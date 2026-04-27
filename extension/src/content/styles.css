@@ -1,0 +1,120 @@
+.hl {
+  position: fixed;
+  pointer-events: none;
+  border: 2px solid #ef4444;
+  background: rgba(239, 68, 68, 0.08);
+  border-radius: 2px;
+  transition:
+    top 80ms,
+    left 80ms,
+    width 80ms,
+    height 80ms;
+  z-index: 1;
+}
+.hl--selected {
+  border-color: #2563eb;
+  background: rgba(37, 99, 235, 0.1);
+}
+.label {
+  position: fixed;
+  pointer-events: none;
+  background: #ef4444;
+  color: white;
+  padding: 1px 6px;
+  font:
+    11px / 1.4 ui-sans-serif,
+    system-ui,
+    -apple-system,
+    "Segoe UI",
+    sans-serif;
+  border-radius: 3px;
+  white-space: nowrap;
+  z-index: 2;
+}
+.popup {
+  position: fixed;
+  pointer-events: auto;
+  background: white;
+  border: 1px solid rgba(0, 0, 0, 0.08);
+  border-radius: 8px;
+  box-shadow: 0 12px 32px rgba(0, 0, 0, 0.2);
+  padding: 10px;
+  font:
+    13px / 1.4 ui-sans-serif,
+    system-ui,
+    -apple-system,
+    "Segoe UI",
+    sans-serif;
+  color: #0f172a;
+  z-index: 3;
+}
+.popup__head {
+  font-size: 11px;
+  color: #64748b;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  margin-bottom: 6px;
+}
+.popup textarea {
+  width: 100%;
+  box-sizing: border-box;
+  border: 1px solid #cbd5e1;
+  border-radius: 4px;
+  padding: 6px 8px;
+  font-size: 13px;
+  font-family: inherit;
+  color: inherit;
+  resize: vertical;
+  outline: none;
+}
+.popup textarea:focus {
+  border-color: #0f172a;
+  box-shadow: 0 0 0 2px rgba(15, 23, 42, 0.15);
+}
+.popup__actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 6px;
+  margin-top: 8px;
+}
+.btn {
+  border: none;
+  border-radius: 4px;
+  padding: 5px 12px;
+  font-size: 12px;
+  cursor: pointer;
+  font-family: inherit;
+}
+.btn--primary {
+  background: #0f172a;
+  color: white;
+}
+.btn--primary:hover {
+  background: #1e293b;
+}
+.btn--primary:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+.btn--ghost {
+  background: transparent;
+  color: #475569;
+}
+.btn--ghost:hover {
+  background: #f1f5f9;
+}
+.status {
+  position: fixed;
+  bottom: 16px;
+  left: 50%;
+  transform: translateX(-50%);
+  pointer-events: none;
+  background: rgba(15, 23, 42, 0.92);
+  color: white;
+  padding: 6px 14px;
+  border-radius: 999px;
+  font:
+    12px / 1 ui-sans-serif,
+    system-ui,
+    sans-serif;
+  z-index: 4;
+}

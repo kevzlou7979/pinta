@@ -20,4 +20,12 @@ export default defineManifest({
   },
   permissions: ["sidePanel", "tabs", "activeTab", "scripting", "storage"],
   host_permissions: ["<all_urls>"],
+  content_scripts: [
+    {
+      matches: ["<all_urls>"],
+      js: ["src/content/overlay.ts"],
+      run_at: "document_idle",
+      all_frames: false,
+    },
+  ],
 });
