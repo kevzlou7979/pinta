@@ -1,0 +1,71 @@
+export type Point = { x: number; y: number };
+
+export type AnnotationKind =
+  | "arrow"
+  | "rect"
+  | "circle"
+  | "freehand"
+  | "pin"
+  | "select";
+
+export type AnnotationTarget = {
+  selector: string;
+  outerHTML: string;
+  computedStyles: Record<string, string>;
+  nearbyText: string[];
+  boundingRect: { x: number; y: number; width: number; height: number };
+  sourceFile?: string;
+  sourceLine?: number;
+};
+
+export type Annotation = {
+  id: string;
+  createdAt: number;
+
+  kind: AnnotationKind;
+  strokes: Point[];
+  color: string;
+
+  target?: AnnotationTarget;
+
+  comment: string;
+
+  viewport: { scrollY: number; width: number; height: number };
+};
+
+export type SessionStatus =
+  | "drafting"
+  | "submitted"
+  | "applying"
+  | "done"
+  | "error";
+
+export type SessionProducer = "extension" | "desktop" | "test";
+
+export type Session = {
+  id: string;
+  url: string;
+  projectRoot: string;
+  startedAt: number;
+  submittedAt?: number;
+  annotations: Annotation[];
+  fullPageScreenshot?: string;
+  status: SessionStatus;
+  appliedSummary?: string;
+  errorMessage?: string;
+  producer: SessionProducer;
+};
+
+export type ClientMessage =
+  | { type: "session.create"; url: string }
+  | { type: "annotation.add"; annotation: Annotation }
+  | { type: "annotation.update"; id: string; patch: Partial<Annotation> }
+  | { type: "annotation.remove"; id: string }
+  | { type: "session.submit"; screenshot: string };
+
+export type ServerMessage =
+  | { type: "session.created"; session: Session }
+  | { type: "session.synced"; session: Session }
+  | { type: "session.applying" }
+  | { type: "session.done"; summary: string }
+  | { type: "error"; message: string };

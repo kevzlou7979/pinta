@@ -1,0 +1,25 @@
+{
+  "name": "@pinta/companion",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "bin": {
+    "pinta-companion": "./dist/cli.js"
+  },
+  "main": "./dist/server.js",
+  "scripts": {
+    "dev": "tsx src/cli.ts",
+    "start": "node dist/cli.js",
+    "build": "tsc -p tsconfig.json"
+  },
+  "dependencies": {
+    "@pinta/shared": "*",
+    "ws": "^8.18.0"
+  },
+  "devDependencies": {
+    "@types/node": "^22.0.0",
+    "@types/ws": "^8.5.12",
+    "tsx": "^4.19.0",
+    "typescript": "^5.6.0"
+  }
+}

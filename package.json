@@ -1,0 +1,21 @@
+{
+  "name": "pinta",
+  "version": "0.0.0",
+  "private": true,
+  "description": "Pinta — visual annotation tool that hands UI changes to a coding agent.",
+  "workspaces": [
+    "shared",
+    "companion",
+    "extension",
+    "vite-plugin",
+    "sample-app"
+  ],
+  "scripts": {
+    "build": "npm run build --workspaces --if-present",
+    "dev:companion": "npm run dev --workspace companion",
+    "post-fake-session": "bash scripts/post-fake-session.sh"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}
