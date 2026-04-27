@@ -1,25 +1,33 @@
 ---
 name: pinta
-description: Use when the user wants to visually annotate their running app to make UI changes. Picks up annotation sessions submitted from the Pinta Chrome extension and edits the matching component files in the user's project.
+description: Use when the user wants to visually annotate their running app to make UI changes. Picks up annotation sessions submitted from the Pinta Chrome extension and edits the matching component files in the user's project. Accepts an optional `--push` (default) or `--polling` argument controlling how the agent waits for sessions.
 ---
 
 # Pinta
 
 Workflow: the user opens the Pinta Chrome extension, draws / picks elements
 on their running app, and clicks Submit. The companion server (running on
-`localhost:7878`) receives the session. Your job is to long-poll for it and
-edit the matching source files.
+`localhost:7878`) receives the session. Your job is to wait for sessions,
+then edit the matching source files.
+
+## Arguments
+
+`/pinta` accepts an optional flag controlling delivery mode:
+
+| Flag | Behavior | When to use |
+|---|---|---|
+| `--push` *(default)* | Open one long-lived SSE stream via Monitor. Each new submission arrives as a single notification — no polling noise in the transcript. | Default. Best for Claude Code (which has Monitor). |
+| `--polling` | Long-poll loop with `curl --max-time 30`. Each cycle is one Bash call. Generates more transcript lines but works with any shell-only agent. | Reference / fallback. Use when Monitor isn't available, or when debugging the protocol. |
+
+If the user passes neither flag, default to `--push`.
 
 ## 1. Verify the companion is running
-
-Check health:
 
 ```bash
 curl -sf http://127.0.0.1:7878/v1/health || echo "DOWN"
 ```
 
-If the response is empty / "DOWN", tell the user to start it in another
-terminal in their project root:
+If empty / "DOWN", tell the user to start it in their project root:
 
 ```bash
 npx pinta-companion .
@@ -34,32 +42,36 @@ for the user to confirm before continuing.
 > "Companion is up. Open the Pinta Chrome extension, annotate the page you
 > want changed, and hit Submit. I'll wait."
 
-## 3. Open the session stream (preferred — push, no polling noise)
+## 3. Wait for sessions
 
-In Claude Code, use the **Monitor** tool with a long-lived SSE stream.
-Each newly-submitted session arrives as a single notification (no
-per-cycle bash call):
+### Default — `--push` (stream)
+
+Open a Monitor on the SSE stream. Each `data:` line is one new session
+notification:
 
 ```bash
-# Inside the Monitor command:
 curl -sN http://127.0.0.1:7878/v1/sessions/stream \
   | grep --line-buffered '^data:' \
   | sed -u 's/^data: //'
 ```
 
-- One Monitor call covers many sessions for the whole working session.
-- Backlog: any sessions already in `submitted` state are pushed
-  immediately on connect, so reconnecting after the user submitted earlier
-  isn't lossy.
-- Idle ping every 20s as an SSE comment (filtered out by the grep
-  above) keeps the connection alive.
-- When the user says "stop" / "exit" / "done", call TaskStop on the
-  Monitor.
+- One Monitor call covers many sessions for the entire working session.
+- **Backlog**: sessions already in `submitted` state are pushed immediately
+  on connect — reconnecting after the user submitted earlier isn't lossy.
+- 20s SSE keepalive comments are filtered out by the grep above.
+- When the user says "stop" / "exit" / "done", call **TaskStop** on the
+  Monitor and exit.
 
-If your agent doesn't have Monitor (Cursor, Cline, Aider), use the
-fallback **long-poll loop** instead — see §3a below.
+### Fallback — `--polling`
 
-Either way, each event/poll-result is a JSON Session payload:
+```bash
+curl -sf --max-time 30 http://127.0.0.1:7878/v1/sessions/poll
+```
+
+Returns 200 + JSON when a session arrives, 204 on timeout. Re-poll
+indefinitely (see §9 — loop after each session, never stop on your own).
+
+### Session payload (same in both modes)
 
 ```json
 {
@@ -75,23 +87,14 @@ Either way, each event/poll-result is a JSON Session payload:
 The screenshot is on disk at `{projectRoot}/{fullPageScreenshotPath}` —
 read it with the Read tool (it's a PNG; the visual UI will display it).
 
-### 3a. Fallback: long-poll loop (Cursor / Cline / Aider / shell-only)
-
-```bash
-curl -sf --max-time 30 http://127.0.0.1:7878/v1/sessions/poll
-```
-
-Returns 200 + JSON when a session arrives, 204 on timeout. Re-poll. Same
-JSON payload as the stream events.
-
 ## 4. Locate source files for each annotation
 
 Each annotation is one of two shapes:
 
 **Element selection (`kind: "select"`)** — `target` is set:
 - `target.sourceFile` — if present (Vite plugin installed), open it directly.
-- Otherwise grep the project for `target.nearbyText[0]` (the most specific
-  text), narrow with `target.nearbyText[1..]` if it's too generic.
+- Otherwise grep the project for `target.nearbyText[0]` (most specific text),
+  narrow with `target.nearbyText[1..]` if too generic.
 - `target.outerHTML` and `target.computedStyles` are useful evidence when
   multiple files match.
 
@@ -122,7 +125,7 @@ curl -sf -X POST http://127.0.0.1:7878/v1/sessions/{id}/status \
 
 For **each** annotation, in order:
 
-1. Mark it as in-progress so the side-panel card shows a spinner:
+1. Mark in-progress (side panel card spins):
 
    ```bash
    curl -sf -X POST http://127.0.0.1:7878/v1/sessions/{id}/annotations/{annId}/status \
@@ -132,7 +135,7 @@ For **each** annotation, in order:
 
 2. Apply the Edit tool changes for that annotation.
 
-3. Mark it done (card flips to ✓):
+3. Mark done (card flips to ✓):
 
    ```bash
    curl -sf -X POST http://127.0.0.1:7878/v1/sessions/{id}/annotations/{annId}/status \
@@ -140,8 +143,7 @@ For **each** annotation, in order:
      -d '{"status":"done"}'
    ```
 
-   Or, if you couldn't apply it (file not found, ambiguous match the
-   user should resolve, etc.):
+   Or, if you couldn't apply it:
 
    ```bash
    curl -sf -X POST http://127.0.0.1:7878/v1/sessions/{id}/annotations/{annId}/status \
@@ -150,16 +152,12 @@ For **each** annotation, in order:
    ```
 
 When every annotation is `done` or `error`, the companion auto-rolls the
-session status (so step 8 below is optional unless you want to attach a
-final summary or skip per-annotation tracking entirely).
+session status (so step 8 below is optional unless you want a final summary).
 
 After all annotations: run the project's lint / test / typecheck commands
 (read package.json scripts; `npm run check`, `npm test`, etc.).
 
-## 8. (Optional) Mark the session done with a summary
-
-If you want to attach a one-line summary the side panel surfaces below
-the "Done" button:
+## 8. (Optional) Final session summary
 
 ```bash
 curl -sf -X POST http://127.0.0.1:7878/v1/sessions/{id}/status \
@@ -175,33 +173,22 @@ curl -sf -X POST http://127.0.0.1:7878/v1/sessions/{id}/status \
   -d '{"status":"error","errorMessage":"..."}'
 ```
 
-The Chrome extension surfaces all status changes in real time via WebSocket.
+## 9. Stay live for the next submission
 
-## 9. Immediately re-enter the poll loop
+**`--push`**: nothing to do — the Monitor keeps streaming. Just go back to
+waiting for the next notification.
 
-This is important — **do not stop polling after one session.** The Pinta
-extension queues sessions one at a time as the user submits them, and the
-companion only hands a session out when an agent calls `/v1/sessions/poll`.
-If you stop polling, the next submission waits in the queue forever (the
-user has to run `/pinta` again to wake you up).
+**`--polling`**: immediately re-enter `/v1/sessions/poll` for the next
+session. Loop indefinitely. Don't stop on your own — the queue holds the
+next submission only as long as someone is calling poll.
 
-After step 8 (or step 7 if you skipped the optional summary), go straight
-back to step 3 and call `/v1/sessions/poll` again. Loop indefinitely:
-
-- 204 means "no session yet" — re-poll. The companion long-polls 25s per
-  call so this is cheap.
-- 200 means a new session — process it (steps 4–8), then loop again.
-
-The user can interrupt the loop at any time. Only stop polling if:
-- The user explicitly tells you to stop ("done", "stop", "exit").
-- The companion goes down (`/v1/health` fails several times in a row) —
-  surface that and ask the user.
-
-Default behavior: stay in the poll loop until told otherwise.
+In both modes, only stop when:
+- The user explicitly says "stop" / "exit" / "done".
+- The companion goes down (`/v1/health` fails repeatedly) — surface and ask.
 
 ## Notes
 
-- Source-mapping accuracy is ~80% with grep alone; ~95+% with
+- Source-mapping accuracy is ~80% with grep alone; ~95%+ with
   `vite-plugin-pinta` installed in the user's project (Phase 6).
 - Always present the plan before editing — grep can pick the wrong file.
 - Multiple annotations may target the same file. Make all edits in one Edit
