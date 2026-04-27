@@ -42,7 +42,14 @@
     oncancel,
   }: Props = $props();
 
-  type Tab = "comment" | "content" | "font" | "sizing" | "spacing" | "css";
+  type Tab =
+    | "comment"
+    | "content"
+    | "font"
+    | "sizing"
+    | "spacing"
+    | "grid"
+    | "css";
   let activeTab = $state<Tab>("comment");
 
   const POPUP_W = 360;
@@ -70,6 +77,20 @@
   let backgroundColor = $state(toHex(liveStyles.backgroundColor));
   let borderRadius = $state(simplifyLength(liveStyles.borderRadius));
   let boxShadow = $state(liveStyles.boxShadow === "none" ? "" : liveStyles.boxShadow);
+
+  // Grid tab — derived initial value from current display + columns.
+  // gridPreset is one of "", "1", "2", ..., "6", "auto".
+  type GridPreset = "" | "1" | "2" | "3" | "4" | "5" | "6" | "auto";
+  let gridPreset = $state<GridPreset>(detectGridPreset(liveStyles));
+  let gridGap = $state(simplifyLength(detectGap(liveStyles)));
+
+  function detectGridPreset(s: LiveStyles): GridPreset {
+    if (s.display !== "grid") return "";
+    return ""; // we don't bother reverse-engineering existing templates
+  }
+  function detectGap(_s: LiveStyles): string {
+    return ""; // current value doesn't matter — only override on change
+  }
 
   // Initial snapshot for diffing.
   const initial = {
@@ -118,6 +139,16 @@
       next["border-radius"] = borderRadius.trim();
     if (boxShadow.trim() && boxShadow !== initial.boxShadow)
       next["box-shadow"] = boxShadow.trim();
+
+    // Grid preset translates to display + grid-template-columns + gap.
+    if (gridPreset) {
+      next["display"] = "grid";
+      next["grid-template-columns"] =
+        gridPreset === "auto"
+          ? "repeat(auto-fit, minmax(240px, 1fr))"
+          : `repeat(${gridPreset}, minmax(0, 1fr))`;
+      if (gridGap.trim()) next["gap"] = gridGap.trim();
+    }
 
     cssChanges = next;
   });
@@ -189,8 +220,23 @@
     { id: "font", label: "Font", dot: hasAny(["font-size", "font-weight", "color", "line-height"]) },
     { id: "sizing", label: "Sizing", dot: hasAny(["width", "height"]) },
     { id: "spacing", label: "Spacing", dot: hasAny(["padding", "margin"]) },
+    { id: "grid", label: "Grid", dot: gridPreset !== "" },
     { id: "css", label: "CSS", dot: customCss.trim().length > 0 },
   ]);
+
+  const GRID_PRESETS: { value: GridPreset; label: string; hint: string }[] = [
+    { value: "1", label: "1", hint: "Single column" },
+    { value: "2", label: "2", hint: "2 equal columns" },
+    { value: "3", label: "3", hint: "3 equal columns" },
+    { value: "4", label: "4", hint: "4 equal columns" },
+    { value: "5", label: "5", hint: "5 equal columns" },
+    { value: "6", label: "6", hint: "6 equal columns" },
+    { value: "auto", label: "Auto", hint: "Responsive: auto-fit minmax(240px, 1fr)" },
+  ];
+
+  function pickGrid(v: GridPreset) {
+    gridPreset = gridPreset === v ? "" : v;
+  }
 
   function hasAny(props: string[]): boolean {
     return props.some((p) => p in cssChanges);
@@ -273,6 +319,35 @@
     <label class="full">Box shadow
       <input type="text" bind:value={boxShadow} onkeydown={onKey} placeholder="e.g. 0 4px 12px rgba(0,0,0,0.1)" />
     </label>
+  {:else if activeTab === "grid"}
+    <p class="popup__hint" style="margin-top: 0; margin-bottom: 8px;">
+      Turn this element into a CSS grid container. Pick a column count
+      (or Auto for responsive) — applies <code>display: grid;
+      grid-template-columns: repeat(N, minmax(0, 1fr))</code>.
+    </p>
+    <div class="chips">
+      {#each GRID_PRESETS as p (p.value)}
+        <button
+          type="button"
+          class="chip"
+          class:chip--active={gridPreset === p.value}
+          title={p.hint}
+          onclick={() => pickGrid(p.value)}
+        >
+          {p.label}
+        </button>
+      {/each}
+    </div>
+    {#if gridPreset}
+      <label style="margin-top: 10px;">Gap
+        <input
+          type="text"
+          bind:value={gridGap}
+          onkeydown={onKey}
+          placeholder="e.g. 1rem, 16px, 0.5rem 1rem"
+        />
+      </label>
+    {/if}
   {:else if activeTab === "css"}
     <textarea
       class="popup__css"

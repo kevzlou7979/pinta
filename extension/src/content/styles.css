@@ -158,6 +158,48 @@
   padding: 2px;
   cursor: pointer;
 }
+.chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+.chip {
+  flex: 1 0 auto;
+  min-width: 36px;
+  background: white;
+  border: 1px solid #cbd5e1;
+  border-radius: 6px;
+  padding: 6px 10px;
+  font:
+    12px / 1 ui-sans-serif,
+    system-ui,
+    sans-serif;
+  font-weight: 600;
+  color: #475569;
+  cursor: pointer;
+  transition: all 0.12s ease;
+}
+.chip:hover {
+  border-color: #ff3d6e;
+  color: #0f172a;
+}
+.chip--active {
+  background: #ff3d6e;
+  border-color: #ff3d6e;
+  color: white;
+  box-shadow: 0 2px 6px rgba(255, 61, 110, 0.25);
+}
+.chip--active:hover {
+  color: white;
+}
+.popup__hint code {
+  background: #fef9f0;
+  border: 1px solid #f1e3cb;
+  border-radius: 3px;
+  padding: 0 4px;
+  font-size: 10.5px;
+  color: #c72d7d;
+}
 .popup textarea {
   width: 100%;
   box-sizing: border-box;
