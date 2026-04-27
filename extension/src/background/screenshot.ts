@@ -27,7 +27,10 @@ type PageDims = {
   devicePixelRatio: number;
 };
 
-const SETTLE_MS = 180; // wait after scroll for sticky/lazy elements + rate limit
+// Chrome enforces MAX_CAPTURE_VISIBLE_TAB_CALLS_PER_SECOND = 2, so we need
+// >= 500ms between captures. 600ms gives margin and lets sticky/lazy
+// elements settle after each scroll step.
+const SETTLE_MS = 600;
 
 export async function captureFullPage(tabId: number): Promise<FullPageCapture> {
   const dims = await measure(tabId);
