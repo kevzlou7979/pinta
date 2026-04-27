@@ -13,12 +13,34 @@
   type Tool = "select" | "arrow" | "rect" | "circle" | "freehand" | "pin";
   type ActiveMode = "idle" | "select" | "draw";
 
-  const TOOLS: { id: Tool; label: string; icon: string }[] = [
-    { id: "select", label: "Select", icon: "▢" },
-    { id: "arrow", label: "Arrow", icon: "↘" },
-    { id: "rect", label: "Rect", icon: "▭" },
-    { id: "freehand", label: "Pen", icon: "✎" },
-    { id: "pin", label: "Pin", icon: "●" },
+  // SVG paths render reliably across fonts/OSes, follow currentColor in
+  // both light + dark mode, and don't depend on unicode glyph coverage.
+  const TOOLS: { id: Tool; label: string; svg: string }[] = [
+    {
+      id: "select",
+      label: "Select",
+      svg: '<rect x="4" y="4" width="16" height="16" rx="2" stroke-dasharray="3 3"/>',
+    },
+    {
+      id: "arrow",
+      label: "Arrow",
+      svg: '<path d="M7 17 L17 7"/><path d="M9 7 L17 7 L17 15"/>',
+    },
+    {
+      id: "rect",
+      label: "Rect",
+      svg: '<rect x="3" y="6" width="18" height="12" rx="1.5"/>',
+    },
+    {
+      id: "freehand",
+      label: "Pen",
+      svg: '<path d="M17 3a2.85 2.85 0 0 1 4 4L7.5 20.5 2 22l1.5-5.5z"/>',
+    },
+    {
+      id: "pin",
+      label: "Pin",
+      svg: '<path d="M12 22s7-7 7-12a7 7 0 0 0-14 0c0 5 7 12 7 12z"/><circle cx="12" cy="10" r="3"/>',
+    },
   ];
 
   let pageUrl = $state<string>("");
@@ -299,7 +321,16 @@
             onclick={() => setActive(activeTool === t.id ? null : t.id)}
             title={t.label}
           >
-            <span class="text-base leading-none">{t.icon}</span>
+            <svg
+              width="18"
+              height="18"
+              viewBox="0 0 24 24"
+              fill="none"
+              stroke="currentColor"
+              stroke-width="2"
+              stroke-linecap="round"
+              stroke-linejoin="round"
+              aria-hidden="true">{@html t.svg}</svg>
             <span class="text-[10px]">{t.label}</span>
           </button>
         {/each}
