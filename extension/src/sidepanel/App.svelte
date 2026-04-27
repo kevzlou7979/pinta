@@ -25,6 +25,10 @@
   let selector = $state("");
   let comment = $state("");
   let capturing = $state(false);
+  // Screenshots add ~1.5–2k vision tokens per submit. Off by default; the
+  // agent works fine with selector + outerHTML + nearbyText alone for most
+  // text/style edits.
+  let includeScreenshot = $state(false);
 
   type IncomingMsg = {
     type?: string;
@@ -171,6 +175,13 @@
       }
       activeTool = null;
 
+      if (!includeScreenshot) {
+        // Text-only mode — let the agent work from selector + outerHTML
+        // + nearbyText alone. Cheaper and faster.
+        app.submit();
+        return;
+      }
+
       const resp = (await chrome.runtime.sendMessage({
         type: "capture.full-page",
         tabId: activeTabId,
@@ -306,6 +317,26 @@
   </main>
 
   <footer class="border-t border-ink-200 p-3 bg-white space-y-2">
+    {#if !allDone && app.session?.status === "drafting"}
+      <label
+        class="flex items-start gap-2 text-[12px] text-ink-700 cursor-pointer select-none"
+      >
+        <input
+          type="checkbox"
+          class="mt-0.5 accent-brand-pink"
+          bind:checked={includeScreenshot}
+        />
+        <span class="flex-1 leading-snug">
+          Include full-page screenshot
+          <span class="block text-[11px] text-ink-500">
+            Adds visual context for the agent. ~1.5–2k extra vision tokens
+            per submit. Off by default — selectors + nearby text are usually
+            enough.
+          </span>
+        </span>
+      </label>
+    {/if}
+
     <div class="flex gap-2">
       {#if allDone}
         <button
