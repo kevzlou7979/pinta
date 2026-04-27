@@ -96,7 +96,16 @@
       });
       activeTool = next;
     } catch (err) {
-      app.lastError = `couldn't reach page: ${(err as Error).message}`;
+      const msg = (err as Error).message;
+      if (
+        /Receiving end does not exist|Could not establish connection/.test(msg)
+      ) {
+        app.lastError =
+          "Pinta isn't injected on this tab yet. Refresh the tab (F5) and try again. " +
+          "If it's a chrome:// or new-tab page, navigate to your app first.";
+      } else {
+        app.lastError = `couldn't reach page: ${msg}`;
+      }
     }
   }
 
