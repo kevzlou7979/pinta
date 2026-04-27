@@ -16,3 +16,8 @@ body {
   background-color: theme("colors.ink.50");
   color: theme("colors.ink.900");
 }
+
+.dark body {
+  background-color: theme("colors.night.bg");
+  color: theme("colors.night.text");
+}

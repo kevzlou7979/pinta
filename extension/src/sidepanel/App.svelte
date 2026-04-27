@@ -317,26 +317,26 @@
       {/if}
     </section>
 
-    <details class="rounded-md border border-ink-200 bg-white">
-      <summary class="px-3 py-2 text-xs text-ink-600 cursor-pointer">
+    <details class="rounded-md border border-ink-200 bg-white dark:border-night-line dark:bg-night-card">
+      <summary class="px-3 py-2 text-xs text-ink-600 dark:text-night-dim cursor-pointer">
         Add by CSS selector instead
       </summary>
       <div class="p-3 pt-0 space-y-2">
         <input
           type="text"
           placeholder="CSS selector (e.g. .submit-btn)"
-          class="w-full rounded-md border border-ink-300 px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-ink-900"
+          class="w-full rounded-md border border-ink-300 bg-white text-ink-900 px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-brand-pink dark:border-night-line dark:bg-night-alt dark:text-night-text dark:placeholder-night-mute"
           bind:value={selector}
         />
         <textarea
           placeholder="What do you want changed?"
           rows={3}
-          class="w-full rounded-md border border-ink-300 px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-ink-900"
+          class="w-full rounded-md border border-ink-300 bg-white text-ink-900 px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-brand-pink dark:border-night-line dark:bg-night-alt dark:text-night-text dark:placeholder-night-mute"
           bind:value={comment}
         ></textarea>
         <button
           type="button"
-          class="w-full rounded-md bg-brand-pink text-white text-sm font-medium py-2 hover:bg-brand-magenta disabled:opacity-50"
+          class="w-full rounded-md bg-brand-pink text-white text-sm font-medium py-2 hover:bg-brand-magenta dark:hover:bg-brand-pink-light disabled:opacity-50"
           disabled={!selector.trim() || !comment.trim()}
           onclick={addAnnotationFromForm}
         >
@@ -347,12 +347,12 @@
 
     <section class="space-y-2">
       <div class="flex items-center justify-between">
-        <h2 class="text-xs uppercase tracking-wide text-ink-500 font-medium">
+        <h2 class="text-xs uppercase tracking-wide text-ink-500 dark:text-night-mute font-medium">
           Annotations ({annotations.length})
         </h2>
       </div>
       {#if annotations.length === 0}
-        <p class="text-xs text-ink-500 italic">
+        <p class="text-xs text-ink-500 dark:text-night-dim italic">
           No annotations yet. Pick a tool above.
         </p>
       {:else}
@@ -372,7 +372,7 @@
 
     {#if app.lastError}
       <p
-        class="text-xs text-red-600 border border-red-200 bg-red-50 rounded-md p-2"
+        class="text-xs text-red-600 border border-red-200 bg-red-50 dark:text-red-300 dark:border-red-900/40 dark:bg-red-950/40 rounded-md p-2"
       >
         {app.lastError}
       </p>
@@ -381,10 +381,10 @@
     <SessionHistory />
   </main>
 
-  <footer class="border-t border-ink-200 p-3 bg-white space-y-2">
+  <footer class="border-t border-ink-200 p-3 bg-white dark:border-night-line dark:bg-night-card space-y-2">
     {#if !allDone && app.session?.status === "drafting"}
       <label
-        class="flex items-start gap-2 text-[12px] text-ink-700 select-none"
+        class="flex items-start gap-2 text-[12px] text-ink-700 dark:text-night-dim select-none"
         class:cursor-pointer={!hasDrawingAnnotation}
         class:cursor-not-allowed={hasDrawingAnnotation}
       >
@@ -397,9 +397,9 @@
         <span class="flex-1 leading-snug">
           Include full-page screenshot
           {#if hasDrawingAnnotation}
-            <span class="text-brand-pink font-medium">(required)</span>
+            <span class="text-brand-pink dark:text-brand-pink-light font-medium">(required)</span>
           {/if}
-          <span class="block text-[11px] text-ink-500">
+          <span class="block text-[11px] text-ink-500 dark:text-night-mute">
             {#if hasDrawingAnnotation}
               A drawing is in this batch — the agent has no DOM target for
               freehand / arrow / circle / rect / pin annotations, so the
@@ -418,7 +418,7 @@
       {#if allDone}
         <button
           type="button"
-          class="flex-1 rounded-md bg-brand-pink text-white text-sm font-medium py-2 hover:bg-brand-magenta"
+          class="flex-1 rounded-md bg-brand-pink text-white text-sm font-medium py-2 hover:bg-brand-magenta dark:hover:bg-brand-pink-light"
           onclick={cancelSession}
         >
           {#if app.session?.status === "error"}
@@ -430,7 +430,7 @@
       {:else}
         <button
           type="button"
-          class="flex-1 rounded-md bg-brand-pink text-white text-sm font-medium py-2 hover:bg-brand-magenta disabled:opacity-50"
+          class="flex-1 rounded-md bg-brand-pink text-white text-sm font-medium py-2 hover:bg-brand-magenta dark:hover:bg-brand-pink-light disabled:opacity-50"
           disabled={!canSubmit || capturing}
           onclick={submit}
         >
@@ -447,7 +447,7 @@
         {#if app.session?.status === "drafting" && annotations.length > 0}
           <button
             type="button"
-            class="rounded-md border border-ink-300 bg-white text-ink-700 text-sm font-medium px-3 hover:bg-ink-50"
+            class="rounded-md border border-ink-300 bg-white text-ink-700 text-sm font-medium px-3 hover:bg-ink-50 dark:border-night-line dark:bg-night-alt dark:text-night-dim dark:hover:bg-night-line dark:hover:text-night-text"
             title="Copy annotations as markdown — paste into claude.ai web, ChatGPT, or another agent"
             onclick={copyToClipboard}
             aria-label="Copy to clipboard"
@@ -458,7 +458,7 @@
         {#if app.session?.status === "submitted" || app.session?.status === "applying"}
           <button
             type="button"
-            class="rounded-md border border-ink-300 bg-white text-ink-700 text-sm font-medium px-3 hover:bg-ink-50"
+            class="rounded-md border border-ink-300 bg-white text-ink-700 text-sm font-medium px-3 hover:bg-ink-50 dark:border-night-line dark:bg-night-alt dark:text-night-dim dark:hover:bg-night-line dark:hover:text-night-text"
             title="Cancel this session and start fresh"
             onclick={cancelSession}
             aria-label="Cancel session"
@@ -469,11 +469,11 @@
       {/if}
     </div>
     {#if app.session?.status === "submitted"}
-      <p class="text-[11px] text-ink-500 text-center">
+      <p class="text-[11px] text-ink-500 dark:text-night-mute text-center">
         Stuck? Click ✕ to cancel and start a new session.
       </p>
     {:else if app.session?.status === "applying"}
-      <p class="text-[11px] text-ink-500 text-center">
+      <p class="text-[11px] text-ink-500 dark:text-night-mute text-center">
         Watch the cards above — each annotation flips to ✓ as the agent finishes it.
       </p>
     {/if}

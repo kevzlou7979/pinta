@@ -79,51 +79,51 @@
   }
 </script>
 
-<details class="rounded-md border border-ink-200 bg-white">
-  <summary class="px-3 py-2 text-xs text-ink-600 cursor-pointer flex justify-between items-center">
+<details class="rounded-md border border-ink-200 bg-white dark:border-night-line dark:bg-night-card">
+  <summary class="px-3 py-2 text-xs text-ink-600 dark:text-night-dim cursor-pointer flex justify-between items-center">
     <span>History ({summaries.length})</span>
     {#if loading}
-      <span class="text-[10px] text-ink-400">…</span>
+      <span class="text-[10px] text-ink-400 dark:text-night-mute">…</span>
     {/if}
   </summary>
   <div class="p-2 pt-0 space-y-1.5 max-h-72 overflow-y-auto">
     {#if error}
-      <p class="text-[11px] text-red-600 px-1">{error}</p>
+      <p class="text-[11px] text-red-600 dark:text-red-300 px-1">{error}</p>
     {:else if summaries.length === 0}
-      <p class="text-[11px] text-ink-500 italic px-1">No sessions yet.</p>
+      <p class="text-[11px] text-ink-500 dark:text-night-mute italic px-1">No sessions yet.</p>
     {:else}
       {#each summaries as s (s.id)}
         {@const badge = statusBadge(s.status)}
         <div
-          class="rounded border border-ink-200 px-2.5 py-1.5 text-[12px] hover:bg-ink-50"
+          class="rounded border border-ink-200 px-2.5 py-1.5 text-[12px] hover:bg-ink-50 dark:border-night-line dark:hover:bg-night-alt"
           class:ring-1={s.id === app.session?.id}
           class:ring-brand-pink={s.id === app.session?.id}
         >
           <div class="flex items-center justify-between gap-2">
             <div class="flex items-center gap-1.5 min-w-0">
               <span class="w-2 h-2 rounded-full shrink-0 {badge.dot}"></span>
-              <span class="text-ink-700 font-medium">{badge.label}</span>
-              <span class="text-ink-400 truncate font-mono text-[11px]">
+              <span class="text-ink-700 dark:text-night-text font-medium">{badge.label}</span>
+              <span class="text-ink-400 dark:text-night-mute truncate font-mono text-[11px]">
                 {shortUrl(s.url)}
               </span>
             </div>
-            <span class="text-[10px] text-ink-400 shrink-0">
+            <span class="text-[10px] text-ink-400 dark:text-night-mute shrink-0">
               {relTime(s.submittedAt ?? s.startedAt)}
             </span>
           </div>
           {#if s.annotationCount > 0 || s.appliedSummary || s.errorMessage}
-            <div class="mt-0.5 text-[11px] text-ink-600 leading-tight">
+            <div class="mt-0.5 text-[11px] text-ink-600 dark:text-night-dim leading-tight">
               {#if s.appliedSummary}
                 {s.appliedSummary}
               {:else if s.errorMessage}
-                <span class="text-red-600">{s.errorMessage}</span>
+                <span class="text-red-600 dark:text-red-300">{s.errorMessage}</span>
               {:else}
                 {s.annotationCount} annotation{s.annotationCount === 1 ? "" : "s"}
               {/if}
             </div>
           {/if}
           {#if s.fullPageScreenshotPath}
-            <div class="text-[10px] text-ink-400 mt-0.5 font-mono truncate">
+            <div class="text-[10px] text-ink-400 dark:text-night-mute mt-0.5 font-mono truncate">
               {s.fullPageScreenshotPath}
             </div>
           {/if}

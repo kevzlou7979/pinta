@@ -1,6 +1,7 @@
 /** @type {import('tailwindcss').Config} */
 export default {
   content: ["./src/**/*.{html,svelte,ts,js}"],
+  darkMode: "class",
   theme: {
     extend: {
       fontFamily: {
@@ -34,8 +35,21 @@ export default {
           amber: "#FFB84D",
           orange: "#FF8855",
           pink: "#FF3D6E",
+          "pink-light": "#FF5A85",
           magenta: "#C72D7D",
           ink: "#1A1A1A",
+        },
+        // Night palette — indigo/violet surfaces for dark mode.
+        // Mirrors the docs site so the brand reads the same on either.
+        night: {
+          bg: "#0E0A18",
+          alt: "#161024",
+          card: "#1A1430",
+          line: "#2A2240",
+          line2: "#3A3158",
+          text: "#ECE8F7",
+          dim: "#A8A0C4",
+          mute: "#7A7299",
         },
       },
     },

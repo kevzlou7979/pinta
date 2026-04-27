@@ -17,7 +17,7 @@
 </script>
 
 <span
-  class="inline-flex items-center gap-1.5 rounded-full bg-ink-100 px-2 py-0.5 text-[11px] text-ink-700"
+  class="inline-flex items-center gap-1.5 rounded-full bg-ink-100 px-2 py-0.5 text-[11px] text-ink-700 dark:bg-night-alt dark:text-night-dim"
 >
   <span class="w-2 h-2 rounded-full {dotClasses[status]}"></span>
   {labels[status]}
