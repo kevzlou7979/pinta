@@ -93,6 +93,18 @@
   const allDone = $derived(
     app.session?.status === "done" || app.session?.status === "error",
   );
+  // Drawing-kind annotations carry only stroke coords + comment — no DOM
+  // selector, no outerHTML. Without a screenshot the agent has nothing to
+  // act on, so we auto-enable capture as soon as one lands in the session
+  // and lock the toggle.
+  const hasDrawingAnnotation = $derived(
+    annotations.some((a) => a.kind !== "select"),
+  );
+  $effect(() => {
+    if (hasDrawingAnnotation && !includeScreenshot) {
+      includeScreenshot = true;
+    }
+  });
 
   async function setActive(tool: Tool | null) {
     if (activeTabId == null) return;
@@ -341,19 +353,31 @@
   <footer class="border-t border-ink-200 p-3 bg-white space-y-2">
     {#if !allDone && app.session?.status === "drafting"}
       <label
-        class="flex items-start gap-2 text-[12px] text-ink-700 cursor-pointer select-none"
+        class="flex items-start gap-2 text-[12px] text-ink-700 select-none"
+        class:cursor-pointer={!hasDrawingAnnotation}
+        class:cursor-not-allowed={hasDrawingAnnotation}
       >
         <input
           type="checkbox"
           class="mt-0.5 accent-brand-pink"
           bind:checked={includeScreenshot}
+          disabled={hasDrawingAnnotation}
         />
         <span class="flex-1 leading-snug">
           Include full-page screenshot
+          {#if hasDrawingAnnotation}
+            <span class="text-brand-pink font-medium">(required)</span>
+          {/if}
           <span class="block text-[11px] text-ink-500">
-            Adds visual context for the agent. ~1.5–2k extra vision tokens
-            per submit. Off by default — selectors + nearby text are usually
-            enough.
+            {#if hasDrawingAnnotation}
+              A drawing is in this batch — the agent has no DOM target for
+              freehand / arrow / circle / rect / pin annotations, so the
+              screenshot is the only context it has.
+            {:else}
+              Adds visual context for the agent. ~1.5–2k extra vision tokens
+              per submit. Off by default — selectors + nearby text are usually
+              enough.
+            {/if}
           </span>
         </span>
       </label>
