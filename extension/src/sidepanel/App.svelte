@@ -17,7 +17,6 @@
     { id: "select", label: "Select", icon: "▢" },
     { id: "arrow", label: "Arrow", icon: "↘" },
     { id: "rect", label: "Rect", icon: "▭" },
-    { id: "circle", label: "Circle", icon: "◯" },
     { id: "freehand", label: "Pen", icon: "✎" },
     { id: "pin", label: "Pin", icon: "●" },
   ];
@@ -285,7 +284,7 @@
       <h2 class="text-xs uppercase tracking-wide text-ink-500 dark:text-night-mute font-medium">
         Tool
       </h2>
-      <div class="grid grid-cols-6 gap-1">
+      <div class="grid grid-cols-5 gap-1">
         {#each TOOLS as t (t.id)}
           <button
             type="button"
