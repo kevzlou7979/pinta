@@ -10,7 +10,7 @@
   <meta property="og:type" content="website" />
   <meta property="og:url" content="https://kevzlou7979.github.io/pinta/" />
   <meta property="og:image" content="https://kevzlou7979.github.io/pinta/assets/icons/icon-512.png" />
-  <meta name="theme-color" content="#fff8ee" media="(prefers-color-scheme: light)" />
+  <meta name="theme-color" content="#fbf7f5" media="(prefers-color-scheme: light)" />
   <meta name="theme-color" content="#0e0a18" media="(prefers-color-scheme: dark)" />
   <script>
     // Apply theme before paint to avoid a flash of the wrong palette,
@@ -35,13 +35,13 @@
   <link href="https://fonts.googleapis.com/css2?family=Poppins:wght@300;400;500;600;700;800&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet" />
   <style>
     :root {
-      /* Brand palette — warm sunset on cream */
-      --cream:        #fff8ee;
-      --cream-soft:   #fff1e0;
-      --cream-deep:   #ffe8cf;
+      /* Brand palette — warm cream with a faint violet wash */
+      --cream:        #fbf7f5;
+      --cream-soft:   #f5eef4;
+      --cream-deep:   #ece1ed;
       --paper:        #ffffff;
-      --line:         #f1e3cb;
-      --line-strong:  #e6d3b3;
+      --line:         #ebe0e9;
+      --line-strong:  #ddccdc;
 
       --ink:          #16110d;
       --ink-dim:      #5a4f44;
@@ -54,9 +54,9 @@
       --amber:        #ffb84d;
       --yellow:       #ffd24d;
 
-      --shadow-sm: 0 1px 2px rgba(22,17,13,0.06), 0 0 0 1px rgba(22,17,13,0.04);
-      --shadow-md: 0 12px 32px rgba(199,45,125,0.10), 0 2px 6px rgba(22,17,13,0.06);
-      --shadow-lg: 0 24px 60px rgba(199,45,125,0.18), 0 6px 16px rgba(22,17,13,0.08);
+      --shadow-sm: 0 1px 2px rgba(22,17,13,0.06), 0 0 0 1px rgba(140,80,220,0.05);
+      --shadow-md: 0 12px 32px rgba(140,80,220,0.10), 0 2px 6px rgba(22,17,13,0.06);
+      --shadow-lg: 0 24px 60px rgba(140,80,220,0.18), 0 6px 16px rgba(22,17,13,0.08);
 
       --max: 1120px;
       --radius: 16px;
@@ -139,7 +139,7 @@
       position: sticky; top: 0;
       backdrop-filter: blur(14px) saturate(140%);
       -webkit-backdrop-filter: blur(14px) saturate(140%);
-      background: rgba(255,248,238,0.78);
+      background: rgba(251,247,245,0.78);
       border-bottom: 1px solid var(--line);
       z-index: 50;
     }
@@ -168,6 +168,7 @@
     }
     .nav-links a:hover { color: var(--ink); text-decoration: none; }
     .nav-cta {
+      display: inline-flex; align-items: center; gap: 7px;
       background: var(--ink);
       color: var(--cream) !important;
       padding: 9px 16px;
@@ -177,6 +178,8 @@
       transition: transform .12s ease, background .15s ease;
     }
     .nav-cta:hover { background: var(--pink); transform: translateY(-1px); text-decoration: none; }
+    .nav-cta-ico { display: block; transition: transform .25s cubic-bezier(.2,.7,.2,1.4); }
+    .nav-cta:hover .nav-cta-ico { transform: rotate(-8deg) scale(1.08); }
 
     @media (max-width: 720px) {
       .nav-links a:not(.nav-cta) { display: none; }
@@ -192,9 +195,9 @@
     .hero::before {
       content: ""; position: absolute; inset: 0; pointer-events: none;
       background:
-        radial-gradient(800px 360px at 12% 10%, rgba(255,210,77,0.30), transparent 60%),
-        radial-gradient(700px 320px at 88% 5%,  rgba(255,61,110,0.22),  transparent 60%),
-        radial-gradient(900px 420px at 50% 110%, rgba(199,45,125,0.10), transparent 60%);
+        radial-gradient(800px 360px at 12% 10%, rgba(255,210,77,0.22), transparent 60%),
+        radial-gradient(700px 320px at 88% 5%,  rgba(140,80,220,0.22),  transparent 60%),
+        radial-gradient(900px 420px at 50% 110%, rgba(199,45,180,0.14), transparent 60%);
       z-index: 0;
     }
     .hero > * { position: relative; z-index: 1; }
@@ -267,18 +270,22 @@
     }
     .btn:hover { text-decoration: none; transform: translateY(-2px); }
     .btn-primary {
-      background: var(--ink); color: var(--cream);
-      box-shadow: 0 8px 22px rgba(22,17,13,0.18);
+      background: var(--pink); color: #fff;
+      box-shadow: 0 8px 22px rgba(255,61,110,0.32);
     }
-    .btn-primary:hover { background: var(--pink); box-shadow: 0 12px 28px rgba(255,61,110,0.36); }
+    .btn-primary:hover { background: var(--pink-deep); color: #fff; box-shadow: 0 12px 28px rgba(255,61,110,0.44); }
     .btn-ghost {
       background: var(--paper); color: var(--ink);
       border-color: var(--line-strong);
       box-shadow: var(--shadow-sm);
     }
     .btn-ghost:hover { border-color: var(--ink); }
-    .btn .arrow { transition: transform .15s ease; }
-    .btn:hover .arrow { transform: translateX(3px); }
+    .btn .arrow {
+      display: inline-flex; align-items: center;
+      transition: transform .35s cubic-bezier(.2,.7,.2,1.4);
+    }
+    .btn:hover .arrow { transform: translateX(4px); }
+    .btn-primary:hover .arrow { transform: translateX(8px); }
 
     /* ---------- PROOF STRIP ---------- */
     .proof {
@@ -293,7 +300,9 @@
 
     .section-head { margin-bottom: 48px; }
     .eyebrow {
-      display: inline-block;
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
       color: var(--pink);
       font-weight: 600;
       font-size: 12.5px;
@@ -301,10 +310,34 @@
       text-transform: uppercase;
       margin-bottom: 12px;
     }
+    .eyebrow-ico { display: block; }
     section h2 {
       font-size: clamp(28px, 3.6vw, 40px);
       margin: 0 0 14px;
       line-height: 1.15;
+    }
+    /* Word-stagger reveal — words settle in once the parent .section-head is visible. */
+    .h2-words .w {
+      display: inline-block;
+      opacity: 0;
+      transform: translateY(0.5em);
+      filter: blur(6px);
+      transition:
+        opacity .65s cubic-bezier(.2,.7,.2,1),
+        transform .65s cubic-bezier(.2,.7,.2,1),
+        filter .65s cubic-bezier(.2,.7,.2,1);
+      transition-delay: calc(var(--i, 0) * 110ms + 250ms);
+      will-change: opacity, transform, filter;
+    }
+    .section-head.is-visible .h2-words .w {
+      opacity: 1;
+      transform: none;
+      filter: blur(0);
+    }
+    @media (prefers-reduced-motion: reduce) {
+      .h2-words .w {
+        opacity: 1; transform: none; filter: none; transition: none;
+      }
     }
     section .sub {
       color: var(--ink-dim);
@@ -357,7 +390,7 @@
     /* ---------- FEATURES ---------- */
     .features {
       display: grid;
-      grid-template-columns: repeat(3, 1fr);
+      grid-template-columns: repeat(3, minmax(0, 1fr));
       gap: 20px;
     }
     .feature {
@@ -397,14 +430,13 @@
     /* ---------- ARCH ---------- */
     .arch {
       display: grid;
-      grid-template-columns: 1fr 1fr;
-      gap: 32px; align-items: center;
+      grid-template-columns: 1fr;
+      gap: 32px; align-items: stretch;
     }
-    @media (max-width: 880px) { .arch { grid-template-columns: 1fr; } }
     .arch-card {
       background:
-        radial-gradient(400px 200px at 20% 0%, rgba(255,184,77,0.18), transparent 70%),
-        radial-gradient(400px 200px at 100% 100%, rgba(199,45,125,0.10), transparent 70%),
+        radial-gradient(400px 200px at 20% 0%, rgba(140,80,220,0.10), transparent 70%),
+        radial-gradient(400px 200px at 100% 100%, rgba(199,45,180,0.08), transparent 70%),
         var(--paper);
       border: 1px solid var(--line);
       border-radius: 18px;
@@ -493,8 +525,10 @@
     /* ---------- ROADMAP ---------- */
     .roadmap {
       display: grid;
-      grid-template-columns: repeat(2, 1fr);
+      grid-template-columns: 1fr;
       gap: 20px;
+      max-width: 540px;
+      margin: 0 auto;
     }
     .road-card {
       background: var(--paper);
@@ -519,7 +553,6 @@
       font-weight: 600;
     }
     .road-card p { margin: 0; color: var(--ink-dim); font-size: 14.5px; }
-    @media (max-width: 720px) { .roadmap { grid-template-columns: 1fr; } }
 
     /* ---------- FOOTER ---------- */
     footer {
@@ -540,6 +573,14 @@
       color: var(--ink); font-weight: 600;
     }
     footer .brand-mini img { width: 22px; height: 22px; border-radius: 6px; }
+    footer .brand-mini-text { display: inline-flex; flex-direction: column; line-height: 1.25; }
+    footer .brand-mini-by {
+      color: #545454;
+      font-weight: 600;
+      font-size: 11.5px;
+      letter-spacing: 0.02em;
+      margin-top: 2px;
+    }
 
     /* ---------- THEME TOGGLE ---------- */
     .theme-toggle {
@@ -600,11 +641,12 @@
     }
     [data-theme="dark"] .btn-primary {
       background: var(--pink);
-      color: #1a0820;
+      color: #fff;
       box-shadow: 0 8px 22px rgba(255,61,110,0.35);
     }
     [data-theme="dark"] .btn-primary:hover {
       background: var(--pink-deep);
+      color: #fff;
       box-shadow: 0 12px 28px rgba(255,61,110,0.50);
     }
     [data-theme="dark"] .btn-primary::after {
@@ -699,6 +741,26 @@
     @keyframes hero-float {
       0%, 100% { transform: translateY(0) rotate(-1deg); }
       50%      { transform: translateY(-10px) rotate(1deg); }
+    }
+    /* One-shot "fan opening" entrance on the logo image. backwards fill ensures
+       the folded from-state is shown before the animation begins; after it ends
+       the element reverts to no transform so the hover tilt transitions cleanly. */
+    .hero-logo {
+      animation: hero-fan-open 0.95s cubic-bezier(.2,.7,.2,1.4) backwards;
+    }
+    @keyframes hero-fan-open {
+      from {
+        opacity: 0;
+        transform: perspective(800px) rotateY(-95deg) scale(0.55);
+      }
+      55% {
+        opacity: 1;
+        transform: perspective(800px) rotateY(12deg) scale(1.06);
+      }
+      to {
+        opacity: 1;
+        transform: perspective(800px) rotateY(0deg) scale(1);
+      }
     }
 
     /* Slow drift on the hero gradient mesh. */
@@ -826,6 +888,7 @@
         opacity: 1; transform: none; transition: none;
       }
       .hero-logo-wrap,
+      .hero-logo,
       .hero::before,
       .hero-title .grad,
       .proof-track,
@@ -859,7 +922,10 @@
           <svg class="icon-moon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"/></svg>
           <svg class="icon-sun" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="4"/><path d="M12 2v2"/><path d="M12 20v2"/><path d="m4.93 4.93 1.41 1.41"/><path d="m17.66 17.66 1.41 1.41"/><path d="M2 12h2"/><path d="M20 12h2"/><path d="m6.34 17.66-1.41 1.41"/><path d="m19.07 4.93-1.41 1.41"/></svg>
         </button>
-        <a class="nav-cta" href="https://github.com/kevzlou7979/pinta">Star on GitHub</a>
+        <a class="nav-cta" href="https://github.com/kevzlou7979/pinta">
+          <svg class="nav-cta-ico" width="14" height="14" viewBox="0 0 16 16" fill="currentColor" aria-hidden="true"><path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.013 8.013 0 0016 8c0-4.42-3.58-8-8-8z"/></svg>
+          Star on GitHub
+        </a>
       </div>
     </div>
   </nav>
@@ -879,7 +945,9 @@
       <div class="cta">
         <a class="btn btn-primary" href="#install">
           Get started
-          <span class="arrow" aria-hidden="true">→</span>
+          <span class="arrow" aria-hidden="true">
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor"><path d="M8 5v14l11-7z"/></svg>
+          </span>
         </a>
         <a class="btn btn-ghost" href="https://github.com/kevzlou7979/pinta">
           <svg width="16" height="16" viewBox="0 0 16 16" fill="currentColor" aria-hidden="true"><path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.013 8.013 0 0016 8c0-4.42-3.58-8-8-8z"/></svg>
@@ -927,25 +995,28 @@
   <section id="how">
     <div class="container">
       <div class="section-head">
-        <span class="eyebrow">How it works</span>
-        <h2>Three components. One loop.</h2>
+        <span class="eyebrow">
+          <svg class="eyebrow-ico" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="10"/><path d="M9.09 9a3 3 0 0 1 5.83 1c0 2-3 3-3 3"/><path d="M12 17h.01"/></svg>
+          How it works
+        </span>
+        <h2 class="h2-words"><span class="w" style="--i:0">Three</span> <span class="w" style="--i:1">components.</span> <span class="w" style="--i:2">One</span> <span class="w" style="--i:3">loop.</span></h2>
         <p class="sub">The extension talks only to the companion. The companion talks to any agent. Nothing is hard-wired to a vendor.</p>
       </div>
       <div class="steps">
         <div class="step">
           <div class="step-num">1</div>
           <h3>Annotate</h3>
-          <p>Open the side panel. Press <code>Ctrl+Shift+S</code> to pick an element, or <code>Ctrl+Shift+D</code> to draw — arrow, rect, circle, freehand, pin. Type a comment per annotation.</p>
+          <p>Open the side panel. Press <code>Ctrl+Shift+S</code> to pick an element, or <code>Ctrl+Shift+D</code> to draw — arrow, rect, pen, pin. Type a comment per annotation.</p>
         </div>
         <div class="step">
           <div class="step-num">2</div>
-          <h3>Capture</h3>
-          <p>Hit Submit. The extension takes a full-page screenshot, bakes the annotations onto it, and posts the session to the companion at <code>localhost:7878</code>.</p>
+          <h3>Submit</h3>
+          <p>Selectors and nearby text are usually enough — screenshot is opt-in (auto-on for drawings). The session is posted to the companion at <code>localhost:7878</code>.</p>
         </div>
         <div class="step">
           <div class="step-num">3</div>
-          <h3>Edit</h3>
-          <p>Your agent picks up the session, presents an edit plan grouped by file, and applies the changes once you confirm. HMR shows the result.</p>
+          <h3>Edit &amp; reload</h3>
+          <p>Your agent (woken via push) presents a per-file plan, applies after you confirm, and the side panel auto-reloads the tab once HMR detects the changes.</p>
         </div>
       </div>
     </div>
@@ -979,28 +1050,49 @@
             <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 19 19 12 22 15 15 22z"/><path d="M18 13 16.5 5.5 2 2 5.5 16.5 13 18 18 13z"/><path d="M2 2l7.586 7.586"/><circle cx="11" cy="11" r="2"/></svg>
           </div>
           <h3>Drawing tools</h3>
-          <p>Arrow, rectangle, circle, freehand, pin. Page-relative coords; drawings translate with scroll. Edge-aware comment popup positioning.</p>
+          <p>Arrow, rectangle, pen, pin. Page-relative coords; drawings translate with scroll. Edge-aware comment popup positioning.</p>
         </div>
         <div class="feature">
           <div class="ico">
             <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="3" width="20" height="14" rx="2"/><path d="M8 21h8"/><path d="M12 17v4"/><circle cx="12" cy="10" r="3"/></svg>
           </div>
-          <h3>Full-page screenshots</h3>
-          <p>Scroll-and-stitch capture from the service worker. Annotations composited onto the PNG before handoff so the agent sees what you see.</p>
+          <h3>Full-page screenshots — opt-in</h3>
+          <p>Scroll-and-stitch capture, composited with annotations baked in. Off by default to save ~1.5–2k vision tokens; auto-locks-on the moment a drawing lands in the batch.</p>
         </div>
         <div class="feature">
           <div class="ico">
             <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="2" width="20" height="8" rx="2"/><rect x="2" y="14" width="20" height="8" rx="2"/><path d="M6 6h.01"/><path d="M6 18h.01"/></svg>
           </div>
           <h3>Companion server</h3>
-          <p>Node 20+. Native HTTP, WebSocket via <code>ws</code>, MCP via the official SDK. Sessions persisted as JSON in <code>.pinta/sessions/</code>.</p>
+          <p>Node 20+. Native HTTP, WebSocket via <code>ws</code>, MCP via the official SDK. Sessions persisted as JSON in <code>.pinta/sessions/</code>. <code>npx pinta-companion .</code> — no clone needed.</p>
         </div>
         <div class="feature">
           <div class="ico">
             <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><path d="M2 12h20"/><path d="M12 2a15 15 0 0 1 4 10 15 15 0 0 1-4 10 15 15 0 0 1-4-10 15 15 0 0 1 4-10z"/></svg>
           </div>
           <h3>Agent-agnostic</h3>
-          <p>Reference Claude Code skill ships with the repo. MCP server works with Cursor, Cline, Continue, Zed, Windsurf. HTTP API is the floor.</p>
+          <p>Claude Code skill ships with the repo. MCP server for Cursor / Cline / Continue / Zed / Windsurf. Aider poll script. Copy-to-clipboard for claude.ai web / ChatGPT. HTTP API is the floor.</p>
+        </div>
+        <div class="feature">
+          <div class="ico">
+            <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 12a9 9 0 1 0 9-9"/><path d="M3 4v5h5"/><path d="m12 7 0 5 4 2"/></svg>
+          </div>
+          <h3>HMR auto-reload</h3>
+          <p>Side panel detects Vite, Webpack/Next.js, and Parcel HMR clients on the active tab and offers to refresh once the agent's edits land. Each annotation card flips to ✓ as it's applied.</p>
+        </div>
+        <div class="feature">
+          <div class="ico">
+            <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"/></svg>
+          </div>
+          <h3>Dark mode</h3>
+          <p>Popup, side panel, and this landing page. Warm cream by day, indigo/violet by night, brand pink on either. Picks up <code>prefers-color-scheme</code> on first run; one-click toggle thereafter.</p>
+        </div>
+        <div class="feature">
+          <div class="ico">
+            <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M13 2 3 14h9l-1 8 10-12h-9z"/></svg>
+          </div>
+          <h3>Push or poll handoff</h3>
+          <p>The Claude Code skill defaults to push (<code>/pinta</code>) — wakes the agent the moment the companion has a session. Sandboxed setups can fall back to long-poll with <code>/pinta --polling</code>.</p>
         </div>
       </div>
     </div>
@@ -1059,7 +1151,7 @@
           <tbody>
             <tr>
               <td><strong>Claude Code</strong></td>
-              <td>Skill (<code>~/.claude/skills/pinta/</code>) — long-polls the HTTP API</td>
+              <td>Skill (<code>~/.claude/skills/pinta/</code>) — push by default (<code>/pinta</code>), long-poll fallback (<code>/pinta --polling</code>)</td>
               <td><span class="badge"><span class="d"></span> Reference, V1</span></td>
             </tr>
             <tr>
@@ -1070,6 +1162,11 @@
             <tr>
               <td><strong>Aider</strong></td>
               <td>Poll script under <code>adapters/aider/</code></td>
+              <td><span class="badge"><span class="d"></span> Shipped V1</span></td>
+            </tr>
+            <tr>
+              <td><strong>claude.ai web / ChatGPT / etc.</strong></td>
+              <td>Side-panel <strong>Copy</strong> button — formats the session as markdown for paste-into-chat</td>
               <td><span class="badge"><span class="d"></span> Shipped V1</span></td>
             </tr>
             <tr>
@@ -1088,8 +1185,8 @@
     <div class="container">
       <div class="section-head">
         <span class="eyebrow">Install &amp; run</span>
-        <h2>Three commands to a working loop.</h2>
-        <p class="sub">Node 20+ and Chrome (or any Chromium-based browser). Clone, build, load — then start the companion in any project you want to edit.</p>
+        <h2>One skill or five commands.</h2>
+        <p class="sub">Node 20+ and Chrome (or any Chromium-based browser). The fastest path is the <code>/build-pinta</code> Claude Code skill — it installs deps, builds in parallel, drops the <code>/pinta</code> skill into <code>~/.claude/skills/pinta/</code>, and prints the load-unpacked path. Or run the steps below manually.</p>
       </div>
       <div class="install-wrap">
         <pre>
@@ -1112,7 +1209,7 @@ bash scripts/install-skill.sh
 npx pinta-companion .
 # or:  node ~/.claude/skills/pinta/start-companion.js .
 <span class="caret" aria-hidden="true"></span></code></pre>
-        <p class="install-note">Then in Claude Code, type <code>/pinta</code>. Or in Cursor: <em>"Pick up the pending Pinta session and apply the changes — show me the plan first."</em></p>
+        <p class="install-note">Then in Claude Code, type <code>/pinta</code> (push, default) — or <code>/pinta --polling</code> for sandboxed setups. In Cursor: <em>"Pick up the pending Pinta session and apply the changes — show me the plan first."</em></p>
       </div>
     </div>
   </section>
@@ -1127,11 +1224,6 @@ npx pinta-companion .
       </div>
       <div class="roadmap">
         <div class="road-card">
-          <span class="tag">Phase 6</span>
-          <h3>vite-plugin-pinta</h3>
-          <p>Inject <code>data-source-file</code> and <code>data-source-line</code> in dev. Eliminates the grep guess; targets &gt;95% mapping accuracy.</p>
-        </div>
-        <div class="road-card">
           <span class="tag">Phase 7</span>
           <h3>Polish</h3>
           <p>Drag-to-reorder annotations, group by file in the side panel, undo via git, per-project <code>.pinta.json</code>, plan-then-execute toggle.</p>
@@ -1145,7 +1237,10 @@ npx pinta-companion .
     <div class="container row">
       <span class="brand-mini">
         <img src="assets/icons/icon-48.png" alt="" aria-hidden="true" />
-        Pinta — visual annotation for the agent era.
+        <span class="brand-mini-text">
+          Pinta — visual annotation for the agent era.
+          <span class="brand-mini-by">by kevzlou7979</span>
+        </span>
       </span>
       <div>
         <a href="https://github.com/kevzlou7979/pinta">GitHub</a>

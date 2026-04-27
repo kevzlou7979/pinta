@@ -25,12 +25,18 @@ matching source files for you.
 |---|---|
 | Chrome MV3 extension (Svelte 5, side panel + popup) | shipped |
 | Element selection overlay (Shadow-DOM isolated) | shipped |
-| Drawing canvas — arrow / rect / circle / freehand / pin | shipped |
-| Full-page screenshot with annotations composited in | shipped |
+| Drawing canvas — arrow / rect / pen / pin | shipped |
+| Full-page screenshot composite — opt-in, auto-on for drawings | shipped |
+| Structured CSS / content-change annotations | shipped |
+| Session history view | shipped |
+| Auto-reload after edits — HMR detection (Vite / Webpack / Parcel) | shipped |
+| Dark mode — popup, side panel, landing page | shipped |
 | Companion server: HTTP + WebSocket + JSON session store | shipped |
-| Claude Code adapter (skill + installer) | shipped |
+| Claude Code adapter — push handoff (default) + polling fallback | shipped |
 | MCP server for Cursor / Cline / Continue / Zed / Windsurf | shipped |
 | Aider adapter (poll script) | shipped |
+| Copy-to-clipboard fallback for claude.ai web / ChatGPT / etc. | shipped |
+| `pinta-companion` published to npm — `npx pinta-companion .` | shipped |
 | `vite-plugin-pinta` for instant source mapping | planned (Phase 6) |
 | Polish — drag reorder, group by file, undo via git | planned (Phase 7) |
 
@@ -122,20 +128,24 @@ finds the companion.
 
 - Press **`Ctrl+Shift+S`** on the page to enter **Select** mode — hover an
   element, click to lock it, type a comment, hit **Add**.
-- Press **`Ctrl+Shift+D`** to enter **Draw** mode — pick a tool (arrow / rect / circle
-  / pen / pin), drag on the page, comment, **Add**.
+- Press **`Ctrl+Shift+D`** to enter **Draw** mode — pick a tool (arrow /
+  rect / pen / pin), drag on the page, comment, **Add**.
 - Annotations appear as cards in the side panel. Edit, delete, reorder.
 
 ### 4. Submit
 
-The extension snaps a full-page screenshot, composites the annotations onto
-it, and posts the session.
+Hit **Send to agent**. The extension posts the session over the WS to the
+companion. The screenshot is **opt-in** (off by default) and auto-locks-on
+when there's a drawing in the batch — selectors + nearby text are usually
+enough for `select`-kind annotations, and skipping the capture saves
+~1.5–2k vision tokens per submit.
 
 ### 5. Hand off to your agent
 
-**Claude Code:** in Claude Code, type `/pinta`. The skill long-polls the
-companion, picks up your session, presents an edit plan grouped by file,
-and waits for your confirmation before editing.
+**Claude Code:** type `/pinta` (push mode, default — wakes the moment the
+companion has a session) or `/pinta --polling` (long-poll fallback for
+sandboxed setups). The skill picks up your session, presents an edit plan
+grouped by file, and waits for your confirmation before editing.
 
 **Cursor / Cline / Continue / Zed:** see
 [`adapters/cursor/README.md`](adapters/cursor/README.md) for the MCP
@@ -144,8 +154,19 @@ changes — show me the plan first."*
 
 **Aider:** see [`adapters/aider/pinta-poll.sh`](adapters/aider/pinta-poll.sh).
 
-**Anything else:** speak the HTTP API (`/v1/sessions/poll`,
-`/v1/sessions/:id/status`) — that's the universal lowest-common-denominator.
+**Anything else (claude.ai web, ChatGPT, etc.):** the side panel has a
+**Copy** button that formats the session as markdown — paste into the
+agent's chat. Useful when you can't run a CLI.
+
+**Custom HTTP:** speak `/v1/sessions/poll` and `/v1/sessions/:id/status` —
+that's the universal lowest-common-denominator.
+
+### 6. Watch the result
+
+After the agent applies the edits, the side panel detects HMR
+(Vite / Webpack / Parcel) on the active tab and offers to refresh
+automatically. Each annotation card flips to **✓** as it lands; the
+screenshot, plan, and applied summary stay in **History** for later.
 
 ---
 
