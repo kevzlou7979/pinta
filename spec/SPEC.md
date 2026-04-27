@@ -446,6 +446,20 @@ Exit criteria: edits land in the right file on the first try, every time, in a p
   there, just enforced). Aim is "never restart the companion when
   bouncing between repos." Estimated ~50 LOC across companion store +
   WS protocol + side panel; no breaking change to the HTTP API.
+- **Token-cost optimizations.** The full-page composite screenshot is the
+  single biggest item in the agent's input context (~1.5–2k vision
+  tokens per submit). Two cheap wins:
+  - *Optional screenshot* — toggle in the side-panel header to skip
+    capture entirely for text-only batches. Submit posts an empty
+    `fullPageScreenshot` so the agent skips the Read step.
+  - *Cropped composite* — instead of stitching the full page, render
+    only the union of annotation bounding rects (with ~24px margin and a
+    tile cap so very-spread-out annotations don't degenerate into a
+    full-page capture anyway). Typically 5–10× smaller than the full
+    page; the agent still sees the annotation in visual context.
+
+  Both are opt-in/toggle so the precise-mode "agent sees the whole page"
+  default is preserved.
 
 ---
 
