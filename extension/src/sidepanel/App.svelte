@@ -381,16 +381,16 @@
         {#each TOOLS as t (t.id)}
           <button
             type="button"
-            class="rounded-md border border-ink-300 bg-white text-ink-900 py-2 text-sm flex flex-col items-center gap-0.5 hover:bg-brand-cream dark:border-night-line dark:bg-night-card dark:text-night-text dark:hover:bg-night-line dark:hover:border-night-line2 disabled:opacity-50 transition-colors"
-            class:bg-brand-pink={activeTool === t.id}
-            class:text-white={activeTool === t.id}
-            class:border-brand-pink={activeTool === t.id}
-            class:dark:bg-brand-pink={activeTool === t.id}
-            class:dark:text-white={activeTool === t.id}
-            class:dark:border-brand-pink={activeTool === t.id}
+            class={[
+              "rounded-md border py-2 text-sm flex flex-col items-center gap-0.5 disabled:opacity-50 transition-colors",
+              activeTool === t.id
+                ? "bg-brand-pink text-white border-brand-pink shadow-inner ring-2 ring-brand-pink/30 dark:ring-brand-pink/50"
+                : "bg-white text-ink-700 border-ink-300 hover:bg-brand-cream hover:border-brand-pink/40 dark:bg-night-card dark:text-night-text dark:border-night-line dark:hover:bg-night-line dark:hover:border-night-line2",
+            ].join(" ")}
             disabled={activeTabId == null}
             onclick={() => setActive(activeTool === t.id ? null : t.id)}
             title={t.label}
+            aria-pressed={activeTool === t.id}
           >
             <svg
               width="18"
