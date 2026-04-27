@@ -10,6 +10,19 @@
   <meta property="og:type" content="website" />
   <meta property="og:url" content="https://kevzlou7979.github.io/pinta/" />
   <meta property="og:image" content="https://kevzlou7979.github.io/pinta/assets/icons/icon-512.png" />
+  <meta name="theme-color" content="#fff8ee" media="(prefers-color-scheme: light)" />
+  <meta name="theme-color" content="#14100c" media="(prefers-color-scheme: dark)" />
+  <script>
+    // Apply theme before paint to avoid a flash of the wrong palette.
+    (function () {
+      try {
+        var stored = localStorage.getItem('pinta-theme');
+        var prefers = window.matchMedia('(prefers-color-scheme: dark)').matches;
+        var theme = stored || (prefers ? 'dark' : 'light');
+        if (theme === 'dark') document.documentElement.setAttribute('data-theme', 'dark');
+      } catch (e) { /* localStorage unavailable — fall back to light */ }
+    })();
+  </script>
   <link rel="icon" type="image/png" sizes="32x32" href="assets/icons/icon-32.png" />
   <link rel="icon" type="image/png" sizes="16x16" href="assets/icons/icon-16.png" />
   <link rel="apple-touch-icon" sizes="128x128" href="assets/icons/icon-128.png" />
@@ -542,6 +555,123 @@
       color: var(--ink); font-weight: 600;
     }
     footer .brand-mini img { width: 22px; height: 22px; border-radius: 6px; }
+
+    /* ---------- THEME TOGGLE ---------- */
+    .theme-toggle {
+      width: 36px; height: 36px;
+      display: inline-flex; align-items: center; justify-content: center;
+      border-radius: 999px;
+      background: var(--paper);
+      color: var(--ink);
+      border: 1px solid var(--line-strong);
+      cursor: pointer;
+      transition: background .15s ease, border-color .15s ease, transform .12s ease, color .15s ease;
+      box-shadow: var(--shadow-sm);
+      padding: 0;
+    }
+    .theme-toggle:hover { transform: translateY(-1px); border-color: var(--ink); color: var(--pink); }
+    .theme-toggle svg { width: 16px; height: 16px; display: block; }
+    .theme-toggle .icon-sun { display: none; }
+    .theme-toggle .icon-moon { display: block; }
+
+    /* ---------- DARK MODE ---------- */
+    [data-theme="dark"] {
+      /* Warm-dark surfaces — keep the brand's sunset character, just at night */
+      --cream:        #14100c;
+      --cream-soft:   #1c1610;
+      --cream-deep:   #241d15;
+      --paper:        #1f1812;
+      --line:         #322619;
+      --line-strong:  #43321f;
+
+      --ink:          #f5e9d4;
+      --ink-dim:      #c4b59c;
+      --ink-mute:     #8b7e6a;
+
+      --pink:         #ff5a85;
+      --pink-deep:    #ff3d6e;
+
+      --shadow-sm: 0 1px 2px rgba(0,0,0,0.45), 0 0 0 1px rgba(255,184,77,0.04);
+      --shadow-md: 0 12px 32px rgba(0,0,0,0.55), 0 2px 6px rgba(255,61,110,0.10);
+      --shadow-lg: 0 24px 60px rgba(0,0,0,0.65), 0 6px 16px rgba(255,61,110,0.15);
+    }
+
+    /* Spots where --ink was used as a *background* in light mode need explicit
+       overrides — in dark mode --ink becomes the text/foreground color. */
+    [data-theme="dark"] pre {
+      background: #0d0a07;
+      color: #f5e9d4;
+      box-shadow: var(--shadow-md);
+    }
+    [data-theme="dark"] pre .term-bar {
+      background: #06040a;
+      color: #8b7e6a;
+      border-bottom-color: #1f1812;
+    }
+    [data-theme="dark"] .arch-card pre {
+      background: transparent;
+      box-shadow: none;
+      color: var(--ink);
+    }
+    [data-theme="dark"] .btn-primary {
+      background: var(--pink);
+      color: #1a0a0e;
+      box-shadow: 0 8px 22px rgba(255,61,110,0.35);
+    }
+    [data-theme="dark"] .btn-primary:hover {
+      background: var(--pink-deep);
+      box-shadow: 0 12px 28px rgba(255,61,110,0.50);
+    }
+    [data-theme="dark"] .btn-ghost { background: var(--paper); }
+    [data-theme="dark"] .nav-cta {
+      background: var(--pink);
+      color: #1a0a0e !important;
+    }
+    [data-theme="dark"] .nav-cta:hover { background: var(--pink-deep); }
+    [data-theme="dark"] nav.top {
+      background: rgba(20,16,12,0.78);
+    }
+    [data-theme="dark"] .pill {
+      background: var(--paper);
+      color: var(--pink);
+      border-color: var(--line-strong);
+    }
+    [data-theme="dark"] .feature .ico {
+      background: var(--cream-soft);
+      color: var(--pink);
+    }
+    [data-theme="dark"] code {
+      background: var(--cream-soft);
+      color: var(--pink);
+      border-color: var(--line);
+    }
+    [data-theme="dark"] table.adapters th { background: var(--cream-soft); }
+    [data-theme="dark"] table.adapters tr:hover td { background: rgba(255,184,77,0.04); }
+    [data-theme="dark"] .badge {
+      background: rgba(90,209,123,0.10);
+      color: #7fd49a;
+      border-color: rgba(90,209,123,0.25);
+    }
+    [data-theme="dark"] .badge .d { background: #7fd49a; }
+    [data-theme="dark"] .road-card .tag {
+      background: var(--cream-soft);
+      color: var(--pink);
+    }
+    [data-theme="dark"] footer { background: var(--cream-soft); }
+    [data-theme="dark"] .hero::before {
+      background:
+        radial-gradient(800px 360px at 12% 10%, rgba(255,210,77,0.16), transparent 60%),
+        radial-gradient(700px 320px at 88% 5%,  rgba(255,61,110,0.22),  transparent 60%),
+        radial-gradient(900px 420px at 50% 110%, rgba(199,45,125,0.18), transparent 60%);
+    }
+    [data-theme="dark"] .arch-card {
+      background:
+        radial-gradient(400px 200px at 20% 0%, rgba(255,184,77,0.10), transparent 70%),
+        radial-gradient(400px 200px at 100% 100%, rgba(199,45,125,0.14), transparent 70%),
+        var(--paper);
+    }
+    [data-theme="dark"] .theme-toggle .icon-sun { display: block; }
+    [data-theme="dark"] .theme-toggle .icon-moon { display: none; }
   </style>
 </head>
 <body>
@@ -557,6 +687,10 @@
         <a href="#how">How it works</a>
         <a href="#features">Features</a>
         <a href="#install">Install</a>
+        <button id="theme-toggle" class="theme-toggle" type="button" aria-label="Toggle dark mode" title="Toggle dark mode">
+          <svg class="icon-moon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"/></svg>
+          <svg class="icon-sun" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="4"/><path d="M12 2v2"/><path d="M12 20v2"/><path d="m4.93 4.93 1.41 1.41"/><path d="m17.66 17.66 1.41 1.41"/><path d="M2 12h2"/><path d="M20 12h2"/><path d="m6.34 17.66-1.41 1.41"/><path d="m19.07 4.93-1.41 1.41"/></svg>
+        </button>
         <a class="nav-cta" href="https://github.com/kevzlou7979/pinta">Star on GitHub</a>
       </div>
     </div>
@@ -833,6 +967,24 @@ npx pinta-companion .
       </div>
     </div>
   </footer>
+
+  <script>
+    (function () {
+      var btn = document.getElementById('theme-toggle');
+      if (!btn) return;
+      btn.addEventListener('click', function () {
+        var html = document.documentElement;
+        var isDark = html.getAttribute('data-theme') === 'dark';
+        if (isDark) {
+          html.removeAttribute('data-theme');
+          try { localStorage.setItem('pinta-theme', 'light'); } catch (e) {}
+        } else {
+          html.setAttribute('data-theme', 'dark');
+          try { localStorage.setItem('pinta-theme', 'dark'); } catch (e) {}
+        }
+      });
+    })();
+  </script>
 
 </body>
 </html>
