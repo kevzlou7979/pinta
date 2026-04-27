@@ -150,6 +150,28 @@ curl -sf -X POST http://127.0.0.1:7878/v1/sessions/{id}/status \
 
 The Chrome extension surfaces all status changes in real time via WebSocket.
 
+## 9. Immediately re-enter the poll loop
+
+This is important — **do not stop polling after one session.** The Pinta
+extension queues sessions one at a time as the user submits them, and the
+companion only hands a session out when an agent calls `/v1/sessions/poll`.
+If you stop polling, the next submission waits in the queue forever (the
+user has to run `/pinta` again to wake you up).
+
+After step 8 (or step 7 if you skipped the optional summary), go straight
+back to step 3 and call `/v1/sessions/poll` again. Loop indefinitely:
+
+- 204 means "no session yet" — re-poll. The companion long-polls 25s per
+  call so this is cheap.
+- 200 means a new session — process it (steps 4–8), then loop again.
+
+The user can interrupt the loop at any time. Only stop polling if:
+- The user explicitly tells you to stop ("done", "stop", "exit").
+- The companion goes down (`/v1/health` fails several times in a row) —
+  surface that and ask the user.
+
+Default behavior: stay in the poll loop until told otherwise.
+
 ## Notes
 
 - Source-mapping accuracy is ~80% with grep alone; ~95+% with
