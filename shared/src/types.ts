@@ -18,6 +18,13 @@ export type AnnotationTarget = {
   sourceLine?: number;
 };
 
+/**
+ * Lifecycle of a single annotation, set by the agent as it works.
+ * Unset = the annotation hasn't been picked up yet (still in the
+ * drafting/submitted batch).
+ */
+export type AnnotationStatus = "applying" | "done" | "error";
+
 export type Annotation = {
   id: string;
   createdAt: number;
@@ -31,6 +38,9 @@ export type Annotation = {
   comment: string;
 
   viewport: { scrollY: number; width: number; height: number };
+
+  status?: AnnotationStatus;
+  errorMessage?: string;
 };
 
 export type SessionStatus =

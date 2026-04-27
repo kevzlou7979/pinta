@@ -19,6 +19,20 @@ export function attachWebSocket(opts: AttachOptions): WebSocketServer {
 
   const wss = new WebSocketServer({ server, path: "/" });
 
+  // Push every store mutation to all connected clients so the side panel
+  // sees agent-driven state changes (e.g. mark_session_applying via HTTP)
+  // in real time without re-fetching.
+  store.subscribe((session) => {
+    if (session.id !== store.getActive()?.id) return;
+    const payload = JSON.stringify({
+      type: "session.synced",
+      session,
+    } satisfies ServerMessage);
+    for (const client of wss.clients) {
+      if (client.readyState === WebSocket.OPEN) client.send(payload);
+    }
+  });
+
   wss.on("connection", (socket) => {
     log("ws client connected");
 

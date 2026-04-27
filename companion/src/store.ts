@@ -3,19 +3,36 @@ import { join } from "node:path";
 import { randomUUID } from "node:crypto";
 import type {
   Annotation,
+  AnnotationStatus,
   Session,
   SessionStatus,
   SessionProducer,
 } from "@pinta/shared";
 
 type Waiter = (session: Session) => void;
+type Listener = (session: Session) => void;
 
 export class SessionStore {
   private sessions = new Map<string, Session>();
   private activeId: string | null = null;
   private waiters: Waiter[] = [];
+  private listeners = new Set<Listener>();
 
   constructor(public readonly projectRoot: string) {}
+
+  /**
+   * Subscribe to every session mutation — used by the WS layer to push
+   * `session.synced` to connected extensions whenever the agent updates
+   * status via HTTP / MCP. Returns an unsubscribe.
+   */
+  subscribe(listener: Listener): () => void {
+    this.listeners.add(listener);
+    return () => this.listeners.delete(listener);
+  }
+
+  private notifyChange(session: Session): void {
+    for (const fn of this.listeners) fn(session);
+  }
 
   private get sessionsDir(): string {
     return join(this.projectRoot, ".pinta", "sessions");
@@ -109,6 +126,7 @@ export class SessionStore {
     this.sessions.set(stored.id, stored);
     if (stored.status === "drafting") this.activeId = stored.id;
     await this.persist(stored);
+    this.notifyChange(stored);
     if (stored.status === "submitted") this.notifyWaiters(stored);
     return stored;
   }
@@ -116,6 +134,7 @@ export class SessionStore {
   addAnnotation(sessionId: string, annotation: Annotation): Session {
     const session = this.requireSession(sessionId);
     session.annotations.push(annotation);
+    this.notifyChange(session);
     return session;
   }
 
@@ -127,13 +146,18 @@ export class SessionStore {
     const session = this.requireSession(sessionId);
     const idx = session.annotations.findIndex((a) => a.id === annotationId);
     if (idx === -1) throw new Error(`annotation ${annotationId} not found`);
-    session.annotations[idx] = { ...session.annotations[idx], ...patch } as Annotation;
+    session.annotations[idx] = {
+      ...session.annotations[idx],
+      ...patch,
+    } as Annotation;
+    this.notifyChange(session);
     return session;
   }
 
   removeAnnotation(sessionId: string, annotationId: string): Session {
     const session = this.requireSession(sessionId);
     session.annotations = session.annotations.filter((a) => a.id !== annotationId);
+    this.notifyChange(session);
     return session;
   }
 
@@ -144,6 +168,7 @@ export class SessionStore {
     if (screenshot) session.fullPageScreenshot = screenshot;
     await this.extractScreenshot(session);
     await this.persist(session);
+    this.notifyChange(session);
     this.notifyWaiters(session);
     return session;
   }
@@ -158,6 +183,36 @@ export class SessionStore {
     if (extras?.summary !== undefined) session.appliedSummary = extras.summary;
     if (extras?.errorMessage !== undefined) session.errorMessage = extras.errorMessage;
     await this.persist(session);
+    this.notifyChange(session);
+    return session;
+  }
+
+  async setAnnotationStatus(
+    sessionId: string,
+    annotationId: string,
+    status: AnnotationStatus,
+    extras?: { errorMessage?: string },
+  ): Promise<Session> {
+    const session = this.requireSession(sessionId);
+    const idx = session.annotations.findIndex((a) => a.id === annotationId);
+    if (idx === -1) throw new Error(`annotation ${annotationId} not found`);
+    const current = session.annotations[idx]!;
+    session.annotations[idx] = {
+      ...current,
+      status,
+      errorMessage: extras?.errorMessage,
+    };
+    // Auto-roll the session status when every annotation has resolved.
+    const settled = session.annotations.every(
+      (a) => a.status === "done" || a.status === "error",
+    );
+    if (settled && session.status === "applying") {
+      session.status = session.annotations.some((a) => a.status === "error")
+        ? "error"
+        : "done";
+    }
+    await this.persist(session);
+    this.notifyChange(session);
     return session;
   }
 

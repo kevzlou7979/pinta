@@ -1,10 +1,19 @@
 import { readFile } from "node:fs/promises";
 import { join, isAbsolute } from "node:path";
-import type { Session, SessionStatus } from "@pinta/shared";
+import type {
+  AnnotationStatus,
+  Session,
+  SessionStatus,
+} from "@pinta/shared";
 
 export type SetStatusInput = {
   status: SessionStatus;
   summary?: string;
+  errorMessage?: string;
+};
+
+export type SetAnnotationStatusInput = {
+  status: AnnotationStatus;
   errorMessage?: string;
 };
 
@@ -13,6 +22,11 @@ export interface Backend {
   getPendingSession(): Promise<Session | null>;
   getSession(id: string): Promise<Session | null>;
   setStatus(id: string, input: SetStatusInput): Promise<Session>;
+  setAnnotationStatus(
+    sessionId: string,
+    annotationId: string,
+    input: SetAnnotationStatusInput,
+  ): Promise<Session>;
   getScreenshot(id: string): Promise<{ base64: string; mediaType: string } | null>;
 }
 
@@ -58,6 +72,25 @@ export class HttpBackend implements Backend {
       },
     );
     if (!res.ok) throw new Error(`status update failed: ${res.status}`);
+    return (await res.json()) as Session;
+  }
+
+  async setAnnotationStatus(
+    sessionId: string,
+    annotationId: string,
+    input: SetAnnotationStatusInput,
+  ): Promise<Session> {
+    const res = await fetch(
+      `${this.baseUrl}/v1/sessions/${encodeURIComponent(sessionId)}/annotations/${encodeURIComponent(annotationId)}/status`,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(input),
+      },
+    );
+    if (!res.ok) {
+      throw new Error(`annotation status update failed: ${res.status}`);
+    }
     return (await res.json()) as Session;
   }
 

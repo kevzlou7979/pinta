@@ -1,6 +1,10 @@
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
 import { URL } from "node:url";
-import type { Session, SessionStatus } from "@pinta/shared";
+import type {
+  AnnotationStatus,
+  Session,
+  SessionStatus,
+} from "@pinta/shared";
 import { SessionStore } from "./store.js";
 
 export type ServerOptions = {
@@ -19,6 +23,8 @@ const okStatuses: SessionStatus[] = [
   "done",
   "error",
 ];
+
+const okAnnotationStatuses: AnnotationStatus[] = ["applying", "done", "error"];
 
 export function startServer(opts: ServerOptions) {
   const { port, store } = opts;
@@ -117,6 +123,31 @@ async function handle(
     }
     const session = await store.setStatus(statusMatch[1]!, body.status, body);
     log(`session ${session.id} → ${session.status}`);
+    return sendJson(res, 200, session);
+  }
+
+  const annotationStatusMatch = path.match(
+    /^\/v1\/sessions\/([^/]+)\/annotations\/([^/]+)\/status$/,
+  );
+  if (method === "POST" && annotationStatusMatch) {
+    const body = await readJson<{
+      status: AnnotationStatus;
+      errorMessage?: string;
+    }>(req);
+    if (!okAnnotationStatuses.includes(body.status)) {
+      return sendJson(res, 400, {
+        error: `invalid annotation status: ${body.status}`,
+      });
+    }
+    const session = await store.setAnnotationStatus(
+      annotationStatusMatch[1]!,
+      annotationStatusMatch[2]!,
+      body.status,
+      body,
+    );
+    log(
+      `session ${session.id} annotation ${annotationStatusMatch[2]} → ${body.status}`,
+    );
     return sendJson(res, 200, session);
   }
 

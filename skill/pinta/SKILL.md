@@ -91,15 +91,48 @@ curl -sf -X POST http://127.0.0.1:7878/v1/sessions/{id}/status \
   -d '{"status":"applying"}'
 ```
 
-## 7. Apply edits
+## 7. Apply edits — one annotation at a time, with per-card status
 
-Use the Edit tool, one annotation at a time. Run the project's lint / test /
-typecheck commands afterward (read package.json scripts; `npm run check`,
-`npm test`, etc.).
+For **each** annotation, in order:
 
-## 8. Mark the session done (or error)
+1. Mark it as in-progress so the side-panel card shows a spinner:
 
-On success:
+   ```bash
+   curl -sf -X POST http://127.0.0.1:7878/v1/sessions/{id}/annotations/{annId}/status \
+     -H "Content-Type: application/json" \
+     -d '{"status":"applying"}'
+   ```
+
+2. Apply the Edit tool changes for that annotation.
+
+3. Mark it done (card flips to ✓):
+
+   ```bash
+   curl -sf -X POST http://127.0.0.1:7878/v1/sessions/{id}/annotations/{annId}/status \
+     -H "Content-Type: application/json" \
+     -d '{"status":"done"}'
+   ```
+
+   Or, if you couldn't apply it (file not found, ambiguous match the
+   user should resolve, etc.):
+
+   ```bash
+   curl -sf -X POST http://127.0.0.1:7878/v1/sessions/{id}/annotations/{annId}/status \
+     -H "Content-Type: application/json" \
+     -d '{"status":"error","errorMessage":"<reason>"}'
+   ```
+
+When every annotation is `done` or `error`, the companion auto-rolls the
+session status (so step 8 below is optional unless you want to attach a
+final summary or skip per-annotation tracking entirely).
+
+After all annotations: run the project's lint / test / typecheck commands
+(read package.json scripts; `npm run check`, `npm test`, etc.).
+
+## 8. (Optional) Mark the session done with a summary
+
+If you want to attach a one-line summary the side panel surfaces below
+the "Done" button:
 
 ```bash
 curl -sf -X POST http://127.0.0.1:7878/v1/sessions/{id}/status \
@@ -107,7 +140,7 @@ curl -sf -X POST http://127.0.0.1:7878/v1/sessions/{id}/status \
   -d '{"status":"done","summary":"Tonalized SubmitButton, removed expiry icon, padded ClaimSummaryCard."}'
 ```
 
-On failure:
+For total failure (could not start at all):
 
 ```bash
 curl -sf -X POST http://127.0.0.1:7878/v1/sessions/{id}/status \
@@ -115,7 +148,7 @@ curl -sf -X POST http://127.0.0.1:7878/v1/sessions/{id}/status \
   -d '{"status":"error","errorMessage":"..."}'
 ```
 
-The Chrome extension surfaces this status in the side panel.
+The Chrome extension surfaces all status changes in real time via WebSocket.
 
 ## Notes
 

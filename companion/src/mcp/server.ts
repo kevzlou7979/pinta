@@ -86,6 +86,69 @@ export function createMcpServer(backend: Backend): McpServer {
   );
 
   server.registerTool(
+    "mark_annotation_applying",
+    {
+      description:
+        "Mark a single annotation as in-progress. Call this just before " +
+        "you start editing the source file(s) for that annotation. The " +
+        "side panel will show a spinner on the matching card.",
+      inputSchema: {
+        sessionId: z.string(),
+        annotationId: z.string(),
+      },
+    },
+    async ({ sessionId, annotationId }) => {
+      await backend.setAnnotationStatus(sessionId, annotationId, {
+        status: "applying",
+      });
+      return ok(`annotation ${annotationId} → applying`);
+    },
+  );
+
+  server.registerTool(
+    "mark_annotation_done",
+    {
+      description:
+        "Mark a single annotation as completed. Call this once the edits " +
+        "for that annotation have landed. The side panel will show a " +
+        "checkmark on the matching card. When every annotation in a " +
+        "session is done, the session itself auto-rolls to 'done'.",
+      inputSchema: {
+        sessionId: z.string(),
+        annotationId: z.string(),
+      },
+    },
+    async ({ sessionId, annotationId }) => {
+      await backend.setAnnotationStatus(sessionId, annotationId, {
+        status: "done",
+      });
+      return ok(`annotation ${annotationId} → done`);
+    },
+  );
+
+  server.registerTool(
+    "mark_annotation_error",
+    {
+      description:
+        "Mark a single annotation as failed (couldn't locate the source, " +
+        "edit blocked, etc.). Other annotations in the same session can " +
+        "still complete normally.",
+      inputSchema: {
+        sessionId: z.string(),
+        annotationId: z.string(),
+        errorMessage: z.string(),
+      },
+    },
+    async ({ sessionId, annotationId, errorMessage }) => {
+      await backend.setAnnotationStatus(sessionId, annotationId, {
+        status: "error",
+        errorMessage,
+      });
+      return ok(`annotation ${annotationId} → error: ${errorMessage}`);
+    },
+  );
+
+  server.registerTool(
     "get_screenshot",
     {
       description:

@@ -82,6 +82,10 @@
   const canSubmit = $derived(
     annotations.length > 0 && app.session?.status === "drafting",
   );
+  const canEditAnnotations = $derived(app.session?.status === "drafting");
+  const allDone = $derived(
+    app.session?.status === "done" || app.session?.status === "error",
+  );
 
   async function setActive(tool: Tool | null) {
     if (activeTabId == null) return;
@@ -282,7 +286,10 @@
           {#each annotations as annotation (annotation.id)}
             <AnnotationCard
               {annotation}
+              canEdit={canEditAnnotations}
               onremove={() => removeAnnotation(annotation.id)}
+              onsave={(comment) =>
+                app.updateAnnotation(annotation.id, { comment })}
             />
           {/each}
         </ul>
@@ -300,41 +307,55 @@
 
   <footer class="border-t border-ink-200 p-3 bg-white space-y-2">
     <div class="flex gap-2">
-      <button
-        type="button"
-        class="flex-1 rounded-md bg-brand-pink text-white text-sm font-medium py-2 hover:bg-brand-magenta disabled:opacity-50"
-        disabled={!canSubmit || capturing}
-        onclick={submit}
-      >
-        {#if capturing}
-          Capturing screenshot…
-        {:else if app.session?.status === "submitted"}
-          Submitted — waiting for agent
-        {:else if app.session?.status === "applying"}
-          Agent is applying changes…
-        {:else if app.session?.status === "done"}
-          Done · {app.session?.appliedSummary ?? "applied"}
-        {:else}
-          Send to agent
-        {/if}
-      </button>
-      {#if app.session?.status === "submitted" || app.session?.status === "applying" || app.session?.status === "done"}
+      {#if allDone}
         <button
           type="button"
-          class="rounded-md border border-ink-300 bg-white text-ink-700 text-sm font-medium px-3 hover:bg-ink-50"
-          title={app.session?.status === "done"
-            ? "Start a new session"
-            : "Cancel this session and start fresh"}
+          class="flex-1 rounded-md bg-brand-pink text-white text-sm font-medium py-2 hover:bg-brand-magenta"
           onclick={cancelSession}
-          aria-label="Cancel session"
         >
-          ✕
+          {#if app.session?.status === "error"}
+            Start new batch (some failed)
+          {:else}
+            ✓ Done — start new batch
+          {/if}
         </button>
+      {:else}
+        <button
+          type="button"
+          class="flex-1 rounded-md bg-brand-pink text-white text-sm font-medium py-2 hover:bg-brand-magenta disabled:opacity-50"
+          disabled={!canSubmit || capturing}
+          onclick={submit}
+        >
+          {#if capturing}
+            Capturing screenshot…
+          {:else if app.session?.status === "submitted"}
+            Submitted — waiting for agent
+          {:else if app.session?.status === "applying"}
+            Agent is applying changes…
+          {:else}
+            Send to agent
+          {/if}
+        </button>
+        {#if app.session?.status === "submitted" || app.session?.status === "applying"}
+          <button
+            type="button"
+            class="rounded-md border border-ink-300 bg-white text-ink-700 text-sm font-medium px-3 hover:bg-ink-50"
+            title="Cancel this session and start fresh"
+            onclick={cancelSession}
+            aria-label="Cancel session"
+          >
+            ✕
+          </button>
+        {/if}
       {/if}
     </div>
     {#if app.session?.status === "submitted"}
       <p class="text-[11px] text-ink-500 text-center">
         Stuck? Click ✕ to cancel and start a new session.
+      </p>
+    {:else if app.session?.status === "applying"}
+      <p class="text-[11px] text-ink-500 text-center">
+        Watch the cards above — each annotation flips to ✓ as the agent finishes it.
       </p>
     {/if}
   </footer>
