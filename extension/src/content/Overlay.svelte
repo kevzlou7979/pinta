@@ -48,15 +48,16 @@
     return () => chrome.runtime.onMessage.removeListener(handler);
   });
 
-  // Hotkeys (chord-based to avoid clobbering normal page typing):
-  //   Ctrl+Shift+S → toggle Select
-  //   Ctrl+Shift+D → toggle Draw
-  //   Ctrl+Shift+E → exit (back to Idle)
-  //   Esc          → cancel in-progress / pending / mode (handled per-mode)
-  // Ctrl+Shift+R is intentionally NOT used (browser hard-reload).
+  // Hotkeys — Alt+letter for clean access without finger-twisting chords.
+  // Chosen to avoid Chrome's reserved Alt combos: Alt+D focuses the URL
+  // bar, Alt+E opens the menu, Alt+F is File menu. So we use:
+  //   Alt+S → toggle Select   (mostly free across browsers)
+  //   Alt+P → toggle Draw     (P for Pen — Alt+D is taken by URL bar)
+  //   Alt+X → exit (Idle)     (eXit; Alt+E is the Chrome menu)
+  //   Esc   → cancel in-progress / pending / mode (handled per-mode)
   onMount(() => {
     function onKey(e: KeyboardEvent) {
-      if (!e.ctrlKey || !e.shiftKey || e.metaKey || e.altKey) return;
+      if (!e.altKey || e.ctrlKey || e.metaKey || e.shiftKey) return;
       const ae = document.activeElement as HTMLElement | null;
       const tag = ae?.tagName;
       if (tag === "INPUT" || tag === "TEXTAREA" || ae?.isContentEditable) return;
@@ -64,10 +65,10 @@
       if (key === "s") {
         e.preventDefault();
         setMode(content.mode === "select" ? "idle" : "select");
-      } else if (key === "d") {
+      } else if (key === "p") {
         e.preventDefault();
         setMode(content.mode === "draw" ? "idle" : "draw", content.tool);
-      } else if (key === "e") {
+      } else if (key === "x") {
         e.preventDefault();
         setMode("idle");
       }
@@ -457,9 +458,9 @@
 {#if content.mode !== "idle"}
   <div class="status">
     {#if content.mode === "select"}
-      Select mode · click to pick · Ctrl+Shift+S or Esc to exit
+      Select mode · click to pick · Alt+S or Esc to exit
     {:else if content.mode === "draw"}
-      Draw · {content.tool} · drag on page · Ctrl+Shift+D or Esc to exit
+      Draw · {content.tool} · drag on page · Alt+P or Esc to exit
     {/if}
   </div>
 {/if}

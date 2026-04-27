@@ -94,6 +94,13 @@ export type Session = {
   appliedSummary?: string;
   errorMessage?: string;
   producer: SessionProducer;
+
+  /**
+   * If true, the agent should skip its plan-and-wait-for-confirmation
+   * step and apply edits directly. The plan is still shown briefly so
+   * the user can see what's happening, but no "go" reply is required.
+   */
+  autoApply?: boolean;
 };
 
 export type ClientMessage =
@@ -101,7 +108,7 @@ export type ClientMessage =
   | { type: "annotation.add"; annotation: Annotation }
   | { type: "annotation.update"; id: string; patch: Partial<Annotation> }
   | { type: "annotation.remove"; id: string }
-  | { type: "session.submit"; screenshot: string };
+  | { type: "session.submit"; screenshot: string; autoApply?: boolean };
 
 export type ServerMessage =
   | { type: "session.created"; session: Session }

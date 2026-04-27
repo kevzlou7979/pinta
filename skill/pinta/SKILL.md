@@ -113,7 +113,14 @@ Group edits by file. For each annotation, state:
 - a one-line summary of the change
 - which annotation it satisfies (`comment` quote)
 
-Show the plan to the user. Wait for explicit confirmation ("go", "yes",
+Show the plan to the user.
+
+**If `session.autoApply` is true** (user toggled "Auto-apply" in the
+side panel), proceed straight to step 6 without waiting — this is opt-in
+fast-iteration mode. Still show the plan first so they see what's
+happening, but don't ask "reply go to apply."
+
+**Otherwise (default)**: wait for explicit confirmation ("go", "yes",
 "apply") before editing anything.
 
 ## 6. Mark the session as applying

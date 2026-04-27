@@ -63,8 +63,8 @@ class ExtensionState {
     this.send({ type: "annotation.remove", id });
   }
 
-  submit(screenshot = ""): void {
-    this.send({ type: "session.submit", screenshot });
+  submit(screenshot = "", autoApply?: boolean): void {
+    this.send({ type: "session.submit", screenshot, autoApply });
   }
 
   /**

@@ -161,11 +161,16 @@ export class SessionStore {
     return session;
   }
 
-  async submit(sessionId: string, screenshot?: string): Promise<Session> {
+  async submit(
+    sessionId: string,
+    screenshot?: string,
+    autoApply?: boolean,
+  ): Promise<Session> {
     const session = this.requireSession(sessionId);
     session.status = "submitted";
     session.submittedAt = Date.now();
     if (screenshot) session.fullPageScreenshot = screenshot;
+    if (autoApply !== undefined) session.autoApply = autoApply;
     await this.extractScreenshot(session);
     await this.persist(session);
     this.notifyChange(session);

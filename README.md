@@ -126,9 +126,9 @@ finds the companion.
 
 ### 3. Annotate
 
-- Press **`Ctrl+Shift+S`** on the page to enter **Select** mode — hover an
+- Press **`Alt+S`** on the page to enter **Select** mode — hover an
   element, click to lock it, type a comment, hit **Add**.
-- Press **`Ctrl+Shift+D`** to enter **Draw** mode — pick a tool (arrow /
+- Press **`Alt+P`** to enter **Draw** mode — pick a tool (arrow /
   rect / pen / pin), drag on the page, comment, **Add**.
 - Annotations appear as cards in the side panel. Edit, delete, reorder.
 
@@ -203,9 +203,9 @@ is real and not aspirational.
 
 | Key | Action |
 |---|---|
-| `Ctrl+Shift+S` | Toggle Select mode |
-| `Ctrl+Shift+D` | Toggle Draw mode |
-| `Ctrl+Shift+E` | Exit to idle (alternative to Esc) |
+| `Alt+S` | Toggle Select mode |
+| `Alt+P` | Toggle Draw mode |
+| `Alt+X` | Exit to idle (alternative to Esc) |
 | `Esc` | Cancel in-progress stroke → pending comment → exit mode |
 
 ---

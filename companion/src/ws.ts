@@ -114,8 +114,14 @@ async function dispatch(
     case "session.submit": {
       const active = store.getActive();
       if (!active) throw new Error("no active session");
-      const submitted = await store.submit(active.id, msg.screenshot);
-      log(`session.submit ${submitted.id} (${submitted.annotations.length} annotations)`);
+      const submitted = await store.submit(
+        active.id,
+        msg.screenshot,
+        msg.autoApply,
+      );
+      log(
+        `session.submit ${submitted.id} (${submitted.annotations.length} annotations${submitted.autoApply ? ", auto-apply" : ""})`,
+      );
       return submitted;
     }
   }

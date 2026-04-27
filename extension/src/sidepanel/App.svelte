@@ -57,6 +57,7 @@
   let includeScreenshot = $state(false);
   let copiedAt = $state<number | null>(null);
   let autoReloadEnabled = $state(true);
+  let autoApplyEnabled = $state(false);
   let hmrDetected = $state<boolean | null>(null);
   let reloadingAt = $state<number | null>(null);
   let lastHandledSessionId = $state<string | null>(null);
@@ -312,7 +313,7 @@
       if (!includeScreenshot) {
         // Text-only mode — let the agent work from selector + outerHTML
         // + nearbyText alone. Cheaper and faster.
-        app.submit();
+        app.submit("", autoApplyEnabled);
         return;
       }
 
@@ -329,7 +330,7 @@
         resp.capture.dataUrl,
         annotations,
       );
-      app.submit(composited);
+      app.submit(composited, autoApplyEnabled);
     } catch (err) {
       app.lastError = `screenshot failed: ${(err as Error).message}`;
     } finally {
@@ -484,6 +485,22 @@
 
   <footer class="border-t border-ink-200 p-3 bg-white dark:border-night-line dark:bg-night-card space-y-2">
     {#if !allDone && app.session?.status === "drafting"}
+      <label
+        class="flex items-start gap-2 text-[12px] text-ink-700 dark:text-night-dim cursor-pointer select-none"
+      >
+        <input
+          type="checkbox"
+          class="mt-0.5 accent-brand-pink"
+          bind:checked={autoApplyEnabled}
+        />
+        <span class="flex-1 leading-snug">
+          Auto-apply (no agent confirmation)
+          <span class="block text-[11px] text-ink-500 dark:text-night-mute">
+            Skip the agent's "reply 'go' to apply" step. Plan is still shown
+            briefly. Off by default — turn on for fast iteration.
+          </span>
+        </span>
+      </label>
       <label
         class="flex items-start gap-2 text-[12px] text-ink-700 dark:text-night-dim select-none"
         class:cursor-pointer={!hasDrawingAnnotation}
