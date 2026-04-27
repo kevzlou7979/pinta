@@ -62,6 +62,57 @@
   font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
   margin-bottom: 6px;
 }
+.popup--editor .popup__head {
+  margin-bottom: 8px;
+}
+.tabs {
+  display: flex;
+  gap: 4px;
+  margin-bottom: 8px;
+  border-bottom: 1px solid #e2e8f0;
+}
+.tab {
+  position: relative;
+  background: transparent;
+  border: 0;
+  border-bottom: 2px solid transparent;
+  padding: 6px 10px;
+  font:
+    12px / 1 ui-sans-serif,
+    system-ui,
+    sans-serif;
+  font-weight: 500;
+  color: #64748b;
+  cursor: pointer;
+  margin-bottom: -1px;
+}
+.tab:hover {
+  color: #0f172a;
+}
+.tab--active {
+  color: #ff3d6e;
+  border-bottom-color: #ff3d6e;
+}
+.tab__dot {
+  display: inline-block;
+  width: 6px;
+  height: 6px;
+  background: #ff3d6e;
+  border-radius: 50%;
+  margin-left: 4px;
+  vertical-align: middle;
+}
+.popup__css {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace !important;
+  font-size: 12px !important;
+  background: #fef9f0;
+}
+.popup__hint {
+  margin: 6px 0 0;
+  font-size: 11px;
+  color: #64748b;
+  line-height: 1.4;
+}
 .popup textarea {
   width: 100%;
   box-sizing: border-box;

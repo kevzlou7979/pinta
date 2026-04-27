@@ -37,6 +37,7 @@
     type?: string;
     target?: AnnotationTarget;
     comment?: string;
+    customCss?: string;
     viewport?: { scrollY: number; width: number; height: number };
     annotation?: Annotation;
   };
@@ -64,6 +65,7 @@
           strokes: [],
           color: "#FF3D6E",
           comment: (m.comment ?? "").trim(),
+          customCss: m.customCss?.trim() || undefined,
           target: m.target,
           viewport: m.viewport ?? snapshotViewport(),
         };

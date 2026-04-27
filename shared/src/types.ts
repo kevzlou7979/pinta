@@ -37,6 +37,13 @@ export type Annotation = {
 
   comment: string;
 
+  /**
+   * Optional raw CSS the user typed in the inline editor's CSS tab.
+   * Phase 8a (inline editing) shape — agent applies this as CSS
+   * additions / property overrides on the matching element.
+   */
+  customCss?: string;
+
   viewport: { scrollY: number; width: number; height: number };
 
   status?: AnnotationStatus;

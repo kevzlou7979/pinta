@@ -6,6 +6,7 @@
   import type { DrawTool } from "./tools/draw.js";
   import Canvas from "./Canvas.svelte";
   import CommentInput from "./CommentInput.svelte";
+  import ElementEditor from "./ElementEditor.svelte";
 
   let hovered: Element | null = $state(null);
   let selected: Element | null = $state(null);
@@ -131,18 +132,28 @@
 
   // Submit a select annotation.
   let selectComment = $state("");
+  let selectCustomCss = $state("");
   function submitSelect() {
-    if (!selected || !selectComment.trim()) return;
+    if (!selected) return;
+    const hasComment = selectComment.trim().length > 0;
+    const hasCss = selectCustomCss.trim().length > 0;
+    if (!hasComment && !hasCss) return;
     const target = captureTarget(selected);
     chrome.runtime.sendMessage({
       type: "annotation.target-selected",
       target,
       comment: selectComment.trim(),
+      customCss: hasCss ? selectCustomCss.trim() : undefined,
       viewport: snapshotViewport(),
     });
     selected = null;
     selectComment = "";
+    selectCustomCss = "";
     setMode("idle");
+  }
+  function clearSelectAndCss() {
+    clearSelectState();
+    selectCustomCss = "";
   }
 
   // Submit a draft drawing as an annotation.
@@ -255,12 +266,13 @@
       style:width="{selectedRect.width}px"
       style:height="{selectedRect.height}px"
     ></div>
-    <CommentInput
+    <ElementEditor
       anchor={selectedRect}
       title={describe(selected)}
-      bind:value={selectComment}
+      bind:comment={selectComment}
+      bind:customCss={selectCustomCss}
       onsubmit={submitSelect}
-      oncancel={clearSelectState}
+      oncancel={clearSelectAndCss}
     />
   {/if}
 {/if}

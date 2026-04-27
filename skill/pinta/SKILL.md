@@ -97,6 +97,9 @@ Each annotation is one of two shapes:
   narrow with `target.nearbyText[1..]` if too generic.
 - `target.outerHTML` and `target.computedStyles` are useful evidence when
   multiple files match.
+- **`customCss`** — if set, the user typed raw CSS in the inline editor's
+  CSS tab. Apply it as additions to the matching source rule. See §7.5
+  below for framework heuristics.
 
 **Drawing (`kind` is `arrow` / `rect` / `circle` / `freehand` / `pin`)** —
 no DOM target. The `comment` describes intent; the screenshot shows what
@@ -120,6 +123,25 @@ curl -sf -X POST http://127.0.0.1:7878/v1/sessions/{id}/status \
   -H "Content-Type: application/json" \
   -d '{"status":"applying"}'
 ```
+
+## 7.5 Applying `customCss` (Phase 8a inline editing)
+
+When an annotation has a `customCss` field, the user has explicitly stated
+the CSS they want applied to the element matched by `target.selector`.
+Don't paraphrase — apply it. Strategy depends on the source framework:
+
+- **Plain CSS / SCSS file**: find the rule for the selector (or a broader
+  matching rule), append the properties. Don't duplicate properties — if
+  the rule already sets `padding`, override; otherwise add.
+- **Tailwind**: convert the CSS properties to the closest utility classes
+  and add them to the element's `class=` attribute. Note caveats in the
+  plan if a property has no clean tailwind equivalent.
+- **CSS-in-JS / styled-components / emotion**: append the properties to
+  the matching styled rule.
+- **Last resort**: add inline `style="…"` on the element.
+
+Always show the planned application (which strategy + which file + the
+final form of the change) before editing.
 
 ## 7. Apply edits — one annotation at a time, with per-card status
 

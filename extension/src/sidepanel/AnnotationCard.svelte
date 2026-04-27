@@ -115,7 +115,15 @@
           </button>
         </div>
       {:else}
-        <p class="text-ink-900 mt-1 break-words">{annotation.comment}</p>
+        {#if annotation.comment}
+          <p class="text-ink-900 mt-1 break-words">{annotation.comment}</p>
+        {/if}
+        {#if annotation.customCss}
+          <pre
+            class="mt-1 px-2 py-1.5 rounded bg-brand-cream text-[11px] text-magenta-900 font-mono overflow-x-auto whitespace-pre-wrap break-words"
+            style="color:#c72d7d;"
+            title="Custom CSS to apply">{annotation.customCss}</pre>
+        {/if}
         {#if annotation.status === "error" && annotation.errorMessage}
           <p class="text-[11px] text-red-600 mt-1">
             {annotation.errorMessage}
