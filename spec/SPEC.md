@@ -543,10 +543,19 @@ animation timeline, design-token picker integrations.
   per the project's actual framework (detected from `package.json` +
   the source file being edited) — no hardcoded Tailwind / CSS-in-JS
   assumptions in the payload.
-- **8b — Planned.** Live preview via inline-style mutation while the
-  user is editing (with a `before` snapshot for cancel). Drag-to-resize
-  handles. Per-side spacing splits with a linked toggle. Design-token
-  picker integrations.
+- **8b — Partially shipped.**
+  - *Live DOM preview* — **shipped**. As the user changes any
+    Font / Sizing / Spacing / Content / CSS field in the popup, the live
+    element on the page updates in real time via `style.setProperty`
+    and `innerText`. A snapshot of the original `style.cssText` +
+    `innerText` is taken on first selection; Cancel and Submit both
+    restore the snapshot so the page is clean for the next pick (the
+    annotation captures the diff; the agent persists it for real later).
+  - *Drag-to-resize handles* — planned.
+  - *Per-side spacing splits with a linked toggle* — planned.
+  - *Design-token picker integrations* — planned.
+  - *Inline edit affordance icon on hover* — planned (user-facing
+    discoverability cue; functionally redundant with select-mode click).
 
 ---
 

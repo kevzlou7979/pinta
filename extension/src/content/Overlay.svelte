@@ -20,9 +20,16 @@
   }
 
   function clearSelectState() {
+    // Restore live-preview mutations BEFORE we drop the reference,
+    // otherwise the page is left in whatever in-progress state the user
+    // had typed.
+    restoreOriginal();
     hovered = null;
     selected = null;
     comment = "";
+    selectCustomCss = "";
+    selectCssChanges = {};
+    selectContentAfter = "";
   }
 
   function setMode(next: Mode, tool?: DrawTool) {
@@ -136,6 +143,12 @@
   let selectCssChanges = $state<Record<string, string>>({});
   let selectContentAfter = $state("");
 
+  // Snapshot of the element's original inline styles + text BEFORE we
+  // start mutating it for live preview. Restored on Cancel / Submit so
+  // the page stays clean between annotations.
+  let originalCssText = $state<string | null>(null);
+  let originalText = $state<string | null>(null);
+
   // Live values fed into the editor — recomputed when the selection
   // changes. tick is bumped on scroll/resize so getComputedStyle stays
   // fresh for elements that move.
@@ -185,6 +198,55 @@
       .trim();
   }
 
+  // Snapshot the live element when it's first selected so we can restore
+  // it later. Re-runs only when `selected` changes.
+  $effect(() => {
+    if (selected) {
+      originalCssText = (selected as HTMLElement).style.cssText;
+      originalText = textOf(selected);
+    } else {
+      originalCssText = null;
+      originalText = null;
+    }
+  });
+
+  // Live DOM preview: whenever the editor's css/content state changes,
+  // re-apply on top of the original snapshot. Cheap full-restore-and-
+  // -reapply avoids needing to track per-property add/remove deltas.
+  $effect(() => {
+    if (!selected || !selected.isConnected || originalCssText === null) return;
+    const el = selected as HTMLElement;
+    el.style.cssText = originalCssText;
+    for (const [prop, val] of Object.entries(selectCssChanges)) {
+      try {
+        el.style.setProperty(prop, val);
+      } catch {
+        // ignore invalid property/value
+      }
+    }
+    if (selectCustomCss.trim()) {
+      const sep = el.style.cssText && !el.style.cssText.endsWith(";") ? "; " : "";
+      el.style.cssText = el.style.cssText + sep + selectCustomCss.trim();
+    }
+    if (selectContentAfter && selectContentAfter !== originalText) {
+      el.innerText = selectContentAfter;
+    } else if (originalText !== null) {
+      // Restore original text if the user cleared their edit.
+      if (el.innerText !== originalText) el.innerText = originalText;
+    }
+  });
+
+  function restoreOriginal() {
+    if (!selected || originalCssText === null) return;
+    const el = selected as HTMLElement;
+    if (el.isConnected) {
+      el.style.cssText = originalCssText;
+      if (originalText !== null && el.innerText !== originalText) {
+        el.innerText = originalText;
+      }
+    }
+  }
+
   function submitSelect() {
     if (!selected) return;
     const hasComment = selectComment.trim().length > 0;
@@ -192,7 +254,10 @@
     const hasChanges = Object.keys(selectCssChanges).length > 0;
     const contentDirty = selectContentAfter.trim() !== liveText.trim();
     if (!hasComment && !hasCss && !hasChanges && !contentDirty) return;
+    // Capture target BEFORE restoring the DOM — so target.outerHTML +
+    // computedStyles reflect the user's intended state, not the original.
     const target = captureTarget(selected);
+    const beforeText = originalText ?? liveText;
     chrome.runtime.sendMessage({
       type: "annotation.target-selected",
       target,
@@ -200,10 +265,14 @@
       customCss: hasCss ? selectCustomCss.trim() : undefined,
       cssChanges: hasChanges ? selectCssChanges : undefined,
       contentChange: contentDirty
-        ? { textBefore: liveText, textAfter: selectContentAfter.trim() }
+        ? { textBefore: beforeText, textAfter: selectContentAfter.trim() }
         : undefined,
       viewport: snapshotViewport(),
     });
+    // Restore the DOM so the page is clean for the next pick. The agent
+    // will eventually persist the change for real; the live preview was
+    // just for the user to see what they were committing to.
+    restoreOriginal();
     selected = null;
     selectComment = "";
     selectCustomCss = "";
@@ -212,6 +281,7 @@
     setMode("idle");
   }
   function clearSelectAndCss() {
+    restoreOriginal();
     clearSelectState();
     selectCustomCss = "";
     selectCssChanges = {};
