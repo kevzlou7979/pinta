@@ -4,8 +4,10 @@
   import { app } from "../lib/state.svelte.js";
   import { uid } from "../lib/id.js";
   import { compositeAnnotations } from "../lib/composite.js";
+  import { formatSessionAsClipboard } from "../lib/format-clipboard.js";
   import StatusPill from "./StatusPill.svelte";
   import AnnotationCard from "./AnnotationCard.svelte";
+  import SessionHistory from "./SessionHistory.svelte";
 
   type Tool = "select" | "arrow" | "rect" | "circle" | "freehand" | "pin";
   type ActiveMode = "idle" | "select" | "draw";
@@ -29,6 +31,7 @@
   // agent works fine with selector + outerHTML + nearbyText alone for most
   // text/style edits.
   let includeScreenshot = $state(false);
+  let copiedAt = $state<number | null>(null);
 
   type IncomingMsg = {
     type?: string;
@@ -156,6 +159,23 @@
     if (!app.session) return;
     await app.cancelAndRestart(pageUrl || app.session.url);
     activeTool = null;
+  }
+
+  async function copyToClipboard() {
+    if (!annotations.length) return;
+    const text = formatSessionAsClipboard({
+      url: pageUrl || app.session?.url || "",
+      annotations,
+    });
+    try {
+      await navigator.clipboard.writeText(text);
+      copiedAt = Date.now();
+      setTimeout(() => {
+        if (copiedAt && Date.now() - copiedAt >= 2000) copiedAt = null;
+      }, 2100);
+    } catch (err) {
+      app.lastError = `clipboard write failed: ${(err as Error).message}`;
+    }
   }
 
   async function submit() {
@@ -314,6 +334,8 @@
         {app.lastError}
       </p>
     {/if}
+
+    <SessionHistory />
   </main>
 
   <footer class="border-t border-ink-200 p-3 bg-white space-y-2">
@@ -367,6 +389,17 @@
             Send to agent
           {/if}
         </button>
+        {#if app.session?.status === "drafting" && annotations.length > 0}
+          <button
+            type="button"
+            class="rounded-md border border-ink-300 bg-white text-ink-700 text-sm font-medium px-3 hover:bg-ink-50"
+            title="Copy annotations as markdown — paste into claude.ai web, ChatGPT, or another agent"
+            onclick={copyToClipboard}
+            aria-label="Copy to clipboard"
+          >
+            {copiedAt ? "✓" : "Copy"}
+          </button>
+        {/if}
         {#if app.session?.status === "submitted" || app.session?.status === "applying"}
           <button
             type="button"

@@ -87,6 +87,23 @@ async function handle(
     return sendJson(res, 200, store.getActive());
   }
 
+  if (method === "GET" && path === "/v1/sessions") {
+    // Recent sessions, newest first. Light summary — no annotation bodies
+    // — so the side panel history view stays fast even with many sessions.
+    const summaries = store.list().map((s) => ({
+      id: s.id,
+      url: s.url,
+      status: s.status,
+      startedAt: s.startedAt,
+      submittedAt: s.submittedAt,
+      annotationCount: s.annotations.length,
+      appliedSummary: s.appliedSummary,
+      errorMessage: s.errorMessage,
+      fullPageScreenshotPath: s.fullPageScreenshotPath,
+    }));
+    return sendJson(res, 200, summaries);
+  }
+
   if (method === "GET" && path === "/v1/sessions/poll") {
     const session = await store.waitForSubmitted(POLL_TIMEOUT_MS);
     if (!session) {

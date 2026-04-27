@@ -438,28 +438,10 @@ Exit criteria: edits land in the right file on the first try, every time, in a p
 - Undo last edit (rolls back via git).
 - Per-project config file (`.pinta.json`) for design system context.
 - Plan-then-execute toggle (require explicit confirmation before edits).
-- **Copy-to-clipboard handoff.** Adds a secondary "Copy" button next to
-  Submit. Instead of going through the companion → agent loop, formats
-  the current session's annotations as a single markdown blob and writes
-  it to the clipboard via `navigator.clipboard.writeText`. The user
-  pastes it into claude.ai web, a Claude Code chat, ChatGPT, or any
-  agent that doesn't speak Pinta's protocol. Format example:
-
-  ```
-  Pinta annotations on http://localhost:5173/auth/login
-
-  1. **Element**: `#email` (input)
-     Comment: Make this 50% width
-     Nearby text: "Email Address — Continue"
-
-  2. **Element**: `button.submit`
-     Comment: Tonal variant
-     Nearby text: "Submit Claim"
-  ```
-
-  Optional, fast, no companion dependency. Useful when the user just
-  wants a one-shot prompt and doesn't need the live submit→apply→done
-  loop. Companion stays unaware (button is purely client-side).
+- ~~**Copy-to-clipboard handoff.**~~ **Shipped.** Secondary "Copy"
+  button next to Submit; formats the session as markdown via
+  `navigator.clipboard.writeText`. Useful for pasting into claude.ai web,
+  ChatGPT, or any agent that doesn't speak Pinta's protocol.
 - **Multi-project mode.** Today the companion is pinned to one
   `projectRoot` at startup — switching projects means restarting it. Make
   the companion hold N project roots; add a small project picker to the
@@ -478,6 +460,83 @@ Exit criteria: edits land in the right file on the first try, every time, in a p
     tile cap so very-spread-out annotations don't degenerate into a
     full-page capture anyway). Typically 5–10× smaller than the full
     page; the agent still sees the annotation in visual context.
+
+### Phase 8 — Inline editing
+
+Beyond commenting, let the user **directly tweak elements in the page**
+and have the resulting CSS / DOM changes flow into the session as
+high-precision annotations the agent can apply verbatim. Closes the gap
+between "I want this to look like that" and showing the agent exactly
+what "that" is.
+
+**UX (per the design sketch):** when the user picks an element in select
+mode, the inline popup gains a tabbed editor:
+
+```
+┌──────────────────────────────────────────┐
+│  Editing  h2.text-3xl                    │
+├──────────────────────────────────────────┤
+│ [Content] Font  Sizing  Spacing  CSS     │
+│                                          │
+│   ▌  Hello world  that could be better   │
+│                                          │
+│   What should change? (free text)        │
+│   ┌──────────────────────────────────┐   │
+│   │                                  │   │
+│   └──────────────────────────────────┘   │
+│   ⌘↵ to save                             │
+└──────────────────────────────────────────┘
+```
+
+**Tabs:**
+- *Content* — text content + (for inputs) placeholder. Pre-filled with
+  the live element. Edits apply to the DOM live so the user sees the
+  result; the diff is captured.
+- *Font* — family, size, weight, line-height, letter-spacing pickers
+  populated from `getComputedStyle`.
+- *Sizing* — width / height / min / max with unit selectors.
+- *Spacing* — margin / padding split per side, with linked-sides toggle.
+- *CSS* — free-form CSS textarea for anything else (`box-shadow:
+  0 4px 12px rgba(...)`, `border-radius`, `display`, etc.).
+
+**Annotation shape.** A new `kind: "edit"` carries:
+
+```ts
+type EditAnnotation = Annotation & {
+  kind: "edit";
+  changes: {
+    content?: { textBefore: string; textAfter: string };
+    css?: Record<string, string>;       // property → value, normalized
+    customCss?: string;                 // raw block from the CSS tab
+  };
+};
+```
+
+Multiple changes on the same element collapse into **one annotation** so
+the agent gets the full picture in one Edit pass.
+
+**Live preview.** Edits mutate the live DOM via inline styles for instant
+visual feedback. We capture a `before` snapshot once the popup opens so
+the agent has both the diff and the original. On Cancel we restore.
+
+**Agent semantics.** The skill (and MCP tools) gain a "edit" annotation
+case: instead of grepping `nearbyText`, they pattern-match the source
+file for the element + apply the captured `changes` as CSS additions or
+property overrides. Frameworks vary — best-effort heuristics:
+- Tailwind: convert the changed props to closest utility classes,
+  modify the `class=` attribute.
+- CSS-in-JS / styled-components: append to the rule.
+- Plain CSS / Sass: append to the matching selector or open a sibling
+  rule.
+- Inline `style=` attribute: as a last resort.
+
+**Out of scope for first cut:** drag-to-resize handles, SVG path editing,
+animation timeline, design-token picker integrations.
+
+**Estimated scope:** this is a real product feature, not a polish item.
+Probably two full phases on its own (8a — popup tabs + Content / CSS
+free-form; 8b — Font / Sizing / Spacing pickers + agent-side
+Tailwind/CSS-in-JS heuristics). Ship 8a first to validate the loop.
 
 ---
 
