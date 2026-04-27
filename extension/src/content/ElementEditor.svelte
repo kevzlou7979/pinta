@@ -213,15 +213,43 @@
     );
   }
 
-  type TabSpec = { id: Tab; label: string; dot: boolean };
+  type TabSpec = { id: Tab; label: string; icon?: string; dot: boolean };
+  // Comment + Content keep word labels (most-used). The rest collapse to
+  // icons with title-attribute tooltips so the tab bar stays compact.
   let tabs = $derived<TabSpec[]>([
     { id: "comment", label: "Comment", dot: comment.trim().length > 0 },
     { id: "content", label: "Content", dot: contentDirty },
-    { id: "font", label: "Font", dot: hasAny(["font-size", "font-weight", "color", "line-height"]) },
-    { id: "sizing", label: "Sizing", dot: hasAny(["width", "height"]) },
-    { id: "spacing", label: "Spacing", dot: hasAny(["padding", "margin"]) },
-    { id: "grid", label: "Grid", dot: gridPreset !== "" },
-    { id: "css", label: "CSS", dot: customCss.trim().length > 0 },
+    {
+      id: "font",
+      label: "Font",
+      icon: "Aa",
+      dot: hasAny(["font-size", "font-weight", "color", "line-height"]),
+    },
+    {
+      id: "sizing",
+      label: "Sizing",
+      icon: "↔",
+      dot: hasAny(["width", "height"]),
+    },
+    {
+      id: "spacing",
+      label: "Spacing",
+      icon: "⊞",
+      dot: hasAny([
+        "padding",
+        "margin",
+        "border-radius",
+        "background-color",
+        "box-shadow",
+      ]),
+    },
+    { id: "grid", label: "Grid", icon: "▦", dot: gridPreset !== "" },
+    {
+      id: "css",
+      label: "CSS",
+      icon: "{ }",
+      dot: customCss.trim().length > 0,
+    },
   ]);
 
   const GRID_PRESETS: { value: GridPreset; label: string; hint: string }[] = [
@@ -257,9 +285,12 @@
         type="button"
         class="tab"
         class:tab--active={activeTab === t.id}
+        class:tab--icon={!!t.icon}
+        title={t.icon ? t.label : undefined}
+        aria-label={t.icon ? t.label : undefined}
         onclick={() => (activeTab = t.id)}
       >
-        {t.label}
+        {t.icon ?? t.label}
         {#if t.dot}
           <span class="tab__dot" aria-hidden="true"></span>
         {/if}

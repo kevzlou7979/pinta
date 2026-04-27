@@ -93,6 +93,16 @@
   color: #ff3d6e;
   border-bottom-color: #ff3d6e;
 }
+.tab--icon {
+  font:
+    14px / 1 ui-sans-serif,
+    system-ui,
+    sans-serif;
+  font-weight: 600;
+  min-width: 32px;
+  padding: 6px 4px;
+  text-align: center;
+}
 .tab__dot {
   display: inline-block;
   width: 6px;
