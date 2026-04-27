@@ -7,6 +7,7 @@ import type {
 import { WsClient, type WsClientStatus } from "./ws-client.js";
 
 const COMPANION_URL = "ws://127.0.0.1:7878/";
+const COMPANION_HTTP = "http://127.0.0.1:7878";
 
 export type ExtensionMode = "draw" | "select" | "review" | "idle";
 
@@ -18,6 +19,9 @@ class ExtensionState {
   lastError = $state<string | null>(null);
 
   private client: WsClient;
+  // Set true between sending session.create and receiving session.created
+  // back, so concurrent ensureSession() calls don't create duplicates.
+  private creatingSession = false;
 
   constructor() {
     this.client = new WsClient({
@@ -42,7 +46,8 @@ class ExtensionState {
   }
 
   ensureSession(url: string): void {
-    if (this.session) return;
+    if (this.session || this.creatingSession) return;
+    this.creatingSession = true;
     this.send({ type: "session.create", url });
   }
 
@@ -62,11 +67,41 @@ class ExtensionState {
     this.send({ type: "session.submit", screenshot });
   }
 
+  /**
+   * Mark the current session as canceled (errored on the companion so any
+   * agent that polls it later will skip it) and start a fresh drafting
+   * session for the same URL.
+   */
+  async cancelAndRestart(url: string): Promise<void> {
+    const current = this.session;
+    if (current && current.status !== "drafting") {
+      try {
+        await fetch(
+          `${COMPANION_HTTP}/v1/sessions/${encodeURIComponent(current.id)}/status`,
+          {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+              status: "error",
+              errorMessage: "canceled by user",
+            }),
+          },
+        );
+      } catch (err) {
+        this.lastError = `cancel failed: ${(err as Error).message}`;
+      }
+    }
+    this.session = null;
+    this.creatingSession = true;
+    this.send({ type: "session.create", url });
+  }
+
   private onMessage(msg: ServerMessage): void {
     switch (msg.type) {
       case "session.created":
       case "session.synced":
         this.session = msg.session;
+        this.creatingSession = false;
         this.lastError = null;
         break;
       case "session.applying":

@@ -144,6 +144,12 @@
     app.removeAnnotation(id);
   }
 
+  async function cancelSession() {
+    if (!app.session) return;
+    await app.cancelAndRestart(pageUrl || app.session.url);
+    activeTool = null;
+  }
+
   async function submit() {
     if (capturing || activeTabId == null) return;
     capturing = true;
@@ -292,24 +298,44 @@
     {/if}
   </main>
 
-  <footer class="border-t border-ink-200 p-3 bg-white">
-    <button
-      type="button"
-      class="w-full rounded-md bg-brand-pink text-white text-sm font-medium py-2 hover:bg-brand-magenta disabled:opacity-50"
-      disabled={!canSubmit || capturing}
-      onclick={submit}
-    >
-      {#if capturing}
-        Capturing screenshot…
-      {:else if app.session?.status === "submitted"}
-        Submitted — waiting for agent
-      {:else if app.session?.status === "applying"}
-        Agent is applying changes…
-      {:else if app.session?.status === "done"}
-        Done · {app.session?.appliedSummary ?? "applied"}
-      {:else}
-        Send to agent
+  <footer class="border-t border-ink-200 p-3 bg-white space-y-2">
+    <div class="flex gap-2">
+      <button
+        type="button"
+        class="flex-1 rounded-md bg-brand-pink text-white text-sm font-medium py-2 hover:bg-brand-magenta disabled:opacity-50"
+        disabled={!canSubmit || capturing}
+        onclick={submit}
+      >
+        {#if capturing}
+          Capturing screenshot…
+        {:else if app.session?.status === "submitted"}
+          Submitted — waiting for agent
+        {:else if app.session?.status === "applying"}
+          Agent is applying changes…
+        {:else if app.session?.status === "done"}
+          Done · {app.session?.appliedSummary ?? "applied"}
+        {:else}
+          Send to agent
+        {/if}
+      </button>
+      {#if app.session?.status === "submitted" || app.session?.status === "applying" || app.session?.status === "done"}
+        <button
+          type="button"
+          class="rounded-md border border-ink-300 bg-white text-ink-700 text-sm font-medium px-3 hover:bg-ink-50"
+          title={app.session?.status === "done"
+            ? "Start a new session"
+            : "Cancel this session and start fresh"}
+          onclick={cancelSession}
+          aria-label="Cancel session"
+        >
+          ✕
+        </button>
       {/if}
-    </button>
+    </div>
+    {#if app.session?.status === "submitted"}
+      <p class="text-[11px] text-ink-500 text-center">
+        Stuck? Click ✕ to cancel and start a new session.
+      </p>
+    {/if}
   </footer>
 </div>
