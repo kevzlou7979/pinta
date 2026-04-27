@@ -438,6 +438,28 @@ Exit criteria: edits land in the right file on the first try, every time, in a p
 - Undo last edit (rolls back via git).
 - Per-project config file (`.pinta.json`) for design system context.
 - Plan-then-execute toggle (require explicit confirmation before edits).
+- **Copy-to-clipboard handoff.** Adds a secondary "Copy" button next to
+  Submit. Instead of going through the companion → agent loop, formats
+  the current session's annotations as a single markdown blob and writes
+  it to the clipboard via `navigator.clipboard.writeText`. The user
+  pastes it into claude.ai web, a Claude Code chat, ChatGPT, or any
+  agent that doesn't speak Pinta's protocol. Format example:
+
+  ```
+  Pinta annotations on http://localhost:5173/auth/login
+
+  1. **Element**: `#email` (input)
+     Comment: Make this 50% width
+     Nearby text: "Email Address — Continue"
+
+  2. **Element**: `button.submit`
+     Comment: Tonal variant
+     Nearby text: "Submit Claim"
+  ```
+
+  Optional, fast, no companion dependency. Useful when the user just
+  wants a one-shot prompt and doesn't need the live submit→apply→done
+  loop. Companion stays unaware (button is purely client-side).
 - **Multi-project mode.** Today the companion is pinned to one
   `projectRoot` at startup — switching projects means restarting it. Make
   the companion hold N project roots; add a small project picker to the
