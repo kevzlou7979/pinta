@@ -6,9 +6,21 @@
   import StatusPill from "./StatusPill.svelte";
   import AnnotationCard from "./AnnotationCard.svelte";
 
+  type Tool = "select" | "arrow" | "rect" | "circle" | "freehand" | "pin";
+  type ActiveMode = "idle" | "select" | "draw";
+
+  const TOOLS: { id: Tool; label: string; icon: string }[] = [
+    { id: "select", label: "Select", icon: "▢" },
+    { id: "arrow", label: "Arrow", icon: "↘" },
+    { id: "rect", label: "Rect", icon: "▭" },
+    { id: "circle", label: "Circle", icon: "◯" },
+    { id: "freehand", label: "Pen", icon: "✎" },
+    { id: "pin", label: "Pin", icon: "●" },
+  ];
+
   let pageUrl = $state<string>("");
   let activeTabId = $state<number | null>(null);
-  let selecting = $state(false);
+  let activeTool = $state<Tool | null>(null);
   let selector = $state("");
   let comment = $state("");
 
@@ -17,6 +29,7 @@
     target?: AnnotationTarget;
     comment?: string;
     viewport?: { scrollY: number; width: number; height: number };
+    annotation?: Annotation;
   };
 
   onMount(async () => {
@@ -43,14 +56,12 @@
           color: "#ef4444",
           comment: (m.comment ?? "").trim(),
           target: m.target,
-          viewport: m.viewport ?? {
-            scrollY: 0,
-            width: window.innerWidth,
-            height: window.innerHeight,
-          },
+          viewport: m.viewport ?? snapshotViewport(),
         };
         app.addAnnotation(annotation);
-        selecting = false;
+        activeTool = null;
+      } else if (m?.type === "annotation.draw-committed" && m.annotation) {
+        app.addAnnotation(m.annotation);
       }
     };
     chrome.runtime.onMessage.addListener(handler);
@@ -70,18 +81,29 @@
     annotations.length > 0 && app.session?.status === "drafting",
   );
 
-  async function toggleSelect() {
+  async function setActive(tool: Tool | null) {
     if (activeTabId == null) return;
-    const next = !selecting;
+    const next = tool;
+    const mode: ActiveMode =
+      next == null ? "idle" : next === "select" ? "select" : "draw";
     try {
       await chrome.tabs.sendMessage(activeTabId, {
-        type: "select-mode.set",
-        active: next,
+        type: "mode.set",
+        mode,
+        tool: mode === "draw" ? next : undefined,
       });
-      selecting = next;
+      activeTool = next;
     } catch (err) {
       app.lastError = `couldn't reach page: ${(err as Error).message}`;
     }
+  }
+
+  function snapshotViewport() {
+    return {
+      scrollY: 0,
+      width: window.innerWidth,
+      height: window.innerHeight,
+    };
   }
 
   function addAnnotationFromForm() {
@@ -93,11 +115,7 @@
       strokes: [],
       color: "#ef4444",
       comment: comment.trim(),
-      viewport: {
-        scrollY: 0,
-        width: window.innerWidth,
-        height: window.innerHeight,
-      },
+      viewport: snapshotViewport(),
       target: {
         selector: selector.trim(),
         outerHTML: "",
@@ -136,22 +154,35 @@
   <main class="flex-1 overflow-y-auto p-4 space-y-4">
     <section class="space-y-2">
       <h2 class="text-xs uppercase tracking-wide text-ink-500 font-medium">
-        Pick an element
+        Tool
       </h2>
-      <button
-        type="button"
-        class="w-full rounded-md border border-ink-300 bg-white text-sm font-medium py-2 hover:bg-ink-50 disabled:opacity-50"
-        class:bg-ink-900={selecting}
-        class:text-white={selecting}
-        class:border-ink-900={selecting}
-        disabled={activeTabId == null}
-        onclick={toggleSelect}
-      >
-        {selecting ? "Selecting… (Esc to cancel)" : "Select element on page"}
-      </button>
-      <p class="text-[11px] text-ink-500">
-        Hover the page → click an element → type a comment in the popup.
-      </p>
+      <div class="grid grid-cols-6 gap-1">
+        {#each TOOLS as t (t.id)}
+          <button
+            type="button"
+            class="rounded-md border border-ink-300 bg-white py-2 text-sm flex flex-col items-center gap-0.5 hover:bg-ink-50 disabled:opacity-50"
+            class:bg-ink-900={activeTool === t.id}
+            class:text-white={activeTool === t.id}
+            class:border-ink-900={activeTool === t.id}
+            disabled={activeTabId == null}
+            onclick={() => setActive(activeTool === t.id ? null : t.id)}
+            title={t.label}
+          >
+            <span class="text-base leading-none">{t.icon}</span>
+            <span class="text-[10px]">{t.label}</span>
+          </button>
+        {/each}
+      </div>
+      {#if activeTool}
+        <p class="text-[11px] text-ink-500">
+          {#if activeTool === "select"}
+            Hover the page → click an element → type a comment.
+          {:else}
+            Drag on the page to draw → type a comment.
+          {/if}
+          Press Esc to cancel.
+        </p>
+      {/if}
     </section>
 
     <details class="rounded-md border border-ink-200 bg-white">
@@ -190,7 +221,7 @@
       </div>
       {#if annotations.length === 0}
         <p class="text-xs text-ink-500 italic">
-          No annotations yet. Pick one above.
+          No annotations yet. Pick a tool above.
         </p>
       {:else}
         <ul class="space-y-2">

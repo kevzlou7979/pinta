@@ -1,53 +1,65 @@
 <script lang="ts">
   import { onMount } from "svelte";
+  import type { Annotation } from "@pinta/shared";
   import { captureTarget } from "./capture.js";
+  import { content, type Mode, type Draft } from "./state.svelte.js";
+  import type { DrawTool } from "./tools/draw.js";
+  import Canvas from "./Canvas.svelte";
+  import CommentInput from "./CommentInput.svelte";
 
-  let active = $state(false);
   let hovered: Element | null = $state(null);
   let selected: Element | null = $state(null);
   let comment = $state("");
-  let tick = $state(0); // bump to force rect recomputation on scroll/resize
+  let tick = $state(0);
 
   const HOST_TAG = "pinta-overlay-host";
-
-  function setActive(next: boolean) {
-    active = next;
-    if (!next) {
-      hovered = null;
-      selected = null;
-      comment = "";
-    }
-  }
 
   function isOurNode(el: Element | null): boolean {
     return !!el?.closest?.(HOST_TAG);
   }
 
-  // Listen for activation toggles from the side panel.
+  function clearSelectState() {
+    hovered = null;
+    selected = null;
+    comment = "";
+  }
+
+  function setMode(next: Mode, tool?: DrawTool) {
+    content.setMode(next);
+    if (next === "draw" && tool) content.setTool(tool);
+    if (next !== "select") clearSelectState();
+  }
+
+  // Listen for mode toggles from the side panel.
   onMount(() => {
     const handler = (msg: unknown) => {
-      const m = msg as { type?: string; active?: boolean };
-      if (m?.type === "select-mode.set") setActive(!!m.active);
+      const m = msg as { type?: string; mode?: Mode; tool?: DrawTool };
+      if (m?.type === "mode.set" && m.mode) setMode(m.mode, m.tool);
     };
     chrome.runtime.onMessage.addListener(handler);
     return () => chrome.runtime.onMessage.removeListener(handler);
   });
 
-  // 'S' hotkey to toggle from anywhere on page (skip text inputs).
+  // Hotkeys: S = select, D = draw (arrow), R = idle/review, Esc = cancel.
   onMount(() => {
     function onKey(e: KeyboardEvent) {
-      if (e.key !== "s" && e.key !== "S") return;
       if (e.metaKey || e.ctrlKey || e.altKey) return;
       const ae = document.activeElement as HTMLElement | null;
       const tag = ae?.tagName;
       if (tag === "INPUT" || tag === "TEXTAREA" || ae?.isContentEditable) return;
-      setActive(!active);
+      if (e.key === "s" || e.key === "S") {
+        setMode(content.mode === "select" ? "idle" : "select");
+      } else if (e.key === "d" || e.key === "D") {
+        setMode(content.mode === "draw" ? "idle" : "draw", content.tool);
+      } else if (e.key === "r" || e.key === "R") {
+        setMode("idle");
+      }
     }
     document.addEventListener("keydown", onKey);
     return () => document.removeEventListener("keydown", onKey);
   });
 
-  // Repaint highlight rects on scroll/resize.
+  // Scroll/resize → repaint highlight rects.
   onMount(() => {
     const bump = () => (tick += 1);
     window.addEventListener("scroll", bump, true);
@@ -58,9 +70,9 @@
     };
   });
 
-  // Hover/click capture while active.
+  // Select-mode pointer handlers.
   $effect(() => {
-    if (!active) return;
+    if (content.mode !== "select") return;
 
     function onMove(e: MouseEvent) {
       if (selected) return;
@@ -82,14 +94,9 @@
     }
     function onKey(e: KeyboardEvent) {
       if (e.key !== "Escape") return;
-      if (selected) {
-        selected = null;
-        comment = "";
-      } else {
-        setActive(false);
-      }
+      if (selected) clearSelectState();
+      else setMode("idle");
     }
-
     document.addEventListener("mousemove", onMove, true);
     document.addEventListener("click", onClick, true);
     document.addEventListener("keydown", onKey, true);
@@ -100,25 +107,64 @@
     };
   });
 
-  function submit() {
-    if (!selected || !comment.trim()) return;
+  // Draw-mode escape handling (Canvas owns mouse).
+  $effect(() => {
+    if (content.mode !== "draw") return;
+    function onKey(e: KeyboardEvent) {
+      if (e.key !== "Escape") return;
+      if (content.pending) content.cancelPending();
+      else if (content.inProgress) content.cancelInProgress();
+      else setMode("idle");
+    }
+    document.addEventListener("keydown", onKey, true);
+    return () => document.removeEventListener("keydown", onKey, true);
+  });
+
+  // Submit a select annotation.
+  let selectComment = $state("");
+  function submitSelect() {
+    if (!selected || !selectComment.trim()) return;
     const target = captureTarget(selected);
     chrome.runtime.sendMessage({
       type: "annotation.target-selected",
       target,
-      comment: comment.trim(),
-      viewport: {
-        scrollY: window.scrollY,
-        width: window.innerWidth,
-        height: window.innerHeight,
-      },
+      comment: selectComment.trim(),
+      viewport: snapshotViewport(),
     });
-    setActive(false);
+    selected = null;
+    selectComment = "";
+    setMode("idle");
   }
 
-  function cancelSelection() {
-    selected = null;
-    comment = "";
+  // Submit a draft drawing as an annotation.
+  let draftComment = $state("");
+  function submitDraft() {
+    if (!content.pending || !draftComment.trim()) return;
+    const draft = content.pending;
+    const annotation: Annotation = {
+      id: draft.id,
+      createdAt: draft.createdAt,
+      kind: draft.kind,
+      strokes: draft.strokes,
+      color: draft.color,
+      comment: draftComment.trim(),
+      viewport: snapshotViewport(),
+    };
+    chrome.runtime.sendMessage({
+      type: "annotation.draw-committed",
+      annotation,
+    });
+    content.recordCommitted(annotation);
+    content.cancelPending();
+    draftComment = "";
+  }
+
+  function snapshotViewport() {
+    return {
+      scrollY: window.scrollY,
+      width: window.innerWidth,
+      height: window.innerHeight,
+    };
   }
 
   function rectOf(el: Element | null): {
@@ -128,28 +174,35 @@
     height: number;
   } | null {
     if (!el) return null;
-    void tick; // re-run on scroll/resize
+    void tick;
     const r = el.getBoundingClientRect();
     return { top: r.top, left: r.left, width: r.width, height: r.height };
   }
 
-  let hoverRect = $derived(rectOf(hovered));
-  let selectedRect = $derived(rectOf(selected));
-
-  const POPUP_W = 300;
-  const POPUP_H = 140;
-
-  function popupTop(r: { top: number; height: number }): number {
-    if (r.top + r.height + 8 + POPUP_H < window.innerHeight) {
-      return r.top + r.height + 8;
+  function rectOfDraft(d: Draft | null): {
+    top: number;
+    left: number;
+    width: number;
+    height: number;
+  } | null {
+    if (!d || d.strokes.length === 0) return null;
+    void tick;
+    let minX = Infinity,
+      minY = Infinity,
+      maxX = -Infinity,
+      maxY = -Infinity;
+    for (const p of d.strokes) {
+      if (p.x < minX) minX = p.x;
+      if (p.y < minY) minY = p.y;
+      if (p.x > maxX) maxX = p.x;
+      if (p.y > maxY) maxY = p.y;
     }
-    return Math.max(8, r.top - POPUP_H - 8);
-  }
-  function popupLeft(r: { left: number; width: number }): number {
-    return Math.max(
-      8,
-      Math.min(window.innerWidth - POPUP_W - 8, r.left),
-    );
+    return {
+      top: minY - window.scrollY,
+      left: minX - window.scrollX,
+      width: Math.max(8, maxX - minX),
+      height: Math.max(8, maxY - minY),
+    };
   }
 
   function describe(el: Element | null): string {
@@ -159,9 +212,15 @@
     const cls = [...el.classList][0];
     return cls ? `${tag}.${cls}` : tag;
   }
+
+  let hoverRect = $derived(rectOf(hovered));
+  let selectedRect = $derived(rectOf(selected));
+  let pendingRect = $derived(rectOfDraft(content.pending));
 </script>
 
-{#if active}
+<Canvas />
+
+{#if content.mode === "select"}
   {#if hoverRect && !selected}
     <div
       class="hl hl--hover"
@@ -187,33 +246,37 @@
       style:width="{selectedRect.width}px"
       style:height="{selectedRect.height}px"
     ></div>
-    <div
-      class="popup"
-      style:top="{popupTop(selectedRect)}px"
-      style:left="{popupLeft(selectedRect)}px"
-      style:width="{POPUP_W}px"
-    >
-      <div class="popup__head">{describe(selected)}</div>
-      <textarea
-        bind:value={comment}
-        placeholder="What do you want changed?"
-        rows="3"
-      ></textarea>
-      <div class="popup__actions">
-        <button class="btn btn--ghost" onclick={cancelSelection}>Cancel</button>
-        <button
-          class="btn btn--primary"
-          onclick={submit}
-          disabled={!comment.trim()}
-        >
-          Add annotation
-        </button>
-      </div>
-    </div>
+    <CommentInput
+      anchor={selectedRect}
+      title={describe(selected)}
+      bind:value={selectComment}
+      onsubmit={submitSelect}
+      oncancel={clearSelectState}
+    />
   {/if}
+{/if}
 
-  <div class="status">Select mode · click to pick · S or Esc to exit</div>
+{#if content.pending && pendingRect}
+  <CommentInput
+    anchor={pendingRect}
+    title="{content.pending.kind}"
+    bind:value={draftComment}
+    onsubmit={submitDraft}
+    oncancel={() => {
+      content.cancelPending();
+      draftComment = "";
+    }}
+  />
+{/if}
+
+{#if content.mode !== "idle"}
+  <div class="status">
+    {#if content.mode === "select"}
+      Select mode · click to pick · S/Esc to exit
+    {:else if content.mode === "draw"}
+      Draw · {content.tool} · drag on page · D/Esc to exit
+    {/if}
+  </div>
 {/if}
 
 <!-- Styles are injected into the shadow root by overlay.ts via styles.css -->
-
