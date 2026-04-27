@@ -3,6 +3,17 @@ export default {
   content: ["./src/**/*.{html,svelte,ts,js}"],
   theme: {
     extend: {
+      fontFamily: {
+        sans: [
+          "Poppins",
+          "ui-sans-serif",
+          "system-ui",
+          "-apple-system",
+          "Segoe UI",
+          "Roboto",
+          "sans-serif",
+        ],
+      },
       colors: {
         ink: {
           50: "#f8fafc",

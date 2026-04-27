@@ -11,7 +11,8 @@ body,
 
 body {
   font-family:
-    ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+    "Poppins", ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto,
+    sans-serif;
   background-color: theme("colors.ink.50");
   color: theme("colors.ink.900");
 }
