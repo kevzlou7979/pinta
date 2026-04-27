@@ -34,14 +34,32 @@ for the user to confirm before continuing.
 > "Companion is up. Open the Pinta Chrome extension, annotate the page you
 > want changed, and hit Submit. I'll wait."
 
-## 3. Long-poll for a submitted session
+## 3. Open the session stream (preferred — push, no polling noise)
+
+In Claude Code, use the **Monitor** tool with a long-lived SSE stream.
+Each newly-submitted session arrives as a single notification (no
+per-cycle bash call):
 
 ```bash
-curl -sf --max-time 30 http://127.0.0.1:7878/v1/sessions/poll
+# Inside the Monitor command:
+curl -sN http://127.0.0.1:7878/v1/sessions/stream \
+  | grep --line-buffered '^data:' \
+  | sed -u 's/^data: //'
 ```
 
-Returns 200 + JSON when a session arrives, 204 on timeout. Re-poll up to a
-few times (loop). The JSON has shape:
+- One Monitor call covers many sessions for the whole working session.
+- Backlog: any sessions already in `submitted` state are pushed
+  immediately on connect, so reconnecting after the user submitted earlier
+  isn't lossy.
+- Idle ping every 20s as an SSE comment (filtered out by the grep
+  above) keeps the connection alive.
+- When the user says "stop" / "exit" / "done", call TaskStop on the
+  Monitor.
+
+If your agent doesn't have Monitor (Cursor, Cline, Aider), use the
+fallback **long-poll loop** instead — see §3a below.
+
+Either way, each event/poll-result is a JSON Session payload:
 
 ```json
 {
@@ -56,6 +74,15 @@ few times (loop). The JSON has shape:
 
 The screenshot is on disk at `{projectRoot}/{fullPageScreenshotPath}` —
 read it with the Read tool (it's a PNG; the visual UI will display it).
+
+### 3a. Fallback: long-poll loop (Cursor / Cline / Aider / shell-only)
+
+```bash
+curl -sf --max-time 30 http://127.0.0.1:7878/v1/sessions/poll
+```
+
+Returns 200 + JSON when a session arrives, 204 on timeout. Re-poll. Same
+JSON payload as the stream events.
 
 ## 4. Locate source files for each annotation
 

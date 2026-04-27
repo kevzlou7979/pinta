@@ -114,6 +114,47 @@ async function handle(
     return sendJson(res, 200, session);
   }
 
+  if (method === "GET" && path === "/v1/sessions/stream") {
+    // Server-Sent Events stream. One long-lived connection per agent;
+    // each newly-submitted session arrives as a single `data: {json}` line.
+    // Avoids the per-cycle tool-call noise that long-polling generates
+    // in agent transcripts.
+    res.writeHead(200, {
+      "Content-Type": "text/event-stream",
+      "Cache-Control": "no-cache, no-transform",
+      Connection: "keep-alive",
+      "X-Accel-Buffering": "no",
+    });
+
+    // Initial backlog: any sessions already in `submitted` state get
+    // pushed immediately so a freshly-connected agent doesn't miss them.
+    for (const s of store.list()) {
+      if (s.status === "submitted") {
+        res.write(`event: session\ndata: ${JSON.stringify(s)}\n\n`);
+      }
+    }
+
+    // Push on every transition into the submitted state.
+    const unsubscribe = store.subscribe((session) => {
+      if (session.status === "submitted") {
+        res.write(`event: session\ndata: ${JSON.stringify(session)}\n\n`);
+      }
+    });
+
+    // Periodic comment keeps proxies / agents from idle-closing the
+    // connection. SSE comments start with `:` and are ignored by clients.
+    const keepalive = setInterval(() => {
+      res.write(`: keepalive ${Date.now()}\n\n`);
+    }, 20_000);
+
+    req.on("close", () => {
+      clearInterval(keepalive);
+      unsubscribe();
+      log("ws stream closed");
+    });
+    return;
+  }
+
   if (method === "POST" && path === "/v1/sessions") {
     const body = await readJson<Session>(req);
     const session = await store.ingestSession(body);
