@@ -438,6 +438,14 @@ Exit criteria: edits land in the right file on the first try, every time, in a p
 - Undo last edit (rolls back via git).
 - Per-project config file (`.pinta.json`) for design system context.
 - Plan-then-execute toggle (require explicit confirmation before edits).
+- **Multi-project mode.** Today the companion is pinned to one
+  `projectRoot` at startup — switching projects means restarting it. Make
+  the companion hold N project roots; add a small project picker to the
+  side panel header that ships the chosen root with `session.create`; have
+  agents read `projectRoot` off the session payload they polled (already
+  there, just enforced). Aim is "never restart the companion when
+  bouncing between repos." Estimated ~50 LOC across companion store +
+  WS protocol + side panel; no breaking change to the HTTP API.
 
 ---
 
