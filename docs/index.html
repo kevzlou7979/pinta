@@ -442,27 +442,38 @@
   <section id="install">
     <div class="container">
       <h2>Install &amp; run</h2>
-      <p class="sub">Node 20+ and Chrome (or any Chromium-based browser). Three commands gets you to a loadable extension and a runnable companion.</p>
-<pre><code># 1. Clone + install
+      <p class="sub">Node 20+ and Chrome (or any Chromium-based browser). The companion is published to npm — no clone needed for the daily loop.</p>
+
+      <h3 style="margin:24px 0 8px;font-size:16px;color:var(--ink);">1. Run the companion in your project root</h3>
+<pre><code>npx pinta-companion .</code></pre>
+      <p class="sub" style="margin-top:8px">Self-contained ~210 KB bundle, zero install state. Listens on <code>http://127.0.0.1:7878</code> and writes sessions to <code>.pinta/sessions/</code>.</p>
+
+      <h3 style="margin:32px 0 8px;font-size:16px;color:var(--ink);">2. Get the Chrome extension</h3>
+<pre><code># Clone + build (one time — Chrome Web Store listing coming)
 git clone https://github.com/kevzlou7979/pinta.git
-cd pinta
-npm install
+cd pinta &amp;&amp; npm install &amp;&amp; npm run build --workspace @pinta/extension
 
-# 2. Build the extension and the companion
-npm run build --workspace @pinta/extension
-npm run build --workspace @pinta/companion
-
-# 3. Install the Claude Code skill (optional)
-bash scripts/install-skill.sh
-
-# 4. Load the extension in Chrome
-#    chrome://extensions → Developer Mode → Load unpacked → ./extension/dist
-
-# 5. Start the companion in the project you want to edit
-node ~/.claude/skills/pinta/start-companion.js .
-# or:  npm run dev:companion -- --project /path/to/your/app
+# Then in Chrome:
+#   chrome://extensions → Developer Mode → Load unpacked → ./extension/dist
 </code></pre>
-      <p class="sub" style="margin-top:24px">Then, in Claude Code, type <code>/pinta</code>. Or in Cursor: <em>"Pick up the pending Pinta session and apply the changes — show me the plan first."</em></p>
+      <p class="sub" style="margin-top:8px">Inside the cloned repo, you can also run <code>/build-pinta</code> in Claude Code to do steps 1–2 in one shot.</p>
+
+      <h3 style="margin:32px 0 8px;font-size:16px;color:var(--ink);">3. Wire up your agent</h3>
+<pre><code># Claude Code (recommended)
+bash scripts/install-skill.sh   # writes ~/.claude/skills/pinta/SKILL.md
+# Then: /pinta
+
+# Cursor / Cline / Continue / Zed — add to ~/.cursor/mcp.json
+{
+  "mcpServers": {
+    "pinta": {
+      "command": "npx",
+      "args": ["-y", "pinta-companion", "pinta-mcp"]
+    }
+  }
+}
+</code></pre>
+      <p class="sub" style="margin-top:24px">Then annotate, hit Submit, and prompt the agent: <em>"Pick up the pending Pinta session and apply the changes — show me the plan first."</em></p>
     </div>
   </section>
 
