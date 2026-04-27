@@ -3,6 +3,7 @@
   import type { Annotation, AnnotationTarget } from "@pinta/shared";
   import { app } from "../lib/state.svelte.js";
   import { uid } from "../lib/id.js";
+  import { compositeAnnotations } from "../lib/composite.js";
   import StatusPill from "./StatusPill.svelte";
   import AnnotationCard from "./AnnotationCard.svelte";
 
@@ -23,6 +24,7 @@
   let activeTool = $state<Tool | null>(null);
   let selector = $state("");
   let comment = $state("");
+  let capturing = $state(false);
 
   type IncomingMsg = {
     type?: string;
@@ -133,8 +135,42 @@
     app.removeAnnotation(id);
   }
 
-  function submit() {
-    app.submit();
+  async function submit() {
+    if (capturing || activeTabId == null) return;
+    capturing = true;
+    app.lastError = null;
+    try {
+      // Take element selection / drawing modes off the page so the screenshot
+      // doesn't include the active toolbar/highlight.
+      try {
+        await chrome.tabs.sendMessage(activeTabId, {
+          type: "mode.set",
+          mode: "idle",
+        });
+      } catch {
+        // content script may not be present (e.g. chrome:// page); fail soft
+      }
+      activeTool = null;
+
+      const resp = (await chrome.runtime.sendMessage({
+        type: "capture.full-page",
+        tabId: activeTabId,
+      })) as { ok: boolean; capture?: { dataUrl: string }; error?: string };
+
+      if (!resp?.ok || !resp.capture) {
+        throw new Error(resp?.error ?? "capture failed");
+      }
+
+      const composited = await compositeAnnotations(
+        resp.capture.dataUrl,
+        annotations,
+      );
+      app.submit(composited);
+    } catch (err) {
+      app.lastError = `screenshot failed: ${(err as Error).message}`;
+    } finally {
+      capturing = false;
+    }
   }
 </script>
 
@@ -248,10 +284,12 @@
     <button
       type="button"
       class="w-full rounded-md bg-emerald-600 text-white text-sm font-medium py-2 hover:bg-emerald-700 disabled:opacity-50"
-      disabled={!canSubmit}
+      disabled={!canSubmit || capturing}
       onclick={submit}
     >
-      {#if app.session?.status === "submitted"}
+      {#if capturing}
+        Capturing screenshot…
+      {:else if app.session?.status === "submitted"}
         Submitted — waiting for agent
       {:else if app.session?.status === "applying"}
         Agent is applying changes…

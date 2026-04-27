@@ -1,5 +1,7 @@
 /// <reference types="chrome" />
 
+import { captureFullPage } from "./screenshot.js";
+
 // Always show the side panel button on the extension toolbar action.
 chrome.runtime.onInstalled.addListener(() => {
   chrome.sidePanel
@@ -7,8 +9,6 @@ chrome.runtime.onInstalled.addListener(() => {
     .catch((err) => console.error("[pinta] sidePanel setup failed", err));
 });
 
-// Allow popup / content scripts to request the panel be opened in the
-// active tab. (Phase 2+ will use this for select/draw mode triggers.)
 chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
   if (msg?.type === "open-side-panel") {
     const tabId = msg.tabId ?? sender.tab?.id;
@@ -17,7 +17,23 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
         () => sendResponse({ ok: true }),
         (err: Error) => sendResponse({ ok: false, error: err.message }),
       );
-      return true; // async response
+      return true;
     }
+  }
+
+  if (msg?.type === "capture.full-page") {
+    const tabId = msg.tabId ?? sender.tab?.id;
+    if (typeof tabId !== "number") {
+      sendResponse({ ok: false, error: "no tabId" });
+      return false;
+    }
+    captureFullPage(tabId).then(
+      (capture) => sendResponse({ ok: true, capture }),
+      (err: Error) => {
+        console.error("[pinta] capture failed", err);
+        sendResponse({ ok: false, error: err.message });
+      },
+    );
+    return true;
   }
 });
