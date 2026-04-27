@@ -95,7 +95,7 @@
     e.preventDefault();
     e.stopPropagation();
     drawing = true;
-    content.beginStroke(pageCoords(e), "#ef4444");
+    content.beginStroke(pageCoords(e), "#FF3D6E");
   }
   function onMouseMove(e: MouseEvent) {
     if (!drawing) return;

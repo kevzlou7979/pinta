@@ -20,7 +20,7 @@
 
 <div class="p-4 space-y-3">
   <div class="flex items-center gap-2">
-    <div class="w-2.5 h-2.5 rounded-full bg-emerald-500"></div>
+    <img src="/icons/icon-32.png" alt="" width="20" height="20" />
     <h1 class="font-semibold text-sm">Pinta</h1>
   </div>
 
@@ -30,7 +30,7 @@
 
   <button
     type="button"
-    class="w-full rounded-md bg-ink-900 text-white text-sm font-medium py-2 hover:bg-ink-800 disabled:opacity-50"
+    class="w-full rounded-md bg-brand-pink text-white text-sm font-medium py-2 hover:bg-brand-magenta disabled:opacity-50"
     disabled={opening}
     onclick={openSidePanel}
   >
@@ -38,6 +38,6 @@
   </button>
 
   {#if error}
-    <p class="text-xs text-red-600">{error}</p>
+    <p class="text-xs text-brand-pink">{error}</p>
   {/if}
 </div>

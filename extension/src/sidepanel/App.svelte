@@ -55,7 +55,7 @@
           createdAt: Date.now(),
           kind: "select",
           strokes: [],
-          color: "#ef4444",
+          color: "#FF3D6E",
           comment: (m.comment ?? "").trim(),
           target: m.target,
           viewport: m.viewport ?? snapshotViewport(),
@@ -115,7 +115,7 @@
       createdAt: Date.now(),
       kind: "select",
       strokes: [],
-      color: "#ef4444",
+      color: "#FF3D6E",
       comment: comment.trim(),
       viewport: snapshotViewport(),
       target: {
@@ -178,11 +178,14 @@
   <header
     class="px-4 py-3 border-b border-ink-200 bg-white flex items-center justify-between"
   >
-    <div>
-      <h1 class="font-semibold text-sm">Pinta</h1>
-      <p class="text-xs text-ink-500 truncate max-w-[200px]" title={pageUrl}>
-        {pageUrl || "no active page"}
-      </p>
+    <div class="flex items-center gap-2 min-w-0">
+      <img src="/icons/icon-32.png" alt="" width="24" height="24" />
+      <div class="min-w-0">
+        <h1 class="font-semibold text-sm">Pinta</h1>
+        <p class="text-xs text-ink-500 truncate max-w-[200px]" title={pageUrl}>
+          {pageUrl || "no active page"}
+        </p>
+      </div>
     </div>
     <StatusPill status={app.connectionStatus} />
   </header>
@@ -196,10 +199,10 @@
         {#each TOOLS as t (t.id)}
           <button
             type="button"
-            class="rounded-md border border-ink-300 bg-white py-2 text-sm flex flex-col items-center gap-0.5 hover:bg-ink-50 disabled:opacity-50"
-            class:bg-ink-900={activeTool === t.id}
+            class="rounded-md border border-ink-300 bg-white py-2 text-sm flex flex-col items-center gap-0.5 hover:bg-brand-cream disabled:opacity-50"
+            class:bg-brand-pink={activeTool === t.id}
             class:text-white={activeTool === t.id}
-            class:border-ink-900={activeTool === t.id}
+            class:border-brand-pink={activeTool === t.id}
             disabled={activeTabId == null}
             onclick={() => setActive(activeTool === t.id ? null : t.id)}
             title={t.label}
@@ -240,7 +243,7 @@
         ></textarea>
         <button
           type="button"
-          class="w-full rounded-md bg-ink-900 text-white text-sm font-medium py-2 hover:bg-ink-800 disabled:opacity-50"
+          class="w-full rounded-md bg-brand-pink text-white text-sm font-medium py-2 hover:bg-brand-magenta disabled:opacity-50"
           disabled={!selector.trim() || !comment.trim()}
           onclick={addAnnotationFromForm}
         >
@@ -283,7 +286,7 @@
   <footer class="border-t border-ink-200 p-3 bg-white">
     <button
       type="button"
-      class="w-full rounded-md bg-emerald-600 text-white text-sm font-medium py-2 hover:bg-emerald-700 disabled:opacity-50"
+      class="w-full rounded-md bg-brand-pink text-white text-sm font-medium py-2 hover:bg-brand-magenta disabled:opacity-50"
       disabled={!canSubmit || capturing}
       onclick={submit}
     >

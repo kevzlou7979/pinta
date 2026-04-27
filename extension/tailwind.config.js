@@ -16,6 +16,16 @@ export default {
           800: "#1e293b",
           900: "#0f172a",
         },
+        // Pinta brand — warm sunset swatch palette.
+        brand: {
+          cream: "#FFF1E0",
+          yellow: "#FFD24D",
+          amber: "#FFB84D",
+          orange: "#FF8855",
+          pink: "#FF3D6E",
+          magenta: "#C72D7D",
+          ink: "#1A1A1A",
+        },
       },
     },
   },

@@ -9,8 +9,8 @@
 .hl {
   position: fixed;
   pointer-events: none;
-  border: 2px solid #ef4444;
-  background: rgba(239, 68, 68, 0.08);
+  border: 2px solid #FF3D6E;
+  background: rgba(255, 61, 110, 0.10);
   border-radius: 2px;
   transition:
     top 80ms,
@@ -26,7 +26,7 @@
 .label {
   position: fixed;
   pointer-events: none;
-  background: #ef4444;
+  background: #FF3D6E;
   color: white;
   padding: 1px 6px;
   font:

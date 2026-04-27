@@ -1,7 +1,7 @@
 import type { Annotation } from "@pinta/shared";
 import { drawAnnotation, type DrawTool } from "../content/tools/draw.js";
 
-const SELECT_COLOR = "#ef4444";
+const SELECT_COLOR = "#FF3D6E";
 const SELECT_LINE_WIDTH = 3;
 const DRAW_LINE_WIDTH = 3;
 const SELECT_PADDING = 4;
@@ -46,7 +46,7 @@ function paintSelect(ctx: CanvasRenderingContext2D, a: Annotation): void {
   ctx.save();
   ctx.lineWidth = SELECT_LINE_WIDTH;
   ctx.strokeStyle = a.color || SELECT_COLOR;
-  ctx.fillStyle = "rgba(239, 68, 68, 0.10)";
+  ctx.fillStyle = "rgba(255, 61, 110, 0.10)";
   const x = r.x - SELECT_PADDING;
   const y = r.y - SELECT_PADDING;
   const w = r.width + SELECT_PADDING * 2;
