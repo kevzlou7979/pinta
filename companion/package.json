@@ -4,15 +4,18 @@
   "private": true,
   "type": "module",
   "bin": {
-    "pinta-companion": "./dist/cli.js"
+    "pinta-companion": "./dist/cli.js",
+    "pinta-mcp": "./dist/mcp-stdio.js"
   },
   "main": "./dist/server.js",
   "scripts": {
     "dev": "tsx src/cli.ts",
+    "dev:mcp": "tsx src/mcp-stdio.ts",
     "start": "node dist/cli.js",
     "build": "tsc -p tsconfig.json"
   },
   "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.0.4",
     "@pinta/shared": "*",
     "ws": "^8.18.0"
   },

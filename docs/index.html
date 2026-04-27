@@ -1,0 +1,488 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Pinta — annotate your running app, let an agent do the edits</title>
+  <meta name="description" content="Pinta is a Chrome extension and companion server that hands visual UI annotations to a coding agent — Claude Code, Cursor, Aider, or any MCP-compatible tool — which edits your source files." />
+  <meta property="og:title" content="Pinta" />
+  <meta property="og:description" content="Annotate your running web app. Let an AI agent do the edits." />
+  <meta property="og:type" content="website" />
+  <meta property="og:url" content="https://kevzlou7979.github.io/pinta/" />
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet" />
+  <style>
+    :root {
+      --bg: #0b0c10;
+      --bg-soft: #14161c;
+      --panel: #1a1d25;
+      --border: #262a35;
+      --ink: #e9eaf0;
+      --ink-dim: #a4a8b5;
+      --ink-mute: #6b7184;
+      --accent: #ff5a4a;
+      --accent-soft: #ffd9d4;
+      --pin: #ffb84a;
+      --code-bg: #0f1117;
+      --max: 1080px;
+    }
+    * { box-sizing: border-box; }
+    html, body { margin: 0; padding: 0; }
+    body {
+      font-family: 'Inter', system-ui, -apple-system, Segoe UI, Roboto, sans-serif;
+      color: var(--ink);
+      background: var(--bg);
+      line-height: 1.55;
+      -webkit-font-smoothing: antialiased;
+    }
+    a { color: var(--accent); text-decoration: none; }
+    a:hover { text-decoration: underline; }
+    code, pre {
+      font-family: 'JetBrains Mono', ui-monospace, SFMono-Regular, Menlo, monospace;
+      font-size: 0.92em;
+    }
+    code {
+      background: var(--code-bg);
+      padding: 0.1em 0.4em;
+      border-radius: 4px;
+      border: 1px solid var(--border);
+      color: var(--accent-soft);
+    }
+    pre {
+      background: var(--code-bg);
+      border: 1px solid var(--border);
+      padding: 18px 20px;
+      border-radius: 10px;
+      overflow-x: auto;
+      color: var(--ink);
+      line-height: 1.6;
+    }
+    pre code { background: transparent; border: 0; padding: 0; color: inherit; }
+
+    .container {
+      max-width: var(--max);
+      margin: 0 auto;
+      padding: 0 28px;
+    }
+
+    /* Nav */
+    nav.top {
+      position: sticky; top: 0;
+      backdrop-filter: blur(8px);
+      background: rgba(11,12,16,0.75);
+      border-bottom: 1px solid var(--border);
+      z-index: 50;
+    }
+    nav.top .row {
+      display: flex; align-items: center; justify-content: space-between;
+      padding: 14px 0;
+    }
+    .brand {
+      display: flex; align-items: center; gap: 10px;
+      font-weight: 700; letter-spacing: -0.01em;
+      color: var(--ink);
+    }
+    .brand .mark {
+      width: 22px; height: 22px; border-radius: 6px;
+      background: var(--accent);
+      display: inline-block; position: relative;
+    }
+    .brand .mark::after {
+      content: ""; position: absolute;
+      inset: 6px 6px auto auto;
+      width: 6px; height: 6px; border-radius: 50%;
+      background: var(--bg);
+    }
+    nav.top a { color: var(--ink-dim); margin-left: 22px; font-size: 14px; }
+    nav.top a:hover { color: var(--ink); text-decoration: none; }
+
+    /* Hero */
+    .hero {
+      padding: 88px 0 72px;
+      text-align: center;
+      background:
+        radial-gradient(900px 420px at 50% -10%, rgba(255,90,74,0.18), transparent 70%),
+        radial-gradient(700px 320px at 50% 110%, rgba(255,184,74,0.10), transparent 70%);
+    }
+    .pill {
+      display: inline-block;
+      font-size: 12px; font-weight: 600;
+      padding: 6px 12px; border-radius: 999px;
+      background: rgba(255,90,74,0.12);
+      color: var(--accent);
+      border: 1px solid rgba(255,90,74,0.35);
+      margin-bottom: 22px;
+      letter-spacing: 0.02em;
+    }
+    h1 {
+      font-size: clamp(40px, 6vw, 64px);
+      line-height: 1.05;
+      letter-spacing: -0.025em;
+      margin: 0 0 18px;
+      font-weight: 700;
+    }
+    h1 em {
+      font-style: normal;
+      color: var(--accent);
+    }
+    .lede {
+      max-width: 640px; margin: 0 auto;
+      color: var(--ink-dim);
+      font-size: 18px;
+    }
+    .cta {
+      display: flex; gap: 12px; justify-content: center;
+      margin-top: 32px; flex-wrap: wrap;
+    }
+    .btn {
+      display: inline-flex; align-items: center; gap: 8px;
+      padding: 12px 18px;
+      border-radius: 10px;
+      font-weight: 600; font-size: 14px;
+      transition: transform .08s ease, background .15s ease, border-color .15s ease;
+    }
+    .btn:hover { text-decoration: none; transform: translateY(-1px); }
+    .btn-primary {
+      background: var(--accent); color: #1a0a08;
+    }
+    .btn-primary:hover { background: #ff7263; }
+    .btn-ghost {
+      background: transparent; color: var(--ink);
+      border: 1px solid var(--border);
+    }
+    .btn-ghost:hover { border-color: var(--ink-dim); }
+
+    /* Section */
+    section { padding: 72px 0; border-top: 1px solid var(--border); }
+    section h2 {
+      font-size: 28px; letter-spacing: -0.015em;
+      margin: 0 0 8px; font-weight: 700;
+    }
+    section .sub {
+      color: var(--ink-dim);
+      margin: 0 0 36px;
+      max-width: 640px;
+    }
+
+    /* Steps */
+    .steps {
+      display: grid;
+      grid-template-columns: repeat(3, 1fr);
+      gap: 18px;
+    }
+    .step {
+      background: var(--panel);
+      border: 1px solid var(--border);
+      border-radius: 12px;
+      padding: 24px;
+      position: relative;
+    }
+    .step-num {
+      width: 28px; height: 28px; border-radius: 50%;
+      background: var(--accent); color: #1a0a08;
+      display: inline-flex; align-items: center; justify-content: center;
+      font-weight: 700; font-size: 13px;
+      margin-bottom: 14px;
+    }
+    .step h3 {
+      margin: 0 0 6px;
+      font-size: 16px;
+    }
+    .step p {
+      margin: 0;
+      color: var(--ink-dim);
+      font-size: 14px;
+    }
+    @media (max-width: 760px) {
+      .steps { grid-template-columns: 1fr; }
+    }
+
+    /* Features */
+    .features {
+      display: grid;
+      grid-template-columns: repeat(2, 1fr);
+      gap: 18px;
+    }
+    .feature {
+      background: var(--bg-soft);
+      border: 1px solid var(--border);
+      border-radius: 12px;
+      padding: 22px;
+    }
+    .feature h3 {
+      margin: 0 0 6px;
+      font-size: 15px;
+      display: flex; align-items: center; gap: 10px;
+    }
+    .feature h3 .dot {
+      width: 8px; height: 8px; border-radius: 50%;
+      background: var(--accent);
+    }
+    .feature p { margin: 0; color: var(--ink-dim); font-size: 14px; }
+    @media (max-width: 720px) { .features { grid-template-columns: 1fr; } }
+
+    /* Architecture diagram */
+    .arch {
+      background: var(--panel);
+      border: 1px solid var(--border);
+      border-radius: 12px;
+      padding: 28px;
+      overflow-x: auto;
+    }
+    .arch pre {
+      background: transparent;
+      border: 0;
+      padding: 0;
+      color: var(--ink);
+      font-size: 13px;
+      line-height: 1.5;
+    }
+
+    /* Adapter table */
+    table.adapters {
+      width: 100%;
+      border-collapse: collapse;
+      background: var(--panel);
+      border: 1px solid var(--border);
+      border-radius: 12px;
+      overflow: hidden;
+    }
+    table.adapters th, table.adapters td {
+      text-align: left;
+      padding: 14px 18px;
+      border-bottom: 1px solid var(--border);
+      font-size: 14px;
+    }
+    table.adapters th {
+      background: var(--bg-soft);
+      color: var(--ink-dim);
+      font-weight: 600;
+      font-size: 12px;
+      letter-spacing: 0.04em;
+      text-transform: uppercase;
+    }
+    table.adapters tr:last-child td { border-bottom: 0; }
+
+    /* Footer */
+    footer {
+      padding: 56px 0 72px;
+      border-top: 1px solid var(--border);
+      color: var(--ink-mute);
+      font-size: 13px;
+    }
+    footer .row {
+      display: flex; justify-content: space-between; align-items: center;
+      flex-wrap: wrap; gap: 16px;
+    }
+    footer a { color: var(--ink-dim); }
+  </style>
+</head>
+<body>
+  <nav class="top">
+    <div class="container row">
+      <a class="brand" href="#top">
+        <span class="mark" aria-hidden="true"></span>
+        Pinta
+      </a>
+      <div>
+        <a href="#how">How it works</a>
+        <a href="#features">Features</a>
+        <a href="#install">Install</a>
+        <a href="https://github.com/kevzlou7979/pinta">GitHub</a>
+      </div>
+    </div>
+  </nav>
+
+  <header class="hero" id="top">
+    <div class="container">
+      <span class="pill">V1 — Phases 0–5 shipped</span>
+      <h1>Annotate your running app.<br /><em>Let an agent do the edits.</em></h1>
+      <p class="lede">
+        Circle a button. Point at a heading. Type <em>"make this tonal"</em>.
+        Pinta hands the annotation to your coding agent — Claude Code,
+        Cursor, Aider, or any MCP-compatible tool — which edits the matching
+        source files for you.
+      </p>
+      <div class="cta">
+        <a class="btn btn-primary" href="#install">Get started</a>
+        <a class="btn btn-ghost" href="https://github.com/kevzlou7979/pinta">View on GitHub</a>
+      </div>
+    </div>
+  </header>
+
+  <section id="how">
+    <div class="container">
+      <h2>How it works</h2>
+      <p class="sub">Three components, one loop. The extension talks only to the companion. The companion talks to any agent. Nothing is hard-wired to a vendor.</p>
+      <div class="steps">
+        <div class="step">
+          <div class="step-num">1</div>
+          <h3>Annotate</h3>
+          <p>Open the side panel. Press <code>S</code> to pick an element, or <code>D</code> to draw — arrow, rect, circle, freehand, pin. Type a comment per annotation.</p>
+        </div>
+        <div class="step">
+          <div class="step-num">2</div>
+          <h3>Capture</h3>
+          <p>Hit Submit. The extension takes a full-page screenshot, bakes the annotations onto it, and posts the session to the companion at <code>localhost:7878</code>.</p>
+        </div>
+        <div class="step">
+          <div class="step-num">3</div>
+          <h3>Edit</h3>
+          <p>Your agent picks up the session, presents an edit plan grouped by file, and applies the changes once you confirm. HMR shows the result.</p>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <section id="features">
+    <div class="container">
+      <h2>What V1 includes</h2>
+      <p class="sub">Phases 0–5 of <a href="https://github.com/kevzlou7979/pinta/blob/main/spec/SPEC.md">the spec</a> are shipped. Source mapping (Phase 6) and polish (Phase 7) are next.</p>
+      <div class="features">
+        <div class="feature">
+          <h3><span class="dot"></span> Chrome MV3 extension</h3>
+          <p>Svelte 5 + CRXJS. Side panel, popup, content-script overlay. Drawing canvas isolated in a Shadow DOM root so host CSS can't leak in.</p>
+        </div>
+        <div class="feature">
+          <h3><span class="dot"></span> Element selection</h3>
+          <p>Hover-highlight, click-to-lock, computed selector, captured outerHTML, computed styles, and nearby text for grep fallback.</p>
+        </div>
+        <div class="feature">
+          <h3><span class="dot"></span> Drawing tools</h3>
+          <p>Arrow, rectangle, circle, freehand, pin. Page-relative coords; drawings translate with scroll. Edge-aware comment popup positioning.</p>
+        </div>
+        <div class="feature">
+          <h3><span class="dot"></span> Full-page screenshots</h3>
+          <p>Scroll-and-stitch capture from the service worker. Annotations composited onto the PNG before handoff so the agent sees what you see.</p>
+        </div>
+        <div class="feature">
+          <h3><span class="dot"></span> Companion server</h3>
+          <p>Node 20+. Native HTTP, WebSocket via <code>ws</code>, MCP via the official SDK. Sessions persisted as JSON in <code>.pinta/sessions/</code>.</p>
+        </div>
+        <div class="feature">
+          <h3><span class="dot"></span> Agent-agnostic</h3>
+          <p>Reference Claude Code skill ships with the repo. MCP server works with Cursor, Cline, Continue, Zed, Windsurf. HTTP API is the floor.</p>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <section>
+    <div class="container">
+      <h2>Architecture</h2>
+      <p class="sub">Three boundaries that matter — extension knows nothing about agents, companion knows nothing about specific agents, agents know nothing about the extension. That separation is the entire point.</p>
+      <div class="arch">
+<pre>
+   Annotate                 Capture                    Edit
+   ────────                 ───────                    ────
+  ┌──────────┐  WebSocket   ┌───────────┐  HTTP / MCP  ┌──────────┐
+  │  Chrome  │ ◄──────────► │  Pinta    │ ◄──────────► │  Claude  │
+  │ extension│              │ companion │              │   Code   │
+  │          │              │           │              │  Cursor  │
+  │ overlay  │              │  :7878    │              │   Zed    │
+  │ + panel  │              │           │              │  Aider   │
+  └──────────┘              └───────────┘              └──────────┘
+                                  │
+                                  ▼
+                        .pinta/sessions/{id}.json
+                        .pinta/sessions/{id}.png
+</pre>
+      </div>
+    </div>
+  </section>
+
+  <section>
+    <div class="container">
+      <h2>Adapters</h2>
+      <p class="sub">Every agent listed below works against the same companion — no extension changes, no rebuild.</p>
+      <table class="adapters">
+        <thead>
+          <tr>
+            <th>Agent</th>
+            <th>Integration</th>
+            <th>Status</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td>Claude Code</td>
+            <td>Skill (<code>~/.claude/skills/pinta/</code>) — long-polls the HTTP API</td>
+            <td>Reference — shipped V1</td>
+          </tr>
+          <tr>
+            <td>Cursor / Cline / Continue / Zed / Windsurf</td>
+            <td>MCP stdio server (<code>pinta-mcp</code>) proxies the companion</td>
+            <td>Shipped V1</td>
+          </tr>
+          <tr>
+            <td>Aider</td>
+            <td>Poll script under <code>adapters/aider/</code></td>
+            <td>Shipped V1</td>
+          </tr>
+          <tr>
+            <td>Anything else</td>
+            <td>HTTP API (<code>/v1/sessions/poll</code>, <code>/v1/sessions/:id/status</code>)</td>
+            <td>Universal floor</td>
+          </tr>
+        </tbody>
+      </table>
+    </div>
+  </section>
+
+  <section id="install">
+    <div class="container">
+      <h2>Install &amp; run</h2>
+      <p class="sub">Node 20+ and Chrome (or any Chromium-based browser). Three commands gets you to a loadable extension and a runnable companion.</p>
+<pre><code># 1. Clone + install
+git clone https://github.com/kevzlou7979/pinta.git
+cd pinta
+npm install
+
+# 2. Build the extension and the companion
+npm run build --workspace @pinta/extension
+npm run build --workspace @pinta/companion
+
+# 3. Install the Claude Code skill (optional)
+bash scripts/install-skill.sh
+
+# 4. Load the extension in Chrome
+#    chrome://extensions → Developer Mode → Load unpacked → ./extension/dist
+
+# 5. Start the companion in the project you want to edit
+node ~/.claude/skills/pinta/start-companion.js .
+# or:  npm run dev:companion -- --project /path/to/your/app
+</code></pre>
+      <p class="sub" style="margin-top:24px">Then, in Claude Code, type <code>/pinta</code>. Or in Cursor: <em>"Pick up the pending Pinta session and apply the changes — show me the plan first."</em></p>
+    </div>
+  </section>
+
+  <section>
+    <div class="container">
+      <h2>Roadmap</h2>
+      <p class="sub">V1 covers the core loop end-to-end. Next milestones, in priority order.</p>
+      <div class="features">
+        <div class="feature">
+          <h3><span class="dot"></span> Phase 6 — vite-plugin-pinta</h3>
+          <p>Inject <code>data-source-file</code> and <code>data-source-line</code> in dev. Eliminates the grep guess; targets >95% mapping accuracy.</p>
+        </div>
+        <div class="feature">
+          <h3><span class="dot"></span> Phase 7 — Polish</h3>
+          <p>Drag-to-reorder annotations, group by file in the side panel, undo via git, per-project <code>.pinta.json</code>, plan-then-execute toggle.</p>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <footer>
+    <div class="container row">
+      <div>Pinta — visual annotation for the agent era.</div>
+      <div>
+        <a href="https://github.com/kevzlou7979/pinta">GitHub</a> ·
+        <a href="https://github.com/kevzlou7979/pinta/blob/main/spec/SPEC.md">Spec</a> ·
+        <a href="https://github.com/kevzlou7979/pinta/issues">Issues</a>
+      </div>
+    </div>
+  </footer>
+</body>
+</html>
