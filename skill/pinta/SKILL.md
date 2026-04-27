@@ -19,14 +19,15 @@ curl -sf http://127.0.0.1:7878/v1/health || echo "DOWN"
 ```
 
 If the response is empty / "DOWN", tell the user to start it in another
-terminal:
+terminal in their project root:
 
 ```bash
-node ~/.claude/skills/pinta/start-companion.js .
+npx pinta-companion .
 ```
 
-(or `npm run dev:companion -- --project .` from the pinta repo). Wait for
-the user to confirm before continuing.
+(falls back to `node ~/.claude/skills/pinta/start-companion.js .` or
+`npm run dev:companion -- --project .` if they've cloned the repo). Wait
+for the user to confirm before continuing.
 
 ## 2. Tell the user you're ready
 

@@ -101,10 +101,13 @@ bash scripts/install-skill.sh
 ### 1. Start the companion in your project root
 
 ```bash
-node ~/.claude/skills/pinta/start-companion.js .
-# or, from this repo:
-npm run dev:companion -- --project /path/to/your/app
+npx pinta-companion .
 ```
+
+No clone or build needed — `pinta-companion` is published to npm as a
+self-contained bundle (~210 KB). Runs on Node 20+. Alternatives if you've
+cloned the repo: `node ~/.claude/skills/pinta/start-companion.js .` or
+`npm run dev:companion -- --project /path/to/your/app`.
 
 The companion listens on `http://127.0.0.1:7878` and writes sessions to
 `{project}/.pinta/sessions/{id}.json` (with the screenshot alongside as

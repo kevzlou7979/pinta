@@ -25,16 +25,17 @@ share one source of truth.
    {
      "mcpServers": {
        "pinta": {
-         "command": "node",
-         "args": [
-           "/absolute/path/to/pinta/companion/dist/mcp-stdio.js"
-         ]
+         "command": "npx",
+         "args": ["-y", "pinta-companion", "pinta-mcp"]
        }
      }
    }
    ```
 
-   For development against TypeScript sources, use `tsx`:
+   `pinta-mcp` ships in the same `pinta-companion` npm package as a second
+   bin. No clone, no build.
+
+   For development against TypeScript sources (after cloning the repo):
 
    ```json
    {

@@ -1,28 +1,54 @@
 {
-  "name": "@pinta/companion",
-  "version": "0.0.0",
-  "private": true,
+  "name": "pinta-companion",
+  "version": "0.1.0",
+  "description": "Companion server for the Pinta browser-annotation workflow. Bridges the Pinta Chrome extension and your coding agent (Claude Code, Cursor, Aider) so visual annotations turn into source-file edits.",
+  "license": "MIT",
+  "author": "kevzlou7979 <kevzlou7979@gmail.com>",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/kevzlou7979/pinta.git",
+    "directory": "companion"
+  },
+  "homepage": "https://github.com/kevzlou7979/pinta#readme",
+  "bugs": "https://github.com/kevzlou7979/pinta/issues",
+  "keywords": [
+    "pinta",
+    "annotation",
+    "ai",
+    "claude-code",
+    "mcp",
+    "chrome-extension",
+    "ui-edit"
+  ],
   "type": "module",
   "bin": {
-    "pinta-companion": "./dist/cli.js",
-    "pinta-mcp": "./dist/mcp-stdio.js"
+    "pinta-companion": "./dist/cli.cjs",
+    "pinta-mcp": "./dist/mcp-stdio.cjs"
   },
-  "main": "./dist/server.js",
+  "files": [
+    "dist/cli.cjs",
+    "dist/mcp-stdio.cjs"
+  ],
+  "engines": {
+    "node": ">=20"
+  },
   "scripts": {
     "dev": "tsx src/cli.ts",
     "dev:mcp": "tsx src/mcp-stdio.ts",
-    "start": "node dist/cli.js",
-    "build": "tsc -p tsconfig.json"
-  },
-  "dependencies": {
-    "@modelcontextprotocol/sdk": "^1.0.4",
-    "@pinta/shared": "*",
-    "ws": "^8.18.0"
+    "build": "node ./build.mjs",
+    "prepublishOnly": "npm run build"
   },
   "devDependencies": {
+    "@modelcontextprotocol/sdk": "^1.0.4",
+    "@pinta/shared": "*",
     "@types/node": "^22.0.0",
     "@types/ws": "^8.5.12",
+    "esbuild": "^0.24.0",
     "tsx": "^4.19.0",
-    "typescript": "^5.6.0"
+    "typescript": "^5.6.0",
+    "ws": "^8.18.0"
+  },
+  "publishConfig": {
+    "access": "public"
   }
 }
