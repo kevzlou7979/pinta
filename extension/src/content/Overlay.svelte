@@ -106,6 +106,18 @@
       if (!el || isOurNode(el)) return;
       e.preventDefault();
       e.stopPropagation();
+      // Switching to a different element while edits were typed against
+      // the previous one — restore the old element AND wipe editor state
+      // so the new pick starts clean. Otherwise the live-preview effect
+      // would re-apply the leftover changes to the new target.
+      if (selected && selected !== el) {
+        restoreOriginal();
+        selectComment = "";
+        selectCustomCss = "";
+        selectCssChanges = {};
+        selectContentAfter = "";
+        textWasMutated = false;
+      }
       selected = el;
       hovered = null;
     }
