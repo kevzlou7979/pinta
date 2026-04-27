@@ -40,18 +40,27 @@
     return () => chrome.runtime.onMessage.removeListener(handler);
   });
 
-  // Hotkeys: S = select, D = draw (arrow), R = idle/review, Esc = cancel.
+  // Hotkeys (chord-based to avoid clobbering normal page typing):
+  //   Ctrl+Shift+S → toggle Select
+  //   Ctrl+Shift+D → toggle Draw
+  //   Ctrl+Shift+E → exit (back to Idle)
+  //   Esc          → cancel in-progress / pending / mode (handled per-mode)
+  // Ctrl+Shift+R is intentionally NOT used (browser hard-reload).
   onMount(() => {
     function onKey(e: KeyboardEvent) {
-      if (e.metaKey || e.ctrlKey || e.altKey) return;
+      if (!e.ctrlKey || !e.shiftKey || e.metaKey || e.altKey) return;
       const ae = document.activeElement as HTMLElement | null;
       const tag = ae?.tagName;
       if (tag === "INPUT" || tag === "TEXTAREA" || ae?.isContentEditable) return;
-      if (e.key === "s" || e.key === "S") {
+      const key = e.key.toLowerCase();
+      if (key === "s") {
+        e.preventDefault();
         setMode(content.mode === "select" ? "idle" : "select");
-      } else if (e.key === "d" || e.key === "D") {
+      } else if (key === "d") {
+        e.preventDefault();
         setMode(content.mode === "draw" ? "idle" : "draw", content.tool);
-      } else if (e.key === "r" || e.key === "R") {
+      } else if (key === "e") {
+        e.preventDefault();
         setMode("idle");
       }
     }
@@ -272,9 +281,9 @@
 {#if content.mode !== "idle"}
   <div class="status">
     {#if content.mode === "select"}
-      Select mode · click to pick · S/Esc to exit
+      Select mode · click to pick · Ctrl+Shift+S or Esc to exit
     {:else if content.mode === "draw"}
-      Draw · {content.tool} · drag on page · D/Esc to exit
+      Draw · {content.tool} · drag on page · Ctrl+Shift+D or Esc to exit
     {/if}
   </div>
 {/if}
