@@ -19,7 +19,9 @@
     {
       id: "select",
       label: "Select",
-      svg: '<rect x="4" y="4" width="16" height="16" rx="2" stroke-dasharray="3 3"/>',
+      // Lucide mouse-pointer-2 — solid cursor arrow. fill=currentColor
+      // overrides the container's fill="none" so the cursor renders solid.
+      svg: '<path d="M4 4l7 17 2.5-7.5L21 11z" fill="currentColor" stroke="currentColor" stroke-width="1"/>',
     },
     {
       id: "arrow",
