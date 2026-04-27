@@ -143,11 +143,18 @@
   let selectCssChanges = $state<Record<string, string>>({});
   let selectContentAfter = $state("");
 
-  // Snapshot of the element's original inline styles + text BEFORE we
-  // start mutating it for live preview. Restored on Cancel / Submit so
-  // the page stays clean between annotations.
+  // Snapshot of the element's original inline styles + innerHTML BEFORE
+  // we start mutating it for live preview. Restored on Cancel / Submit
+  // so the page stays clean between annotations. innerHTML (not
+  // innerText) preserves nested children — assigning innerText collapses
+  // <span>s, <a>s, etc. into plain text and destroys structure.
   let originalCssText = $state<string | null>(null);
+  let originalInnerHtml = $state<string | null>(null);
   let originalText = $state<string | null>(null);
+  // Plain (non-reactive) flag tracking whether we mutated the text via
+  // innerText. Used to know if a restore is needed when the user clears
+  // their Content edit.
+  let textWasMutated = false;
 
   // Live values fed into the editor — recomputed when the selection
   // changes. tick is bumped on scroll/resize so getComputedStyle stays
@@ -203,16 +210,22 @@
   $effect(() => {
     if (selected) {
       originalCssText = (selected as HTMLElement).style.cssText;
+      originalInnerHtml = (selected as HTMLElement).innerHTML;
       originalText = textOf(selected);
     } else {
       originalCssText = null;
+      originalInnerHtml = null;
       originalText = null;
     }
+    textWasMutated = false;
   });
 
   // Live DOM preview: whenever the editor's css/content state changes,
   // re-apply on top of the original snapshot. Cheap full-restore-and-
-  // -reapply avoids needing to track per-property add/remove deltas.
+  // -reapply for styles avoids needing to track per-property deltas.
+  // Text only gets touched if the user explicitly typed something
+  // different from the original — otherwise we leave the element's
+  // children alone (innerText assignment would destroy nested markup).
   $effect(() => {
     if (!selected || !selected.isConnected || originalCssText === null) return;
     const el = selected as HTMLElement;
@@ -230,20 +243,23 @@
     }
     if (selectContentAfter && selectContentAfter !== originalText) {
       el.innerText = selectContentAfter;
-    } else if (originalText !== null) {
-      // Restore original text if the user cleared their edit.
-      if (el.innerText !== originalText) el.innerText = originalText;
+      textWasMutated = true;
+    } else if (textWasMutated && originalInnerHtml !== null) {
+      // User cleared their Content edit — restore the original markup
+      // (NOT innerText, which would collapse children).
+      el.innerHTML = originalInnerHtml;
+      textWasMutated = false;
     }
   });
 
   function restoreOriginal() {
     if (!selected || originalCssText === null) return;
     const el = selected as HTMLElement;
-    if (el.isConnected) {
-      el.style.cssText = originalCssText;
-      if (originalText !== null && el.innerText !== originalText) {
-        el.innerText = originalText;
-      }
+    if (!el.isConnected) return;
+    el.style.cssText = originalCssText;
+    if (textWasMutated && originalInnerHtml !== null) {
+      el.innerHTML = originalInnerHtml;
+      textWasMutated = false;
     }
   }
 
