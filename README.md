@@ -1,6 +1,10 @@
-# Pinta
+<p align="center">
+  <img src="docs/assets/icons/icon-256.png" alt="Pinta" width="128" height="128" />
+</p>
 
-**Annotate your running web app. Let an AI agent do the edits.**
+<h1 align="center">Pinta</h1>
+
+<p align="center"><strong>Annotate your running web app. Let an AI agent do the edits.</strong></p>
 
 Circle a button. Point at a heading. Type *"make this tonal"*. Pinta
 captures the annotation, snapshots the page, and hands it to your coding

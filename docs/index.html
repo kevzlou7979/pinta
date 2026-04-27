@@ -9,6 +9,10 @@
   <meta property="og:description" content="Annotate your running web app. Let an AI agent do the edits." />
   <meta property="og:type" content="website" />
   <meta property="og:url" content="https://kevzlou7979.github.io/pinta/" />
+  <meta property="og:image" content="https://kevzlou7979.github.io/pinta/assets/icons/icon-512.png" />
+  <link rel="icon" type="image/png" sizes="32x32" href="assets/icons/icon-32.png" />
+  <link rel="icon" type="image/png" sizes="16x16" href="assets/icons/icon-16.png" />
+  <link rel="apple-touch-icon" sizes="128x128" href="assets/icons/icon-128.png" />
   <link rel="preconnect" href="https://fonts.googleapis.com" />
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
   <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet" />
@@ -21,9 +25,11 @@
       --ink: #e9eaf0;
       --ink-dim: #a4a8b5;
       --ink-mute: #6b7184;
-      --accent: #ff5a4a;
-      --accent-soft: #ffd9d4;
-      --pin: #ffb84a;
+      --accent: #ff3d6e;
+      --accent-hover: #ff5a85;
+      --accent-soft: #ffd6e2;
+      --warm-amber: #ffb84d;
+      --warm-orange: #ff8855;
       --code-bg: #0f1117;
       --max: 1080px;
     }
@@ -84,34 +90,36 @@
       color: var(--ink);
     }
     .brand .mark {
-      width: 22px; height: 22px; border-radius: 6px;
-      background: var(--accent);
-      display: inline-block; position: relative;
-    }
-    .brand .mark::after {
-      content: ""; position: absolute;
-      inset: 6px 6px auto auto;
-      width: 6px; height: 6px; border-radius: 50%;
-      background: var(--bg);
+      width: 26px; height: 26px;
+      display: inline-block;
+      border-radius: 6px;
     }
     nav.top a { color: var(--ink-dim); margin-left: 22px; font-size: 14px; }
     nav.top a:hover { color: var(--ink); text-decoration: none; }
 
     /* Hero */
     .hero {
-      padding: 88px 0 72px;
+      padding: 72px 0 80px;
       text-align: center;
       background:
-        radial-gradient(900px 420px at 50% -10%, rgba(255,90,74,0.18), transparent 70%),
-        radial-gradient(700px 320px at 50% 110%, rgba(255,184,74,0.10), transparent 70%);
+        radial-gradient(900px 420px at 50% -10%, rgba(255,61,110,0.20), transparent 70%),
+        radial-gradient(700px 320px at 50% 110%, rgba(255,184,77,0.12), transparent 70%);
+    }
+    .hero-logo {
+      width: 96px; height: 96px;
+      border-radius: 22px;
+      box-shadow:
+        0 12px 32px rgba(255,61,110,0.25),
+        0 2px 6px rgba(0,0,0,0.35);
+      margin-bottom: 28px;
     }
     .pill {
       display: inline-block;
       font-size: 12px; font-weight: 600;
       padding: 6px 12px; border-radius: 999px;
-      background: rgba(255,90,74,0.12);
+      background: rgba(255,61,110,0.12);
       color: var(--accent);
-      border: 1px solid rgba(255,90,74,0.35);
+      border: 1px solid rgba(255,61,110,0.35);
       margin-bottom: 22px;
       letter-spacing: 0.02em;
     }
@@ -144,9 +152,9 @@
     }
     .btn:hover { text-decoration: none; transform: translateY(-1px); }
     .btn-primary {
-      background: var(--accent); color: #1a0a08;
+      background: var(--accent); color: #fff1e0;
     }
-    .btn-primary:hover { background: #ff7263; }
+    .btn-primary:hover { background: var(--accent-hover); }
     .btn-ghost {
       background: transparent; color: var(--ink);
       border: 1px solid var(--border);
@@ -180,7 +188,7 @@
     }
     .step-num {
       width: 28px; height: 28px; border-radius: 50%;
-      background: var(--accent); color: #1a0a08;
+      background: var(--accent); color: #fff1e0;
       display: inline-flex; align-items: center; justify-content: center;
       font-weight: 700; font-size: 13px;
       margin-bottom: 14px;
@@ -282,7 +290,7 @@
   <nav class="top">
     <div class="container row">
       <a class="brand" href="#top">
-        <span class="mark" aria-hidden="true"></span>
+        <img class="mark" src="assets/icons/icon-48.png" alt="" aria-hidden="true" />
         Pinta
       </a>
       <div>
@@ -296,7 +304,8 @@
 
   <header class="hero" id="top">
     <div class="container">
-      <span class="pill">V1 — Phases 0–5 shipped</span>
+      <img class="hero-logo" src="assets/icons/icon-256.png" alt="Pinta logo" width="96" height="96" />
+      <div><span class="pill">V1 — Phases 0–5 shipped</span></div>
       <h1>Annotate your running app.<br /><em>Let an agent do the edits.</em></h1>
       <p class="lede">
         Circle a button. Point at a heading. Type <em>"make this tonal"</em>.
