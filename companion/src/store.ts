@@ -21,6 +21,33 @@ export class SessionStore {
     return join(this.projectRoot, ".pinta", "sessions");
   }
 
+  /** Path stored on the session — relative to projectRoot, posix-style. */
+  private screenshotPath(id: string): string {
+    return `.pinta/sessions/${id}.png`;
+  }
+
+  private absScreenshotPath(id: string): string {
+    return join(this.sessionsDir, `${id}.png`);
+  }
+
+  /**
+   * If the session carries a base64 PNG data URL, write it to disk and
+   * replace the inline data with a relative path reference. Mutates and
+   * returns the session.
+   */
+  private async extractScreenshot(session: Session): Promise<Session> {
+    const data = session.fullPageScreenshot;
+    if (!data) return session;
+    const m = /^data:image\/(png|jpeg);base64,(.+)$/i.exec(data);
+    if (!m) return session;
+    const [, , base64] = m;
+    await mkdir(this.sessionsDir, { recursive: true });
+    await writeFile(this.absScreenshotPath(session.id), Buffer.from(base64!, "base64"));
+    session.fullPageScreenshotPath = this.screenshotPath(session.id);
+    delete session.fullPageScreenshot;
+    return session;
+  }
+
   async restore(): Promise<void> {
     try {
       await mkdir(this.sessionsDir, { recursive: true });
@@ -78,6 +105,7 @@ export class SessionStore {
       ...session,
       projectRoot: session.projectRoot || this.projectRoot,
     };
+    await this.extractScreenshot(stored);
     this.sessions.set(stored.id, stored);
     if (stored.status === "drafting") this.activeId = stored.id;
     await this.persist(stored);
@@ -114,6 +142,7 @@ export class SessionStore {
     session.status = "submitted";
     session.submittedAt = Date.now();
     if (screenshot) session.fullPageScreenshot = screenshot;
+    await this.extractScreenshot(session);
     await this.persist(session);
     this.notifyWaiters(session);
     return session;

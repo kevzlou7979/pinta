@@ -49,7 +49,14 @@ export type Session = {
   startedAt: number;
   submittedAt?: number;
   annotations: Annotation[];
+  /**
+   * Full base64 data URL. Set transiently when the extension submits;
+   * the companion strips this after persisting the PNG to disk and
+   * exposes `fullPageScreenshotPath` instead.
+   */
   fullPageScreenshot?: string;
+  /** Path relative to projectRoot, e.g. `.pinta/sessions/{id}.png`. */
+  fullPageScreenshotPath?: string;
   status: SessionStatus;
   appliedSummary?: string;
   errorMessage?: string;
