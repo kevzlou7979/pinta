@@ -54,6 +54,10 @@
   // text/style edits.
   let includeScreenshot = $state(false);
   let copiedAt = $state<number | null>(null);
+  let autoReloadEnabled = $state(true);
+  let hmrDetected = $state<boolean | null>(null);
+  let reloadingAt = $state<number | null>(null);
+  let lastHandledSessionId = $state<string | null>(null);
 
   type IncomingMsg = {
     type?: string;
@@ -203,6 +207,71 @@
     await app.cancelAndRestart(pageUrl || app.session.url);
     activeTool = null;
   }
+
+  // Best-effort HMR detection: probe the page for known dev-mode markers.
+  // Returns true if any are present (Vite, Webpack/Next.js, Parcel HMR).
+  async function detectHmr(tabId: number): Promise<boolean> {
+    try {
+      const [{ result }] = await chrome.scripting.executeScript({
+        target: { tabId },
+        func: () => {
+          const w = window as unknown as Record<string, unknown>;
+          if (document.querySelector('script[src*="@vite/client"]')) return true;
+          if (document.querySelector('script[src*="vite/dist"]')) return true;
+          if (w.__vite_plugin_react_preamble_installed__) return true;
+          if (w.__HMR__) return true;
+          if (w.webpackHotUpdate || w.__webpack_hmr) return true;
+          if (w.__NEXT_HMR_LATENCY_CB || w.__NEXT_DATA__) {
+            // __NEXT_DATA__ exists in prod too; only treat as HMR if there
+            // is also a websocket-ish error overlay element.
+            if (document.querySelector("nextjs-portal, nextjs-build-watcher")) {
+              return true;
+            }
+          }
+          if (document.querySelector("vite-error-overlay")) return true;
+          if (document.querySelector("[data-svelte-h]") && location.hostname === "localhost") {
+            // Heuristic only — Svelte 5 hydration markers + localhost.
+            return true;
+          }
+          return false;
+        },
+      });
+      return !!result;
+    } catch {
+      return false;
+    }
+  }
+
+  async function reloadActiveTab() {
+    if (activeTabId == null) return;
+    reloadingAt = Date.now();
+    try {
+      await chrome.tabs.reload(activeTabId);
+      setTimeout(() => {
+        if (reloadingAt && Date.now() - reloadingAt >= 1500) reloadingAt = null;
+      }, 1600);
+    } catch (err) {
+      app.lastError = `reload failed: ${(err as Error).message}`;
+      reloadingAt = null;
+    }
+  }
+
+  // When a session reaches done/error, optionally auto-reload the tab if
+  // no HMR was detected. Tracked by session id so we don't re-trigger on
+  // re-renders.
+  $effect(() => {
+    const session = app.session;
+    if (!session) return;
+    if (session.status !== "done") return;
+    if (lastHandledSessionId === session.id) return;
+    lastHandledSessionId = session.id;
+    if (activeTabId == null) return;
+
+    detectHmr(activeTabId).then((hasHmr) => {
+      hmrDetected = hasHmr;
+      if (!hasHmr && autoReloadEnabled) reloadActiveTab();
+    });
+  });
 
   async function copyToClipboard() {
     if (!annotations.length) return;
@@ -457,6 +526,18 @@
             ✓ Done — start new batch
           {/if}
         </button>
+        <button
+          type="button"
+          class="rounded-md border border-ink-300 dark:border-night-line bg-white dark:bg-night-card text-ink-700 dark:text-night-text text-sm font-medium px-3 hover:bg-ink-50 dark:hover:bg-night-line disabled:opacity-50"
+          title={hmrDetected
+            ? "HMR detected — page should already be updated. Click to reload anyway."
+            : "Reload the page to see the changes"}
+          onclick={reloadActiveTab}
+          disabled={reloadingAt !== null || activeTabId == null}
+          aria-label="Reload page"
+        >
+          {reloadingAt ? "↻…" : "↻"}
+        </button>
       {:else}
         <button
           type="button"
@@ -506,6 +587,22 @@
       <p class="text-[11px] text-ink-500 dark:text-night-mute text-center">
         Watch the cards above — each annotation flips to ✓ as the agent finishes it.
       </p>
+    {:else if allDone}
+      <div class="flex items-center justify-between gap-2">
+        <label class="flex items-center gap-1.5 text-[11px] text-ink-600 dark:text-night-dim cursor-pointer select-none">
+          <input
+            type="checkbox"
+            class="accent-brand-pink"
+            bind:checked={autoReloadEnabled}
+          />
+          Auto-reload when not using HMR
+        </label>
+        {#if hmrDetected === true}
+          <span class="text-[11px] text-emerald-600 dark:text-emerald-400">HMR detected ✓</span>
+        {:else if hmrDetected === false}
+          <span class="text-[11px] text-ink-500 dark:text-night-mute">No HMR detected</span>
+        {/if}
+      </div>
     {/if}
   </footer>
 </div>
