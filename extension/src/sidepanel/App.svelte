@@ -5,6 +5,7 @@
   import { uid } from "../lib/id.js";
   import { compositeAnnotations } from "../lib/composite.js";
   import { formatSessionAsClipboard } from "../lib/format-clipboard.js";
+  import { theme, toggleTheme } from "../lib/theme.svelte.js";
   import StatusPill from "./StatusPill.svelte";
   import AnnotationCard from "./AnnotationCard.svelte";
   import SessionHistory from "./SessionHistory.svelte";
@@ -38,6 +39,8 @@
     target?: AnnotationTarget;
     comment?: string;
     customCss?: string;
+    cssChanges?: Record<string, string>;
+    contentChange?: { textBefore: string; textAfter: string };
     viewport?: { scrollY: number; width: number; height: number };
     annotation?: Annotation;
   };
@@ -66,6 +69,11 @@
           color: "#FF3D6E",
           comment: (m.comment ?? "").trim(),
           customCss: m.customCss?.trim() || undefined,
+          cssChanges:
+            m.cssChanges && Object.keys(m.cssChanges).length > 0
+              ? m.cssChanges
+              : undefined,
+          contentChange: m.contentChange,
           target: m.target,
           viewport: m.viewport ?? snapshotViewport(),
         };
@@ -240,33 +248,54 @@
 
 <div class="flex flex-col h-full">
   <header
-    class="px-4 py-3 border-b border-ink-200 bg-white flex items-center justify-between"
+    class="px-4 py-3 border-b border-ink-200 bg-white dark:border-night-line dark:bg-night-card flex items-center justify-between"
   >
     <div class="flex items-center gap-2 min-w-0">
       <img src="/icons/icon-32.png" alt="" width="24" height="24" />
       <div class="min-w-0">
-        <h1 class="font-semibold text-sm">Pinta</h1>
-        <p class="text-xs text-ink-500 truncate max-w-[200px]" title={pageUrl}>
+        <h1 class="font-semibold text-sm dark:text-night-text">Pinta</h1>
+        <p
+          class="text-xs text-ink-500 dark:text-night-dim truncate max-w-[200px]"
+          title={pageUrl}
+        >
           {pageUrl || "no active page"}
         </p>
       </div>
     </div>
-    <StatusPill status={app.connectionStatus} />
+    <div class="flex items-center gap-2 shrink-0">
+      <button
+        type="button"
+        class="w-7 h-7 inline-flex items-center justify-center rounded-full border border-ink-200 bg-white text-ink-600 hover:text-brand-pink hover:border-ink-400 dark:border-night-line dark:bg-night-alt dark:text-night-dim dark:hover:text-brand-pink-light dark:hover:border-night-line2 transition-colors"
+        onclick={toggleTheme}
+        aria-label={theme.value === "dark" ? "Switch to light mode" : "Switch to dark mode"}
+        title={theme.value === "dark" ? "Light mode" : "Dark mode"}
+      >
+        {#if theme.value === "dark"}
+          <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="4"/><path d="M12 2v2"/><path d="M12 20v2"/><path d="m4.93 4.93 1.41 1.41"/><path d="m17.66 17.66 1.41 1.41"/><path d="M2 12h2"/><path d="M20 12h2"/><path d="m6.34 17.66-1.41 1.41"/><path d="m19.07 4.93-1.41 1.41"/></svg>
+        {:else}
+          <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"/></svg>
+        {/if}
+      </button>
+      <StatusPill status={app.connectionStatus} />
+    </div>
   </header>
 
   <main class="flex-1 overflow-y-auto p-4 space-y-4">
     <section class="space-y-2">
-      <h2 class="text-xs uppercase tracking-wide text-ink-500 font-medium">
+      <h2 class="text-xs uppercase tracking-wide text-ink-500 dark:text-night-mute font-medium">
         Tool
       </h2>
       <div class="grid grid-cols-6 gap-1">
         {#each TOOLS as t (t.id)}
           <button
             type="button"
-            class="rounded-md border border-ink-300 bg-white py-2 text-sm flex flex-col items-center gap-0.5 hover:bg-brand-cream disabled:opacity-50"
+            class="rounded-md border border-ink-300 bg-white text-ink-900 py-2 text-sm flex flex-col items-center gap-0.5 hover:bg-brand-cream dark:border-night-line dark:bg-night-card dark:text-night-text dark:hover:bg-night-line dark:hover:border-night-line2 disabled:opacity-50 transition-colors"
             class:bg-brand-pink={activeTool === t.id}
             class:text-white={activeTool === t.id}
             class:border-brand-pink={activeTool === t.id}
+            class:dark:bg-brand-pink={activeTool === t.id}
+            class:dark:text-white={activeTool === t.id}
+            class:dark:border-brand-pink={activeTool === t.id}
             disabled={activeTabId == null}
             onclick={() => setActive(activeTool === t.id ? null : t.id)}
             title={t.label}
@@ -277,7 +306,7 @@
         {/each}
       </div>
       {#if activeTool}
-        <p class="text-[11px] text-ink-500">
+        <p class="text-[11px] text-ink-500 dark:text-night-dim">
           {#if activeTool === "select"}
             Hover the page → click an element → type a comment.
           {:else}

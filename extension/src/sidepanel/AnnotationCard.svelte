@@ -118,9 +118,23 @@
         {#if annotation.comment}
           <p class="text-ink-900 mt-1 break-words">{annotation.comment}</p>
         {/if}
+        {#if annotation.contentChange}
+          <p class="text-[11px] text-ink-600 mt-1 break-words">
+            <span class="text-ink-400">Text:</span>
+            <span class="line-through text-ink-500">{annotation.contentChange.textBefore.slice(0, 60)}</span>
+            <span class="text-ink-400">→</span>
+            <span style="color:#c72d7d;">{annotation.contentChange.textAfter.slice(0, 60)}</span>
+          </p>
+        {/if}
+        {#if annotation.cssChanges && Object.keys(annotation.cssChanges).length > 0}
+          <pre
+            class="mt-1 px-2 py-1.5 rounded bg-brand-cream text-[11px] font-mono overflow-x-auto whitespace-pre-wrap break-words"
+            style="color:#c72d7d;"
+            title="Structured CSS changes">{Object.entries(annotation.cssChanges).map(([k, v]) => `${k}: ${v};`).join("\n")}</pre>
+        {/if}
         {#if annotation.customCss}
           <pre
-            class="mt-1 px-2 py-1.5 rounded bg-brand-cream text-[11px] text-magenta-900 font-mono overflow-x-auto whitespace-pre-wrap break-words"
+            class="mt-1 px-2 py-1.5 rounded bg-brand-cream text-[11px] font-mono overflow-x-auto whitespace-pre-wrap break-words"
             style="color:#c72d7d;"
             title="Custom CSS to apply">{annotation.customCss}</pre>
         {/if}

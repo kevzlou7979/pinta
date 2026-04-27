@@ -533,10 +533,20 @@ property overrides. Frameworks vary — best-effort heuristics:
 **Out of scope for first cut:** drag-to-resize handles, SVG path editing,
 animation timeline, design-token picker integrations.
 
-**Estimated scope:** this is a real product feature, not a polish item.
-Probably two full phases on its own (8a — popup tabs + Content / CSS
-free-form; 8b — Font / Sizing / Spacing pickers + agent-side
-Tailwind/CSS-in-JS heuristics). Ship 8a first to validate the loop.
+**Status:**
+- **8a — Shipped.** Tabbed editor (Comment / Content / Font / Sizing /
+  Spacing / CSS) wired into select mode. Pickers populated from
+  `getComputedStyle` and emit a structured `cssChanges: Record<string,
+  string>` (kebab-case CSS properties) plus a `contentChange:
+  {textBefore, textAfter}` for the Content tab. The CSS tab still emits
+  raw `customCss` for anything the pickers don't cover. Agent applies
+  per the project's actual framework (detected from `package.json` +
+  the source file being edited) — no hardcoded Tailwind / CSS-in-JS
+  assumptions in the payload.
+- **8b — Planned.** Live preview via inline-style mutation while the
+  user is editing (with a `before` snapshot for cancel). Drag-to-resize
+  handles. Per-side spacing splits with a linked toggle. Design-token
+  picker integrations.
 
 ---
 

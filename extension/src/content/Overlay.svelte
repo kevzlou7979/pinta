@@ -133,27 +133,89 @@
   // Submit a select annotation.
   let selectComment = $state("");
   let selectCustomCss = $state("");
+  let selectCssChanges = $state<Record<string, string>>({});
+  let selectContentAfter = $state("");
+
+  // Live values fed into the editor — recomputed when the selection
+  // changes. tick is bumped on scroll/resize so getComputedStyle stays
+  // fresh for elements that move.
+  let liveStyles = $derived(computeLiveStyles(selected));
+  let liveText = $derived(textOf(selected));
+
+  function computeLiveStyles(el: Element | null) {
+    void tick;
+    const empty = {
+      fontFamily: "",
+      fontSize: "",
+      fontWeight: "",
+      color: "",
+      lineHeight: "",
+      width: "",
+      height: "",
+      padding: "",
+      margin: "",
+      backgroundColor: "",
+      borderRadius: "",
+      boxShadow: "",
+      display: "",
+    };
+    if (!el) return empty;
+    const cs = window.getComputedStyle(el);
+    return {
+      fontFamily: cs.fontFamily,
+      fontSize: cs.fontSize,
+      fontWeight: cs.fontWeight,
+      color: cs.color,
+      lineHeight: cs.lineHeight,
+      width: cs.width,
+      height: cs.height,
+      padding: cs.padding,
+      margin: cs.margin,
+      backgroundColor: cs.backgroundColor,
+      borderRadius: cs.borderRadius,
+      boxShadow: cs.boxShadow,
+      display: cs.display,
+    };
+  }
+
+  function textOf(el: Element | null): string {
+    if (!el) return "";
+    return ((el as HTMLElement).innerText ?? el.textContent ?? "")
+      .replace(/\s+/g, " ")
+      .trim();
+  }
+
   function submitSelect() {
     if (!selected) return;
     const hasComment = selectComment.trim().length > 0;
     const hasCss = selectCustomCss.trim().length > 0;
-    if (!hasComment && !hasCss) return;
+    const hasChanges = Object.keys(selectCssChanges).length > 0;
+    const contentDirty = selectContentAfter.trim() !== liveText.trim();
+    if (!hasComment && !hasCss && !hasChanges && !contentDirty) return;
     const target = captureTarget(selected);
     chrome.runtime.sendMessage({
       type: "annotation.target-selected",
       target,
       comment: selectComment.trim(),
       customCss: hasCss ? selectCustomCss.trim() : undefined,
+      cssChanges: hasChanges ? selectCssChanges : undefined,
+      contentChange: contentDirty
+        ? { textBefore: liveText, textAfter: selectContentAfter.trim() }
+        : undefined,
       viewport: snapshotViewport(),
     });
     selected = null;
     selectComment = "";
     selectCustomCss = "";
+    selectCssChanges = {};
+    selectContentAfter = "";
     setMode("idle");
   }
   function clearSelectAndCss() {
     clearSelectState();
     selectCustomCss = "";
+    selectCssChanges = {};
+    selectContentAfter = "";
   }
 
   // Submit a draft drawing as an annotation.
@@ -269,8 +331,12 @@
     <ElementEditor
       anchor={selectedRect}
       title={describe(selected)}
+      {liveText}
+      {liveStyles}
       bind:comment={selectComment}
       bind:customCss={selectCustomCss}
+      bind:cssChanges={selectCssChanges}
+      bind:contentAfter={selectContentAfter}
       onsubmit={submitSelect}
       oncancel={clearSelectAndCss}
     />

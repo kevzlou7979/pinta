@@ -124,24 +124,50 @@ curl -sf -X POST http://127.0.0.1:7878/v1/sessions/{id}/status \
   -d '{"status":"applying"}'
 ```
 
-## 7.5 Applying `customCss` (Phase 8a inline editing)
+## 7.5 Applying inline-editor changes (Phase 8a)
 
-When an annotation has a `customCss` field, the user has explicitly stated
-the CSS they want applied to the element matched by `target.selector`.
-Don't paraphrase — apply it. Strategy depends on the source framework:
+The inline editor produces up to three structured payloads on a `select`
+annotation. Apply each as faithfully as possible:
 
-- **Plain CSS / SCSS file**: find the rule for the selector (or a broader
-  matching rule), append the properties. Don't duplicate properties — if
-  the rule already sets `padding`, override; otherwise add.
-- **Tailwind**: convert the CSS properties to the closest utility classes
-  and add them to the element's `class=` attribute. Note caveats in the
-  plan if a property has no clean tailwind equivalent.
-- **CSS-in-JS / styled-components / emotion**: append the properties to
-  the matching styled rule.
-- **Last resort**: add inline `style="…"` on the element.
+| Field | What it is | What to do |
+|---|---|---|
+| `cssChanges` | `{property: value}` from the Font / Sizing / Spacing pickers | Apply each property change |
+| `customCss` | Raw CSS the user typed in the CSS tab | Apply as-is |
+| `contentChange` | `{textBefore, textAfter}` from the Content tab | Replace the matching text in the source |
 
-Always show the planned application (which strategy + which file + the
-final form of the change) before editing.
+**Don't hardcode framework choices.** Detect what the project actually
+uses, then apply the changes in the most natural way for that codebase:
+
+- Look at `package.json` dependencies (`tailwindcss`, `styled-components`,
+  `@emotion/styled`, `vanilla-extract`, `@stitches/react`, `panda-css`,
+  `@material-ui/styles`, framework presence, etc.).
+- Look at the source file you're editing — its imports, existing class /
+  className patterns, neighboring styles. The same project can mix
+  approaches; match what's already there in *that* file.
+
+Some general guides (not exhaustive — adapt):
+- Utility-class systems (Tailwind, UnoCSS, Panda): translate properties
+  to the closest utilities and add to the element's `class=` /
+  `className=`. If a property has no clean utility, fall through to one
+  of the other strategies for *that* property only.
+- Tagged template / runtime CSS-in-JS (styled-components, Emotion,
+  Stitches): append to the matching styled rule.
+- Compile-time CSS-in-JS (vanilla-extract, Compiled, Linaria): edit the
+  matching style object / template literal.
+- Plain CSS / SCSS / Modules: find the rule for `target.selector` (or
+  the closest ancestor selector that already exists), append /
+  override.
+- Inline `style=` attribute: only as a last resort, or when the user
+  framed the change as a one-off.
+
+For **`contentChange`**: locate `textBefore` in the source as a string
+literal and replace with `textAfter`. Preserve surrounding markup. If
+the text appears in multiple places, use surrounding component context
+(parent selectors, nearby props) to disambiguate.
+
+**Always present the planned application** before editing — say which
+strategy you picked and why, the file(s) you'll touch, and the final
+form of the change. Wait for explicit "go" before editing.
 
 ## 7. Apply edits — one annotation at a time, with per-card status
 

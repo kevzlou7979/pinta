@@ -44,6 +44,22 @@ export type Annotation = {
    */
   customCss?: string;
 
+  /**
+   * Structured CSS property → value changes from the picker tabs (Font /
+   * Sizing / Spacing). The agent translates these into whatever the
+   * project's framework expects — Tailwind utilities, CSS-in-JS, plain
+   * CSS, etc. — based on the source file it's editing. Property names
+   * are CSS conventional kebab-case ("font-size", "padding-top").
+   */
+  cssChanges?: Record<string, string>;
+
+  /**
+   * If set, the user edited the element's text content in the Content
+   * tab. Both before and after are captured so the agent can do a
+   * targeted replacement in the source instead of re-finding the text.
+   */
+  contentChange?: { textBefore: string; textAfter: string };
+
   viewport: { scrollY: number; width: number; height: number };
 
   status?: AnnotationStatus;
