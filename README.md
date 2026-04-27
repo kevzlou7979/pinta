@@ -60,6 +60,19 @@ matching source files for you.
 coding agent — Claude Code is the reference; Cursor / Cline / Continue / Zed
 work via MCP.
 
+**One-shot setup (recommended)** — clone the repo, open Claude Code in
+the repo dir, and run:
+
+```
+/build-pinta
+```
+
+The project-scoped `build-pinta` skill installs deps, builds the extension
+and companion in parallel, installs the `/pinta` skill into
+`~/.claude/skills/pinta/`, and prints the path to load into Chrome.
+
+**Manual setup** if you'd rather drive it yourself:
+
 ```bash
 # 1. Clone + install
 git clone https://github.com/kevzlou7979/pinta.git
