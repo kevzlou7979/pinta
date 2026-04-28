@@ -19,26 +19,79 @@ matching source files for you.
 
 ---
 
+## What's new
+
+Recent additions on top of the original V1 pipeline:
+
+- **Inline editing popover** — pick an element, get a 7-tab editor
+  (Comment / Content / Font / Sizing / Spacing / Grid / CSS). Live DOM
+  preview as you type; the page accumulates a visual preview of every
+  queued edit and rolls back per-card on Remove. Pickers emit
+  framework-neutral `cssChanges`; the agent translates to whatever the
+  project actually uses (Tailwind / styled-components / vanilla-extract /
+  plain CSS — no hardcoded assumptions).
+- **Image attachments** — paste (Cmd/Ctrl+V) or drag-drop images into
+  the popover; they attach as `[image1]`, `[image2]` tokens in the
+  comment. Agent reads each as visual context.
+- **Multi-project mode** — `npx pinta-companion .` in each project root
+  picks the next free port, registers in `~/.pinta/registry.json`, and
+  the side panel auto-routes the active tab to the right one via URL
+  patterns. Strict per-project scoping: annotations don't bleed across
+  projects.
+- **SSE push delivery** — `/pinta` defaults to `--push` (one long-lived
+  Monitor stream, no polling noise in the agent transcript). Long-poll
+  fallback via `/pinta --polling`.
+- **Per-annotation status** — each card flips to ✓ as the agent
+  finishes it, live via WS broadcast.
+- **First-claim-wins** — when multiple Claude Code terminals subscribe
+  to the same project (Claude Dock), one of them claims each session
+  and the others silently skip. No double-edits.
+- **Auto-apply toggle** — opt-in fast-iteration mode that skips the
+  agent's "reply 'go'" confirmation step.
+- **HMR auto-reload** — when a session lands and HMR isn't detected on
+  the active tab, the side panel reloads it for you. Toggleable.
+- **Dark mode** — popup, side panel, landing page.
+- **Auto-detect tool icons** — replaced flaky Unicode glyphs with inline
+  SVG paths that follow `currentColor` in light + dark.
+- **Hotkeys** — `Alt+S` (Select) / `Alt+P` (Pen) / `Alt+X` (Exit) /
+  `Esc` (Cancel) / `Cmd+Enter` (submit in popover). Avoid Ctrl+Shift+R
+  hard-reload collision.
+
+See [`spec/SPEC.md` §7–9](spec/SPEC.md) for the full status of each.
+
+---
+
 ## What V1 includes
 
 | Capability | Status |
 |---|---|
-| Chrome MV3 extension (Svelte 5, side panel + popup) | shipped |
-| Element selection overlay (Shadow-DOM isolated) | shipped |
-| Drawing canvas — arrow / rect / pen / pin | shipped |
+| Chrome MV3 extension (Svelte 5, side panel + popup, Shadow-DOM overlay) | shipped |
+| Element selection — selector + outerHTML + computedStyles + nearbyText | shipped |
+| Drawing canvas — arrow / rect / pen / pin (page-relative coords) | shipped |
+| Inline editing popover — Comment / Content / Font / Sizing / Spacing / Grid / CSS | shipped |
+| Live DOM preview while editing (mutate inline styles, snapshot for rollback) | shipped |
+| Cumulative preview — kept on the page as you Add; rolled back per-card on Remove | shipped |
+| Image attachments — paste / drop into the popover with `[image1]` tokens | shipped |
+| Numbered pin badges on annotated elements (per-page session breadcrumb) | shipped |
 | Full-page screenshot composite — opt-in, auto-on for drawings | shipped |
-| Structured CSS / content-change annotations | shipped |
-| Session history view | shipped |
-| Auto-reload after edits — HMR detection (Vite / Webpack / Parcel) | shipped |
-| Dark mode — popup, side panel, landing page | shipped |
-| Companion server: HTTP + WebSocket + JSON session store | shipped |
+| Per-annotation status — spinner / ✓ / ! per card, live via WS broadcast | shipped |
+| Session history view + applied summary persisted | shipped |
+| Auto-reload after edits — HMR detection (Vite / Webpack / Next.js / Parcel) | shipped |
+| Dark mode — popup, side panel, landing page (system + localStorage) | shipped |
+| Auto-apply toggle — skip the agent's "reply 'go'" gate, opt-in | shipped |
+| Cancel-session button — escape stuck `submitted` / `applying` state | shipped |
+| Companion server — HTTP + WebSocket + SSE push + JSON store + per-project registry | shipped |
+| Multi-project mode — auto port allocation, URL-pattern routing, strict per-project scoping | shipped |
+| First-claim-wins session claim (multi-terminal coordination, e.g. Claude Dock) | shipped |
 | Claude Code adapter — push handoff (default) + polling fallback | shipped |
 | MCP server for Cursor / Cline / Continue / Zed / Windsurf | shipped |
 | Aider adapter (poll script) | shipped |
 | Copy-to-clipboard fallback for claude.ai web / ChatGPT / etc. | shipped |
 | `pinta-companion` published to npm — `npx pinta-companion .` | shipped |
 | `vite-plugin-pinta` for instant source mapping | planned (Phase 6) |
-| Polish — drag reorder, group by file, undo via git | planned (Phase 7) |
+| Drag-reorder annotations, group by file, undo last edit via git | planned (Phase 7) |
+| Drag-to-resize handles, per-side spacing splits, design-token pickers | planned (Phase 8) |
+| Cropped composite screenshot (5–10× smaller, only annotation bboxes) | planned |
 
 ---
 
@@ -115,9 +168,15 @@ self-contained bundle (~210 KB). Runs on Node 20+. Alternatives if you've
 cloned the repo: `node ~/.claude/skills/pinta/start-companion.js .` or
 `npm run dev:companion -- --project /path/to/your/app`.
 
-The companion listens on `http://127.0.0.1:7878` and writes sessions to
+The companion listens on `http://127.0.0.1:7878` (auto-incrementing to
+the next free port if 7878 is busy — useful when you're running Pinta
+on multiple projects in parallel) and writes sessions to
 `{project}/.pinta/sessions/{id}.json` (with the screenshot alongside as
 `{id}.png`).
+
+Each running companion registers itself in `~/.pinta/registry.json` so
+the side panel and the `/pinta` skill can find the right one for the
+project / tab you're working on. See [Multi-project mode](#multi-project-mode).
 
 ### 2. Open your app in Chrome and the Pinta side panel
 
@@ -167,6 +226,38 @@ After the agent applies the edits, the side panel detects HMR
 (Vite / Webpack / Parcel) on the active tab and offers to refresh
 automatically. Each annotation card flips to **✓** as it lands; the
 screenshot, plan, and applied summary stay in **History** for later.
+
+---
+
+## Multi-project mode
+
+Run Pinta on more than one project at once — each `npx pinta-companion .`
+picks the next free port (7878 → 7879 → 7880 …). All running companions
+register themselves in `~/.pinta/registry.json`, which lets:
+
+- **The side panel** show a project picker in the header. The active tab
+  is auto-routed to the right project via URL patterns (e.g.
+  `http://localhost:5173/*` → `claims-forms`). Click a tab once and use
+  the **Associate this URL** button — the pattern is committed to that
+  project's `.pinta.json` so teammates inherit it.
+- **The `/pinta` skill** find the companion whose `projectRoot` matches
+  the agent's `pwd`. No more "wrong project" submits when you forget to
+  restart in a different repo.
+
+Project-scoped `.pinta.json` (committed):
+
+```json
+{
+  "urlPatterns": [
+    "http://localhost:5173/*",
+    "https://*.staging.example.com/*"
+  ]
+}
+```
+
+`*` matches one path segment, `**` matches multiple. If a tab matches
+zero or multiple companions, the picker stays open so you choose
+explicitly — no silent mis-routing.
 
 ---
 
@@ -251,8 +342,9 @@ V1 covers the core loop. What's next, in priority order:
   `data-source-line` in dev so the agent doesn't have to grep. Targets >95%
   source-mapping accuracy.
 - **Phase 7 — Polish.** Drag-to-reorder annotations, group by file in the
-  side panel, undo last edit (rolls back via git), per-project
-  `.pinta.json` for design system context, plan-then-execute toggle.
+  side panel, undo last edit (rolls back via git), plan-then-execute
+  toggle. (Per-project `.pinta.json` shipped alongside multi-project
+  mode and is already wired up.)
 - **Beyond.** Conflict detection, multi-tab sessions, read-only sharing.
   See [`spec/SPEC.md` §9](spec/SPEC.md#9-open-questions) for the open
   design questions.

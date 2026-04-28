@@ -429,37 +429,69 @@ Exit criteria: same workflow works in Cursor and Claude Code without changing th
 
 Exit criteria: edits land in the right file on the first try, every time, in a project with the plugin installed.
 
-### Phase 7 — Polish (ongoing)
+### Phase 7 — Polish
 
+Most of Phase 7 has shipped. What's left is genuinely small / nice-to-have.
+
+**Shipped:**
+- ~~Keyboard shortcuts.~~ **Shipped** as `Alt+S` (Select) / `Alt+P` (Pen
+  / Draw) / `Alt+X` (Exit) / `Esc` (Cancel) / `Cmd+Enter` (submit in
+  inline-editor popup). Originally Ctrl+Shift+S/D/R; moved to Alt to
+  avoid Ctrl+Shift+R hard-reload collision and away from chord finger-
+  twisting.
+- ~~Session history view.~~ **Shipped.** Collapsible "History (N)"
+  panel at the bottom of the side panel; status badges (drafting /
+  submitted / applying / done / error), relative timestamps, applied
+  summaries / error messages, screenshot path. Backed by a slim
+  `GET /v1/sessions` endpoint (no annotation bodies).
+- ~~Per-project `.pinta.json`.~~ **Shipped** as the URL-pattern config
+  for multi-project routing (see Phase 9). Will grow into design-system
+  context in a later pass.
+- ~~Plan-then-execute toggle.~~ **Shipped** as **Auto-apply** toggle in
+  the side-panel footer (the inverse semantics — default IS plan-then-
+  execute; opt-in to skip the "reply 'go'" gate). Carried on the
+  session as `autoApply: boolean`; skill §5 branches on it.
+- ~~Copy-to-clipboard handoff.~~ **Shipped.** Secondary "Copy" button
+  next to Submit; formats the session as markdown via
+  `navigator.clipboard.writeText`. Useful for pasting into claude.ai
+  web, ChatGPT, or any agent that doesn't speak Pinta's protocol.
+- ~~Multi-project mode.~~ **Shipped** — see Phase 9.
+- ~~Token-cost: optional screenshot.~~ **Shipped.** Checkbox in the
+  submit footer; off by default so text-only batches skip capture
+  (~1.5–2k vision tokens saved). Auto-locks to ON when a drawing
+  annotation is in the batch (drawings have no DOM target, so the
+  screenshot is the only context the agent has).
+- ~~HMR-aware auto-reload.~~ **Shipped.** When a session reaches `done`,
+  the side panel injects a one-shot probe via `chrome.scripting.execute
+  Script` looking for Vite / Webpack / Next.js / Parcel HMR markers. If
+  HMR is detected → no reload, footer shows "HMR detected ✓". If not
+  detected → `chrome.tabs.reload(activeTabId)` (toggleable). A manual
+  `↻` button is always available.
+- ~~Dark mode.~~ **Shipped** across popup, side panel, and landing
+  page. Theme persisted in `localStorage`; toggle in the popup; honors
+  system `prefers-color-scheme` on first load.
+- ~~Persistent pin badges on annotated elements.~~ **Shipped.** A small
+  numbered brand-pink badge appears at the top-right corner of each
+  annotated DOM element so the user has a visual breadcrumb of what's
+  already picked. Survives scroll/resize, re-numbers when annotations
+  are removed, clears on cancel-session.
+- ~~Cancel-session button.~~ **Shipped.** Small `✕` next to the
+  Submit button when status is `submitted` / `applying` / `done`.
+  Marks the current session as `error` (agents that pick it up later
+  skip cleanly) and creates a fresh `drafting` session. Hint text
+  appears below ("Stuck? Click ✕…").
+
+**Planned (still open):**
 - Drag-to-reorder annotations.
-- Group annotations by file in side panel.
-- Keyboard shortcuts (D/S/R modes, Esc to cancel, Cmd+Enter to submit).
-- Session history view.
-- Undo last edit (rolls back via git).
-- Per-project config file (`.pinta.json`) for design system context.
-- Plan-then-execute toggle (require explicit confirmation before edits).
-- ~~**Copy-to-clipboard handoff.**~~ **Shipped.** Secondary "Copy"
-  button next to Submit; formats the session as markdown via
-  `navigator.clipboard.writeText`. Useful for pasting into claude.ai web,
-  ChatGPT, or any agent that doesn't speak Pinta's protocol.
-- **Multi-project mode.** Today the companion is pinned to one
-  `projectRoot` at startup — switching projects means restarting it. Make
-  the companion hold N project roots; add a small project picker to the
-  side panel header that ships the chosen root with `session.create`; have
-  agents read `projectRoot` off the session payload they polled (already
-  there, just enforced). Aim is "never restart the companion when
-  bouncing between repos." Estimated ~50 LOC across companion store +
-  WS protocol + side panel; no breaking change to the HTTP API.
-- **Token-cost optimizations.** The full-page composite screenshot is the
-  single biggest item in the agent's input context (~1.5–2k vision
-  tokens per submit). Two cheap wins:
-  - *Optional screenshot* — checkbox in the submit footer; off by default
-    so text-only batches skip capture entirely. **Shipped.**
-  - *Cropped composite* — instead of stitching the full page, render
-    only the union of annotation bounding rects (with ~24px margin and a
-    tile cap so very-spread-out annotations don't degenerate into a
-    full-page capture anyway). Typically 5–10× smaller than the full
-    page; the agent still sees the annotation in visual context.
+- Group annotations by file in the side panel (once a session is
+  applying — fewer screen-fulls during long batches).
+- Undo last edit (git rollback).
+- *Token-cost — Cropped composite screenshot.* Stitch only the union of
+  annotation bounding rects (+ ~24px margin, tile cap so very-spread-
+  out annotations don't degenerate to full-page anyway). Typically
+  5–10× smaller than full-page; the agent still sees the annotation in
+  visual context.
+- Design-token picker integrations on `.pinta.json`.
 
 ### Phase 8 — Inline editing
 
@@ -534,28 +566,164 @@ property overrides. Frameworks vary — best-effort heuristics:
 animation timeline, design-token picker integrations.
 
 **Status:**
-- **8a — Shipped.** Tabbed editor (Comment / Content / Font / Sizing /
-  Spacing / CSS) wired into select mode. Pickers populated from
+
+- **8a — Shipped.** Tabbed editor wired into select mode with **7 tabs**
+  (Comment, Content, Font, Sizing, Spacing, Grid, CSS — Comment +
+  Content render as full word labels; the rest collapse to icon-only
+  tabs with tooltips so the bar stays compact). Pickers populated from
   `getComputedStyle` and emit a structured `cssChanges: Record<string,
-  string>` (kebab-case CSS properties) plus a `contentChange:
-  {textBefore, textAfter}` for the Content tab. The CSS tab still emits
-  raw `customCss` for anything the pickers don't cover. Agent applies
-  per the project's actual framework (detected from `package.json` +
-  the source file being edited) — no hardcoded Tailwind / CSS-in-JS
-  assumptions in the payload.
-- **8b — Partially shipped.**
+  string>` (kebab-case CSS properties), `contentChange: {textBefore,
+  textAfter}` for the Content tab, and raw `customCss` for the CSS tab.
+  Grid tab adds CSS-grid presets (1 / 2 / 3 / 4 / 5 / 6 / Auto-fit
+  columns + gap). Agent applies per the project's actual framework
+  (detected from `package.json` + the source file being edited) — no
+  hardcoded Tailwind / CSS-in-JS assumptions in the payload.
+
+- **8b — Largely shipped.**
   - *Live DOM preview* — **shipped**. As the user changes any
     Font / Sizing / Spacing / Content / CSS field in the popup, the live
     element on the page updates in real time via `style.setProperty`
-    and `innerText`. A snapshot of the original `style.cssText` +
-    `innerText` is taken on first selection; Cancel and Submit both
-    restore the snapshot so the page is clean for the next pick (the
-    annotation captures the diff; the agent persists it for real later).
-  - *Drag-to-resize handles* — planned.
+    and `innerText`. Snapshot of the original `style.cssText` +
+    `innerHTML` is taken on first selection.
+  - *Cumulative preview (don't revert on Submit)* — **shipped**. The
+    inline-style mutations stay applied after the user clicks Add, so
+    the page accumulates a visual preview of every queued edit. Removing
+    a card in the side panel rolls THAT element back from its stored
+    snapshot; Cancel-session rolls all of them back. Re-editing an
+    already-annotated element reuses the true-original snapshot as the
+    baseline so rollback math stays correct.
   - *Per-side spacing splits with a linked toggle* — planned.
+  - *Drag-to-resize handles* — planned.
   - *Design-token picker integrations* — planned.
-  - *Inline edit affordance icon on hover* — planned (user-facing
-    discoverability cue; functionally redundant with select-mode click).
+  - *Inline edit affordance icon on hover* — planned.
+
+- **8c — Image attachments — Shipped.** The annotation popover now
+  accepts paste (Cmd/Ctrl+V) and drag-drop of images. Each attached
+  image is added to `images: AnnotationImage[]` on the annotation and
+  inserts a stable `[image1]`, `[image2]` token at the cursor in the
+  comment text. Mirrors how Claude Dock references images in chat.
+  Thumbnail strip in the popup with × to remove (renumbers tokens
+  automatically). Side-panel cards render the thumbnails inline.
+  Skill §7.4 instructs the agent to Read each referenced image for
+  visual context before planning.
+
+  ```ts
+  type AnnotationImage = {
+    id: string;            // "image1", "image2" — used in [imageN] refs
+    mediaType: string;     // "image/png", "image/jpeg"
+    dataUrl?: string;      // inline base64 (current shape)
+    path?: string;         // disk path, set if companion extracts later
+    name?: string;         // original filename if dropped from disk
+  };
+  ```
+
+**Bug fixes that shipped alongside Phase 8 work** (worth noting because
+they were each subtle):
+- Selecting an element with nested children no longer flattens it —
+  snapshot uses `innerHTML` (not `innerText`) so structure survives.
+- Clicking inside the inline editor no longer dismisses the host page's
+  popovers / dialogs — the shadow host now traps pointer/focus events
+  in bubble phase so document-level "outside click" detectors don't see
+  them.
+- Switching to a different element while edits were typed against the
+  previous one now restores the previous element AND wipes editor
+  state, so the new pick starts clean.
+- Tool button icons switched from Unicode glyphs (▢, ↘, ▭ — some don't
+  render in every font) to inline SVG paths that follow `currentColor`.
+- Active-tool button "pressed" state no longer paints white — the
+  `bg-white` / `bg-brand-pink` tailwind utilities had identical
+  specificity; refactored to mutually-exclusive class sets.
+
+### Phase 9 — Protocol & coordination — Shipped
+
+A cluster of cross-cutting capabilities that didn't fit Phases 0–6 but
+that Phases 7+8 needed in place. Documented as one phase because they
+all touch the wire protocol or the agent ↔ companion ↔ extension
+contract.
+
+**Shipped:**
+
+- **SSE push delivery (`/v1/sessions/stream`).** One long-lived SSE
+  connection per agent; each newly-submitted session arrives as a
+  single `event: session\ndata: {json}` line. Replaces the per-cycle
+  Bash-tool noise that long-polling generated in agent transcripts.
+  The `/pinta` skill now defaults to push (`Monitor + curl -N`) and
+  falls back to long-poll only via `/pinta --polling`. Backlog of
+  already-submitted sessions is pushed on connect so reconnects aren't
+  lossy. 20s SSE comments keep the connection from idle-closing.
+
+- **Per-annotation status broadcast.** Each annotation has its own
+  `status: "applying" | "done" | "error"` field (independent of the
+  session-level status). Skill marks each annotation applying →
+  `Edit` → done as it works through the batch; the side panel
+  re-renders per card live (spinner / ✓ / red bang). When every
+  annotation has settled, the companion auto-rolls the session status
+  to `done` (or `error` if any failed).
+  - HTTP: `POST /v1/sessions/:id/annotations/:annId/status`
+  - MCP: `mark_annotation_applying`, `mark_annotation_done`,
+    `mark_annotation_error`
+  - WS: companion subscribes its store and pushes `session.synced`
+    on every state change so the side panel sees agent-driven updates
+    in real time without re-fetching (this also fixed an existing bug
+    where session-level status updates over HTTP weren't reaching the
+    side panel live).
+
+- **Multi-project mode.** One companion process per project, all
+  running concurrently:
+  - **Auto port allocation** — `--port 7878` increments to the next
+    free port (up to `7898` by default) when busy.
+  - **Registry** at `~/.pinta/registry.json` — every running companion
+    registers itself on startup with `{ id, port, projectRoot,
+    urlPatterns, version, pid }`. Cleaned up on graceful shutdown;
+    next-startup prunes stale entries as a backstop.
+  - **URL-pattern routing** in `.pinta.json` per project. Side panel
+    auto-routes the active tab to the matching companion. "Associate
+    this URL" button writes the pattern to the project's `.pinta.json`
+    so teammates inherit it.
+  - `/pinta` skill calls `find-companion.js` which reads the registry
+    and prints the port for the companion whose `projectRoot` matches
+    cwd — exit codes 0 (found) / 2 (others running, none here) /
+    3 (none at all) drive helpful messages back to the user.
+  - **Strict per-project scoping.** When the active tab URL doesn't
+    match the connected companion's URL patterns, the side panel hides
+    the Tool toolbar / annotation list / Submit footer entirely and
+    shows only the "associate or pick a different project" prompt.
+    Pinta annotations don't bleed across projects.
+
+- **First-claim-wins claim semantics.** When multiple Claude Code
+  terminals subscribe to the same project (e.g. Claude Dock), all of
+  them see every push. To prevent racing on the same submission, the
+  skill calls `POST /v1/sessions/:id/claim` with a stable claimer id;
+  the companion sets `claimedBy / claimedAt` on first claim and
+  returns 409 to subsequent claimers. Losers silently skip back to
+  streaming.
+
+- **Screenshot extraction to disk.** When a session is submitted with
+  an inline base64 PNG, the companion writes it to
+  `.pinta/sessions/{id}.png` and replaces the field with
+  `fullPageScreenshotPath`. Keeps API responses + persisted JSON slim
+  and lets the agent `Read` the image directly. Skill notes the same
+  pattern will apply to `AnnotationImage` payloads in a future
+  optimization.
+
+**Wire-protocol changes (vs the original spec §6.2):**
+
+| Direction | Addition |
+|---|---|
+| HTTP | `GET /v1/sessions` (slim history list) |
+| HTTP | `GET /v1/sessions/stream` (SSE push) |
+| HTTP | `POST /v1/sessions/:id/annotations/:annId/status` |
+| HTTP | `POST /v1/sessions/:id/claim` |
+| HTTP | `GET /v1/registry` (multi-project snapshot) |
+| HTTP | `GET /v1/url-patterns`, `POST /v1/url-patterns` |
+| HTTP | `GET /v1/health` now returns `{ projectRoot, port, urlPatterns, registryId, version, pid }` |
+| MCP | `mark_annotation_applying / done / error` |
+| WS  | `session.submit` carries `autoApply?: boolean` |
+
+`Annotation` shape gained `customCss`, `cssChanges`, `contentChange`,
+`images`, `status`, `errorMessage`. `Session` gained `autoApply`,
+`claimedBy`, `claimedAt`, `fullPageScreenshotPath`. None are breaking
+— all are optional fields.
 
 ---
 
