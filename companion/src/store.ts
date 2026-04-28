@@ -103,6 +103,18 @@ export class SessionStore {
     url: string;
     producer?: SessionProducer;
   }): Session {
+    // Idempotent on the drafting session. The side panel sends
+    // session.create whenever it reconnects (e.g. user navigated tabs and
+    // we re-routed back to this companion). Without this guard, a fresh
+    // session would replace the user's in-progress draft and the
+    // annotations they'd already added would silently disappear from view.
+    const existing = this.getActive();
+    if (existing && existing.status === "drafting") {
+      // Update the URL in case the user is now on a different page in
+      // the same project — annotations still carry their per-target URL.
+      if (input.url) existing.url = input.url;
+      return existing;
+    }
     const session: Session = {
       id: randomUUID(),
       url: input.url,
@@ -219,6 +231,36 @@ export class SessionStore {
     await this.persist(session);
     this.notifyChange(session);
     return session;
+  }
+
+  /**
+   * First-claim-wins. If the session has no claimer yet, mark it
+   * claimed by `claimerId` and return `{ ok: true, session }`. If
+   * already claimed by someone else, return `{ ok: false, claimedBy }`.
+   * Idempotent for the same claimerId — re-claiming returns ok.
+   */
+  async tryClaim(
+    sessionId: string,
+    claimerId: string,
+  ): Promise<
+    | { ok: true; session: Session }
+    | { ok: false; claimedBy: string; claimedAt: number }
+  > {
+    const session = this.requireSession(sessionId);
+    if (session.claimedBy && session.claimedBy !== claimerId) {
+      return {
+        ok: false,
+        claimedBy: session.claimedBy,
+        claimedAt: session.claimedAt ?? 0,
+      };
+    }
+    if (!session.claimedBy) {
+      session.claimedBy = claimerId;
+      session.claimedAt = Date.now();
+      await this.persist(session);
+      this.notifyChange(session);
+    }
+    return { ok: true, session };
   }
 
   takeNextSubmitted(): Session | null {
