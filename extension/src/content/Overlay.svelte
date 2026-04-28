@@ -48,9 +48,14 @@
         annotationId?: string;
       };
       if (m?.type === "mode.set" && m.mode) setMode(m.mode, m.tool);
-      else if (m?.type === "annotated.remove" && m.annotationId)
-        content.removeAnnotatedById(m.annotationId);
-      else if (m?.type === "annotated.clear") content.clearAnnotated();
+      else if (m?.type === "annotated.remove" && m.annotationId) {
+        const { entry } = content.removeAnnotatedById(m.annotationId);
+        if (entry) restoreFromSnapshot(entry);
+      } else if (m?.type === "annotated.clear") {
+        for (const entry of content.takeAllAnnotated()) {
+          restoreFromSnapshot(entry);
+        }
+      }
     };
     chrome.runtime.onMessage.addListener(handler);
     return () => chrome.runtime.onMessage.removeListener(handler);
@@ -227,11 +232,19 @@
   }
 
   // Snapshot the live element when it's first selected so we can restore
-  // it later. Re-runs only when `selected` changes.
+  // it later. If the element was already annotated this session, reuse
+  // that snapshot so re-editing builds on top of the *true* original
+  // (not the post-first-annotation state).
   $effect(() => {
     if (selected) {
-      originalCssText = (selected as HTMLElement).style.cssText;
-      originalInnerHtml = (selected as HTMLElement).innerHTML;
+      const existing = content.findAnnotatedByElement(selected);
+      if (existing) {
+        originalCssText = existing.originalCssText;
+        originalInnerHtml = existing.originalInnerHtml;
+      } else {
+        originalCssText = (selected as HTMLElement).style.cssText;
+        originalInnerHtml = (selected as HTMLElement).innerHTML;
+      }
       originalText = textOf(selected);
     } else {
       originalCssText = null;
@@ -284,6 +297,20 @@
     }
   }
 
+  /** Restore a previously-annotated element from its stored snapshot. */
+  function restoreFromSnapshot(entry: {
+    element: Element;
+    originalCssText: string;
+    originalInnerHtml: string;
+  }): void {
+    const el = entry.element as HTMLElement;
+    if (!el?.isConnected) return;
+    el.style.cssText = entry.originalCssText;
+    if (el.innerHTML !== entry.originalInnerHtml) {
+      el.innerHTML = entry.originalInnerHtml;
+    }
+  }
+
   function submitSelect() {
     if (!selected) return;
     const hasComment = selectComment.trim().length > 0;
@@ -302,7 +329,13 @@
       typeof crypto !== "undefined" && "randomUUID" in crypto
         ? `ann-${crypto.randomUUID()}`
         : `ann-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
-    content.recordAnnotated(annId, selected);
+    // Record the snapshot WITH the annotation. If the element was
+    // already annotated (re-edit), recordAnnotated stores another entry
+    // pointing at the same true-original snapshot — that's fine, the
+    // first remove restores fully and subsequent removes are no-ops.
+    if (originalCssText !== null && originalInnerHtml !== null) {
+      content.recordAnnotated(annId, selected, originalCssText, originalInnerHtml);
+    }
     chrome.runtime.sendMessage({
       type: "annotation.target-selected",
       annotationId: annId,
@@ -315,15 +348,16 @@
         : undefined,
       viewport: snapshotViewport(),
     });
-    // Restore the DOM so the page is clean for the next pick. The agent
-    // will eventually persist the change for real; the live preview was
-    // just for the user to see what they were committing to.
-    restoreOriginal();
+    // Keep the inline preview applied — the user wants a cumulative
+    // visual of all queued edits. The annotation's snapshot is in
+    // `content.annotated`, so on Remove or Cancel-session we can roll
+    // back this specific element. Just clear our editing handles.
     selected = null;
     selectComment = "";
     selectCustomCss = "";
     selectCssChanges = {};
     selectContentAfter = "";
+    textWasMutated = false;
     setMode("idle");
   }
   function clearSelectAndCss() {

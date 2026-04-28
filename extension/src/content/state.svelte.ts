@@ -28,10 +28,19 @@ class ContentState {
   pending = $state<Draft | null>(null);
 
   // DOM elements the user has annotated in the current page session.
-  // Each gets a numbered pin badge in the overlay so they can see at a
-  // glance what's already been picked. Cleared when the side panel
-  // cancels/starts a new session.
-  annotated = $state<{ id: string; element: Element; index: number }[]>([]);
+  // Each gets a numbered pin badge in the overlay AND keeps the inline
+  // style/text mutations visible until the user removes the annotation
+  // or starts a new session. Snapshot is the *true* original so we can
+  // do per-annotation rollback later.
+  annotated = $state<
+    {
+      id: string;
+      element: Element;
+      index: number;
+      originalCssText: string;
+      originalInnerHtml: string;
+    }[]
+  >([]);
 
   setMode(next: Mode) {
     this.mode = next;
@@ -97,17 +106,62 @@ class ContentState {
     this.committed = [...this.committed, annotation];
   }
 
-  recordAnnotated(id: string, element: Element): number {
+  recordAnnotated(
+    id: string,
+    element: Element,
+    originalCssText: string,
+    originalInnerHtml: string,
+  ): number {
     const index = this.annotated.length + 1;
-    this.annotated = [...this.annotated, { id, element, index }];
+    this.annotated = [
+      ...this.annotated,
+      { id, element, index, originalCssText, originalInnerHtml },
+    ];
     return index;
   }
 
-  removeAnnotatedById(id: string): void {
+  /** Look up the snapshot for an already-annotated element, if any. */
+  findAnnotatedByElement(el: Element):
+    | { originalCssText: string; originalInnerHtml: string }
+    | null {
+    const hit = this.annotated.find((a) => a.element === el);
+    return hit
+      ? {
+          originalCssText: hit.originalCssText,
+          originalInnerHtml: hit.originalInnerHtml,
+        }
+      : null;
+  }
+
+  removeAnnotatedById(id: string): { entry: { element: Element; originalCssText: string; originalInnerHtml: string } | null } {
+    const idx = this.annotated.findIndex((a) => a.id === id);
+    if (idx === -1) return { entry: null };
+    const entry = this.annotated[idx]!;
     const next = this.annotated
       .filter((a) => a.id !== id)
       .map((a, i) => ({ ...a, index: i + 1 }));
     this.annotated = next;
+    return {
+      entry: {
+        element: entry.element,
+        originalCssText: entry.originalCssText,
+        originalInnerHtml: entry.originalInnerHtml,
+      },
+    };
+  }
+
+  takeAllAnnotated(): {
+    element: Element;
+    originalCssText: string;
+    originalInnerHtml: string;
+  }[] {
+    const all = this.annotated.map((a) => ({
+      element: a.element,
+      originalCssText: a.originalCssText,
+      originalInnerHtml: a.originalInnerHtml,
+    }));
+    this.annotated = [];
+    return all;
   }
 
   clearAnnotated(): void {
