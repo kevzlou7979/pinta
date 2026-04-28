@@ -587,8 +587,10 @@
               {/if}
             </p>
             <p class="leading-snug mt-0.5 text-amber-800 dark:text-amber-300">
-              Annotations still go to <strong>{shortRoot(sel.projectRoot)}</strong>.
-              Save the pattern below so this tab auto-routes next time.
+              Annotations are <strong>paused</strong> — Pinta keeps them
+              scoped per project. Save the pattern to route this tab to
+              <strong>{shortRoot(sel.projectRoot)}</strong>, or pick a
+              different project below.
             </p>
           </div>
         </div>
@@ -647,6 +649,7 @@
       </div>
     {/if}
 
+    {#if !showAssociatePrompt}
     <section class="space-y-2">
       <h2 class="text-xs uppercase tracking-wide text-ink-500 dark:text-night-mute font-medium">
         Tool
@@ -744,6 +747,7 @@
         </ul>
       {/if}
     </section>
+    {/if}
 
     {#if app.lastError}
       <p
@@ -756,7 +760,10 @@
     <SessionHistory />
   </main>
 
-  <footer class="border-t border-ink-200 p-3 bg-white dark:border-night-line dark:bg-night-card space-y-2">
+  <footer
+    class="border-t border-ink-200 p-3 bg-white dark:border-night-line dark:bg-night-card space-y-2"
+    class:hidden={showAssociatePrompt}
+  >
     {#if !allDone && app.session?.status === "drafting"}
       <label
         class="flex items-start gap-2 text-[12px] text-ink-700 dark:text-night-dim cursor-pointer select-none"
