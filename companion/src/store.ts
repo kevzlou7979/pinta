@@ -12,6 +12,14 @@ import type {
 type Waiter = (session: Session) => void;
 type Listener = (session: Session) => void;
 
+/**
+ * How long a claim survives without activity before another agent can
+ * steal it. Refreshed on every status update — a healthy agent emitting
+ * progress easily stays under this; one that crashed mid-apply releases
+ * the lock instead of orphaning the session forever.
+ */
+const CLAIM_TTL_MS = 5 * 60 * 1000;
+
 export class SessionStore {
   private sessions = new Map<string, Session>();
   private activeId: string | null = null;
@@ -199,6 +207,9 @@ export class SessionStore {
     session.status = status;
     if (extras?.summary !== undefined) session.appliedSummary = extras.summary;
     if (extras?.errorMessage !== undefined) session.errorMessage = extras.errorMessage;
+    // Status updates count as heartbeat — refreshes the claim TTL so a
+    // long-running apply doesn't get stolen out from under the agent.
+    if (session.claimedBy) session.claimedAt = Date.now();
     await this.persist(session);
     this.notifyChange(session);
     return session;
@@ -228,16 +239,19 @@ export class SessionStore {
         ? "error"
         : "done";
     }
+    // Per-annotation status updates also count as claim heartbeat.
+    if (session.claimedBy) session.claimedAt = Date.now();
     await this.persist(session);
     this.notifyChange(session);
     return session;
   }
 
   /**
-   * First-claim-wins. If the session has no claimer yet, mark it
-   * claimed by `claimerId` and return `{ ok: true, session }`. If
-   * already claimed by someone else, return `{ ok: false, claimedBy }`.
-   * Idempotent for the same claimerId — re-claiming returns ok.
+   * First-claim-wins. If the session has no claimer yet (or the prior
+   * claim has gone stale past `CLAIM_TTL_MS` without any heartbeat),
+   * mark it claimed by `claimerId` and return `{ ok: true, session }`.
+   * If actively claimed by someone else, return `{ ok: false, claimedBy }`.
+   * Idempotent for the same claimerId — re-claiming refreshes the TTL.
    */
   async tryClaim(
     sessionId: string,
@@ -247,16 +261,22 @@ export class SessionStore {
     | { ok: false; claimedBy: string; claimedAt: number }
   > {
     const session = this.requireSession(sessionId);
-    if (session.claimedBy && session.claimedBy !== claimerId) {
+    const now = Date.now();
+    const claimAge = now - (session.claimedAt ?? 0);
+    const stale = !!session.claimedBy && claimAge > CLAIM_TTL_MS;
+
+    if (session.claimedBy && session.claimedBy !== claimerId && !stale) {
       return {
         ok: false,
         claimedBy: session.claimedBy,
         claimedAt: session.claimedAt ?? 0,
       };
     }
-    if (!session.claimedBy) {
+    // Take or refresh the claim. Both first-claim and stale-takeover
+    // paths land here; same-claimer re-claims also refresh claimedAt.
+    if (!session.claimedBy || session.claimedBy !== claimerId || stale) {
       session.claimedBy = claimerId;
-      session.claimedAt = Date.now();
+      session.claimedAt = now;
       await this.persist(session);
       this.notifyChange(session);
     }

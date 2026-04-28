@@ -19,6 +19,14 @@ alongside as `{id}.png`).
 Pair it with the [Pinta Chrome extension](https://github.com/kevzlou7979/pinta)
 (the side panel will say **Connected** when it finds the companion).
 
+### Multi-project
+
+Run a companion per project — each `npx pinta-companion .` picks the next
+free port (7878 → 7879 → 7880 …) and registers itself in
+`~/.pinta/registry.json`. The Pinta side panel auto-routes the active tab
+to the right companion via `.pinta.json` URL patterns; the Claude Code
+`/pinta` skill finds the companion whose root matches the agent's `pwd`.
+
 ## MCP bridge
 
 For Cursor / Cline / Continue / Zed, this package also ships `pinta-mcp` —

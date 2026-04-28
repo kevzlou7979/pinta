@@ -6,11 +6,13 @@
 //          node built-ins)
 
 import { build } from "esbuild";
-import { rmSync, mkdirSync } from "node:fs";
+import { rmSync, mkdirSync, readFileSync } from "node:fs";
 
 const outdir = "dist";
 rmSync(outdir, { recursive: true, force: true });
 mkdirSync(outdir, { recursive: true });
+
+const pkg = JSON.parse(readFileSync(new URL("./package.json", import.meta.url), "utf8"));
 
 const shared = {
   bundle: true,
@@ -23,6 +25,12 @@ const shared = {
   sourcemap: "linked",
   legalComments: "none",
   minify: false,
+  // Inject the package version so registry entries can advertise it
+  // for skew detection. Stays a `typeof` guard at the source level so
+  // dev (tsx) runs as "dev" until the bundle ships.
+  define: {
+    __PINTA_VERSION__: JSON.stringify(pkg.version),
+  },
   // (source files already start with `#!/usr/bin/env node` — esbuild
   // preserves it, so no banner needed.)
   logLevel: "info",

@@ -6,15 +6,35 @@ import type {
   SessionStatus,
 } from "@pinta/shared";
 import { SessionStore } from "./store.js";
+import {
+  snapshot as registrySnapshot,
+  updateUrlPatterns as updateRegistryUrlPatterns,
+  type RegistryEntry,
+} from "./registry.js";
+import { addUrlPattern, readProjectConfig } from "./project-config.js";
 
 export type ServerOptions = {
   host?: string;
   port: number;
+  /**
+   * If true and `port` is in use, increment up to `portRangeEnd` looking
+   * for a free port. Defaults to false to preserve the historical
+   * "fail fast on collision" behavior for explicit --port usage.
+   */
+  autoAllocatePort?: boolean;
+  portRangeEnd?: number;
   store: SessionStore;
   log?: (msg: string) => void;
+  /**
+   * Mutable hook into this companion's registry entry, set by the CLI
+   * after registration so health/registry endpoints can surface live
+   * urlPatterns + the entry id (used by POST /v1/url-patterns).
+   */
+  getRegistryEntry?: () => RegistryEntry | null;
 };
 
 const POLL_TIMEOUT_MS = 25_000;
+const DEFAULT_PORT_RANGE_END = 7898;
 
 const okStatuses: SessionStatus[] = [
   "drafting",
@@ -26,36 +46,74 @@ const okStatuses: SessionStatus[] = [
 
 const okAnnotationStatuses: AnnotationStatus[] = ["applying", "done", "error"];
 
-export function startServer(opts: ServerOptions) {
-  const { port, store } = opts;
+export type StartedServer = {
+  close: () => Promise<void>;
+  port: number;
+  server: ReturnType<typeof createServer>;
+};
+
+export async function startServer(opts: ServerOptions): Promise<StartedServer> {
+  const { store } = opts;
   const host = opts.host ?? "127.0.0.1";
   const log = opts.log ?? (() => {});
+  const autoAllocate = opts.autoAllocatePort ?? false;
+  const rangeEnd = opts.portRangeEnd ?? DEFAULT_PORT_RANGE_END;
 
   const server = createServer(async (req, res) => {
     try {
-      await handle(req, res, store, log);
+      await handle(req, res, store, log, opts);
     } catch (err) {
       log(`error: ${(err as Error).message}`);
       sendJson(res, 500, { error: (err as Error).message });
     }
   });
 
-  return new Promise<{
-    close: () => Promise<void>;
-    port: number;
-    server: typeof server;
-  }>((resolve) => {
-    server.listen(port, host, () => {
-      log(`pinta companion listening on http://${host}:${port}`);
-      resolve({
-        port,
-        server,
-        close: () =>
-          new Promise<void>((r) => {
-            server.close(() => r());
-          }),
-      });
-    });
+  // Try ports in sequence until one binds. Without auto-allocation we
+  // surface the original EADDRINUSE so callers passing an explicit
+  // --port get the failure they expect.
+  let port = opts.port;
+  while (true) {
+    try {
+      await listen(server, port, host);
+      break;
+    } catch (err) {
+      const code = (err as NodeJS.ErrnoException).code;
+      if (code === "EADDRINUSE" && autoAllocate && port < rangeEnd) {
+        port += 1;
+        continue;
+      }
+      throw err;
+    }
+  }
+
+  log(`pinta companion listening on http://${host}:${port}`);
+  return {
+    port,
+    server,
+    close: () =>
+      new Promise<void>((r) => {
+        server.close(() => r());
+      }),
+  };
+}
+
+function listen(
+  server: ReturnType<typeof createServer>,
+  port: number,
+  host: string,
+): Promise<void> {
+  return new Promise((resolve, reject) => {
+    const onError = (err: Error) => {
+      server.off("listening", onListening);
+      reject(err);
+    };
+    const onListening = () => {
+      server.off("error", onError);
+      resolve();
+    };
+    server.once("error", onError);
+    server.once("listening", onListening);
+    server.listen(port, host);
   });
 }
 
@@ -64,6 +122,7 @@ async function handle(
   res: ServerResponse,
   store: SessionStore,
   log: (msg: string) => void,
+  opts: ServerOptions,
 ): Promise<void> {
   const url = new URL(req.url ?? "/", "http://localhost");
   const method = (req.method ?? "GET").toUpperCase();
@@ -80,7 +139,54 @@ async function handle(
   }
 
   if (method === "GET" && path === "/v1/health") {
-    return sendJson(res, 200, { ok: true, projectRoot: store.projectRoot });
+    const entry = opts.getRegistryEntry?.() ?? null;
+    return sendJson(res, 200, {
+      ok: true,
+      projectRoot: store.projectRoot,
+      port: entry?.port,
+      urlPatterns: entry?.urlPatterns ?? [],
+      registryId: entry?.id,
+      version: entry?.version,
+      pid: process.pid,
+    });
+  }
+
+  // Surface every running companion so the extension can populate its
+  // project picker without scanning ports itself. Returns the same
+  // pruned snapshot we use for skill discovery.
+  if (method === "GET" && path === "/v1/registry") {
+    const snap = await registrySnapshot();
+    return sendJson(res, 200, snap);
+  }
+
+  // Append a URL pattern to this project's .pinta.json. Side panel
+  // calls this when the user clicks "Associate this URL with this
+  // project". Returns the updated patterns so the extension can
+  // re-evaluate routing immediately.
+  if (method === "POST" && path === "/v1/url-patterns") {
+    const body = await readJson<{ pattern: string }>(req);
+    if (!body.pattern || typeof body.pattern !== "string") {
+      return sendJson(res, 400, { error: "missing pattern" });
+    }
+    const patterns = await addUrlPattern(store.projectRoot, body.pattern);
+    log(`url-pattern added: ${body.pattern}`);
+    // Persist the change in two places: the in-memory entry (so this
+    // companion's own /v1/health is correct immediately) and the
+    // shared ~/.pinta/registry.json (so other companions and the
+    // extension see the update via /v1/registry).
+    const entry = opts.getRegistryEntry?.();
+    if (entry) {
+      entry.urlPatterns = patterns;
+      await updateRegistryUrlPatterns(entry.id, patterns);
+    }
+    return sendJson(res, 200, { urlPatterns: patterns });
+  }
+
+  // Read the on-disk patterns directly. Used by tests + by the
+  // extension when bootstrapping after a companion restart.
+  if (method === "GET" && path === "/v1/url-patterns") {
+    const config = await readProjectConfig(store.projectRoot);
+    return sendJson(res, 200, { urlPatterns: config.urlPatterns ?? [] });
   }
 
   if (method === "GET" && path === "/v1/sessions/active") {
@@ -167,6 +273,41 @@ async function handle(
     const session = store.get(sessionMatch[1]!);
     if (!session) return sendJson(res, 404, { error: "not found" });
     return sendJson(res, 200, session);
+  }
+
+  // First-claim-wins. Multiple agents subscribed to the same SSE stream
+  // (typical inside Claude Dock with several terminals on one project)
+  // all receive every submitted-session push; this endpoint lets them
+  // race to claim and the winner processes the session. Losers get 409
+  // and silently skip back to streaming.
+  const claimMatch = path.match(/^\/v1\/sessions\/([^/]+)\/claim$/);
+  if (method === "POST" && claimMatch) {
+    const body = await readJson<{ claimerId?: string }>(req);
+    const claimerId =
+      body.claimerId && typeof body.claimerId === "string"
+        ? body.claimerId
+        : null;
+    if (!claimerId) {
+      return sendJson(res, 400, { error: "missing claimerId" });
+    }
+    let result;
+    try {
+      result = await store.tryClaim(claimMatch[1]!, claimerId);
+    } catch (err) {
+      return sendJson(res, 404, { error: (err as Error).message });
+    }
+    if (!result.ok) {
+      log(
+        `claim ${claimMatch[1]} REJECTED for ${claimerId} (already held by ${result.claimedBy})`,
+      );
+      return sendJson(res, 409, {
+        error: "already claimed",
+        claimedBy: result.claimedBy,
+        claimedAt: result.claimedAt,
+      });
+    }
+    log(`claim ${claimMatch[1]} GRANTED to ${claimerId}`);
+    return sendJson(res, 200, result.session);
   }
 
   const statusMatch = path.match(/^\/v1\/sessions\/([^/]+)\/status$/);

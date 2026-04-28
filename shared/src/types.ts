@@ -125,6 +125,16 @@ export type Session = {
    * the user can see what's happening, but no "go" reply is required.
    */
   autoApply?: boolean;
+
+  /**
+   * Set when an agent successfully claims this session via
+   * POST /v1/sessions/:id/claim. First-claim-wins ensures that when
+   * multiple Claude Code terminals are subscribed to the same project
+   * (e.g. inside Claude Dock), exactly one of them processes any given
+   * submission instead of all of them racing.
+   */
+  claimedBy?: string;
+  claimedAt?: number;
 };
 
 export type ClientMessage =

@@ -203,6 +203,17 @@
     !!app.selectedCompanion && isAssociatable && !matchesSelected,
   );
 
+  // Routing ambiguity: when more than one running companion claims the
+  // current tab URL, the auto-pick policy is non-deterministic — the
+  // user could end up annotating in the "wrong" project without realizing
+  // it. Surface this so they know to tighten one project's patterns.
+  const matchingCompanionsForUrl = $derived(
+    pageUrl
+      ? app.companions.filter((c) => matchAny(pageUrl, c.urlPatterns))
+      : [],
+  );
+  const hasRoutingConflict = $derived(matchingCompanionsForUrl.length > 1);
+
   function shortRoot(path: string): string {
     // Show the trailing path segment (project name) — full path is in title.
     const norm = path.replace(/\\/g, "/");
@@ -502,8 +513,16 @@
                 <code class="block bg-ink-100 dark:bg-night-card px-2 py-1.5 rounded font-mono text-[11px]">npx pinta-companion .</code>
               </div>
             {:else}
+              {#if hasRoutingConflict}
+                <div class="border-b border-amber-300 bg-amber-50 dark:border-amber-700/40 dark:bg-amber-950/40 px-3 py-2 text-[11px] text-amber-900 dark:text-amber-200 leading-snug">
+                  <span class="font-semibold">{matchingCompanionsForUrl.length} projects</span>
+                  match this URL — auto-routing is ambiguous.
+                  Tighten one project's URL patterns to disambiguate.
+                </div>
+              {/if}
               <ul class="max-h-[280px] overflow-y-auto py-1">
                 {#each app.companions as c (c.port)}
+                  {@const conflicts = hasRoutingConflict && matchingCompanionsForUrl.some((m) => m.port === c.port)}
                   <li>
                     <button
                       type="button"
@@ -526,6 +545,9 @@
                       <span class="flex-1 min-w-0">
                         <span class="block font-medium text-ink-900 dark:text-night-text truncate" title={c.projectRoot}>
                           {shortRoot(c.projectRoot)}
+                          {#if conflicts}
+                            <span class="ml-1 inline-block align-middle text-amber-600 dark:text-amber-400" title="Also matches the current URL — routing conflict">⚠</span>
+                          {/if}
                         </span>
                         <span class="block text-[10px] text-ink-500 dark:text-night-mute truncate">
                           port {c.port}

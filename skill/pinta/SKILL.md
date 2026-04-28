@@ -105,6 +105,40 @@ read it with the Read tool (it's a PNG; the visual UI will display it).
 > project mode discovery should make this reliable, but if a stale
 > registry entry leaked through, refuse to edit and tell the user.
 
+## 3.5 Claim the session — first-wins, prevents race conditions
+
+When multiple Claude Code terminals are open on the same project (e.g.
+inside Claude Dock), all of them receive every push. To stop them from
+racing on the same submission, **claim it first**. Only the agent that
+successfully claims should process the session — the others silently
+skip and go back to streaming.
+
+```bash
+# Generate a stable claimer id once per /pinta run. The cwd makes it
+# debuggable on the companion's logs; the random suffix disambiguates
+# multiple terminals in the same cwd.
+CLAIMER_ID="${CLAIMER_ID:-$(printf '%s/%s' "$PWD" "$(node -e 'console.log(crypto.randomUUID())')")}"
+
+CLAIM_RESPONSE=$(curl -sf -w "\n%{http_code}" -X POST "$BASE/v1/sessions/$SESSION_ID/claim" \
+  -H "Content-Type: application/json" \
+  -d "{\"claimerId\":\"$CLAIMER_ID\"}")
+CLAIM_HTTP=$(printf '%s' "$CLAIM_RESPONSE" | tail -n1)
+
+if [ "$CLAIM_HTTP" = "409" ]; then
+  # Another agent already owns this session. Don't show the user
+  # anything — silently skip back to the SSE stream / poll loop.
+  continue   # or `return` / next-iter, depending on your loop shape
+fi
+
+if [ "$CLAIM_HTTP" != "200" ]; then
+  # Network or session-not-found error — surface it.
+  echo "claim failed: $CLAIM_RESPONSE" >&2
+fi
+```
+
+The 200 response body is the full session (with `claimedBy` and
+`claimedAt` set). Keep going — proceed to the plan.
+
 ## 4. Locate source files for each annotation
 
 Each annotation is one of two shapes:

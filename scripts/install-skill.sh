@@ -27,6 +27,8 @@ fi
 
 mkdir -p "$SKILL_DEST"
 cp "$SKILL_SRC/SKILL.md" "$SKILL_DEST/SKILL.md"
+cp "$SKILL_SRC/find-companion.js" "$SKILL_DEST/find-companion.js"
+cp "$SKILL_SRC/package.json" "$SKILL_DEST/package.json"
 
 cat > "$SKILL_DEST/start-companion.js" <<EOF
 #!/usr/bin/env node
@@ -71,6 +73,8 @@ chmod +x "$SKILL_DEST/start-companion.js"
 
 echo "installed:"
 echo "  $SKILL_DEST/SKILL.md"
+echo "  $SKILL_DEST/find-companion.js"
+echo "  $SKILL_DEST/package.json"
 echo "  $SKILL_DEST/start-companion.js  →  $REPO_ROOT/companion"
 echo
 echo "In Claude Code, run /pinta to start the workflow."

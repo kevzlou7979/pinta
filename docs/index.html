@@ -443,17 +443,205 @@
       overflow-x: auto;
       box-shadow: var(--shadow-sm);
     }
-    .arch-card pre {
-      background: transparent;
-      box-shadow: none;
-      color: var(--ink);
-      font-size: 12.5px;
-      line-height: 1.65;
+    .arch-diagram {
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      gap: 18px;
+      padding: 4px 0;
     }
-    .arch-card pre code {
-      padding: 0;
+    .arch-row {
+      display: grid;
+      grid-template-columns: 1fr auto 1fr auto 1fr;
+      align-items: center;
+      gap: 10px;
+      width: 100%;
+    }
+    .arch-node {
+      display: flex;
+      flex-direction: column;
+      align-items: stretch;
+      gap: 8px;
+    }
+    .arch-node-eyebrow {
+      font-size: 11px;
+      letter-spacing: 0.18em;
+      text-transform: uppercase;
+      color: var(--ink-mute);
+      text-align: center;
+      font-weight: 600;
+    }
+    .arch-card-node {
+      border-radius: 14px;
+      padding: 16px 18px;
+      border: 1px solid var(--line);
+      background: var(--paper);
+      box-shadow: var(--shadow-sm);
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      gap: 8px;
+      text-align: center;
+      min-height: 138px;
+      justify-content: center;
+    }
+    .arch-card-node strong {
+      font-size: 15px;
       color: var(--ink);
+      font-weight: 700;
+    }
+    .arch-card-node small {
+      font-size: 12.5px;
+      color: var(--ink-dim);
+      display: block;
+      line-height: 1.55;
       font-weight: 500;
+    }
+    .arch-card-node--ext {
+      background:
+        linear-gradient(180deg, rgba(199,45,180,0.18), rgba(199,45,180,0.06)),
+        var(--paper);
+      border-color: rgba(199,45,180,0.35);
+    }
+    .arch-card-node--comp {
+      background:
+        linear-gradient(180deg, rgba(40,170,150,0.18), rgba(40,170,150,0.06)),
+        var(--paper);
+      border-color: rgba(40,170,150,0.32);
+    }
+    .arch-card-node--ed {
+      background:
+        linear-gradient(180deg, rgba(255,136,85,0.18), rgba(255,136,85,0.06)),
+        var(--paper);
+      border-color: rgba(255,136,85,0.32);
+    }
+    .arch-pill {
+      display: inline-block;
+      padding: 2px 10px;
+      border: 1px solid rgba(40,170,150,0.55);
+      border-radius: 999px;
+      font-size: 11px;
+      letter-spacing: 0.04em;
+      color: rgba(20,120,105,1);
+      font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+      background: rgba(40,170,150,0.08);
+    }
+    .arch-link {
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      gap: 4px;
+      padding: 0 6px;
+    }
+    .arch-link-label {
+      font-size: 11.5px;
+      color: var(--ink-mute);
+      letter-spacing: 0.04em;
+      white-space: nowrap;
+    }
+    .arch-link-line {
+      position: relative;
+      width: 100%;
+      min-width: 56px;
+      height: 1.5px;
+      background: var(--line-strong);
+    }
+    .arch-link-line::before,
+    .arch-link-line::after {
+      content: "";
+      position: absolute;
+      top: 50%;
+      width: 6px; height: 6px;
+      border-top: 1.5px solid var(--line-strong);
+      border-right: 1.5px solid var(--line-strong);
+    }
+    .arch-link-line::before {
+      left: -1px;
+      transform: translateY(-50%) rotate(-135deg);
+    }
+    .arch-link-line::after {
+      right: -1px;
+      transform: translateY(-50%) rotate(45deg);
+    }
+    .arch-writes {
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      gap: 4px;
+    }
+    .arch-writes-line {
+      width: 0;
+      height: 28px;
+      border-left: 1.5px dashed var(--line-strong);
+    }
+    .arch-writes-label {
+      font-size: 11.5px;
+      color: var(--ink-mute);
+      letter-spacing: 0.04em;
+    }
+    .arch-storage {
+      border: 1.5px dashed var(--line-strong);
+      border-radius: 14px;
+      padding: 16px 20px 14px;
+      background: var(--cream-soft);
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      gap: 12px;
+      min-width: 320px;
+    }
+    .arch-storage-title {
+      font-size: 12.5px;
+      letter-spacing: 0.08em;
+      text-transform: uppercase;
+      color: var(--ink-dim);
+      font-weight: 700;
+    }
+    .arch-storage-files {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 12px;
+      width: 100%;
+    }
+    .arch-file {
+      background: var(--paper);
+      border: 1px solid var(--line);
+      border-radius: 10px;
+      padding: 10px 14px;
+      font-size: 12.5px;
+      color: var(--ink);
+      font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+      text-align: center;
+    }
+    .arch-file small {
+      display: block;
+      font-family: 'Poppins', system-ui, sans-serif;
+      color: var(--ink-mute);
+      font-size: 11px;
+      margin-top: 3px;
+      letter-spacing: 0.03em;
+    }
+    .arch-path {
+      font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+      font-size: 12px;
+      color: var(--ink-mute);
+    }
+    @media (max-width: 720px) {
+      .arch-row {
+        grid-template-columns: 1fr;
+      }
+      .arch-link {
+        padding: 4px 0;
+      }
+      .arch-link-line {
+        width: 1.5px;
+        min-width: 0;
+        height: 28px;
+        background: transparent;
+        border-left: 1.5px solid var(--line-strong);
+      }
+      .arch-link-line::before,
+      .arch-link-line::after { display: none; }
     }
     .rules {
       list-style: none;
@@ -502,7 +690,8 @@
     table.adapters tr:hover td { background: rgba(255,241,224,0.4); }
     .badge {
       display: inline-flex; align-items: center; gap: 6px;
-      padding: 4px 10px; border-radius: 999px;
+      padding: 4px 16px; border-radius: 999px;
+      white-space: nowrap;
       font-size: 12px; font-weight: 600;
       background: rgba(90,209,123,0.14);
       color: #2f7a44;
@@ -633,10 +822,39 @@
       color: #7a7299;
       border-bottom-color: #1a1430;
     }
-    [data-theme="dark"] .arch-card pre {
-      background: transparent;
-      box-shadow: none;
-      color: var(--ink);
+    [data-theme="dark"] .arch-card-node {
+      background: var(--paper);
+      border-color: var(--line);
+    }
+    [data-theme="dark"] .arch-card-node--ext {
+      background:
+        linear-gradient(180deg, rgba(199,45,180,0.36), rgba(199,45,180,0.10)),
+        var(--paper);
+      border-color: rgba(199,45,180,0.55);
+    }
+    [data-theme="dark"] .arch-card-node--comp {
+      background:
+        linear-gradient(180deg, rgba(40,170,150,0.32), rgba(40,170,150,0.10)),
+        var(--paper);
+      border-color: rgba(40,170,150,0.55);
+    }
+    [data-theme="dark"] .arch-card-node--ed {
+      background:
+        linear-gradient(180deg, rgba(255,136,85,0.32), rgba(255,136,85,0.10)),
+        var(--paper);
+      border-color: rgba(255,136,85,0.55);
+    }
+    [data-theme="dark"] .arch-pill {
+      color: rgba(120,220,200,1);
+      background: rgba(40,170,150,0.16);
+      border-color: rgba(40,170,150,0.55);
+    }
+    [data-theme="dark"] .arch-storage {
+      background: rgba(0,0,0,0.22);
+    }
+    [data-theme="dark"] .arch-file {
+      background: var(--paper);
+      border-color: var(--line);
     }
     [data-theme="dark"] .btn-primary {
       background: var(--pink);
@@ -933,7 +1151,7 @@
   <header class="hero" id="top">
     <div class="container">
       <span class="hero-logo-wrap"><img class="hero-logo" src="assets/icons/icon-256.png" alt="Pinta logo" width="108" height="108" /></span>
-      <div><span class="pill"><span class="pulse"></span> V1 — Phases 0–5 shipped</span></div>
+      <div><span class="pill"><span class="pulse"></span> V1.1 — multi-project routing shipped</span></div>
       <h1 class="hero-title">Annotate your running app.<br /><span class="grad">Let an agent do the edits.</span></h1>
       <p class="lede">
         Circle a button. Point at a heading. Type <em>"make this tonal"</em>.
@@ -998,7 +1216,7 @@
           <svg class="eyebrow-ico" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="10"/><path d="M9.09 9a3 3 0 0 1 5.83 1c0 2-3 3-3 3"/><path d="M12 17h.01"/></svg>
           How it works
         </span>
-        <h2 class="h2-words"><span class="w" style="--i:0">Point.</span> <span class="w" style="--i:1">Comment.</span> <span class="w" style="--i:2">Watch&nbsp;it&nbsp;ship.</span></h2>
+        <h2 class="h2-words"><span class="w" style="--i:0">Annotate.</span> <span class="w" style="--i:1">Submit.</span> <span class="w" style="--i:2">Ship.</span></h2>
         <p class="sub">The extension talks only to the companion. The companion talks to any agent. Nothing is hard-wired to a vendor.</p>
       </div>
       <div class="steps">
@@ -1093,6 +1311,13 @@
           <h3>Push or poll handoff</h3>
           <p>The Claude Code skill defaults to push (<code>/pinta</code>) — wakes the agent the moment the companion has a session. Sandboxed setups can fall back to long-poll with <code>/pinta --polling</code>.</p>
         </div>
+        <div class="feature">
+          <div class="ico">
+            <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="3" width="9" height="9" rx="1.5"/><rect x="13" y="3" width="9" height="9" rx="1.5"/><rect x="2" y="14" width="9" height="7" rx="1.5"/><rect x="13" y="14" width="9" height="7" rx="1.5"/></svg>
+          </div>
+          <h3>Multi-project routing</h3>
+          <p>Run a companion per project — each picks the next free port (7878, 7879, …) and registers in <code>~/.pinta/registry.json</code>. Side panel auto-routes the active tab via <code>.pinta.json</code> URL patterns; the <code>/pinta</code> skill finds the companion whose root matches the agent's <code>pwd</code>. No more wrong-project submits.</p>
+        </div>
       </div>
     </div>
   </section>
@@ -1107,19 +1332,52 @@
       </div>
       <div class="arch">
         <div class="arch-card">
-<pre><code>   Annotate                 Capture                    Edit
-   ────────                 ───────                    ────
-  ┌──────────┐  WebSocket   ┌───────────┐  HTTP / MCP  ┌──────────┐
-  │  Chrome  │ ◄──────────► │   Pinta   │ ◄──────────► │  Claude  │
-  │ extension│              │ companion │              │   Code   │
-  │          │              │           │              │  Cursor  │
-  │ overlay  │              │  :7878    │              │   Zed    │
-  │ + panel  │              │           │              │  Aider   │
-  └──────────┘              └───────────┘              └──────────┘
-                                  │
-                                  ▼
-                        .pinta/sessions/{id}.json
-                        .pinta/sessions/{id}.png</code></pre>
+          <div class="arch-diagram">
+            <div class="arch-row">
+              <div class="arch-node">
+                <div class="arch-node-eyebrow">Annotate</div>
+                <div class="arch-card-node arch-card-node--ext">
+                  <strong>Chrome extension</strong>
+                  <small>Overlay<br>Side panel</small>
+                </div>
+              </div>
+              <div class="arch-link">
+                <span class="arch-link-label">WebSocket</span>
+                <div class="arch-link-line"></div>
+              </div>
+              <div class="arch-node">
+                <div class="arch-node-eyebrow">Capture</div>
+                <div class="arch-card-node arch-card-node--comp">
+                  <strong>Pinta companion</strong>
+                  <small>Local server</small>
+                  <span class="arch-pill">port 7878</span>
+                </div>
+              </div>
+              <div class="arch-link">
+                <span class="arch-link-label">HTTP / MCP</span>
+                <div class="arch-link-line"></div>
+              </div>
+              <div class="arch-node">
+                <div class="arch-node-eyebrow">Edit</div>
+                <div class="arch-card-node arch-card-node--ed">
+                  <strong>Editors</strong>
+                  <small>Claude Code<br>Cursor &middot; Zed<br>Aider</small>
+                </div>
+              </div>
+            </div>
+            <div class="arch-writes">
+              <div class="arch-writes-line"></div>
+              <span class="arch-writes-label">writes</span>
+            </div>
+            <div class="arch-storage">
+              <div class="arch-storage-title">Session storage</div>
+              <div class="arch-storage-files">
+                <div class="arch-file">{id}.json<small>annotations</small></div>
+                <div class="arch-file">{id}.png<small>screenshot</small></div>
+              </div>
+            </div>
+            <div class="arch-path">.pinta/sessions/</div>
+          </div>
         </div>
         <ul class="rules">
           <li><strong>Extension → Companion.</strong> WebSocket, JSON sessions. The extension only knows about the companion.</li>
@@ -1225,7 +1483,7 @@ npx pinta-companion .
         <div class="road-card">
           <span class="tag">Phase 7</span>
           <h3>Polish</h3>
-          <p>Drag-to-reorder annotations, group by file in the side panel, undo via git, per-project <code>.pinta.json</code>, plan-then-execute toggle.</p>
+          <p>Drag-to-reorder annotations, group by file in the side panel, undo via git, plan-then-execute toggle.</p>
         </div>
       </div>
     </div>
