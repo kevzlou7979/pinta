@@ -6,9 +6,9 @@ description: Use when the user wants to visually annotate their running app to m
 # Pinta
 
 Workflow: the user opens the Pinta Chrome extension, draws / picks elements
-on their running app, and clicks Submit. The companion server (running on
-`localhost:7878`) receives the session. Your job is to wait for sessions,
-then edit the matching source files.
+on their running app, and clicks Submit. The companion server (one process
+per project, discovered via `~/.pinta/registry.json`) receives the session.
+Your job is to wait for sessions, then edit the matching source files.
 
 ## Arguments
 
@@ -21,26 +21,40 @@ then edit the matching source files.
 
 If the user passes neither flag, default to `--push`.
 
-## 1. Verify the companion is running
+## 1. Discover the companion for this project
+
+Multiple Pinta companions can run at once — one per project. Each
+companion registers itself in `~/.pinta/registry.json` on startup. The
+helper below reads that registry and prints the port for the companion
+whose `projectRoot` matches your cwd.
 
 ```bash
-curl -sf http://127.0.0.1:7878/v1/health || echo "DOWN"
+DISCOVERY=$(node ~/.claude/skills/pinta/find-companion.js)
+DISCOVERY_EXIT=$?
+PORT=$(printf '%s' "$DISCOVERY" | cut -f1)
+BASE="http://127.0.0.1:$PORT"
 ```
 
-If empty / "DOWN", tell the user to start it in their project root:
+Possible exit codes:
 
-```bash
-npx pinta-companion .
-```
+| Code | Meaning | What to do |
+|---|---|---|
+| `0` | Found — `$PORT` is set | Continue to step 2 |
+| `2` | Other companions running, none for this cwd | Tell user: **"A companion is running, but not for this project. Start one in this project root: `node ~/.claude/skills/pinta/start-companion.js .` (preferred while on the unreleased build) or `npx pinta-companion .` (once a new npm version ships)"** Wait for confirmation before retrying. |
+| `3` | No registry / no companions running | Tell user: **"No Pinta companion is running. Start one in this project root: `node ~/.claude/skills/pinta/start-companion.js .` (preferred while on the unreleased build) or `npx pinta-companion .` (once a new npm version ships)"** Wait for confirmation before retrying. |
 
-(falls back to `node ~/.claude/skills/pinta/start-companion.js .` or
-`npm run dev:companion -- --project .` if they've cloned the repo). Wait
-for the user to confirm before continuing.
+After the user confirms they've started the companion, re-run the
+discovery snippet — the registry only updates on companion startup.
+
+> **Verify** with `curl -sf "$BASE/v1/health"` once `$PORT` is set —
+> the response includes `projectRoot` so you can sanity-check you're
+> talking to the right one.
 
 ## 2. Tell the user you're ready
 
-> "Companion is up. Open the Pinta Chrome extension, annotate the page you
-> want changed, and hit Submit. I'll wait."
+> "Companion is up on port `$PORT` for `<projectRoot>`. Open the Pinta
+> Chrome extension, annotate the page you want changed, and hit Submit.
+> I'll wait."
 
 ## 3. Wait for sessions
 
@@ -50,7 +64,7 @@ Open a Monitor on the SSE stream. Each `data:` line is one new session
 notification:
 
 ```bash
-curl -sN http://127.0.0.1:7878/v1/sessions/stream \
+curl -sN "$BASE/v1/sessions/stream" \
   | grep --line-buffered '^data:' \
   | sed -u 's/^data: //'
 ```
@@ -65,7 +79,7 @@ curl -sN http://127.0.0.1:7878/v1/sessions/stream \
 ### Fallback — `--polling`
 
 ```bash
-curl -sf --max-time 30 http://127.0.0.1:7878/v1/sessions/poll
+curl -sf --max-time 30 "$BASE/v1/sessions/poll"
 ```
 
 Returns 200 + JSON when a session arrives, 204 on timeout. Re-poll
@@ -86,6 +100,10 @@ indefinitely (see §9 — loop after each session, never stop on your own).
 
 The screenshot is on disk at `{projectRoot}/{fullPageScreenshotPath}` —
 read it with the Read tool (it's a PNG; the visual UI will display it).
+
+> **Sanity-check** the session's `projectRoot` matches your cwd. Multi-
+> project mode discovery should make this reliable, but if a stale
+> registry entry leaked through, refuse to edit and tell the user.
 
 ## 4. Locate source files for each annotation
 
@@ -126,10 +144,39 @@ happening, but don't ask "reply go to apply."
 ## 6. Mark the session as applying
 
 ```bash
-curl -sf -X POST http://127.0.0.1:7878/v1/sessions/{id}/status \
+curl -sf -X POST "$BASE/v1/sessions/{id}/status" \
   -H "Content-Type: application/json" \
   -d '{"status":"applying"}'
 ```
+
+## 7.4 Annotation reference images
+
+A `select` annotation may carry an `images: AnnotationImage[]` field —
+the user pasted or drag-dropped reference screenshots into the
+annotation popover (e.g. "make this look like [image1]"). The comment
+text typically uses `[image1]`, `[image2]` placeholders to reference
+them.
+
+Each image carries either:
+
+- `dataUrl` — inline base64 PNG/JPEG, OR
+- `path` — relative to `projectRoot` (companion may extract large
+  attachments to disk in a future version)
+
+When you build the plan, **read each referenced image** for visual
+context before deciding how to apply the edit. With the Read tool:
+
+```bash
+# If dataUrl is inline, write it to a temp PNG first:
+echo "<base64>" | base64 -d > /tmp/pinta-image1.png
+# Then Read /tmp/pinta-image1.png — Claude will see it as vision input.
+
+# If `path` is set, just Read $projectRoot/$path directly.
+```
+
+Mention each referenced image in the plan ("matching the dropdown
+styling shown in [image1]"). The user is using them as ground truth —
+respect the visual.
 
 ## 7.5 Applying inline-editor changes (Phase 8a)
 
@@ -183,7 +230,7 @@ For **each** annotation, in order:
 1. Mark in-progress (side panel card spins):
 
    ```bash
-   curl -sf -X POST http://127.0.0.1:7878/v1/sessions/{id}/annotations/{annId}/status \
+   curl -sf -X POST "$BASE/v1/sessions/{id}/annotations/{annId}/status" \
      -H "Content-Type: application/json" \
      -d '{"status":"applying"}'
    ```
@@ -193,7 +240,7 @@ For **each** annotation, in order:
 3. Mark done (card flips to ✓):
 
    ```bash
-   curl -sf -X POST http://127.0.0.1:7878/v1/sessions/{id}/annotations/{annId}/status \
+   curl -sf -X POST "$BASE/v1/sessions/{id}/annotations/{annId}/status" \
      -H "Content-Type: application/json" \
      -d '{"status":"done"}'
    ```
@@ -201,7 +248,7 @@ For **each** annotation, in order:
    Or, if you couldn't apply it:
 
    ```bash
-   curl -sf -X POST http://127.0.0.1:7878/v1/sessions/{id}/annotations/{annId}/status \
+   curl -sf -X POST "$BASE/v1/sessions/{id}/annotations/{annId}/status" \
      -H "Content-Type: application/json" \
      -d '{"status":"error","errorMessage":"<reason>"}'
    ```
@@ -215,7 +262,7 @@ After all annotations: run the project's lint / test / typecheck commands
 ## 8. (Optional) Final session summary
 
 ```bash
-curl -sf -X POST http://127.0.0.1:7878/v1/sessions/{id}/status \
+curl -sf -X POST "$BASE/v1/sessions/{id}/status" \
   -H "Content-Type: application/json" \
   -d '{"status":"done","summary":"Tonalized SubmitButton, removed expiry icon, padded ClaimSummaryCard."}'
 ```
@@ -223,7 +270,7 @@ curl -sf -X POST http://127.0.0.1:7878/v1/sessions/{id}/status \
 For total failure (could not start at all):
 
 ```bash
-curl -sf -X POST http://127.0.0.1:7878/v1/sessions/{id}/status \
+curl -sf -X POST "$BASE/v1/sessions/{id}/status" \
   -H "Content-Type: application/json" \
   -d '{"status":"error","errorMessage":"..."}'
 ```
@@ -250,3 +297,6 @@ In both modes, only stop when:
   pass per file when possible.
 - The HMR refresh in the browser is the user's verification step. If they
   spot a regression, expect a follow-up session.
+- Multi-project: every companion picks the next free port (7878, 7879, …).
+  Skill discovery uses `~/.pinta/registry.json`, so always rebuild `$BASE`
+  if you suspect drift (e.g. user restarted the companion mid-session).

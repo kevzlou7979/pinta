@@ -60,6 +60,30 @@ export type Annotation = {
    */
   contentChange?: { textBefore: string; textAfter: string };
 
+  /**
+   * Reference images attached by the user — pasted into the comment
+   * popover or drag-dropped onto it. The user typically refers to them
+   * inline as `[image1]`, `[image2]`, etc. The agent reads them as
+   * visual context for the change (e.g. "make this look like [image1]").
+   *
+   * Inline base64 dataUrls for now. Companion may extract to disk and
+   * replace with `path` later for large attachments.
+   */
+  images?: AnnotationImage[];
+};
+
+export type AnnotationImage = {
+  /** Stable id ("image1", "image2") used in inline `[imageN]` references. */
+  id: string;
+  /** MIME type, e.g. "image/png", "image/jpeg". */
+  mediaType: string;
+  /** Base64 data URL — inline payload. */
+  dataUrl?: string;
+  /** Path on disk relative to projectRoot, set after companion extraction. */
+  path?: string;
+  /** Optional original filename if dropped from disk. */
+  name?: string;
+
   viewport: { scrollY: number; width: number; height: number };
 
   status?: AnnotationStatus;

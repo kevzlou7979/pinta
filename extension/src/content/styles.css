@@ -234,6 +234,70 @@
   font-size: 10.5px;
   color: #c72d7d;
 }
+.popup--drop {
+  outline: 2px dashed #ff3d6e;
+  outline-offset: -4px;
+}
+.thumbs {
+  display: flex;
+  gap: 6px;
+  flex-wrap: wrap;
+  margin-top: 8px;
+}
+.thumb {
+  position: relative;
+  width: 56px;
+  height: 56px;
+  border-radius: 6px;
+  border: 1px solid #ebe0e9;
+  background: #fef9f0;
+  overflow: hidden;
+  flex: 0 0 auto;
+}
+.thumb img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  display: block;
+}
+.thumb__token {
+  position: absolute;
+  bottom: 2px;
+  left: 2px;
+  background: rgba(15, 23, 42, 0.78);
+  color: white;
+  font:
+    600 9px / 1 ui-monospace,
+    SFMono-Regular,
+    Menlo,
+    monospace;
+  padding: 2px 4px;
+  border-radius: 3px;
+  letter-spacing: 0.02em;
+}
+.thumb__x {
+  position: absolute;
+  top: 2px;
+  right: 2px;
+  width: 16px;
+  height: 16px;
+  border-radius: 50%;
+  border: 0;
+  background: rgba(15, 23, 42, 0.85);
+  color: white;
+  font:
+    700 11px / 1 ui-sans-serif,
+    system-ui,
+    sans-serif;
+  cursor: pointer;
+  padding: 0;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+}
+.thumb__x:hover {
+  background: #ff3d6e;
+}
 .popup textarea {
   width: 100%;
   box-sizing: border-box;

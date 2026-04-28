@@ -1,5 +1,6 @@
 <script lang="ts">
   import { onMount } from "svelte";
+  import type { AnnotationImage } from "@pinta/shared";
 
   type LiveStyles = {
     fontFamily: string;
@@ -26,6 +27,7 @@
     customCss: string;
     cssChanges: Record<string, string>;
     contentAfter: string;
+    images: AnnotationImage[];
     onsubmit: () => void;
     oncancel: () => void;
   };
@@ -38,9 +40,100 @@
     customCss = $bindable(""),
     cssChanges = $bindable<Record<string, string>>({}),
     contentAfter = $bindable<string>(""),
+    images = $bindable<AnnotationImage[]>([]),
     onsubmit,
     oncancel,
   }: Props = $props();
+
+  let commentTextarea: HTMLTextAreaElement | undefined = $state();
+  let dropActive = $state(false);
+
+  function readBlob(blob: File | Blob): Promise<string> {
+    return new Promise((resolve, reject) => {
+      const reader = new FileReader();
+      reader.onload = () => resolve(reader.result as string);
+      reader.onerror = () => reject(reader.error ?? new Error("read failed"));
+      reader.readAsDataURL(blob);
+    });
+  }
+
+  async function attachImage(blob: File | Blob, name?: string) {
+    const dataUrl = await readBlob(blob);
+    const id = `image${images.length + 1}`;
+    images = [...images, { id, mediaType: blob.type || "image/png", dataUrl, name }];
+    insertPlaceholder(`[${id}]`);
+  }
+
+  function insertPlaceholder(token: string) {
+    if (activeTab !== "comment") activeTab = "comment";
+    const ta = commentTextarea;
+    if (ta) {
+      const start = ta.selectionStart;
+      const end = ta.selectionEnd;
+      const before = comment.slice(0, start);
+      const after = comment.slice(end);
+      const sep = before.length > 0 && !before.endsWith(" ") ? " " : "";
+      comment = before + sep + token + (after.startsWith(" ") || after.length === 0 ? "" : " ") + after;
+      // restore cursor just after the inserted token
+      requestAnimationFrame(() => {
+        const pos = before.length + sep.length + token.length;
+        ta.focus();
+        ta.setSelectionRange(pos, pos);
+      });
+    } else {
+      const sep = comment.length > 0 && !comment.endsWith(" ") ? " " : "";
+      comment = comment + sep + token;
+    }
+  }
+
+  function removeImageAt(idx: number) {
+    const removed = images[idx];
+    if (!removed) return;
+    images = images.filter((_, i) => i !== idx).map((img, i) => ({ ...img, id: `image${i + 1}` }));
+    // Strip the placeholder for the removed image and renumber the rest in
+    // the comment text so [imageN] references keep matching.
+    let next = comment.split(`[${removed.id}]`).join("").replace(/\s{2,}/g, " ").trim();
+    // Renumber: walk from the highest down to avoid clobbering lower ids.
+    for (let i = images.length; i >= 1; i--) {
+      const oldToken = `[image${i + 1}]`; // shifted up before we filtered
+      const newToken = `[image${i}]`;
+      next = next.split(oldToken).join(newToken);
+    }
+    comment = next;
+  }
+
+  async function onPaste(e: ClipboardEvent) {
+    const items = e.clipboardData?.items;
+    if (!items) return;
+    for (const item of items) {
+      if (item.kind === "file" && item.type.startsWith("image/")) {
+        e.preventDefault();
+        const blob = item.getAsFile();
+        if (blob) await attachImage(blob, blob.name);
+      }
+    }
+  }
+
+  async function onDrop(e: DragEvent) {
+    dropActive = false;
+    const files = e.dataTransfer?.files;
+    if (!files || files.length === 0) return;
+    e.preventDefault();
+    for (const file of files) {
+      if (file.type.startsWith("image/")) await attachImage(file, file.name);
+    }
+  }
+
+  function onDragOver(e: DragEvent) {
+    if (e.dataTransfer?.types?.includes("Files")) {
+      e.preventDefault();
+      dropActive = true;
+    }
+  }
+
+  function onDragLeave() {
+    dropActive = false;
+  }
 
   type Tab =
     | "comment"
@@ -160,7 +253,8 @@
     comment.trim().length > 0 ||
       customCss.trim().length > 0 ||
       cssChangeCount > 0 ||
-      contentDirty,
+      contentDirty ||
+      images.length > 0,
   );
 
   function onKey(e: KeyboardEvent) {
@@ -273,9 +367,15 @@
 
 <div
   class="popup popup--editor"
+  class:popup--drop={dropActive}
   style:top="{top}px"
   style:left="{left}px"
   style:width="{POPUP_W}px"
+  ondragover={onDragOver}
+  ondragleave={onDragLeave}
+  ondrop={onDrop}
+  role="region"
+  aria-label="Element editor"
 >
   <div class="popup__head">{title}</div>
 
@@ -300,11 +400,34 @@
 
   {#if activeTab === "comment"}
     <textarea
+      bind:this={commentTextarea}
       bind:value={comment}
       onkeydown={onKey}
-      placeholder="What do you want changed?"
+      onpaste={onPaste}
+      placeholder="What do you want changed? Paste or drop images for visual reference."
       rows="4"
     ></textarea>
+    {#if images.length > 0}
+      <div class="thumbs">
+        {#each images as img, i (img.id)}
+          <div class="thumb">
+            <img src={img.dataUrl} alt={`reference ${img.id}`} />
+            <span class="thumb__token">[{img.id}]</span>
+            <button
+              type="button"
+              class="thumb__x"
+              title="Remove {img.id}"
+              aria-label="Remove {img.id}"
+              onclick={() => removeImageAt(i)}
+            >×</button>
+          </div>
+        {/each}
+      </div>
+    {/if}
+    <p class="popup__hint">
+      Tip: paste a screenshot or drag an image in — it attaches as
+      <code>[image{images.length + 1}]</code> in the comment.
+    </p>
   {:else if activeTab === "content"}
     <textarea
       bind:value={contentAfter}

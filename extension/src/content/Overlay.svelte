@@ -30,6 +30,7 @@
     selectCustomCss = "";
     selectCssChanges = {};
     selectContentAfter = "";
+    selectImages = [];
   }
 
   function setMode(next: Mode, tool?: DrawTool) {
@@ -130,6 +131,7 @@
         selectCustomCss = "";
         selectCssChanges = {};
         selectContentAfter = "";
+        selectImages = [];
         textWasMutated = false;
       }
       selected = el;
@@ -168,6 +170,7 @@
   let selectCustomCss = $state("");
   let selectCssChanges = $state<Record<string, string>>({});
   let selectContentAfter = $state("");
+  let selectImages = $state<import("@pinta/shared").AnnotationImage[]>([]);
 
   // Snapshot of the element's original inline styles + innerHTML BEFORE
   // we start mutating it for live preview. Restored on Cancel / Submit
@@ -316,8 +319,9 @@
     const hasComment = selectComment.trim().length > 0;
     const hasCss = selectCustomCss.trim().length > 0;
     const hasChanges = Object.keys(selectCssChanges).length > 0;
+    const hasImages = selectImages.length > 0;
     const contentDirty = selectContentAfter.trim() !== liveText.trim();
-    if (!hasComment && !hasCss && !hasChanges && !contentDirty) return;
+    if (!hasComment && !hasCss && !hasChanges && !contentDirty && !hasImages) return;
     // Capture target BEFORE restoring the DOM — so target.outerHTML +
     // computedStyles reflect the user's intended state, not the original.
     const target = captureTarget(selected);
@@ -346,6 +350,7 @@
       contentChange: contentDirty
         ? { textBefore: beforeText, textAfter: selectContentAfter.trim() }
         : undefined,
+      images: hasImages ? selectImages : undefined,
       viewport: snapshotViewport(),
     });
     // Keep the inline preview applied — the user wants a cumulative
@@ -357,6 +362,7 @@
     selectCustomCss = "";
     selectCssChanges = {};
     selectContentAfter = "";
+    selectImages = [];
     textWasMutated = false;
     setMode("idle");
   }
@@ -366,6 +372,7 @@
     selectCustomCss = "";
     selectCssChanges = {};
     selectContentAfter = "";
+    selectImages = [];
   }
 
   // Submit a draft drawing as an annotation.
@@ -501,6 +508,7 @@
       bind:customCss={selectCustomCss}
       bind:cssChanges={selectCssChanges}
       bind:contentAfter={selectContentAfter}
+      bind:images={selectImages}
       onsubmit={submitSelect}
       oncancel={clearSelectAndCss}
     />

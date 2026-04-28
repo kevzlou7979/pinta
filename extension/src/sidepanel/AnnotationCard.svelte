@@ -138,6 +138,31 @@
             class="mt-1 px-2 py-1.5 rounded bg-brand-cream text-brand-magenta dark:bg-night-alt dark:text-brand-pink-light text-[11px] font-mono overflow-x-auto whitespace-pre-wrap break-words"
             title="Custom CSS to apply">{annotation.customCss}</pre>
         {/if}
+        {#if annotation.images && annotation.images.length > 0}
+          <div class="mt-1.5 flex gap-1 flex-wrap">
+            {#each annotation.images as img (img.id)}
+              <a
+                href={img.dataUrl ?? "#"}
+                target="_blank"
+                rel="noopener"
+                title="{img.id} — open in new tab"
+                class="relative block w-12 h-12 rounded overflow-hidden border border-ink-200 dark:border-night-line"
+              >
+                {#if img.dataUrl}
+                  <img
+                    src={img.dataUrl}
+                    alt={img.id}
+                    class="w-full h-full object-cover"
+                  />
+                {/if}
+                <span
+                  class="absolute bottom-0 left-0 right-0 text-[8px] text-white text-center font-mono"
+                  style="background: rgba(15, 23, 42, 0.78);"
+                >{img.id}</span>
+              </a>
+            {/each}
+          </div>
+        {/if}
         {#if annotation.status === "error" && annotation.errorMessage}
           <p class="text-[11px] text-red-600 dark:text-red-300 mt-1">
             {annotation.errorMessage}

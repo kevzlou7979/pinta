@@ -6,6 +6,8 @@
   import { compositeAnnotations } from "../lib/composite.js";
   import { formatSessionAsClipboard } from "../lib/format-clipboard.js";
   import { theme, toggleTheme } from "../lib/theme.svelte.js";
+  import { matchAny, suggestPattern } from "../lib/url-patterns.js";
+  import type { Companion } from "../lib/companions.js";
   import StatusPill from "./StatusPill.svelte";
   import AnnotationCard from "./AnnotationCard.svelte";
   import SessionHistory from "./SessionHistory.svelte";
@@ -70,12 +72,17 @@
     customCss?: string;
     cssChanges?: Record<string, string>;
     contentChange?: { textBefore: string; textAfter: string };
+    images?: import("@pinta/shared").AnnotationImage[];
     viewport?: { scrollY: number; width: number; height: number };
     annotation?: Annotation;
   };
 
+  let projectMenuOpen = $state(false);
+  let associating = $state(false);
+  let associatedAt = $state<number | null>(null);
+  let associateError = $state<string | null>(null);
+
   onMount(async () => {
-    app.start();
     try {
       const [tab] = await chrome.tabs.query({
         active: true,
@@ -86,6 +93,28 @@
     } catch {
       // not running in extension context (e.g. dev preview)
     }
+    // Discover companions + auto-pick by URL pattern. Must follow the
+    // tab query so the URL is available for routing.
+    await app.start(pageUrl || null);
+
+    // When the active tab changes (user navigates), re-evaluate routing.
+    const onTabActivated = async () => {
+      try {
+        const [tab] = await chrome.tabs.query({
+          active: true,
+          currentWindow: true,
+        });
+        pageUrl = tab?.url ?? "";
+        activeTabId = tab?.id ?? null;
+        await app.rescan(pageUrl || null);
+      } catch {
+        // ignore — likely transient
+      }
+    };
+    chrome.tabs?.onActivated?.addListener(onTabActivated);
+    chrome.tabs?.onUpdated?.addListener((tabId, info) => {
+      if (info.url && tabId === activeTabId) onTabActivated();
+    });
 
     const handler = (msg: unknown) => {
       const m = msg as IncomingMsg;
@@ -103,6 +132,7 @@
               ? m.cssChanges
               : undefined,
           contentChange: m.contentChange,
+          images: m.images && m.images.length > 0 ? m.images : undefined,
           target: m.target,
           viewport: m.viewport ?? snapshotViewport(),
         };
@@ -144,6 +174,65 @@
       includeScreenshot = true;
     }
   });
+
+  // Routing-mismatch detection: side panel is connected to a companion
+  // but the active tab URL doesn't match any of its URL patterns. Two
+  // sub-states matter — patterns are empty (offer to associate) vs.
+  // patterns set but none match (warn before submit).
+  const matchesSelected = $derived(
+    !!app.selectedCompanion &&
+      !!pageUrl &&
+      app.selectedCompanion.urlPatterns.length > 0 &&
+      matchAny(pageUrl, app.selectedCompanion.urlPatterns),
+  );
+  const showAssociatePrompt = $derived(
+    !!app.selectedCompanion &&
+      !!pageUrl &&
+      pageUrl.startsWith("http") &&
+      !matchesSelected,
+  );
+
+  function shortRoot(path: string): string {
+    // Show the trailing path segment (project name) — full path is in title.
+    const norm = path.replace(/\\/g, "/");
+    const trimmed = norm.replace(/\/$/, "");
+    const seg = trimmed.split("/").pop();
+    return seg || trimmed;
+  }
+
+  async function selectCompanion(c: Companion | null) {
+    projectMenuOpen = false;
+    await app.select(c);
+  }
+
+  async function associateActiveUrl() {
+    if (!pageUrl || !app.selectedCompanion || associating) return;
+    associating = true;
+    associateError = null;
+    try {
+      await app.associateUrl(suggestPattern(pageUrl));
+      associatedAt = Date.now();
+      // Clear the success indicator after a couple seconds. The banner
+      // will hide itself the moment matchesSelected flips to true, but
+      // keep the success badge visible for a beat in case the URL also
+      // changed during the request.
+      setTimeout(() => {
+        if (associatedAt && Date.now() - associatedAt >= 1900) {
+          associatedAt = null;
+        }
+      }, 2000);
+    } catch (err) {
+      // Surface in two places so the user can't miss it: inline in the
+      // banner (next to the button) AND the global error strip below.
+      const msg = (err as Error).message;
+      associateError = msg;
+      app.lastError = `associate failed: ${msg}`;
+      // eslint-disable-next-line no-console
+      console.error("[pinta] associate failed", err);
+    } finally {
+      associating = false;
+    }
+  }
 
   async function setActive(tool: Tool | null) {
     if (activeTabId == null) return;
@@ -358,14 +447,97 @@
   >
     <div class="flex items-center gap-2 min-w-0">
       <img src="/icons/icon-32.png" alt="" width="24" height="24" />
-      <div class="min-w-0">
+      <div class="min-w-0 relative">
         <h1 class="font-semibold text-sm dark:text-night-text">Pinta</h1>
-        <p
-          class="text-xs text-ink-500 dark:text-night-dim truncate max-w-[200px]"
-          title={pageUrl}
-        >
-          {pageUrl || "no active page"}
-        </p>
+        {#if app.selectedCompanion}
+          <button
+            type="button"
+            class="flex items-center gap-1 text-xs text-ink-600 dark:text-night-dim hover:text-brand-pink dark:hover:text-brand-pink-light max-w-[200px] truncate"
+            title={app.selectedCompanion.projectRoot}
+            onclick={() => (projectMenuOpen = !projectMenuOpen)}
+            aria-haspopup="listbox"
+            aria-expanded={projectMenuOpen}
+          >
+            <span class="truncate font-medium">{shortRoot(app.selectedCompanion.projectRoot)}</span>
+            <span class="text-ink-400 dark:text-night-mute">:{app.selectedCompanion.port}</span>
+            <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="6 9 12 15 18 9"/></svg>
+          </button>
+        {:else if app.scanning}
+          <p class="text-xs text-ink-500 dark:text-night-dim">scanning…</p>
+        {:else if app.companions.length > 0}
+          <button
+            type="button"
+            class="flex items-center gap-1 text-xs text-brand-pink dark:text-brand-pink-light hover:underline"
+            onclick={() => (projectMenuOpen = !projectMenuOpen)}
+            aria-haspopup="listbox"
+            aria-expanded={projectMenuOpen}
+          >
+            Pick project ({app.companions.length})
+            <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="6 9 12 15 18 9"/></svg>
+          </button>
+        {:else}
+          <p class="text-xs text-ink-500 dark:text-night-dim">no companion running</p>
+        {/if}
+
+        {#if projectMenuOpen}
+          <div
+            class="absolute left-0 top-full mt-1 w-[280px] z-30 rounded-md border border-ink-300 bg-white shadow-lg dark:border-night-line dark:bg-night-alt"
+            role="listbox"
+          >
+            {#if app.companions.length === 0}
+              <div class="p-3 text-xs text-ink-600 dark:text-night-dim">
+                <p class="mb-2">No companion is running.</p>
+                <p class="mb-2">Start one in your project root:</p>
+                <code class="block bg-ink-100 dark:bg-night-card px-2 py-1.5 rounded font-mono text-[11px]">npx pinta-companion .</code>
+              </div>
+            {:else}
+              <ul class="max-h-[280px] overflow-y-auto py-1">
+                {#each app.companions as c (c.port)}
+                  <li>
+                    <button
+                      type="button"
+                      class={[
+                        "w-full text-left px-3 py-2 text-xs flex items-start gap-2 hover:bg-ink-50 dark:hover:bg-night-line",
+                        app.selectedCompanion?.port === c.port
+                          ? "bg-ink-50 dark:bg-night-line"
+                          : "",
+                      ].join(" ")}
+                      onclick={() => selectCompanion(c)}
+                    >
+                      <span
+                        class={[
+                          "mt-1 w-1.5 h-1.5 rounded-full shrink-0",
+                          app.selectedCompanion?.port === c.port
+                            ? "bg-brand-pink"
+                            : "bg-ink-300 dark:bg-night-line2",
+                        ].join(" ")}
+                      ></span>
+                      <span class="flex-1 min-w-0">
+                        <span class="block font-medium text-ink-900 dark:text-night-text truncate" title={c.projectRoot}>
+                          {shortRoot(c.projectRoot)}
+                        </span>
+                        <span class="block text-[10px] text-ink-500 dark:text-night-mute truncate">
+                          port {c.port}
+                          {#if c.urlPatterns.length}· {c.urlPatterns.length} pattern{c.urlPatterns.length > 1 ? "s" : ""}{/if}
+                        </span>
+                      </span>
+                    </button>
+                  </li>
+                {/each}
+              </ul>
+            {/if}
+            <div class="border-t border-ink-200 dark:border-night-line p-2">
+              <button
+                type="button"
+                class="w-full text-[11px] text-ink-600 dark:text-night-dim hover:text-brand-pink dark:hover:text-brand-pink-light flex items-center justify-center gap-1 py-1"
+                onclick={() => app.rescan(pageUrl || null)}
+                disabled={app.scanning}
+              >
+                {app.scanning ? "scanning…" : "↻ Rescan"}
+              </button>
+            </div>
+          </div>
+        {/if}
       </div>
     </div>
     <div class="flex items-center gap-2 shrink-0">
@@ -387,6 +559,94 @@
   </header>
 
   <main class="flex-1 overflow-y-auto p-4 space-y-4">
+    {#if app.companions.length === 0 && !app.scanning}
+      <div class="rounded-md border border-amber-300 bg-amber-50 dark:border-amber-700/40 dark:bg-amber-950/40 p-3 text-xs text-amber-900 dark:text-amber-200">
+        <p class="font-semibold mb-1">No companion is running</p>
+        <p class="mb-2 leading-snug">Start one in the project root you want to edit:</p>
+        <code class="block bg-white/60 dark:bg-black/30 px-2 py-1.5 rounded font-mono text-[11px] mb-2">npx pinta-companion .</code>
+        <button
+          type="button"
+          class="text-amber-900 dark:text-amber-200 underline underline-offset-2 hover:no-underline"
+          onclick={() => app.rescan(pageUrl || null)}
+        >
+          ↻ Rescan
+        </button>
+      </div>
+    {:else if showAssociatePrompt && app.selectedCompanion}
+      {@const sel = app.selectedCompanion}
+      {@const suggestedPattern = suggestPattern(pageUrl)}
+      <div class="rounded-md border border-amber-300 bg-amber-50 dark:border-amber-700/40 dark:bg-amber-950/40 p-3 text-xs text-amber-900 dark:text-amber-200 space-y-2.5">
+        <div class="flex items-start gap-2">
+          <svg class="shrink-0 mt-0.5" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 9v4"/><path d="M12 17h.01"/><path d="M10.29 3.86 1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"/></svg>
+          <div class="flex-1">
+            <p class="font-semibold">
+              {#if sel.urlPatterns.length === 0}
+                No URL patterns set for {shortRoot(sel.projectRoot)}
+              {:else}
+                URL doesn't match any of {shortRoot(sel.projectRoot)}'s patterns
+              {/if}
+            </p>
+            <p class="leading-snug mt-0.5 text-amber-800 dark:text-amber-300">
+              Annotations still go to <strong>{shortRoot(sel.projectRoot)}</strong>.
+              Save the pattern below so this tab auto-routes next time.
+            </p>
+          </div>
+        </div>
+
+        <div class="space-y-1">
+          <div class="text-[10px] uppercase tracking-wide text-amber-700 dark:text-amber-400 font-semibold">Pattern</div>
+          <code class="block bg-white/70 dark:bg-black/30 border border-amber-200 dark:border-amber-800/50 px-2 py-1.5 rounded font-mono text-[11px] text-amber-900 dark:text-amber-100 break-all">
+            {suggestedPattern}
+          </code>
+        </div>
+
+        <button
+          type="button"
+          class={[
+            "w-full rounded-md text-white text-xs font-medium py-2 transition-colors disabled:opacity-60 inline-flex items-center justify-center gap-1.5",
+            associatedAt
+              ? "bg-emerald-600 hover:bg-emerald-700"
+              : "bg-amber-600 hover:bg-amber-700",
+          ].join(" ")}
+          onclick={associateActiveUrl}
+          disabled={associating || !!associatedAt}
+        >
+          {#if associating}
+            <svg class="animate-spin" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" aria-hidden="true"><path d="M21 12a9 9 0 1 1-6.219-8.56"/></svg>
+            Saving…
+          {:else if associatedAt}
+            <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="20 6 9 17 4 12"/></svg>
+            Saved — auto-routing this URL next time
+          {:else}
+            Save pattern to .pinta.json
+          {/if}
+        </button>
+
+        {#if associateError}
+          <p class="text-[11px] text-red-700 dark:text-red-300 bg-red-50 dark:bg-red-950/40 border border-red-200 dark:border-red-900/40 rounded px-2 py-1.5">
+            <strong>Couldn't save:</strong> {associateError}
+            <button
+              type="button"
+              class="ml-1 underline underline-offset-2"
+              onclick={() => (associateError = null)}
+            >
+              dismiss
+            </button>
+          </p>
+        {/if}
+
+        {#if app.companions.length > 1 && !associatedAt}
+          <button
+            type="button"
+            class="text-[11px] underline underline-offset-2 hover:no-underline text-amber-800 dark:text-amber-300"
+            onclick={() => (projectMenuOpen = true)}
+          >
+            Or pick a different project →
+          </button>
+        {/if}
+      </div>
+    {/if}
+
     <section class="space-y-2">
       <h2 class="text-xs uppercase tracking-wide text-ink-500 dark:text-night-mute font-medium">
         Tool
