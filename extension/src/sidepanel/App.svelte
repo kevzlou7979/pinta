@@ -64,6 +64,7 @@
 
   type IncomingMsg = {
     type?: string;
+    annotationId?: string;
     target?: AnnotationTarget;
     comment?: string;
     customCss?: string;
@@ -90,7 +91,7 @@
       const m = msg as IncomingMsg;
       if (m?.type === "annotation.target-selected" && m.target) {
         const annotation: Annotation = {
-          id: uid("ann"),
+          id: m.annotationId ?? uid("ann"),
           createdAt: Date.now(),
           kind: "select",
           strokes: [],
@@ -203,10 +204,22 @@
 
   function removeAnnotation(id: string) {
     app.removeAnnotation(id);
+    // Drop the matching pin badge in the content overlay too.
+    if (activeTabId != null) {
+      chrome.tabs
+        .sendMessage(activeTabId, { type: "annotated.remove", annotationId: id })
+        .catch(() => {});
+    }
   }
 
   async function cancelSession() {
     if (!app.session) return;
+    // Wipe pin badges in the content overlay before the session resets.
+    if (activeTabId != null) {
+      chrome.tabs
+        .sendMessage(activeTabId, { type: "annotated.clear" })
+        .catch(() => {});
+    }
     await app.cancelAndRestart(pageUrl || app.session.url);
     activeTool = null;
   }

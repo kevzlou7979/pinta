@@ -38,11 +38,19 @@
     if (next !== "select") clearSelectState();
   }
 
-  // Listen for mode toggles from the side panel.
+  // Listen for mode toggles + annotated-pin lifecycle from the side panel.
   onMount(() => {
     const handler = (msg: unknown) => {
-      const m = msg as { type?: string; mode?: Mode; tool?: DrawTool };
+      const m = msg as {
+        type?: string;
+        mode?: Mode;
+        tool?: DrawTool;
+        annotationId?: string;
+      };
       if (m?.type === "mode.set" && m.mode) setMode(m.mode, m.tool);
+      else if (m?.type === "annotated.remove" && m.annotationId)
+        content.removeAnnotatedById(m.annotationId);
+      else if (m?.type === "annotated.clear") content.clearAnnotated();
     };
     chrome.runtime.onMessage.addListener(handler);
     return () => chrome.runtime.onMessage.removeListener(handler);
@@ -287,8 +295,17 @@
     // computedStyles reflect the user's intended state, not the original.
     const target = captureTarget(selected);
     const beforeText = originalText ?? liveText;
+    // Pre-generate the annotation ID so the content script and side
+    // panel agree on it (used to clean up the pin badge if the user
+    // removes the annotation from the side panel later).
+    const annId =
+      typeof crypto !== "undefined" && "randomUUID" in crypto
+        ? `ann-${crypto.randomUUID()}`
+        : `ann-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
+    content.recordAnnotated(annId, selected);
     chrome.runtime.sendMessage({
       type: "annotation.target-selected",
+      annotationId: annId,
       target,
       comment: selectComment.trim(),
       customCss: hasCss ? selectCustomCss.trim() : undefined,
@@ -400,6 +417,20 @@
 </script>
 
 <Canvas />
+
+<!-- Persistent pin badges for elements already annotated this session -->
+{#each content.annotated as a (a.id)}
+  {@const r = rectOf(a.element)}
+  {#if r}
+    <div
+      class="pin"
+      style:top="{Math.max(0, r.top - 8)}px"
+      style:left="{Math.max(0, r.left + r.width - 16)}px"
+      title="Annotation #{a.index}"
+      aria-label="Annotation {a.index}"
+    >{a.index}</div>
+  {/if}
+{/each}
 
 {#if content.mode === "select"}
   {#if hoverRect && !selected}

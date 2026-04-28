@@ -27,6 +27,12 @@ class ContentState {
   // The just-completed stroke awaiting a comment.
   pending = $state<Draft | null>(null);
 
+  // DOM elements the user has annotated in the current page session.
+  // Each gets a numbered pin badge in the overlay so they can see at a
+  // glance what's already been picked. Cleared when the side panel
+  // cancels/starts a new session.
+  annotated = $state<{ id: string; element: Element; index: number }[]>([]);
+
   setMode(next: Mode) {
     this.mode = next;
     if (next !== "draw") {
@@ -89,6 +95,23 @@ class ContentState {
 
   recordCommitted(annotation: Annotation): void {
     this.committed = [...this.committed, annotation];
+  }
+
+  recordAnnotated(id: string, element: Element): number {
+    const index = this.annotated.length + 1;
+    this.annotated = [...this.annotated, { id, element, index }];
+    return index;
+  }
+
+  removeAnnotatedById(id: string): void {
+    const next = this.annotated
+      .filter((a) => a.id !== id)
+      .map((a, i) => ({ ...a, index: i + 1 }));
+    this.annotated = next;
+  }
+
+  clearAnnotated(): void {
+    this.annotated = [];
   }
 }
 
