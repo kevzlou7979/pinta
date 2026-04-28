@@ -185,11 +185,22 @@
       app.selectedCompanion.urlPatterns.length > 0 &&
       matchAny(pageUrl, app.selectedCompanion.urlPatterns),
   );
+  // Annotations don't bleed across projects. When the active tab URL
+  // doesn't match any of the connected companion's patterns, gate the
+  // entire annotation UI behind the associate-or-pick prompt.
+  // Includes file:// (local docs / static HTML) and any other scheme
+  // beyond http(s) — the "scope to project" guarantee should hold
+  // regardless of where the page is loaded from. chrome:// and
+  // about://-style internal pages get a pass since the content script
+  // never injects there anyway.
+  const isAssociatable = $derived(
+    !!pageUrl &&
+      (pageUrl.startsWith("http://") ||
+        pageUrl.startsWith("https://") ||
+        pageUrl.startsWith("file://")),
+  );
   const showAssociatePrompt = $derived(
-    !!app.selectedCompanion &&
-      !!pageUrl &&
-      pageUrl.startsWith("http") &&
-      !matchesSelected,
+    !!app.selectedCompanion && isAssociatable && !matchesSelected,
   );
 
   function shortRoot(path: string): string {
