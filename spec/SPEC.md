@@ -341,14 +341,16 @@ Discovery is three-tier: explicit `--companion-url` /
 `$PINTA_COMPANION_URL` first, then `~/.pinta/registry.json` walk-up for
 `$CLAUDE_PROJECT_DIR` (else cwd), then `localhost:7878` as a fallback.
 
-User adds the bridge to their MCP config:
+User adds the bridge to their MCP config. `pinta-mcp` ships as a `bin`
+inside the `pinta-companion` npm package (not as a separate package),
+so the `npx` invocation needs `-p`:
 
 ```json
 {
   "mcpServers": {
     "pinta": {
       "command": "npx",
-      "args": ["pinta-mcp"]
+      "args": ["-y", "-p", "pinta-companion", "pinta-mcp"]
     }
   }
 }
