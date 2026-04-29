@@ -1,0 +1,207 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Pinta — Privacy Policy</title>
+  <meta name="description" content="Pinta privacy policy — what data the Pinta Chrome extension and companion server do (and don't) handle." />
+  <meta name="theme-color" content="#fbf7f5" media="(prefers-color-scheme: light)" />
+  <meta name="theme-color" content="#0e0a18" media="(prefers-color-scheme: dark)" />
+  <link rel="icon" type="image/png" sizes="32x32" href="assets/icons/icon-32.png" />
+  <link rel="icon" type="image/png" sizes="16x16" href="assets/icons/icon-16.png" />
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Poppins:wght@400;500;600;700&family=JetBrains+Mono:wght@400&display=swap" rel="stylesheet" />
+  <style>
+    :root {
+      --cream: #fbf7f5;
+      --paper: #ffffff;
+      --line: #ebe0e9;
+      --ink: #16110d;
+      --ink-dim: #5a4f44;
+      --ink-mute: #9a8e7a;
+      --pink: #ff3d6e;
+    }
+    [data-theme="dark"] {
+      --cream: #0e0a18;
+      --paper: #14101e;
+      --line: #2a1f3a;
+      --ink: #f4ecf2;
+      --ink-dim: #b9a8b9;
+      --ink-mute: #7a6a7a;
+    }
+    * { box-sizing: border-box; }
+    html, body { margin: 0; padding: 0; }
+    body {
+      background: var(--cream);
+      color: var(--ink);
+      font-family: "Poppins", system-ui, sans-serif;
+      font-size: 16px;
+      line-height: 1.65;
+      -webkit-font-smoothing: antialiased;
+    }
+    .wrap {
+      max-width: 720px;
+      margin: 0 auto;
+      padding: 56px 24px 96px;
+    }
+    header {
+      border-bottom: 1px solid var(--line);
+      padding-bottom: 24px;
+      margin-bottom: 40px;
+    }
+    .crumb {
+      font-size: 13px;
+      color: var(--ink-mute);
+      margin-bottom: 16px;
+    }
+    .crumb a { color: var(--ink-dim); text-decoration: none; }
+    .crumb a:hover { color: var(--pink); }
+    h1 {
+      font-size: 36px;
+      font-weight: 700;
+      letter-spacing: -0.02em;
+      margin: 0 0 8px;
+    }
+    .sub {
+      color: var(--ink-dim);
+      font-size: 15px;
+    }
+    h2 {
+      font-size: 22px;
+      font-weight: 600;
+      margin: 48px 0 12px;
+      letter-spacing: -0.01em;
+    }
+    h3 {
+      font-size: 16px;
+      font-weight: 600;
+      margin: 28px 0 8px;
+      color: var(--ink);
+    }
+    p { margin: 0 0 16px; color: var(--ink-dim); }
+    ul { margin: 0 0 16px 0; padding-left: 22px; }
+    li { margin-bottom: 6px; color: var(--ink-dim); }
+    code {
+      font-family: "JetBrains Mono", ui-monospace, monospace;
+      font-size: 0.88em;
+      background: var(--paper);
+      border: 1px solid var(--line);
+      padding: 1px 6px;
+      border-radius: 4px;
+      color: var(--ink);
+    }
+    .callout {
+      background: var(--paper);
+      border: 1px solid var(--line);
+      border-left: 3px solid var(--pink);
+      padding: 16px 20px;
+      border-radius: 6px;
+      margin: 20px 0;
+    }
+    .callout p:last-child { margin-bottom: 0; }
+    strong { color: var(--ink); }
+    a { color: var(--pink); text-decoration: none; }
+    a:hover { text-decoration: underline; }
+    footer {
+      border-top: 1px solid var(--line);
+      padding-top: 24px;
+      margin-top: 64px;
+      font-size: 13px;
+      color: var(--ink-mute);
+    }
+  </style>
+  <script>
+    (function () {
+      var html = document.documentElement;
+      try {
+        var stored = localStorage.getItem('pinta-theme');
+        var prefers = window.matchMedia('(prefers-color-scheme: dark)').matches;
+        var theme = stored || (prefers ? 'dark' : 'light');
+        if (theme === 'dark') html.setAttribute('data-theme', 'dark');
+      } catch (e) {}
+    })();
+  </script>
+</head>
+<body>
+  <div class="wrap">
+    <header>
+      <div class="crumb"><a href="./">← Pinta</a></div>
+      <h1>Privacy Policy</h1>
+      <p class="sub">Effective 2026-04-29 · Pinta v0.2.0</p>
+    </header>
+
+    <div class="callout">
+      <p><strong>The short version:</strong> Pinta is a single-user developer tool. Nothing leaves your machine. We don't operate any servers, collect any data, or use any analytics. The Chrome extension talks to a companion process on <code>localhost</code>; the companion talks to your AI coding agent (Claude Code, Cursor, Aider, etc.) which is also running locally.</p>
+    </div>
+
+    <h2>1. What Pinta does</h2>
+    <p>Pinta lets you annotate your running web app — drawings, element selections, comments — and hand the annotations to an AI coding agent that edits your project's source files. There are two pieces:</p>
+    <ul>
+      <li>The <strong>Chrome extension</strong> (this listing) — runs in your browser.</li>
+      <li>The <strong>companion server</strong> (<code>pinta-companion</code> on npm) — runs on your machine on <code>localhost</code>, started by you.</li>
+    </ul>
+
+    <h2>2. What data Pinta handles</h2>
+
+    <h3>Locally, in your browser</h3>
+    <ul>
+      <li><strong>Annotations</strong> — selectors, sanitized <code>outerHTML</code> snippets (max 2 KB), nearby text, computed styles, your free-form comments, and full-page screenshots.</li>
+      <li><strong>Theme preference</strong> — light or dark, in <code>chrome.storage.local</code>.</li>
+      <li><strong>Standalone-mode sessions</strong> — when no companion is running, annotations are saved to IndexedDB (<code>pinta-standalone</code> database), keyed by the URL's origin.</li>
+    </ul>
+
+    <h3>Sent to the companion (localhost only)</h3>
+    <p>When you click <strong>Submit</strong>, the extension sends the session payload over a WebSocket to <code>127.0.0.1</code> on the port the companion is listening on. The companion writes submitted sessions to <code>.pinta/sessions/</code> inside <em>your project root</em>. Both ends are on your machine.</p>
+
+    <h3>Sent to the agent</h3>
+    <p>The companion exposes the session over an HTTP API and an MCP server, both on <code>localhost</code>. Your AI coding agent (running locally) reads the session and decides what to edit. <strong>Pinta has no connection to the AI provider</strong> — the agent's own privacy policy governs how it handles the prompt.</p>
+
+    <h2>3. What Pinta does NOT do</h2>
+    <ul>
+      <li>No analytics, no telemetry, no usage tracking.</li>
+      <li>No remote servers. Pinta operates no cloud infrastructure.</li>
+      <li>No third-party SDKs, ad networks, or trackers in the extension.</li>
+      <li>No automatic capture of any kind. Annotations are user-initiated.</li>
+      <li>No background screenshot capture. Screenshots happen only when you click Submit (and the screenshot toggle is on).</li>
+    </ul>
+
+    <h2>4. Sensitive-data handling</h2>
+    <p>Captured <code>outerHTML</code> is sanitized client-side before it leaves the page: inline event handlers (<code>onclick</code> etc.), <code>integrity</code>, <code>nonce</code>, CSRF / token / auth / JWT / bearer attributes, and password input values are all stripped from the captured HTML. The capture is also truncated to 2 KB to bound exposure.</p>
+    <p>If you annotate inside a tab that has authenticated session state (cookies, tokens), the screenshot will of course render whatever's on the page — Pinta is showing the agent what <em>you</em> see. Treat your agent the same way you'd treat anyone you screen-share with.</p>
+
+    <h2>5. Permissions used</h2>
+    <ul>
+      <li><code>&lt;all_urls&gt;</code> host permission — Pinta is a developer tool you invoke on your own running app at any URL. No site is targeted automatically.</li>
+      <li><code>tabs</code> — to read the active tab URL for routing the session to the matching project companion.</li>
+      <li><code>activeTab</code> + <code>scripting</code> — to inject the annotation overlay and to capture screenshots of the user-activated tab.</li>
+      <li><code>sidePanel</code> — to host the side-panel UI.</li>
+      <li><code>storage</code> — for theme preference; standalone sessions use IndexedDB.</li>
+    </ul>
+
+    <h2>6. Third-party resources</h2>
+    <p>The extension bundles its fonts (Poppins) — no runtime fetch from Google Fonts. The landing page at <a href="https://kevzlou7979.github.io/pinta/">kevzlou7979.github.io/pinta</a> does load Google Fonts; that's a static site, not the extension. The extension itself makes no network calls beyond <code>localhost</code>.</p>
+
+    <h2>7. How to delete your data</h2>
+    <ul>
+      <li><strong>Standalone sessions</strong> — open the side panel, hit the <strong>✕</strong> next to Copy. Or in Chrome DevTools → Application → IndexedDB → delete <code>pinta-standalone</code>.</li>
+      <li><strong>Companion sessions</strong> — delete <code>.pinta/sessions/</code> from inside your project root.</li>
+      <li><strong>Theme preference</strong> — Chrome → Settings → Site settings → clear extension storage.</li>
+      <li><strong>Uninstall</strong> — removing the extension removes everything except files the companion wrote to your project (which are yours to manage).</li>
+    </ul>
+
+    <h2>8. Children</h2>
+    <p>Pinta is a developer tool. It is not directed at children under 13.</p>
+
+    <h2>9. Changes to this policy</h2>
+    <p>Material changes will be reflected by bumping the effective date at the top of this page and noted in the <a href="https://github.com/kevzlou7979/pinta/blob/main/CHANGELOG.md">CHANGELOG</a>.</p>
+
+    <h2>10. Contact</h2>
+    <p>Open an issue at <a href="https://github.com/kevzlou7979/pinta/issues">github.com/kevzlou7979/pinta/issues</a> or email <a href="mailto:kevzlou7979@gmail.com">kevzlou7979@gmail.com</a>.</p>
+
+    <footer>
+      Pinta is open source under the MIT License. Source: <a href="https://github.com/kevzlou7979/pinta">github.com/kevzlou7979/pinta</a>.
+    </footer>
+  </div>
+</body>
+</html>
