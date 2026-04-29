@@ -10,6 +10,12 @@ chrome.runtime.onInstalled.addListener(() => {
 });
 
 chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
+  // Drop messages that didn't originate from this extension. Chrome's
+  // default delivery already enforces this, but pin it down explicitly
+  // so adding `externally_connectable` later doesn't quietly open up
+  // these privileged paths (sidepanel.open, captureFullPage).
+  if (sender?.id !== chrome.runtime.id) return false;
+
   if (msg?.type === "open-side-panel") {
     const tabId = msg.tabId ?? sender.tab?.id;
     if (typeof tabId === "number") {
