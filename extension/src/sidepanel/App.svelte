@@ -191,6 +191,12 @@
   const allDone = $derived(
     app.session?.status === "done" || app.session?.status === "error",
   );
+  // Light up the per-annotation spinner the instant the user submits —
+  // don't wait for the agent to flip individual statuses to "applying".
+  // Sitting idle between Submit and the first agent edit is bad UX.
+  const sessionPending = $derived(
+    app.session?.status === "submitted" || app.session?.status === "applying",
+  );
   // Drawing-kind annotations carry only stroke coords + comment — no DOM
   // selector, no outerHTML. Without a screenshot the agent has nothing to
   // act on, so we auto-enable capture as soon as one lands in the session
@@ -976,6 +982,7 @@
             <AnnotationCard
               {annotation}
               canEdit={canEditAnnotations}
+              pending={sessionPending && annotation.status !== "done" && annotation.status !== "error"}
               onremove={() => removeAnnotation(annotation.id)}
               onsave={(comment) =>
                 app.updateAnnotation(annotation.id, { comment })}

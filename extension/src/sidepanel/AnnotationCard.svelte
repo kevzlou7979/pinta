@@ -4,10 +4,21 @@
   type Props = {
     annotation: Annotation;
     canEdit: boolean;
+    /** Session-level "waiting on agent" state. Lights up the spinner the
+     *  moment the user clicks Send, so the UI doesn't sit idle while the
+     *  agent decides which annotation to start with. Per-annotation
+     *  status (done / error / applying) still wins over this. */
+    pending?: boolean;
     onremove: () => void;
     onsave: (comment: string) => void;
   };
-  let { annotation, canEdit, onremove, onsave }: Props = $props();
+  let {
+    annotation,
+    canEdit,
+    pending = false,
+    onremove,
+    onsave,
+  }: Props = $props();
 
   let editing = $state(false);
   let draftComment = $state(annotation.comment);
@@ -51,13 +62,7 @@
   <div class="flex items-start gap-2">
     <!-- Status indicator -->
     <div class="pt-0.5 shrink-0">
-      {#if annotation.status === "applying"}
-        <span
-          class="inline-block w-3 h-3 rounded-full border-2 border-brand-pink border-t-transparent animate-spin"
-          title="Agent is applying this change"
-          aria-label="applying"
-        ></span>
-      {:else if annotation.status === "done"}
+      {#if annotation.status === "done"}
         <span
           class="inline-flex items-center justify-center w-4 h-4 rounded-full bg-emerald-600 text-white text-[10px] font-bold leading-none"
           title="Done"
@@ -73,6 +78,14 @@
         >
           !
         </span>
+      {:else if annotation.status === "applying" || pending}
+        <span
+          class="inline-block w-3 h-3 rounded-full border-2 border-brand-pink border-t-transparent animate-spin"
+          title={annotation.status === "applying"
+            ? "Agent is applying this change"
+            : "Waiting for agent"}
+          aria-label={annotation.status === "applying" ? "applying" : "waiting"}
+        ></span>
       {:else}
         <span
           class="inline-block w-3 h-3 rounded-full border border-ink-300 bg-white dark:bg-night-alt dark:border-night-line2"
