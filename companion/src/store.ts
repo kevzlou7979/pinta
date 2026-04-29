@@ -251,7 +251,10 @@ export class SessionStore {
    * claim has gone stale past `CLAIM_TTL_MS` without any heartbeat),
    * mark it claimed by `claimerId` and return `{ ok: true, session }`.
    * If actively claimed by someone else, return `{ ok: false, claimedBy }`.
-   * Idempotent for the same claimerId — re-claiming refreshes the TTL.
+   * Idempotent for the same claimerId — re-claiming returns ok with the
+   * existing claim. The TTL heartbeat is wired through `setStatus` /
+   * `setAnnotationStatus`, not through re-claim, so an agent that's
+   * actively reporting progress stays alive without explicit re-claims.
    */
   async tryClaim(
     sessionId: string,

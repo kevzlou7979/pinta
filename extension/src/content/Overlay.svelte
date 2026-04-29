@@ -3,7 +3,7 @@
   import type { Annotation } from "@pinta/shared";
   import { captureTarget } from "./capture.js";
   import { content, type Mode, type Draft } from "./state.svelte.js";
-  import type { DrawTool } from "./tools/draw.js";
+  import { targetAnchor, type DrawTool } from "./tools/draw.js";
   import Canvas from "./Canvas.svelte";
   import CommentInput from "./CommentInput.svelte";
   import ElementEditor from "./ElementEditor.svelte";
@@ -50,12 +50,23 @@
       };
       if (m?.type === "mode.set" && m.mode) setMode(m.mode, m.tool);
       else if (m?.type === "annotated.remove" && m.annotationId) {
+        // The side panel doesn't know whether an annotation came from
+        // select-mode (DOM element + pin badge) or draw-mode (canvas
+        // stroke). Try both collections — exactly one will match.
         const { entry } = content.removeAnnotatedById(m.annotationId);
         if (entry) restoreFromSnapshot(entry);
+        content.removeCommittedById(m.annotationId);
+        // Also drop the in-flight pending draft if its id was just removed
+        // — guards the corner case where the user removes from the side
+        // panel while still typing the comment.
+        if (content.pending?.id === m.annotationId) content.cancelPending();
       } else if (m?.type === "annotated.clear") {
         for (const entry of content.takeAllAnnotated()) {
           restoreFromSnapshot(entry);
         }
+        content.clearCommitted();
+        if (content.pending) content.cancelPending();
+        if (content.inProgress) content.cancelInProgress();
       }
     };
     chrome.runtime.onMessage.addListener(handler);
@@ -388,6 +399,11 @@
       color: draft.color,
       comment: draftComment.trim(),
       viewport: snapshotViewport(),
+      // Resolve the element under the drawing's "target anchor" (arrow
+      // head end, centroid for shapes, point for pin) so the annotation
+      // carries a selector + outerHTML even when the consumer can't see
+      // the screenshot — e.g. an agent reading just the .md file.
+      target: resolveDrawingTarget(draft) ?? undefined,
     };
     chrome.runtime.sendMessage({
       type: "annotation.draw-committed",
@@ -396,6 +412,25 @@
     content.recordCommitted(annotation);
     content.cancelPending();
     draftComment = "";
+  }
+
+  function resolveDrawingTarget(draft: Draft) {
+    const anchor = targetAnchor(draft.kind, draft.strokes);
+    if (!anchor) return null;
+    // page coords → viewport coords for elementFromPoint
+    const vx = anchor.x - window.scrollX;
+    const vy = anchor.y - window.scrollY;
+    if (vx < 0 || vy < 0 || vx > window.innerWidth || vy > window.innerHeight) {
+      // anchor scrolled off-screen — skip rather than guess
+      return null;
+    }
+    // Our shadow host is pointer-events:none, so elementFromPoint pierces
+    // through the overlay and returns the underlying page element.
+    const el = document.elementFromPoint(vx, vy);
+    if (!el) return null;
+    // Ignore the overlay host itself if browser ever returns it.
+    if (el.tagName === "PINTA-OVERLAY-HOST") return null;
+    return captureTarget(el);
   }
 
   function snapshotViewport() {
@@ -462,14 +497,15 @@
 <!-- Persistent pin badges for elements already annotated this session -->
 {#each content.annotated as a (a.id)}
   {@const r = rectOf(a.element)}
+  {@const n = content.globalSeq(a.id)}
   {#if r}
     <div
       class="pin"
       style:top="{Math.max(0, r.top - 8)}px"
       style:left="{Math.max(0, r.left + r.width - 16)}px"
-      title="Annotation #{a.index}"
-      aria-label="Annotation {a.index}"
-    >{a.index}</div>
+      title="Annotation #{n}"
+      aria-label="Annotation {n}"
+    >{n}</div>
   {/if}
 {/each}
 

@@ -4,9 +4,56 @@ Notable changes shipped on top of the original V1 pipeline. Newest first.
 For the architectural design behind each item, see
 [`spec/SPEC.md`](spec/SPEC.md).
 
-## Unreleased
+## 0.2.0 — 2026-04-29
 
 ### Added
+
+- **Standalone mode (Phase 10).** When no companion is running anywhere
+  (or when no companion's URL patterns match the active tab), the side
+  panel runs locally — annotations land in IndexedDB
+  (`pinta-standalone` DB), keyed by URL `origin`. Submit is hidden;
+  **Copy to clipboard** becomes the primary action with a
+  **Download ▾** dropdown:
+  - **Markdown + screenshot (.zip)** — one composited PNG per scroll
+    section so fixed sidebars / sticky headers don't duplicate
+    vertically. MD references each section image so an agent picks
+    them up automatically.
+  - **Markdown** — text only.
+  - **Plain text** — text only.
+
+  Designed for QA / testers hitting deployed URLs (no project on disk,
+  no Node, no companion required). The picker is still in the header
+  as an escape hatch — click "or pick project (N)" to associate the URL.
+
+- **Numbered annotation badges.** Every annotation — selects, draws
+  (arrow / rect / circle / freehand / pin) — gets a numbered brand-pink
+  badge. Selects render DOM-attached badges; drawings render canvas
+  badges; the composited screenshot bakes the same numbers in.
+  Numbering is unified across kinds via `globalSeq()` (chronological
+  by `createdAt`) so the on-page number, the side-panel list number,
+  and the badge in the screenshot all agree. Renumbers automatically
+  on remove.
+
+- **Drawings get an actionable target.** Freehand / arrow / circle /
+  rect / pin annotations now run `document.elementFromPoint` at their
+  anchor (arrow's end, shape's centroid) and attach the resulting
+  element's selector + outerHTML + nearbyText. The MD output is
+  meaningful even without a screenshot.
+
+- **Multi-project hardening.**
+  - Skill `find-companion.js` walks up `$CLAUDE_PROJECT_DIR` (else cwd)
+    and picks the deepest registered `projectRoot`.
+  - `pinta-mcp` three-tier discovery: explicit `--companion-url` →
+    registry walk-up for cwd → `localhost:7878` default.
+  - Claim TTL: 5-minute window, refreshed on every status update.
+    Stale claims auto-release so a crashed agent doesn't orphan a
+    session forever.
+  - Registry `snapshot()` writes back pruned state and the atomic
+    write retries on Windows EPERM/EBUSY/EACCES so concurrent
+    companion startup no longer races.
+  - Routing-conflict warning in the project picker when more than one
+    companion's patterns match the current URL.
+  - Pin badges clear in the active tab when switching companions.
 
 - **Inline editing popover (Phase 8a/8b/8c).** When the user picks an
   element in select mode, the popover is now a 7-tab editor:

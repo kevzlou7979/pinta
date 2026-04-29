@@ -1,6 +1,6 @@
 {
   "name": "pinta-companion",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "Companion server for the Pinta browser-annotation workflow. Bridges the Pinta Chrome extension and your coding agent (Claude Code, Cursor, Aider) so visual annotations turn into source-file edits.",
   "license": "MIT",
   "author": "kevzlou7979 <kevzlou7979@gmail.com>",
@@ -36,6 +36,8 @@
     "dev": "tsx src/cli.ts",
     "dev:mcp": "tsx src/mcp-stdio.ts",
     "build": "node ./build.mjs",
+    "test": "vitest run",
+    "test:watch": "vitest",
     "prepublishOnly": "npm run build"
   },
   "devDependencies": {
@@ -46,6 +48,7 @@
     "esbuild": "^0.24.0",
     "tsx": "^4.19.0",
     "typescript": "^5.6.0",
+    "vitest": "^2.1.4",
     "ws": "^8.18.0"
   },
   "publishConfig": {

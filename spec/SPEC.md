@@ -72,6 +72,19 @@ Four components, designed so each could in principle be swapped:
 
 This split is the entire point of the architecture. It's what makes "works with any coding agent" real.
 
+**Multi-companion routing.** A single extension can talk to multiple
+companions concurrently — one per project. Each companion registers in
+`~/.pinta/registry.json` and claims URL patterns via per-project
+`.pinta.json`. The side panel auto-routes the active tab to the right
+companion. See Phase 9.
+
+**Standalone (no-companion) mode.** When no companion is running (or
+none claims the active tab's URL), the extension runs fully locally —
+annotations live in IndexedDB, the agent-handoff path collapses to
+**Copy to clipboard** and **Download `.zip`** instead of WS submit.
+Designed for QA / testers who don't have the project on disk. See
+Phase 10.
+
 ---
 
 ## 4. Core concepts
@@ -83,28 +96,49 @@ A single mark-up: one drawing or selection plus an optional comment.
 type Annotation = {
   id: string;                         // uuid
   createdAt: number;
-  
+
   // The mark
   kind: 'arrow' | 'rect' | 'circle' | 'freehand' | 'pin' | 'select';
-  strokes: Point[];                   // canvas coordinates, page-relative
+  strokes: Point[];                   // page coordinates
   color: string;
-  
-  // What it points at (optional — pure drawings have no target)
+
+  // What it points at — drawings auto-resolve via elementFromPoint at
+  // commit time, so this is populated for every annotation in practice.
   target?: {
     selector: string;                 // computed CSS selector
     outerHTML: string;                // truncated to ~2KB
     computedStyles: Record<string, string>;
     nearbyText: string[];             // for grep fallback
-    boundingRect: DOMRect;
+    boundingRect: { x: number; y: number; width: number; height: number };
     sourceFile?: string;              // from Vite plugin if installed
     sourceLine?: number;
   };
-  
+
   // The intent
   comment: string;
-  
-  // Context
-  viewport: { scrollY: number; width: number; height: number };
+
+  // Inline-editor payloads (Phase 8). All optional. The agent emits
+  // whichever of these are set; multiple can coexist on one annotation.
+  customCss?: string;                 // raw CSS textarea
+  cssChanges?: Record<string, string>;// kebab-case CSS prop → value
+  contentChange?: { textBefore: string; textAfter: string };
+  images?: AnnotationImage[];         // [imageN] tokens in `comment`
+
+  // Context — set on capture, optional because draft annotations may
+  // not yet have a viewport snapshot (e.g. test ingest paths).
+  viewport?: { scrollY: number; width: number; height: number };
+
+  // Lifecycle, set by the agent. Unset = not yet picked up.
+  status?: 'applying' | 'done' | 'error';
+  errorMessage?: string;
+};
+
+type AnnotationImage = {
+  id: string;            // "image1", "image2" — used in [imageN] refs
+  mediaType: string;     // "image/png", "image/jpeg"
+  dataUrl?: string;      // inline base64 (current shape)
+  path?: string;         // disk path, set if companion extracts later
+  name?: string;         // original filename if dropped from disk
 };
 ```
 
@@ -116,12 +150,35 @@ type Session = {
   id: string;
   url: string;
   projectRoot: string;                // companion was started in this directory
+                                      // (empty string in standalone mode)
   startedAt: number;
   submittedAt?: number;
   annotations: Annotation[];
-  fullPageScreenshot: string;         // base64 PNG, captured at submit
+
+  // Set transiently when the extension submits with a screenshot; the
+  // companion strips it after persisting the PNG to disk and exposes
+  // `fullPageScreenshotPath` (path relative to projectRoot) instead.
+  fullPageScreenshot?: string;
+  fullPageScreenshotPath?: string;
+
   status: 'drafting' | 'submitted' | 'applying' | 'done' | 'error';
   appliedSummary?: string;            // agent's summary of what it did
+  errorMessage?: string;
+
+  // Where this session came from. "extension" is the normal Chrome
+  // extension flow; "test" is the HTTP /v1/sessions ingest path used by
+  // tests and direct curl. "desktop" reserved for future native client.
+  producer: 'extension' | 'desktop' | 'test';
+
+  // Phase 7 — when true, agent skips the "reply 'go' to apply" gate.
+  autoApply?: boolean;
+
+  // Phase 9 — first-claim-wins coordination across multiple agents
+  // subscribed to the same project (e.g. multiple Claude Code terminals
+  // in Claude Dock). Set by POST /v1/sessions/:id/claim. Stale claims
+  // (>5 min without a status-update heartbeat) auto-release.
+  claimedBy?: string;
+  claimedAt?: number;
 };
 ```
 
@@ -278,20 +335,32 @@ When invoked:
 
 #### 6.3.2 Cursor / Cline / Continue / Zed (MCP)
 
-User adds the companion to their MCP config:
+The companion ships a separate stdio MCP bridge binary, `pinta-mcp`,
+that proxies to whichever companion is responsible for the agent's cwd.
+Discovery is three-tier: explicit `--companion-url` /
+`$PINTA_COMPANION_URL` first, then `~/.pinta/registry.json` walk-up for
+`$CLAUDE_PROJECT_DIR` (else cwd), then `localhost:7878` as a fallback.
+
+User adds the bridge to their MCP config:
 
 ```json
 {
   "mcpServers": {
     "pinta": {
-      "command": "node",
-      "args": ["/path/to/companion/server.js", "--mcp-only", "--project", "."]
+      "command": "npx",
+      "args": ["pinta-mcp"]
     }
   }
 }
 ```
 
-Now `get_pending_session`, `mark_session_done`, etc. are available as tools in the agent. The user invokes the workflow with a natural prompt: "Pick up the visual edit session and apply the changes."
+(The companion itself — `pinta-companion .` — must be running separately
+in the project root, which is the same model as Claude Code.)
+
+Now `get_pending_session`, `mark_session_done`, `mark_annotation_done`,
+etc. are available as tools in the agent. The user invokes the workflow
+with a natural prompt: "Pick up the visual edit session and apply the
+changes."
 
 #### 6.3.3 Aider
 
@@ -301,9 +370,18 @@ A custom command in `.aider.conf.yml` or a wrapper script that polls the HTTP AP
 
 Any agent that can make HTTP requests. The HTTP API is the universal lowest-common-denominator integration.
 
-### 6.4 Vite plugin (optional, opt-in)
+### 6.4 Vite plugin (optional, opt-in) — Planned
 
-`vite-plugin-pinta` — adds `data-source-file` and `data-source-line` to root elements of components in dev mode. Modeled on `vite-plugin-svelte-inspector`. ~50 LOC. Without it, the extension still works (greps text). With it, edits are instant and unambiguous.
+`vite-plugin-pinta` would add `data-source-file` and `data-source-line`
+to root elements of components in dev mode. Modeled on
+`vite-plugin-svelte-inspector`. ~50 LOC.
+
+**Status:** *consumer side shipped, plugin not yet implemented.* The
+extension already reads `data-source-file` / `data-source-line` from
+clicked elements (`extension/src/content/capture.ts`) — projects that
+hand-add those attributes (or use a similar plugin from another tool)
+get instant source-mapping. The Pinta-branded plugin itself is not yet
+written; until then, the extension falls back to grep on `nearbyText`.
 
 ---
 
@@ -419,13 +497,19 @@ Exit criteria: agent receives a screenshot with red circles/arrows visible exact
 
 Exit criteria: same workflow works in Cursor and Claude Code without changing the extension or companion.
 
-### Phase 6 — Vite plugin for source mapping (1 evening)
+### Phase 6 — Vite plugin for source mapping (1 evening) — Planned
 
 **Goal**: instant, unambiguous edits.
 
 - Vite plugin that injects `data-source-file` and `data-source-line` in dev.
-- Extension reads these attributes when present.
-- Falls back gracefully when absent.
+- Extension reads these attributes when present. *Shipped* —
+  `extension/src/content/capture.ts` already populates
+  `target.sourceFile` / `target.sourceLine` from the attributes if any
+  ancestor carries them.
+- Falls back gracefully when absent. *Shipped.*
+- The plugin itself: **not yet written.** Until then, projects can
+  reuse another tool's source-attribute plugin or add the attributes
+  by hand and Pinta picks them up.
 
 Exit criteria: edits land in the right file on the first try, every time, in a project with the plugin installed.
 
@@ -531,21 +615,25 @@ mode, the inline popup gains a tabbed editor:
 - *CSS* — free-form CSS textarea for anything else (`box-shadow:
   0 4px 12px rgba(...)`, `border-radius`, `display`, etc.).
 
-**Annotation shape.** A new `kind: "edit"` carries:
+**Annotation shape.** Rather than introducing a new `kind: "edit"`,
+the shipped design extends the base `Annotation` with optional fields
+populated by the inline editor (see §4 for the full type):
 
 ```ts
-type EditAnnotation = Annotation & {
-  kind: "edit";
-  changes: {
-    content?: { textBefore: string; textAfter: string };
-    css?: Record<string, string>;       // property → value, normalized
-    customCss?: string;                 // raw block from the CSS tab
-  };
+type Annotation = {
+  // … existing fields (kind, target, comment, …) …
+
+  customCss?: string;                 // raw CSS textarea
+  cssChanges?: Record<string, string>;// kebab-case CSS prop → value
+  contentChange?: { textBefore: string; textAfter: string };
+  images?: AnnotationImage[];
 };
 ```
 
-Multiple changes on the same element collapse into **one annotation** so
-the agent gets the full picture in one Edit pass.
+The `kind` stays `"select"` (or whichever drawing kind triggered the
+editor); the structured-edit payload rides on top. Multiple changes on
+the same element collapse into **one annotation** so the agent gets the
+full picture in one Edit pass.
 
 **Live preview.** Edits mutate the live DOM via inline styles for instant
 visual feedback. We capture a `before` snapshot once the popup opens so
@@ -724,6 +812,65 @@ contract.
 `images`, `status`, `errorMessage`. `Session` gained `autoApply`,
 `claimedBy`, `claimedAt`, `fullPageScreenshotPath`. None are breaking
 — all are optional fields.
+
+### Phase 10 — Standalone mode — Shipped
+
+Companion-less operation for users who don't have the project on disk
+— typically QA / testers hitting deployed staging URLs. The extension
+runs fully locally; the companion is optional, only required for the
+agent submission path.
+
+**Trigger.** `appMode === "standalone"` whenever no companion is
+selected — covers both "no companions running" and "companions exist
+but none matched this URL". The picker stays in the side-panel header
+as an escape hatch ("or pick project (N)") so a tester whose dev
+later starts a companion can still associate the URL.
+
+**Storage.** `extension/src/lib/local-store.ts` — IndexedDB
+(`pinta-standalone` DB, single object store keyed by URL `origin`).
+Picked over `chrome.storage.local` because the 5 MB cap there dies on
+sessions with screenshots; IDB's quota is a fraction of disk space and
+stores binary blobs efficiently. Different staging URLs (`example.com`
+vs `another.example.com`) get isolated drafts; reload preserves them.
+
+**Replacement actions in the side-panel footer.**
+- **Submit to agent** is hidden (no companion to submit to).
+- **Copy to clipboard** becomes the primary action — formats the
+  session as markdown via the same `formatSessionAsClipboard` used in
+  connected mode.
+- **Download ▾** dropdown:
+  - *Markdown + screenshot (`.zip`)* — captures the page using the
+    existing scroll-and-stitch (`extension/src/background/screenshot.ts`),
+    composites annotations + numbered badges, then bundles **one PNG
+    per scroll section** so fixed sidebars / sticky headers don't appear
+    duplicated stacked vertically. The MD references each section image.
+  - *Markdown* — text only.
+  - *Plain text* — text only.
+- **Clear (✕)** wipes the IDB session for the current origin.
+
+**Numbered badges (Phase 10 dependency).** Every annotation — selects,
+draws, pin tool — gets a brand-pink numbered badge. Selects render
+DOM-attached badges via `Overlay.svelte`; drawings render on the
+canvas via `Canvas.svelte`; the composited screenshot bakes the same
+numbers in. Numbering is unified via `globalSeq()` (chronological by
+`createdAt`) so the on-page number, the side-panel list number, and
+the badge in the screenshot all agree.
+
+**Drawings auto-attach a target.** Freehand / arrow / circle / rect /
+pin annotations now run `document.elementFromPoint` at their anchor
+(arrow's end, shape's centroid) and capture the underlying element's
+selector + outerHTML + nearbyText. Means the MD output is meaningful
+even without a screenshot. Connected mode benefits too — the agent
+sees both the drawing and an actionable selector.
+
+**Out of scope for first cut:**
+- Modal / popover capture (clicking Download dismisses page popovers
+  via outside-click detection in most popover libraries; deferred to
+  a hotkey / delayed-capture follow-up).
+- Multi-tab IDB sync (two tabs on the same origin race; last write
+  wins).
+- Migrating an in-flight standalone session to a companion when one
+  appears mid-session.
 
 ---
 

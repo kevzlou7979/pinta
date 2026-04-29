@@ -2,10 +2,17 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 import type { Backend } from "./backend.js";
 
+// Injected by esbuild from companion/package.json — see build.mjs. The
+// `typeof` guard keeps `tsx` (dev) runs from crashing when the macro
+// hasn't been substituted; bundled builds always have it as a string.
+declare const __PINTA_VERSION__: string;
+const VERSION =
+  typeof __PINTA_VERSION__ === "string" ? __PINTA_VERSION__ : "dev";
+
 export function createMcpServer(backend: Backend): McpServer {
   const server = new McpServer({
     name: "pinta",
-    version: "0.0.1",
+    version: VERSION,
   });
 
   server.registerTool(

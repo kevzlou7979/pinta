@@ -23,6 +23,24 @@ matching source files for you.
 
 Recent additions on top of the original V1 pipeline:
 
+- **Standalone mode** — the side panel works fully without a companion.
+  Designed for QA / testers hitting deployed URLs (no Node, no project
+  on disk, no companion to start). Annotations live in the browser
+  (IndexedDB, keyed by URL origin); **Copy to clipboard** is the
+  primary action and a **Download ▾** dropdown ships either pure
+  Markdown / Plain text, or a **`.zip` of MD + per-section composited
+  PNGs** (one PNG per scroll position so fixed sidebars don't duplicate
+  vertically). Hand the zip to Claude / Cursor / any agent that reads
+  files — it picks up the screenshots automatically.
+- **Numbered annotation badges** — every annotation (selects + draws +
+  pins) gets a brand-pink numbered badge on the page, in the side
+  panel, and baked into the screenshot. Numbering is unified across
+  kinds (chronological by creation), so "annotation 3" means the same
+  thing everywhere.
+- **Drawings get an actionable target** — freehand / arrow / circle /
+  rect / pin annotations now resolve the element under the drawing's
+  anchor and attach selector + outerHTML + nearbyText. The MD output
+  is meaningful even without a screenshot.
 - **Inline editing popover** — pick an element, get a 7-tab editor
   (Comment / Content / Font / Sizing / Spacing / Grid / CSS). Live DOM
   preview as you type; the page accumulates a visual preview of every

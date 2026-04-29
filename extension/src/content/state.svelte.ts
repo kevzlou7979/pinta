@@ -36,11 +36,32 @@ class ContentState {
     {
       id: string;
       element: Element;
-      index: number;
+      /** Wall-clock ms — used to merge with `committed` into a single
+       *  chronological order for unified badge numbering. */
+      createdAt: number;
       originalCssText: string;
       originalInnerHtml: string;
     }[]
   >([]);
+
+  /**
+   * Returns the 1-based sequence number of `id` across both annotated[]
+   * (selects + pins) and committed[] (drawings), ordered by createdAt.
+   * This is the source of truth for numbered badges on screen — keeps
+   * the on-page numbers in sync with the side panel's annotation list
+   * and the badges baked into the composited screenshot.
+   */
+  globalSeq(id: string): number {
+    const all: { id: string; createdAt: number }[] = [
+      ...this.annotated.map((a) => ({ id: a.id, createdAt: a.createdAt })),
+      ...this.committed.map((c) => ({
+        id: c.id,
+        createdAt: c.createdAt ?? 0,
+      })),
+    ].sort((a, b) => a.createdAt - b.createdAt);
+    const idx = all.findIndex((e) => e.id === id);
+    return idx === -1 ? 0 : idx + 1;
+  }
 
   setMode(next: Mode) {
     this.mode = next;
@@ -106,18 +127,33 @@ class ContentState {
     this.committed = [...this.committed, annotation];
   }
 
+  removeCommittedById(id: string): boolean {
+    const before = this.committed.length;
+    this.committed = this.committed.filter((c) => c.id !== id);
+    return this.committed.length !== before;
+  }
+
+  clearCommitted(): void {
+    this.committed = [];
+  }
+
   recordAnnotated(
     id: string,
     element: Element,
     originalCssText: string,
     originalInnerHtml: string,
   ): number {
-    const index = this.annotated.length + 1;
     this.annotated = [
       ...this.annotated,
-      { id, element, index, originalCssText, originalInnerHtml },
+      {
+        id,
+        element,
+        createdAt: Date.now(),
+        originalCssText,
+        originalInnerHtml,
+      },
     ];
-    return index;
+    return this.globalSeq(id);
   }
 
   /** Look up the snapshot for an already-annotated element, if any. */
@@ -137,10 +173,9 @@ class ContentState {
     const idx = this.annotated.findIndex((a) => a.id === id);
     if (idx === -1) return { entry: null };
     const entry = this.annotated[idx]!;
-    const next = this.annotated
-      .filter((a) => a.id !== id)
-      .map((a, i) => ({ ...a, index: i + 1 }));
-    this.annotated = next;
+    // No need to manually renumber — `globalSeq()` recomputes from the
+    // remaining createdAt order on every read.
+    this.annotated = this.annotated.filter((a) => a.id !== id);
     return {
       entry: {
         element: entry.element,

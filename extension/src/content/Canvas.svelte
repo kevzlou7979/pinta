@@ -1,6 +1,6 @@
 <script lang="ts">
   import { onMount } from "svelte";
-  import { drawAnnotation } from "./tools/draw.js";
+  import { drawAnnotation, badgeAnchor, drawNumberBadge } from "./tools/draw.js";
   import { content } from "./state.svelte.js";
 
   const COMMITTED_ALPHA = 0.55;
@@ -60,6 +60,12 @@
 
     const translate = { x: scrollX, y: scrollY };
 
+    // Selects render their own DOM-attached numbered badges via
+    // Overlay.svelte (since they're anchored to live elements that
+    // move/scroll). Everything else — arrow, rect, circle, freehand,
+    // pin — gets a canvas-rendered badge here. Numbers come from
+    // `globalSeq()` so the count is unified with selects and matches
+    // the side panel + the composited screenshot.
     for (const a of content.committed) {
       if (a.kind === "select") continue;
       drawAnnotation(ctx, a.kind, a.strokes, {
@@ -68,6 +74,17 @@
         lineWidth: LINE_WIDTH,
         translate,
       });
+      const anchor = badgeAnchor(a.kind, a.strokes);
+      const seq = content.globalSeq(a.id);
+      if (anchor && seq > 0) {
+        drawNumberBadge(
+          ctx,
+          anchor.x - translate.x,
+          anchor.y - translate.y,
+          seq,
+          a.color,
+        );
+      }
     }
 
     if (content.inProgress) {

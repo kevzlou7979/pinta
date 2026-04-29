@@ -70,6 +70,21 @@ export type Annotation = {
    * replace with `path` later for large attachments.
    */
   images?: AnnotationImage[];
+
+  /**
+   * Viewport snapshot at annotation time — width/height drive screenshot
+   * scaling, scrollY anchors page-coords-based stroke positions when
+   * compositing.
+   */
+  viewport?: { scrollY: number; width: number; height: number };
+
+  /**
+   * Per-annotation lifecycle, set by the agent as it works through a
+   * submitted batch. Unset = the annotation hasn't been picked up yet.
+   */
+  status?: AnnotationStatus;
+  /** Set when status === "error" so the side panel can show what failed. */
+  errorMessage?: string;
 };
 
 export type AnnotationImage = {
@@ -83,11 +98,6 @@ export type AnnotationImage = {
   path?: string;
   /** Optional original filename if dropped from disk. */
   name?: string;
-
-  viewport: { scrollY: number; width: number; height: number };
-
-  status?: AnnotationStatus;
-  errorMessage?: string;
 };
 
 export type SessionStatus =

@@ -12,6 +12,7 @@
   ],
   "scripts": {
     "build": "npm run build --workspaces --if-present",
+    "test": "npm run test --workspaces --if-present",
     "dev:companion": "npm run dev --workspace companion",
     "post-fake-session": "bash scripts/post-fake-session.sh"
   },

@@ -160,3 +160,123 @@ function renderPin(
   ctx.stroke();
   ctx.restore();
 }
+
+/**
+ * The page-coords point that "this drawing is pointing at" — used to
+ * resolve the underlying DOM element so even a freehand scribble or an
+ * arrow gets a selector + outerHTML attached, making the annotation
+ * actionable for an agent reading the MD without a screenshot.
+ *
+ * Differs from `badgeAnchor` for arrow: badges anchor at the *start*
+ * (so they don't sit on the arrowhead), but the *target* is the
+ * arrowhead end (what the arrow is pointing at).
+ */
+export function targetAnchor(
+  kind: DrawTool,
+  points: Point[],
+): Point | null {
+  if (points.length === 0) return null;
+  switch (kind) {
+    case "pin":
+      return points[0]!;
+    case "arrow": {
+      if (points.length < 2) return null;
+      return points[points.length - 1]!;
+    }
+    case "rect":
+    case "circle": {
+      if (points.length < 2) return null;
+      const a = points[0]!;
+      const b = points[points.length - 1]!;
+      return { x: (a.x + b.x) / 2, y: (a.y + b.y) / 2 };
+    }
+    case "freehand": {
+      let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+      for (const p of points) {
+        if (p.x < minX) minX = p.x;
+        if (p.y < minY) minY = p.y;
+        if (p.x > maxX) maxX = p.x;
+        if (p.y > maxY) maxY = p.y;
+      }
+      if (!Number.isFinite(minX)) return null;
+      return { x: (minX + maxX) / 2, y: (minY + maxY) / 2 };
+    }
+  }
+}
+
+/**
+ * Anchor point for the numbered badge of a given drawing — close to
+ * the visual centroid so the badge sits near the shape without
+ * obscuring its content.
+ */
+export function badgeAnchor(
+  kind: DrawTool,
+  points: Point[],
+): Point | null {
+  if (points.length === 0) return null;
+  switch (kind) {
+    case "pin":
+      // Slight offset so the badge sits next to the dot, not on top of it.
+      return { x: points[0]!.x + PIN_RADIUS + 8, y: points[0]!.y };
+    case "arrow":
+    case "rect":
+    case "circle": {
+      if (points.length < 2) return null;
+      const a = points[0]!;
+      const b = points[points.length - 1]!;
+      // Top-left corner for rect (so it doesn't overlap the inside),
+      // start point for arrow (the "from" end), centroid for circle.
+      if (kind === "rect") {
+        return { x: Math.min(a.x, b.x), y: Math.min(a.y, b.y) };
+      }
+      if (kind === "arrow") {
+        return { x: a.x, y: a.y };
+      }
+      return { x: (a.x + b.x) / 2, y: (a.y + b.y) / 2 };
+    }
+    case "freehand": {
+      // Use the bounding-box top-left of the stroke. Avoids the badge
+      // landing inside a tight scribble.
+      let minX = Infinity;
+      let minY = Infinity;
+      for (const p of points) {
+        if (p.x < minX) minX = p.x;
+        if (p.y < minY) minY = p.y;
+      }
+      return Number.isFinite(minX) ? { x: minX, y: minY } : null;
+    }
+  }
+}
+
+const BADGE_RADIUS = 11;
+const BADGE_FONT = "bold 12px ui-sans-serif, system-ui, sans-serif";
+
+/**
+ * Renders a numbered badge (filled circle + white digit) at the given
+ * point. Used by both the live canvas overlay and the composited
+ * screenshot so the user sees the same numbers on screen and in the
+ * exported file.
+ */
+export function drawNumberBadge(
+  ctx: CanvasRenderingContext2D,
+  x: number,
+  y: number,
+  n: number,
+  color = "#FF3D6E",
+): void {
+  ctx.save();
+  ctx.globalAlpha = 1;
+  ctx.fillStyle = color;
+  ctx.beginPath();
+  ctx.arc(x, y, BADGE_RADIUS, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.lineWidth = 2;
+  ctx.strokeStyle = "white";
+  ctx.stroke();
+  ctx.fillStyle = "white";
+  ctx.font = BADGE_FONT;
+  ctx.textAlign = "center";
+  ctx.textBaseline = "middle";
+  ctx.fillText(String(n), x, y + 0.5);
+  ctx.restore();
+}
