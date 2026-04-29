@@ -670,19 +670,70 @@
     .rules {
       list-style: none;
       padding: 0; margin: 0;
-      display: grid; gap: 14px;
+      display: grid;
+      grid-template-columns: repeat(3, 1fr);
+      gap: 16px;
     }
-    .rules li {
+    .rule {
+      position: relative;
       background: var(--paper);
       border: 1px solid var(--line);
-      border-left: 3px solid var(--pink);
-      padding: 16px 18px;
-      border-radius: 12px;
-      font-size: 14.5px;
-      color: var(--ink-dim);
+      border-radius: 14px;
+      padding: 22px 20px 20px;
+      display: flex;
+      flex-direction: column;
+      gap: 12px;
       box-shadow: var(--shadow-sm);
+      overflow: hidden;
     }
-    .rules li strong { color: var(--ink); font-weight: 600; }
+    .rule::before {
+      content: "";
+      position: absolute;
+      inset: 0 0 auto 0;
+      height: 3px;
+      background: linear-gradient(90deg, var(--rule-from, var(--pink)), var(--rule-to, var(--orange)));
+    }
+    .rule--ext  { --rule-from: rgba(199,45,180,0.95); --rule-to: rgba(40,170,150,0.95); }
+    .rule--comp { --rule-from: rgba(40,170,150,0.95); --rule-to: rgba(255,136,85,0.95); }
+    .rule--ed   { --rule-from: rgba(255,136,85,0.95); --rule-to: rgba(255,61,110,0.95); }
+    .rule-arrow {
+      display: inline-flex;
+      align-items: center;
+      gap: 8px;
+      flex-wrap: wrap;
+    }
+    .rule-from, .rule-to {
+      display: inline-block;
+      padding: 4px 11px;
+      border-radius: 999px;
+      font-size: 12.5px;
+      font-weight: 600;
+      background: var(--cream-soft);
+      border: 1px solid var(--line);
+      color: var(--ink);
+    }
+    .rule-link {
+      font-size: 15px;
+      color: var(--ink-mute);
+      font-weight: 700;
+    }
+    .rule-protocol {
+      font-size: 11px;
+      letter-spacing: 0.08em;
+      text-transform: uppercase;
+      color: var(--ink-mute);
+      font-weight: 600;
+      font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+    }
+    .rule-body {
+      margin: 0;
+      font-size: 14px;
+      color: var(--ink-dim);
+      line-height: 1.55;
+    }
+    @media (max-width: 860px) {
+      .rules { grid-template-columns: 1fr; }
+    }
 
     /* ---------- ADAPTERS ---------- */
     .adapters-wrap {
@@ -1427,9 +1478,33 @@
           </div>
         </div>
         <ul class="rules">
-          <li><strong>Extension → Companion.</strong> WebSocket, JSON sessions. The extension only knows about the companion.</li>
-          <li><strong>Companion ↔ Agents.</strong> HTTP API and MCP server. The companion is generic — no agent-specific logic.</li>
-          <li><strong>Agents → Project files.</strong> Agents read sessions, present plans, then edit. HMR closes the loop.</li>
+          <li class="rule rule--ext">
+            <span class="rule-arrow">
+              <span class="rule-from">Extension</span>
+              <span class="rule-link" aria-hidden="true">→</span>
+              <span class="rule-to">Companion</span>
+            </span>
+            <span class="rule-protocol">WebSocket · JSON sessions</span>
+            <p class="rule-body">The extension only knows about the companion.</p>
+          </li>
+          <li class="rule rule--comp">
+            <span class="rule-arrow">
+              <span class="rule-from">Companion</span>
+              <span class="rule-link" aria-hidden="true">↔</span>
+              <span class="rule-to">Agents</span>
+            </span>
+            <span class="rule-protocol">HTTP API · MCP server</span>
+            <p class="rule-body">The companion is generic — no agent-specific logic.</p>
+          </li>
+          <li class="rule rule--ed">
+            <span class="rule-arrow">
+              <span class="rule-from">Agents</span>
+              <span class="rule-link" aria-hidden="true">→</span>
+              <span class="rule-to">Project files</span>
+            </span>
+            <span class="rule-protocol">Read · Plan · Edit</span>
+            <p class="rule-body">Agents read sessions, present plans, then edit. HMR closes the loop.</p>
+          </li>
         </ul>
       </div>
     </div>
@@ -1552,6 +1627,8 @@ npx pinta-companion .
         <a href="https://github.com/kevzlou7979/pinta/blob/main/spec/SPEC.md">Spec</a>
         &nbsp;·&nbsp;
         <a href="https://github.com/kevzlou7979/pinta/issues">Issues</a>
+        &nbsp;·&nbsp;
+        <a href="privacy.html">Privacy</a>
       </div>
     </div>
   </footer>
