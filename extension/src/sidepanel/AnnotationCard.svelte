@@ -172,24 +172,25 @@
     </div>
 
     {#if !editing}
-      <div class="flex flex-col items-end gap-0.5 shrink-0">
+      <div class="flex items-center gap-0.5 shrink-0">
         {#if canEdit}
           <button
             type="button"
-            class="text-ink-400 hover:text-ink-900 dark:text-night-mute dark:hover:text-night-text text-xs"
+            class="w-6 h-6 inline-flex items-center justify-center rounded text-ink-400 hover:text-ink-900 hover:bg-ink-100 dark:text-night-mute dark:hover:text-night-text dark:hover:bg-night-line transition-colors"
             onclick={startEdit}
-            aria-label="Edit annotation"
+            aria-label="Edit comment"
             title="Edit comment"
           >
-            Edit
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 20h9"/><path d="M16.5 3.5a2.121 2.121 0 0 1 3 3L7 19l-4 1 1-4z"/></svg>
           </button>
           <button
             type="button"
-            class="text-ink-400 hover:text-red-600 dark:text-night-mute dark:hover:text-red-400 text-xs"
+            class="w-6 h-6 inline-flex items-center justify-center rounded text-ink-400 hover:text-red-600 hover:bg-red-50 dark:text-night-mute dark:hover:text-red-400 dark:hover:bg-red-950/40 transition-colors"
             onclick={onremove}
             aria-label="Remove annotation"
+            title="Remove annotation"
           >
-            Remove
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M18 6 6 18"/><path d="m6 6 12 12"/></svg>
           </button>
         {/if}
       </div>

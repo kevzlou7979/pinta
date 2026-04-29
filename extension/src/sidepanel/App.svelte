@@ -4,7 +4,12 @@
   import { app } from "../lib/state.svelte.js";
   import { uid } from "../lib/id.js";
   import { compositeAnnotations } from "../lib/composite.js";
-  import { formatSessionAsClipboard } from "../lib/format-clipboard.js";
+  import {
+    formatSession,
+    formatSessionAsClipboard,
+    type ExportFormat,
+  } from "../lib/format-clipboard.js";
+  import { zipSync, strToU8 } from "fflate";
   import { theme, toggleTheme } from "../lib/theme.svelte.js";
   import { matchAny, suggestPattern } from "../lib/url-patterns.js";
   import type { Companion } from "../lib/companions.js";
@@ -81,6 +86,8 @@
   let associating = $state(false);
   let associatedAt = $state<number | null>(null);
   let associateError = $state<string | null>(null);
+  let downloadMenuOpen = $state(false);
+  let bundleBusy = $state(false);
 
   onMount(async () => {
     try {
@@ -149,7 +156,12 @@
   onDestroy(() => app.stop());
 
   $effect(() => {
-    if (app.connectionStatus === "connected" && pageUrl && !app.session) {
+    if (!pageUrl || app.session) return;
+    // Standalone mode is fire-once (no WS to wait on). Connected mode
+    // waits until the WS is up so the companion doesn't miss the create.
+    if (app.appMode === "standalone") {
+      app.ensureSession(pageUrl);
+    } else if (app.connectionStatus === "connected") {
       app.ensureSession(pageUrl);
     }
   });
@@ -323,6 +335,13 @@
     }
   }
 
+  function clearAllAnnotations() {
+    if (!annotations.length) return;
+    // Snapshot ids first — removeAnnotation mutates the list as it goes.
+    const ids = annotations.map((a) => a.id);
+    for (const id of ids) removeAnnotation(id);
+  }
+
   async function cancelSession() {
     if (!app.session) return;
     // Wipe pin badges in the content overlay before the session resets.
@@ -417,6 +436,125 @@
     }
   }
 
+  function downloadAs(format: ExportFormat) {
+    if (!annotations.length) return;
+    downloadMenuOpen = false;
+    const url = pageUrl || app.session?.url || "";
+    const text = formatSession({ url, annotations }, format);
+    const mime = format === "md" ? "text/markdown" : "text/plain";
+    const blob = new Blob([text], { type: `${mime};charset=utf-8` });
+    const objUrl = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = objUrl;
+    a.download = filenameFor(url, format);
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    // Revoke after the click handler has had a chance to consume the URL.
+    setTimeout(() => URL.revokeObjectURL(objUrl), 0);
+  }
+
+  function filenameFor(url: string, format: ExportFormat): string {
+    return `${baseFilename(url)}.${format}`;
+  }
+
+  function baseFilename(url: string): string {
+    const stamp = new Date()
+      .toISOString()
+      .replace(/[:.]/g, "-")
+      .replace("T", "_")
+      .slice(0, 19);
+    let host = "annotations";
+    try {
+      const u = new URL(url);
+      host = u.hostname || host;
+    } catch {
+      // url unparsable — fall back to "annotations"
+    }
+    return `pinta-${host}-${stamp}`;
+  }
+
+  function dataUrlToBytes(dataUrl: string): Uint8Array {
+    const comma = dataUrl.indexOf(",");
+    if (comma === -1) throw new Error("malformed data URL");
+    const b64 = dataUrl.slice(comma + 1);
+    const bin = atob(b64);
+    const out = new Uint8Array(bin.length);
+    for (let i = 0; i < bin.length; i++) out[i] = bin.charCodeAt(i);
+    return out;
+  }
+
+  /**
+   * Bundle export: capture full-page screenshot, composite annotations
+   * (with numbered badges) onto it, zip the .md and .png together so
+   * an agent can read both with a single drop into Claude / Cursor / etc.
+   * Standalone-mode equivalent of the connected-mode Submit flow.
+   */
+  async function downloadBundle(format: ExportFormat) {
+    if (!annotations.length || activeTabId == null || bundleBusy) return;
+    downloadMenuOpen = false;
+    bundleBusy = true;
+    app.lastError = null;
+    try {
+      // Lift the toolbar/highlight off the page before capture so the
+      // screenshot is clean. Same trick the connected-mode submit uses.
+      try {
+        await chrome.tabs.sendMessage(activeTabId, {
+          type: "mode.set",
+          mode: "idle",
+        });
+      } catch {
+        // content script may not be present (e.g. chrome:// page); fail soft
+      }
+      activeTool = null;
+
+      const resp = (await chrome.runtime.sendMessage({
+        type: "capture.full-page",
+        tabId: activeTabId,
+      })) as {
+        ok: boolean;
+        capture?: { dataUrl: string };
+        error?: string;
+      };
+      if (!resp?.ok || !resp.capture) {
+        throw new Error(resp?.error ?? "capture failed");
+      }
+
+      const composited = await compositeAnnotations(
+        resp.capture.dataUrl,
+        annotations,
+      );
+
+      const url = pageUrl || app.session?.url || "";
+      const base = baseFilename(url);
+      const screenshotName = `${base}.png`;
+      const docName = `${base}.${format}`;
+
+      const text = formatSession({ url, annotations }, format, {
+        screenshotFilename: screenshotName,
+      });
+
+      const zipped = zipSync({
+        [docName]: strToU8(text),
+        [screenshotName]: dataUrlToBytes(composited),
+      });
+
+      const blob = new Blob([zipped as BlobPart], { type: "application/zip" });
+      const objUrl = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = objUrl;
+      a.download = `${base}.zip`;
+      document.body.appendChild(a);
+      a.click();
+      document.body.removeChild(a);
+      setTimeout(() => URL.revokeObjectURL(objUrl), 0);
+    } catch (err) {
+      app.lastError = `bundle export failed: ${(err as Error).message}`;
+    } finally {
+      bundleBusy = false;
+    }
+  }
+
   async function submit() {
     if (capturing || activeTabId == null) return;
     capturing = true;
@@ -484,21 +622,30 @@
             <span class="text-ink-400 dark:text-night-mute">:{app.selectedCompanion.port}</span>
             <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="6 9 12 15 18 9"/></svg>
           </button>
-        {:else if app.scanning}
+        {:else if app.appMode === "discovering"}
           <p class="text-xs text-ink-500 dark:text-night-dim">scanning…</p>
-        {:else if app.companions.length > 0}
-          <button
-            type="button"
-            class="flex items-center gap-1 text-xs text-brand-pink dark:text-brand-pink-light hover:underline"
-            onclick={() => (projectMenuOpen = !projectMenuOpen)}
-            aria-haspopup="listbox"
-            aria-expanded={projectMenuOpen}
-          >
-            Pick project ({app.companions.length})
-            <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="6 9 12 15 18 9"/></svg>
-          </button>
         {:else}
-          <p class="text-xs text-ink-500 dark:text-night-dim">no companion running</p>
+          <!-- Standalone: maybe alone, maybe with companions registered but
+               none matching this URL. Pill is primary; project picker is
+               a secondary escape hatch only when there's something to pick. -->
+          <div class="flex items-center gap-1.5 flex-wrap">
+            <span class="inline-flex items-center gap-1 text-[10px] uppercase tracking-wide font-semibold text-emerald-700 dark:text-emerald-300 bg-emerald-100 dark:bg-emerald-950/50 border border-emerald-300 dark:border-emerald-800/50 rounded-full px-1.5 py-0.5" title="Annotations stay in this browser. Use Copy or Download to share with an agent.">
+              Standalone
+            </span>
+            {#if app.companions.length > 0}
+              <button
+                type="button"
+                class="text-[11px] text-ink-500 dark:text-night-mute hover:text-brand-pink dark:hover:text-brand-pink-light flex items-center gap-0.5"
+                onclick={() => (projectMenuOpen = !projectMenuOpen)}
+                aria-haspopup="listbox"
+                aria-expanded={projectMenuOpen}
+                title="Switch to a registered project (sends annotations to its agent)"
+              >
+                or pick project ({app.companions.length})
+                <svg width="9" height="9" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="6 9 12 15 18 9"/></svg>
+              </button>
+            {/if}
+          </div>
         {/if}
 
         {#if projectMenuOpen}
@@ -587,25 +734,14 @@
           <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"/></svg>
         {/if}
       </button>
-      <StatusPill status={app.connectionStatus} />
+      {#if app.appMode !== "standalone"}
+        <StatusPill status={app.connectionStatus} />
+      {/if}
     </div>
   </header>
 
   <main class="flex-1 overflow-y-auto p-4 space-y-4">
-    {#if app.companions.length === 0 && !app.scanning}
-      <div class="rounded-md border border-amber-300 bg-amber-50 dark:border-amber-700/40 dark:bg-amber-950/40 p-3 text-xs text-amber-900 dark:text-amber-200">
-        <p class="font-semibold mb-1">No companion is running</p>
-        <p class="mb-2 leading-snug">Start one in the project root you want to edit:</p>
-        <code class="block bg-white/60 dark:bg-black/30 px-2 py-1.5 rounded font-mono text-[11px] mb-2">npx pinta-companion .</code>
-        <button
-          type="button"
-          class="text-amber-900 dark:text-amber-200 underline underline-offset-2 hover:no-underline"
-          onclick={() => app.rescan(pageUrl || null)}
-        >
-          ↻ Rescan
-        </button>
-      </div>
-    {:else if showAssociatePrompt && app.selectedCompanion}
+    {#if showAssociatePrompt && app.selectedCompanion}
       {@const sel = app.selectedCompanion}
       {@const suggestedPattern = suggestPattern(pageUrl)}
       <div class="rounded-md border border-amber-300 bg-amber-50 dark:border-amber-700/40 dark:bg-amber-950/40 p-3 text-xs text-amber-900 dark:text-amber-200 space-y-2.5">
@@ -761,6 +897,18 @@
         <h2 class="text-xs uppercase tracking-wide text-ink-500 dark:text-night-mute font-medium">
           Annotations ({annotations.length})
         </h2>
+        {#if canEditAnnotations && annotations.length > 0}
+          <button
+            type="button"
+            class="inline-flex items-center gap-1 rounded-md border border-ink-200 bg-transparent text-ink-500 hover:text-red-600 hover:border-red-300 hover:bg-red-50 dark:border-night-line dark:text-night-dim dark:hover:text-red-400 dark:hover:border-red-900 dark:hover:bg-red-950/30 text-[11px] font-medium px-2 py-1 transition-colors"
+            onclick={clearAllAnnotations}
+            aria-label="Clear all annotations"
+            title="Remove every annotation in this batch"
+          >
+            <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 6h18"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6"/><path d="M8 6V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/></svg>
+            Clear
+          </button>
+        {/if}
       </div>
       {#if annotations.length === 0}
         <p class="text-xs text-ink-500 dark:text-night-dim italic">
@@ -783,21 +931,32 @@
     {/if}
 
     {#if app.lastError}
-      <p
-        class="text-xs text-red-600 border border-red-200 bg-red-50 dark:text-red-300 dark:border-red-900/40 dark:bg-red-950/40 rounded-md p-2"
+      <div
+        class="flex items-start gap-2 text-xs text-red-600 border border-red-200 bg-red-50 dark:text-red-300 dark:border-red-900/40 dark:bg-red-950/40 rounded-md p-2"
       >
-        {app.lastError}
-      </p>
+        <p class="flex-1 min-w-0 break-words">{app.lastError}</p>
+        <button
+          type="button"
+          class="shrink-0 text-red-500 hover:text-red-700 dark:text-red-400 dark:hover:text-red-200 leading-none px-1"
+          onclick={() => (app.lastError = null)}
+          aria-label="Dismiss error"
+          title="Dismiss"
+        >
+          ✕
+        </button>
+      </div>
     {/if}
 
-    <SessionHistory />
+    {#if app.appMode !== "standalone"}
+      <SessionHistory />
+    {/if}
   </main>
 
   <footer
     class="border-t border-ink-200 p-3 bg-white dark:border-night-line dark:bg-night-card space-y-2"
     class:hidden={showAssociatePrompt}
   >
-    {#if !allDone && app.session?.status === "drafting"}
+    {#if app.appMode === "connected" && !allDone && app.session?.status === "drafting"}
       <label
         class="flex items-start gap-2 text-[12px] text-ink-700 dark:text-night-dim cursor-pointer select-none"
       >
@@ -846,7 +1005,81 @@
     {/if}
 
     <div class="flex gap-2">
-      {#if allDone}
+      {#if app.appMode === "standalone"}
+        <button
+          type="button"
+          class="flex-1 rounded-md bg-brand-pink text-white text-sm font-medium py-2 hover:bg-brand-magenta dark:hover:bg-brand-pink-light disabled:opacity-50 inline-flex items-center justify-center gap-1.5"
+          disabled={annotations.length === 0}
+          onclick={copyToClipboard}
+          title="Copy annotations as markdown to share or paste into an AI tool"
+        >
+          {#if copiedAt}
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="20 6 9 17 4 12"/></svg>
+            Copied
+          {:else}
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>
+            Copy to clipboard
+          {/if}
+        </button>
+        {#if annotations.length > 0}
+          <div class="relative">
+            <button
+              type="button"
+              class="h-full rounded-md border border-ink-300 bg-white text-ink-700 text-sm font-medium px-3 hover:bg-ink-50 dark:border-night-line dark:bg-night-alt dark:text-night-dim dark:hover:bg-night-line dark:hover:text-night-text inline-flex items-center gap-1"
+              title="Download annotations as a file an agent can read"
+              onclick={() => (downloadMenuOpen = !downloadMenuOpen)}
+              aria-haspopup="menu"
+              aria-expanded={downloadMenuOpen}
+            >
+              <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
+              <svg width="9" height="9" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="6 9 12 15 18 9"/></svg>
+            </button>
+            {#if downloadMenuOpen}
+              <div
+                class="absolute right-0 bottom-full mb-1 w-56 z-30 rounded-md border border-ink-300 bg-white shadow-lg dark:border-night-line dark:bg-night-alt overflow-hidden"
+                role="menu"
+              >
+                <button
+                  type="button"
+                  class="w-full text-left px-3 py-2 text-xs text-ink-800 dark:text-night-text hover:bg-ink-50 dark:hover:bg-night-line disabled:opacity-50"
+                  disabled={bundleBusy}
+                  onclick={() => downloadBundle("md")}
+                >
+                  <span class="font-medium">
+                    {bundleBusy ? "Capturing screenshot…" : "Markdown + screenshot"}
+                  </span>
+                  <span class="block text-[10px] text-ink-500 dark:text-night-mute">.zip — most context for agents</span>
+                </button>
+                <button
+                  type="button"
+                  class="w-full text-left px-3 py-2 text-xs text-ink-800 dark:text-night-text hover:bg-ink-50 dark:hover:bg-night-line border-t border-ink-200 dark:border-night-line"
+                  onclick={() => downloadAs("md")}
+                >
+                  <span class="font-medium">Markdown</span>
+                  <span class="block text-[10px] text-ink-500 dark:text-night-mute">.md — text only</span>
+                </button>
+                <button
+                  type="button"
+                  class="w-full text-left px-3 py-2 text-xs text-ink-800 dark:text-night-text hover:bg-ink-50 dark:hover:bg-night-line border-t border-ink-200 dark:border-night-line"
+                  onclick={() => downloadAs("txt")}
+                >
+                  <span class="font-medium">Plain text</span>
+                  <span class="block text-[10px] text-ink-500 dark:text-night-mute">.txt — text only</span>
+                </button>
+              </div>
+            {/if}
+          </div>
+          <button
+            type="button"
+            class="rounded-md border border-ink-300 bg-white text-ink-700 text-sm font-medium px-3 hover:bg-ink-50 dark:border-night-line dark:bg-night-alt dark:text-night-dim dark:hover:bg-night-line dark:hover:text-night-text"
+            title="Clear all annotations and start fresh"
+            onclick={cancelSession}
+            aria-label="Clear annotations"
+          >
+            ✕
+          </button>
+        {/if}
+      {:else if allDone}
         <button
           type="button"
           class="flex-1 rounded-md bg-brand-pink text-white text-sm font-medium py-2 hover:bg-brand-magenta dark:hover:bg-brand-pink-light"
@@ -911,7 +1144,11 @@
         {/if}
       {/if}
     </div>
-    {#if app.session?.status === "submitted"}
+    {#if app.appMode === "standalone" && annotations.length === 0}
+      <p class="text-[11px] text-ink-500 dark:text-night-mute text-center">
+        Add annotations with the tools above. Hit Copy to share them anywhere.
+      </p>
+    {:else if app.session?.status === "submitted"}
       <p class="text-[11px] text-ink-500 dark:text-night-mute text-center">
         Stuck? Click ✕ to cancel and start a new session.
       </p>
