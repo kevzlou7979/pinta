@@ -3,7 +3,10 @@
   import type { Annotation, AnnotationTarget } from "@pinta/shared";
   import { app } from "../lib/state.svelte.js";
   import { uid } from "../lib/id.js";
-  import { compositeAnnotations } from "../lib/composite.js";
+  import {
+    compositeAnnotations,
+    compositeAnnotationsToViewport,
+  } from "../lib/composite.js";
   import {
     formatSession,
     formatSessionAsClipboard,
@@ -89,7 +92,47 @@
   let downloadMenuOpen = $state(false);
   let bundleBusy = $state(false);
 
+  // Runtime-message handler is wired here (not inside the async onMount)
+  // so the cleanup function returns sync — Svelte's onMount can't return
+  // a Promise<cleanup>. The handler doesn't depend on async setup.
+  //
+  // Origin guard: Chrome only delivers runtime messages from the same
+  // extension by default, but this future-proofs against accidentally
+  // adding `externally_connectable` to the manifest later.
+  const runtimeMessageHandler = (
+    msg: unknown,
+    sender: chrome.runtime.MessageSender,
+  ) => {
+    if (sender?.id !== chrome.runtime.id) return;
+    const m = msg as IncomingMsg;
+    if (m?.type === "annotation.target-selected" && m.target) {
+      const annotation: Annotation = {
+        id: m.annotationId ?? uid("ann"),
+        createdAt: Date.now(),
+        kind: "select",
+        strokes: [],
+        color: "#FF3D6E",
+        comment: (m.comment ?? "").trim(),
+        customCss: m.customCss?.trim() || undefined,
+        cssChanges:
+          m.cssChanges && Object.keys(m.cssChanges).length > 0
+            ? m.cssChanges
+            : undefined,
+        contentChange: m.contentChange,
+        images: m.images && m.images.length > 0 ? m.images : undefined,
+        target: m.target,
+        viewport: m.viewport ?? snapshotViewport(),
+      };
+      app.addAnnotation(annotation);
+      activeTool = null;
+    } else if (m?.type === "annotation.draw-committed" && m.annotation) {
+      app.addAnnotation(m.annotation);
+    }
+  };
+
   onMount(async () => {
+    chrome.runtime.onMessage.addListener(runtimeMessageHandler);
+
     try {
       const [tab] = await chrome.tabs.query({
         active: true,
@@ -122,38 +165,12 @@
     chrome.tabs?.onUpdated?.addListener((tabId, info) => {
       if (info.url && tabId === activeTabId) onTabActivated();
     });
-
-    const handler = (msg: unknown) => {
-      const m = msg as IncomingMsg;
-      if (m?.type === "annotation.target-selected" && m.target) {
-        const annotation: Annotation = {
-          id: m.annotationId ?? uid("ann"),
-          createdAt: Date.now(),
-          kind: "select",
-          strokes: [],
-          color: "#FF3D6E",
-          comment: (m.comment ?? "").trim(),
-          customCss: m.customCss?.trim() || undefined,
-          cssChanges:
-            m.cssChanges && Object.keys(m.cssChanges).length > 0
-              ? m.cssChanges
-              : undefined,
-          contentChange: m.contentChange,
-          images: m.images && m.images.length > 0 ? m.images : undefined,
-          target: m.target,
-          viewport: m.viewport ?? snapshotViewport(),
-        };
-        app.addAnnotation(annotation);
-        activeTool = null;
-      } else if (m?.type === "annotation.draw-committed" && m.annotation) {
-        app.addAnnotation(m.annotation);
-      }
-    };
-    chrome.runtime.onMessage.addListener(handler);
-    return () => chrome.runtime.onMessage.removeListener(handler);
   });
 
-  onDestroy(() => app.stop());
+  onDestroy(() => {
+    chrome.runtime.onMessage.removeListener(runtimeMessageHandler);
+    app.stop();
+  });
 
   $effect(() => {
     if (!pageUrl || app.session) return;
@@ -358,7 +375,7 @@
   // Returns true if any are present (Vite, Webpack/Next.js, Parcel HMR).
   async function detectHmr(tabId: number): Promise<boolean> {
     try {
-      const [{ result }] = await chrome.scripting.executeScript({
+      const [first] = await chrome.scripting.executeScript({
         target: { tabId },
         func: () => {
           const w = window as unknown as Record<string, unknown>;
@@ -382,7 +399,7 @@
           return false;
         },
       });
-      return !!result;
+      return !!first?.result;
     } catch {
       return false;
     }
@@ -513,30 +530,64 @@
         tabId: activeTabId,
       })) as {
         ok: boolean;
-        capture?: { dataUrl: string };
+        capture?: {
+          dataUrl: string;
+          slices?: Array<{ dataUrl: string; offsetY: number }>;
+          viewportWidth?: number;
+          viewportHeight?: number;
+        };
         error?: string;
       };
       if (!resp?.ok || !resp.capture) {
         throw new Error(resp?.error ?? "capture failed");
       }
 
-      const composited = await compositeAnnotations(
-        resp.capture.dataUrl,
-        annotations,
-      );
-
       const url = pageUrl || app.session?.url || "";
       const base = baseFilename(url);
-      const screenshotName = `${base}.png`;
       const docName = `${base}.${format}`;
+      const slices = resp.capture.slices ?? [];
+      const vw = resp.capture.viewportWidth ?? window.innerWidth;
+      const vh = resp.capture.viewportHeight ?? window.innerHeight;
+
+      // One composited PNG per scroll section so fixed/sticky elements
+      // appear once each (in their own viewport) instead of stacking
+      // vertically as they would in a stitched full-page image.
+      const screenshotEntries: Record<string, Uint8Array> = {};
+      const screenshotNames: string[] = [];
+      if (slices.length > 0) {
+        for (let i = 0; i < slices.length; i++) {
+          const slice = slices[i]!;
+          const composited = await compositeAnnotationsToViewport(
+            slice.dataUrl,
+            annotations,
+            { offsetY: slice.offsetY, width: vw, height: vh },
+          );
+          const name =
+            slices.length === 1
+              ? `${base}.png`
+              : `${base}-section${String(i + 1).padStart(2, "0")}.png`;
+          screenshotEntries[name] = dataUrlToBytes(composited);
+          screenshotNames.push(name);
+        }
+      } else {
+        // Background didn't return slices (older bundle?). Fall back to
+        // the stitched image.
+        const composited = await compositeAnnotations(
+          resp.capture.dataUrl,
+          annotations,
+        );
+        const name = `${base}.png`;
+        screenshotEntries[name] = dataUrlToBytes(composited);
+        screenshotNames.push(name);
+      }
 
       const text = formatSession({ url, annotations }, format, {
-        screenshotFilename: screenshotName,
+        screenshotFilenames: screenshotNames,
       });
 
       const zipped = zipSync({
         [docName]: strToU8(text),
-        [screenshotName]: dataUrlToBytes(composited),
+        ...screenshotEntries,
       });
 
       const blob = new Blob([zipped as BlobPart], { type: "application/zip" });
@@ -710,7 +761,7 @@
               <button
                 type="button"
                 class="w-full text-[11px] text-ink-600 dark:text-night-dim hover:text-brand-pink dark:hover:text-brand-pink-light flex items-center justify-center gap-1 py-1"
-                onclick={() => app.rescan(pageUrl || null)}
+                onclick={() => app.rescan(pageUrl || null, true)}
                 disabled={app.scanning}
               >
                 {app.scanning ? "scanning…" : "↻ Rescan"}
@@ -820,9 +871,14 @@
 
     {#if !showAssociatePrompt}
     <section class="space-y-2">
-      <h2 class="text-xs uppercase tracking-wide text-ink-500 dark:text-night-mute font-medium">
-        Tool
-      </h2>
+      <div class="flex items-center justify-between gap-2">
+        <h2 class="text-xs uppercase tracking-wide text-ink-500 dark:text-night-mute font-medium">
+          Tool
+        </h2>
+        {#if app.appMode !== "standalone"}
+          <SessionHistory />
+        {/if}
+      </div>
       <div class="grid grid-cols-5 gap-1">
         {#each TOOLS as t (t.id)}
           <button
@@ -947,9 +1003,6 @@
       </div>
     {/if}
 
-    {#if app.appMode !== "standalone"}
-      <SessionHistory />
-    {/if}
   </main>
 
   <footer

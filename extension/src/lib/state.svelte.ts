@@ -9,11 +9,39 @@ import {
   discoverCompanions,
   type Companion,
 } from "./companions.js";
-import { findCompanionForUrl } from "./url-patterns.js";
+import { findCompanionForUrl, matchAny } from "./url-patterns.js";
+import {
+  loadByOrigin,
+  save as saveLocal,
+  clearOrigin as clearLocal,
+  originOf,
+} from "./local-store.js";
 
 const SELECTED_KEY = "pinta-selected-companion";
 
 export type ExtensionMode = "draw" | "select" | "review" | "idle";
+
+/**
+ * Top-level connection mode.
+ * - `discovering`: first scan in flight, don't render mode-dependent UI yet
+ * - `connected`: at least one companion is running; existing WS-driven flow
+ * - `standalone`: no companions running anywhere; session lives in IndexedDB,
+ *   only Copy is exposed (no agent submit). Designed for testers hitting
+ *   deployed URLs who have no project on disk.
+ */
+export type AppMode = "discovering" | "connected" | "standalone";
+
+function newDraft(url: string): Session {
+  return {
+    id: crypto.randomUUID(),
+    url,
+    projectRoot: "",
+    startedAt: Date.now(),
+    annotations: [],
+    status: "drafting",
+    producer: "extension",
+  };
+}
 
 class ExtensionState {
   session = $state<Session | null>(null);
@@ -32,6 +60,22 @@ class ExtensionState {
   private client: WsClient | null = null;
   private creatingSession = false;
   private lastUrl: string | null = null;
+  /** Origin currently driving the standalone-mode session (IDB key). */
+  private currentOrigin: string | null = null;
+
+  /**
+   * Top-level connection mode. Standalone whenever no companion is
+   * currently selected — covers both "no companions running" (tester
+   * case) and "companions exist but none matched this URL" (tester on
+   * a URL the dev forgot to register). The picker still appears in the
+   * header so the user can associate manually if they want. Distinct
+   * from `mode` above which controls the active drawing tool.
+   */
+  get appMode(): AppMode {
+    if (this.selectedCompanion) return "connected";
+    if (this.scanning && this.companions.length === 0) return "discovering";
+    return "standalone";
+  }
 
   /**
    * Begin the extension lifecycle. Discovers companions, picks one
@@ -50,11 +94,50 @@ class ExtensionState {
     this.connectionStatus = "disconnected";
   }
 
-  /** Manual rescan — used after a connection drop or user-triggered refresh. */
-  async rescan(activeTabUrl: string | null = this.lastUrl): Promise<void> {
+  /**
+   * Re-evaluate routing for the current tab URL.
+   *
+   * Fast-path: if `force` is false (the navigation case) and the active
+   * tab still matches the currently-selected companion's URL patterns,
+   * skip the port scan entirely. SPAs that route via pushState fire
+   * `chrome.tabs.onUpdated` repeatedly during a single user navigation,
+   * and re-probing 21 ports on each event was wasted work whenever the
+   * destination was still inside the same project.
+   *
+   * Manual rescan triggers (the "↻ Rescan" button) pass `force = true`
+   * so the scan still discovers newly-started companions.
+   */
+  async rescan(
+    activeTabUrl: string | null = this.lastUrl,
+    force: boolean = false,
+  ): Promise<void> {
+    if (
+      !force &&
+      this.selectedCompanion &&
+      activeTabUrl &&
+      this.selectedCompanion.urlPatterns.length > 0 &&
+      matchAny(activeTabUrl, this.selectedCompanion.urlPatterns)
+    ) {
+      // Routing context still resolves to the same companion. Update
+      // the cached URL so future calls have an accurate baseline, but
+      // don't burn the port-scan budget.
+      this.lastUrl = activeTabUrl;
+      return;
+    }
+
     this.scanning = true;
     try {
       this.companions = await discoverCompanions();
+
+      // Wipe the locally-loaded session if we're entering routing — it
+      // gets re-hydrated below if we end up standalone, replaced by the
+      // companion's session if we end up connected.
+      const wasStandalone = !!this.currentOrigin;
+      if (wasStandalone) {
+        this.session = null;
+        this.currentOrigin = null;
+      }
+
       const stillSelected = this.selectedCompanion
         ? this.companions.find(
             (c) => c.port === this.selectedCompanion!.port,
@@ -75,7 +158,8 @@ class ExtensionState {
         await this.connectTo(urlMatch);
       } else if (!stillSelected) {
         // Current companion is gone and the URL doesn't disambiguate —
-        // fall back to the auto-pick policy.
+        // fall back to the auto-pick policy. Returns null if no auto-pick
+        // is possible (zero companions, or many with no URL match).
         const next = this.pickCompanion(this.companions, activeTabUrl);
         await this.connectTo(next);
       } else if (stillSelected !== this.selectedCompanion) {
@@ -83,8 +167,44 @@ class ExtensionState {
         // changed since last scan).
         this.selectedCompanion = stillSelected;
       }
+
+      // Standalone fallback: routing landed on no companion (either
+      // none exist, or none match and there's no auto-pick). Hydrate
+      // the local session for the current origin so annotations have a
+      // place to land.
+      if (!this.selectedCompanion) {
+        if (this.client) {
+          this.client.stop();
+          this.client = null;
+          this.connectionStatus = "disconnected";
+        }
+        await this.hydrateStandalone(activeTabUrl);
+      }
     } finally {
       this.scanning = false;
+    }
+  }
+
+  /**
+   * Standalone mode: load (or leave empty for later creation) the session
+   * for the current origin. Called from rescan when no companions exist.
+   */
+  private async hydrateStandalone(activeTabUrl: string | null): Promise<void> {
+    const origin = originOf(activeTabUrl);
+    if (!origin) {
+      // Unsupported URL (chrome://, about:, etc.) — keep state cleared.
+      this.session = null;
+      this.currentOrigin = null;
+      return;
+    }
+    if (this.currentOrigin === origin && this.session) return;
+    this.currentOrigin = origin;
+    try {
+      const existing = await loadByOrigin(origin);
+      this.session = existing ?? null;
+    } catch (err) {
+      this.lastError = `local store read failed: ${(err as Error).message}`;
+      this.session = null;
     }
   }
 
@@ -181,33 +301,116 @@ class ExtensionState {
     this.client?.send(msg);
   }
 
-  ensureSession(url: string): void {
+  async ensureSession(url: string): Promise<void> {
     this.lastUrl = url;
-    if (this.session || this.creatingSession || !this.client) return;
+    if (this.session || this.creatingSession) return;
+
+    if (this.appMode === "standalone") {
+      const origin = originOf(url);
+      if (!origin) return;
+      this.currentOrigin = origin;
+      const existing = await loadByOrigin(origin).catch(() => null);
+      if (existing) {
+        this.session = existing;
+        return;
+      }
+      const draft = newDraft(url);
+      this.session = draft;
+      // Snapshot before save — IndexedDB's structuredClone can't handle
+      // Svelte 5 reactive proxies that wrap state objects.
+      await saveLocal(origin, $state.snapshot(draft) as Session).catch((err) => {
+        this.lastError = `local store write failed: ${(err as Error).message}`;
+      });
+      return;
+    }
+
+    if (!this.client) return;
     this.creatingSession = true;
     this.send({ type: "session.create", url });
   }
 
-  addAnnotation(annotation: Annotation): void {
+  async addAnnotation(annotation: Annotation): Promise<void> {
+    if (this.appMode === "standalone") {
+      await this.mutateLocal((s) => ({
+        ...s,
+        annotations: [...s.annotations, annotation],
+      }));
+      return;
+    }
     this.send({ type: "annotation.add", annotation });
   }
 
-  updateAnnotation(id: string, patch: Partial<Annotation>): void {
+  async updateAnnotation(id: string, patch: Partial<Annotation>): Promise<void> {
+    if (this.appMode === "standalone") {
+      await this.mutateLocal((s) => ({
+        ...s,
+        annotations: s.annotations.map((a) =>
+          a.id === id ? ({ ...a, ...patch } as Annotation) : a,
+        ),
+      }));
+      return;
+    }
     this.send({ type: "annotation.update", id, patch });
   }
 
-  removeAnnotation(id: string): void {
+  async removeAnnotation(id: string): Promise<void> {
+    if (this.appMode === "standalone") {
+      await this.mutateLocal((s) => ({
+        ...s,
+        annotations: s.annotations.filter((a) => a.id !== id),
+      }));
+      return;
+    }
     this.send({ type: "annotation.remove", id });
   }
 
   submit(screenshot = "", autoApply?: boolean): void {
+    // No-op in standalone — the side panel hides Submit there. Defensive
+    // guard so a stray call (e.g. from a hotkey) doesn't crash.
+    if (this.appMode === "standalone") return;
     this.send({ type: "session.submit", screenshot, autoApply });
+  }
+
+  /**
+   * Wipe the standalone session for the current origin and start a
+   * fresh draft — equivalent of "Cancel and restart" in connected mode.
+   * No-op in connected mode (callers should use `cancelAndRestart`).
+   */
+  async clearStandaloneSession(): Promise<void> {
+    if (this.appMode !== "standalone" || !this.currentOrigin) return;
+    const url = this.lastUrl ?? "";
+    await clearLocal(this.currentOrigin).catch(() => {});
+    this.session = null;
+    if (url) await this.ensureSession(url);
+  }
+
+  /**
+   * Apply a pure mutation to the local-mode session and persist. No-op
+   * if there's no active session yet (caller should ensureSession first).
+   */
+  private async mutateLocal(
+    fn: (s: Session) => Session,
+  ): Promise<void> {
+    if (!this.session || !this.currentOrigin) return;
+    const next = fn(this.session);
+    this.session = next;
+    // Snapshot strips Svelte 5 reactive proxies — IndexedDB uses
+    // structuredClone internally and chokes on them otherwise.
+    await saveLocal(this.currentOrigin, $state.snapshot(next) as Session).catch(
+      (err) => {
+        this.lastError = `local store write failed: ${(err as Error).message}`;
+      },
+    );
   }
 
   /**
    * Cancel the current session and start a fresh one for the same URL.
    */
   async cancelAndRestart(url: string): Promise<void> {
+    if (this.appMode === "standalone") {
+      await this.clearStandaloneSession();
+      return;
+    }
     const current = this.session;
     const base = this.httpBase();
     if (current && current.status !== "drafting" && base) {
