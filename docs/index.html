@@ -1564,31 +1564,36 @@
     <div class="container">
       <div class="section-head">
         <span class="eyebrow">Install &amp; run</span>
-        <h2>One skill or five commands.</h2>
-        <p class="sub">Node 20+ and Chrome (or any Chromium-based browser). The fastest path is the <code>/build-pinta</code> Claude Code skill — it installs deps, builds in parallel, drops the <code>/pinta</code> skill into <code>~/.claude/skills/pinta/</code>, and prints the load-unpacked path. Or run the steps below manually.</p>
+        <h2>Two commands.</h2>
+        <p class="sub">Install the Chrome extension, run the companion in your project, annotate. Node 20+ and Chrome (or any Chromium-based browser).</p>
       </div>
       <div class="install-wrap">
         <pre>
-<span class="term-bar"><span class="dot r"></span><span class="dot y"></span><span class="dot g"></span><span class="label">~/code  —  zsh</span></span><code># 1. Clone + install
-git clone https://github.com/kevzlou7979/pinta.git
-cd pinta
-npm install
+<span class="term-bar"><span class="dot r"></span><span class="dot y"></span><span class="dot g"></span><span class="label">~/your-project  —  zsh</span></span><code># 1. Install the extension
+#    Chrome Web Store: https://chrome.google.com/webstore  (search "Pinta")
 
-# 2. Build the extension and the companion
-npm run build --workspace @pinta/extension
-npm run build --workspace @pinta/companion
-
-# 3. Install the Claude Code skill (optional but recommended)
-bash scripts/install-skill.sh
-
-# 4. Load the extension in Chrome
-#    chrome://extensions → Developer Mode → Load unpacked → ./extension/dist
-
-# 5. Start the companion in the project you want to edit
+# 2. Run the companion in your project root
 npx pinta-companion .
-# or:  node ~/.claude/skills/pinta/start-companion.js .
+
+# 3. Open Pinta in your browser, annotate, hit Submit
+#    Then in Claude Code:  /pinta
 <span class="caret" aria-hidden="true"></span></code></pre>
-        <p class="install-note">Then in Claude Code, type <code>/pinta</code> (push, default) — or <code>/pinta --polling</code> for sandboxed setups. In Cursor: <em>"Pick up the pending Pinta session and apply the changes — show me the plan first."</em></p>
+        <p class="install-note">
+          For Cursor / Cline / Continue / Zed, add the MCP bridge to your agent's config:
+        </p>
+        <pre>
+<span class="term-bar"><span class="dot r"></span><span class="dot y"></span><span class="dot g"></span><span class="label">~/.cursor/mcp.json  —  json</span></span><code>{
+  "mcpServers": {
+    "pinta": {
+      "command": "npx",
+      "args": ["-y", "-p", "pinta-companion", "pinta-mcp"]
+    }
+  }
+}
+<span class="caret" aria-hidden="true"></span></code></pre>
+        <p class="install-note">
+          <strong>Want to hack on Pinta itself?</strong> See <a href="https://github.com/kevzlou7979/pinta#development">Development</a> in the README — clone, <code>npm install</code>, <code>npm run build</code>, load unpacked.
+        </p>
       </div>
     </div>
   </section>

@@ -141,35 +141,34 @@ See [`spec/SPEC.md` §7–9](spec/SPEC.md) for the full status of each.
 coding agent — Claude Code is the reference; Cursor / Cline / Continue / Zed
 work via MCP.
 
-**One-shot setup (recommended)** — clone the repo, open Claude Code in
-the repo dir, and run:
-
-```
-/build-pinta
-```
-
-The project-scoped `build-pinta` skill installs deps, builds the extension
-and companion in parallel, installs the `/pinta` skill into
-`~/.claude/skills/pinta/`, and prints the path to load into Chrome.
-
-**Manual setup** if you'd rather drive it yourself:
-
 ```bash
-# 1. Clone + install
-git clone https://github.com/kevzlou7979/pinta.git
-cd pinta
-npm install
+# 1. Install the extension from the Chrome Web Store
+#    https://chrome.google.com/webstore  (search "Pinta")
 
-# 2. Build the extension and the companion
-npm run build --workspace @pinta/extension
-npm run build --workspace @pinta/companion
+# 2. Run the companion in your project root
+npx pinta-companion .
 
-# 3. Install the Claude Code skill (optional but recommended)
-bash scripts/install-skill.sh
-
-# 4. Load the extension in Chrome
-#    chrome://extensions → Developer Mode → Load unpacked → pick ./extension/dist
+# 3. In Claude Code:
+/pinta
 ```
+
+For Cursor / Cline / Continue / Zed, drop this into your agent's MCP
+config:
+
+```json
+{
+  "mcpServers": {
+    "pinta": {
+      "command": "npx",
+      "args": ["-y", "-p", "pinta-companion", "pinta-mcp"]
+    }
+  }
+}
+```
+
+> **Hacking on Pinta itself?** See [Development](#development) below for
+> the source build (`git clone` → `npm install` → `npm run build`,
+> load unpacked in Chrome).
 
 ---
 
