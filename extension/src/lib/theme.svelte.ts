@@ -1,8 +1,10 @@
 // Theme manager — reads + writes a 'dark' class on <html>, persists to
-// localStorage. The popup/sidepanel HTMLs run a tiny inline script before
-// this module loads, so the class is already correct by the time the
-// Svelte tree mounts. This module just keeps the reactive store in sync
-// with that boot decision and lets components toggle.
+// localStorage. Imported synchronously by each entry's main.ts so
+// applyTheme() runs before the Svelte tree mounts. MV3's default CSP
+// (script-src 'self') forbids inline pre-paint scripts, so the class
+// is set on first module evaluation rather than before the very first
+// frame — there can be a one-frame light-themed flash on dark-mode
+// boot. Acceptable trade-off for CSP compliance.
 
 const STORAGE_KEY = "pinta-theme";
 
@@ -25,10 +27,13 @@ function systemTheme(): Theme {
 }
 
 function bootTheme(): Theme {
-  // Source of truth at boot is the class set by the inline FOUC script.
+  // Stored preference wins, then prefers-color-scheme, then light. Reads
+  // the live class as a tiebreaker if anything else set it (e.g. a
+  // future inline script via a hashed CSP allowlist).
   if (typeof document !== "undefined") {
+    const stored = readStored();
+    if (stored != null) return stored;
     if (document.documentElement.classList.contains("dark")) return "dark";
-    if (readStored() != null) return readStored() as Theme;
     return systemTheme();
   }
   return "light";
