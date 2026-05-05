@@ -67,7 +67,10 @@
     // `globalSeq()` so the count is unified with selects and matches
     // the side panel + the composited screenshot.
     for (const a of content.committed) {
-      if (a.kind === "select") continue;
+      // Selects use DOM-attached badges (Overlay.svelte). Image-kind
+      // annotations get their own placement overlay (Phase 3) — neither
+      // belongs in the stroke-canvas pipeline.
+      if (a.kind === "select" || a.kind === "image") continue;
       drawAnnotation(ctx, a.kind, a.strokes, {
         color: a.color,
         opacity: COMMITTED_ALPHA,

@@ -10,8 +10,27 @@
 
   let hovered: Element | null = $state(null);
   let selected: Element | null = $state(null);
+  // Ctrl/Cmd+click on additional elements queues them as extra targets
+  // for the same comment. Live preview / inline edits still apply to the
+  // primary `selected` only — extras are carriers for the agent.
+  let extras: Element[] = $state([]);
   let comment = $state("");
   let tick = $state(0);
+
+  /**
+   * Read-only overlay for an imported `.pinta` session being viewed in
+   * the side panel. When set, the page shows a metadata pill in the
+   * top-right and numbered halos/badges for each annotation that can
+   * be located on the current page (via target.selector). Cleared by
+   * the side panel when the viewer closes.
+   */
+  type ImportedOverlay = {
+    title: string;
+    author: string;
+    accentColor: string;
+    annotations: Annotation[];
+  };
+  let imported: ImportedOverlay | null = $state(null);
 
   const HOST_TAG = "pinta-overlay-host";
 
@@ -26,6 +45,7 @@
     restoreOriginal();
     hovered = null;
     selected = null;
+    extras = [];
     comment = "";
     selectCustomCss = "";
     selectCssChanges = {};
@@ -47,8 +67,38 @@
         mode?: Mode;
         tool?: DrawTool;
         annotationId?: string;
+        dataUrl?: string;
+        mediaType?: string;
+        name?: string;
+        imported?: ImportedOverlay;
       };
       if (m?.type === "mode.set" && m.mode) setMode(m.mode, m.tool);
+      else if (m?.type === "image.place" && m.dataUrl) {
+        // Side panel handed us a freshly-picked file. Decode natural
+        // dimensions before pushing into state so the overlay can size
+        // the placement rect proportionally to the image (instead of
+        // using a hardcoded default that would distort the aspect).
+        const probe = new Image();
+        probe.onload = () => {
+          content.setPendingImage({
+            mediaType: m.mediaType ?? "image/png",
+            dataUrl: m.dataUrl!,
+            name: m.name,
+            naturalWidth: probe.naturalWidth || 400,
+            naturalHeight: probe.naturalHeight || 300,
+          });
+          // Snap any leftover select / draw state out of the way so
+          // the image overlay isn't fighting another mode for input.
+          clearSelectState();
+          content.cancelPending();
+          content.cancelInProgress();
+        };
+        probe.onerror = () => {
+          // Bad bitmap — drop silently. The side panel will surface a
+          // generic "couldn't load image" if it cared to track this.
+        };
+        probe.src = m.dataUrl;
+      }
       else if (m?.type === "annotated.remove" && m.annotationId) {
         // The side panel doesn't know whether an annotation came from
         // select-mode (DOM element + pin badge) or draw-mode (canvas
@@ -67,6 +117,14 @@
         content.clearCommitted();
         if (content.pending) content.cancelPending();
         if (content.inProgress) content.cancelInProgress();
+      } else if (m?.type === "imported.show" && m.imported) {
+        // Clear any in-progress UI so the read-only overlay renders cleanly.
+        clearSelectState();
+        content.cancelPending();
+        content.cancelInProgress();
+        imported = m.imported;
+      } else if (m?.type === "imported.hide") {
+        imported = null;
       }
     };
     chrome.runtime.onMessage.addListener(handler);
@@ -132,10 +190,30 @@
       if (!el || isOurNode(el)) return;
       e.preventDefault();
       e.stopPropagation();
-      // Switching to a different element while edits were typed against
-      // the previous one — restore the old element AND wipe editor state
-      // so the new pick starts clean. Otherwise the live-preview effect
-      // would re-apply the leftover changes to the new target.
+
+      // Ctrl/Cmd+click → multi-select. Toggles the element in/out of
+      // `extras` without disturbing the primary selection or its live
+      // preview. The primary is unchanged so the inline editor stays
+      // anchored to the same popover; extras are pure agent-targets.
+      const isModifier = e.ctrlKey || e.metaKey;
+      if (isModifier && selected) {
+        if (el === selected) return; // clicking primary itself does nothing
+        const i = extras.indexOf(el);
+        if (i >= 0) {
+          // Toggle off — remove from extras.
+          extras = extras.filter((_, idx) => idx !== i);
+        } else {
+          extras = [...extras, el];
+        }
+        hovered = null;
+        return;
+      }
+
+      // Plain click — replaces both primary and extras. Switching the
+      // primary while edits were typed against the previous one means
+      // we restore the old element AND wipe editor state so the new
+      // pick starts clean. Otherwise the live-preview effect would
+      // re-apply the leftover changes to the new target.
       if (selected && selected !== el) {
         restoreOriginal();
         selectComment = "";
@@ -146,6 +224,7 @@
         textWasMutated = false;
       }
       selected = el;
+      extras = [];
       hovered = null;
     }
     function onKey(e: KeyboardEvent) {
@@ -175,6 +254,166 @@
     document.addEventListener("keydown", onKey, true);
     return () => document.removeEventListener("keydown", onKey, true);
   });
+
+  // Image-mode escape: cancel the pending placement entirely. Unlike
+  // draw mode there's no "in-progress" vs "pending" distinction —
+  // either you have a placed image or you don't.
+  $effect(() => {
+    if (content.mode !== "image") return;
+    function onKey(e: KeyboardEvent) {
+      if (e.key === "Escape") content.cancelPendingImage();
+    }
+    document.addEventListener("keydown", onKey, true);
+    return () => document.removeEventListener("keydown", onKey, true);
+  });
+
+  // Comment for the in-flight image placement. Cleared on submit/cancel.
+  let imageComment = $state("");
+
+  // Drag / resize bookkeeping. We keep deltas in a closure-local var
+  // (not $state) because pointer events fire faster than Svelte can
+  // schedule reactivity passes — direct mutation of state on each move
+  // is fine since we DO want re-renders, but the *original* placement
+  // we're computing offsets from must not change mid-gesture.
+  function onImageDragStart(e: PointerEvent) {
+    if (!content.pendingImage || e.button !== 0) return;
+    e.preventDefault();
+    e.stopPropagation();
+    const start = { ...content.pendingImage };
+    const startClientX = e.clientX;
+    const startClientY = e.clientY;
+    const target = e.currentTarget as HTMLElement;
+    target.setPointerCapture(e.pointerId);
+    function onMove(ev: PointerEvent) {
+      const dx = ev.clientX - startClientX;
+      const dy = ev.clientY - startClientY;
+      content.updatePendingImage({ x: start.x + dx, y: start.y + dy });
+    }
+    function onUp(ev: PointerEvent) {
+      try { target.releasePointerCapture(ev.pointerId); } catch { /* released by browser */ }
+      target.removeEventListener("pointermove", onMove);
+      target.removeEventListener("pointerup", onUp);
+      target.removeEventListener("pointercancel", onUp);
+    }
+    target.addEventListener("pointermove", onMove);
+    target.addEventListener("pointerup", onUp);
+    target.addEventListener("pointercancel", onUp);
+  }
+
+  type Corner = "nw" | "ne" | "sw" | "se";
+
+  function onImageResizeStart(e: PointerEvent, corner: Corner) {
+    if (!content.pendingImage || e.button !== 0) return;
+    e.preventDefault();
+    e.stopPropagation();
+    const start = { ...content.pendingImage };
+    const ratio = start.width / start.height;
+    const startClientX = e.clientX;
+    const startClientY = e.clientY;
+    const handle = e.currentTarget as HTMLElement;
+    handle.setPointerCapture(e.pointerId);
+    function onMove(ev: PointerEvent) {
+      const dx = ev.clientX - startClientX;
+      const dy = ev.clientY - startClientY;
+      // Aspect-locked resize — drives off the *primary* axis (x) and
+      // computes y from the original ratio. Predictable behavior, no
+      // drift from rounding errors that would otherwise compound across
+      // repeated resizes.
+      let nextW = start.width;
+      let nextH = start.height;
+      let nextX = start.x;
+      let nextY = start.y;
+      const signX = corner === "nw" || corner === "sw" ? -1 : 1;
+      const signY = corner === "nw" || corner === "ne" ? -1 : 1;
+      // Use whichever axis the user moved more of, but lock to ratio.
+      const projected = signX * dx > signY * dy ? signX * dx : signY * dy;
+      nextW = Math.max(40, start.width + projected);
+      nextH = nextW / ratio;
+      if (signX < 0) nextX = start.x + (start.width - nextW);
+      if (signY < 0) nextY = start.y + (start.height - nextH);
+      content.updatePendingImage({ x: nextX, y: nextY, width: nextW, height: nextH });
+    }
+    function onUp(ev: PointerEvent) {
+      try { handle.releasePointerCapture(ev.pointerId); } catch { /* released by browser */ }
+      handle.removeEventListener("pointermove", onMove);
+      handle.removeEventListener("pointerup", onUp);
+      handle.removeEventListener("pointercancel", onUp);
+    }
+    handle.addEventListener("pointermove", onMove);
+    handle.addEventListener("pointerup", onUp);
+    handle.addEventListener("pointercancel", onUp);
+  }
+
+  // Live viewport rect of the pending image (page coords → viewport
+  // coords, includes scroll). Recomputed reactively on tick (scroll/
+  // resize) so the overlay stays anchored to the page if the user
+  // scrolls while positioning.
+  let pendingImageRect = $derived.by(() => {
+    void tick;
+    const p = content.pendingImage;
+    if (!p) return null;
+    return {
+      top: p.y - window.scrollY,
+      left: p.x - window.scrollX,
+      width: p.width,
+      height: p.height,
+    };
+  });
+
+  function submitImage() {
+    const p = content.pendingImage;
+    if (!p) return;
+    const trimmed = imageComment.trim();
+    if (!trimmed) return;
+    const annId =
+      typeof crypto !== "undefined" && "randomUUID" in crypto
+        ? `ann-${crypto.randomUUID()}`
+        : `ann-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
+    const placement = { x: p.x, y: p.y, width: p.width, height: p.height };
+    // Resolve the DOM element under the image's center — same trick as
+    // resolveDrawingTarget. Gives the agent a selector + outerHTML to
+    // anchor the change against, even though the user "drew" with an
+    // image instead of a stroke. Fall through silently if the center
+    // is offscreen / over our own host.
+    const cx = p.x + p.width / 2 - window.scrollX;
+    const cy = p.y + p.height / 2 - window.scrollY;
+    let target: import("@pinta/shared").AnnotationTarget | undefined;
+    if (cx >= 0 && cy >= 0 && cx <= window.innerWidth && cy <= window.innerHeight) {
+      const el = document.elementFromPoint(cx, cy);
+      if (el && el.tagName !== "PINTA-OVERLAY-HOST") {
+        target = captureTarget(el);
+      }
+    }
+    const annotation: import("@pinta/shared").Annotation = {
+      id: annId,
+      createdAt: Date.now(),
+      kind: "image",
+      strokes: [],
+      color: "#FF3D6E",
+      comment: trimmed,
+      images: [
+        {
+          id: "image1",
+          mediaType: p.mediaType,
+          dataUrl: p.dataUrl,
+          name: p.name,
+          placement,
+        },
+      ],
+      target,
+      targets: target ? [target] : undefined,
+      viewport: snapshotViewport(),
+    };
+    chrome.runtime.sendMessage({ type: "annotation.draw-committed", annotation });
+    content.recordCommitted(annotation);
+    content.cancelPendingImage();
+    imageComment = "";
+  }
+
+  function cancelImage() {
+    content.cancelPendingImage();
+    imageComment = "";
+  }
 
   // Submit a select annotation.
   let selectComment = $state("");
@@ -333,9 +572,12 @@
     const hasImages = selectImages.length > 0;
     const contentDirty = selectContentAfter.trim() !== liveText.trim();
     if (!hasComment && !hasCss && !hasChanges && !contentDirty && !hasImages) return;
-    // Capture target BEFORE restoring the DOM — so target.outerHTML +
-    // computedStyles reflect the user's intended state, not the original.
-    const target = captureTarget(selected);
+    // Capture every target BEFORE restoring the DOM — so target.outerHTML
+    // + computedStyles reflect the user's intended state, not the
+    // original. Primary first, then each ctrl-clicked extra (in click
+    // order) so the agent can reason about them in the same order the
+    // user picked them.
+    const targets = [captureTarget(selected), ...extras.map(captureTarget)];
     const beforeText = originalText ?? liveText;
     // Pre-generate the annotation ID so the content script and side
     // panel agree on it (used to clean up the pin badge if the user
@@ -348,13 +590,16 @@
     // already annotated (re-edit), recordAnnotated stores another entry
     // pointing at the same true-original snapshot — that's fine, the
     // first remove restores fully and subsequent removes are no-ops.
+    // Only the primary gets a snapshot — extras are not mutated by the
+    // editor, so they don't need rollback bookkeeping.
     if (originalCssText !== null && originalInnerHtml !== null) {
       content.recordAnnotated(annId, selected, originalCssText, originalInnerHtml);
     }
     chrome.runtime.sendMessage({
       type: "annotation.target-selected",
       annotationId: annId,
-      target,
+      targets,
+      groupingMode: targets.length > 1 ? "single-edit" : undefined,
       comment: selectComment.trim(),
       customCss: hasCss ? selectCustomCss.trim() : undefined,
       cssChanges: hasChanges ? selectCssChanges : undefined,
@@ -369,6 +614,7 @@
     // `content.annotated`, so on Remove or Cancel-session we can roll
     // back this specific element. Just clear our editing handles.
     selected = null;
+    extras = [];
     selectComment = "";
     selectCustomCss = "";
     selectCssChanges = {};
@@ -388,6 +634,7 @@
 
   // Submit a draft drawing as an annotation.
   let draftComment = $state("");
+  let draftImages = $state<import("@pinta/shared").AnnotationImage[]>([]);
   function submitDraft() {
     if (!content.pending || !draftComment.trim()) return;
     const draft = content.pending;
@@ -404,6 +651,7 @@
       // carries a selector + outerHTML even when the consumer can't see
       // the screenshot — e.g. an agent reading just the .md file.
       target: resolveDrawingTarget(draft) ?? undefined,
+      images: draftImages.length ? draftImages : undefined,
     };
     chrome.runtime.sendMessage({
       type: "annotation.draw-committed",
@@ -412,6 +660,7 @@
     content.recordCommitted(annotation);
     content.cancelPending();
     draftComment = "";
+    draftImages = [];
   }
 
   function resolveDrawingTarget(draft: Draft) {
@@ -490,12 +739,138 @@
   let hoverRect = $derived(rectOf(hovered));
   let selectedRect = $derived(rectOf(selected));
   let pendingRect = $derived(rectOfDraft(content.pending));
+  // Live rects for each ctrl-clicked extra. Recomputed on scroll/resize
+  // (tick) via rectOf, same as primary. Filter out anything that's been
+  // detached from the DOM since the click — better silently drop than
+  // render a halo at a stale position.
+  let extraRects = $derived(
+    extras
+      .map((el, i) => ({ el, rect: rectOf(el), n: i + 2 }))
+      .filter((x): x is { el: Element; rect: NonNullable<ReturnType<typeof rectOf>>; n: number } => x.rect !== null && (x.el as HTMLElement).isConnected),
+  );
+  // Numbering: when only the primary is selected, no badges (status
+  // strip alone is enough). When there are extras, primary becomes "1"
+  // and each extra is "2", "3", "N+1" — matches the order the user
+  // ctrl-clicked them in.
+  let primaryBadgeNumber = $derived(extras.length > 0 ? 1 : 0);
+
+  /**
+   * Resolve each imported annotation to a viewport rect when possible.
+   * - `target.selector` lookup is the source of truth — anchors halos
+   *   and badges to whatever the imported session pointed at.
+   * - Falls back to the first stroke's coords for pin / drawing kinds.
+   * Re-evaluated whenever `imported` changes or `tick` bumps (scroll /
+   * resize), so badges follow the layout in real time.
+   */
+  type ImportedRect = {
+    id: string;
+    n: number;
+    rect: { top: number; left: number; width: number; height: number } | null;
+    badge: { top: number; left: number };
+    matched: boolean; // true = located via selector; false = stroke fallback
+  };
+  let importedRects: ImportedRect[] = $derived.by(() => {
+    void tick;
+    if (!imported) return [];
+    const out: ImportedRect[] = [];
+    for (let i = 0; i < imported.annotations.length; i++) {
+      const a = imported.annotations[i]!;
+      const n = i + 1;
+      const sel =
+        a.targets?.[0]?.selector ?? a.target?.selector ?? null;
+      let rect: ImportedRect["rect"] = null;
+      let matched = false;
+      if (sel) {
+        try {
+          const el = document.querySelector(sel);
+          if (el) {
+            const r = el.getBoundingClientRect();
+            rect = {
+              top: r.top,
+              left: r.left,
+              width: r.width,
+              height: r.height,
+            };
+            matched = true;
+          }
+        } catch {
+          // bad selector — skip silently, badge falls back to strokes
+        }
+      }
+      if (!rect) {
+        const p = a.strokes?.[0];
+        if (!p) continue; // no anchor at all — skip this annotation
+        // Strokes are page-space; convert to viewport for the badge.
+        rect = {
+          top: p.y - window.scrollY,
+          left: p.x - window.scrollX,
+          width: 0,
+          height: 0,
+        };
+      }
+      out.push({
+        id: a.id,
+        n,
+        rect: matched ? rect : null,
+        badge: {
+          top: Math.max(0, rect.top - 8),
+          left: Math.max(0, rect.left + rect.width - 16),
+        },
+        matched,
+      });
+    }
+    return out;
+  });
 </script>
 
-<Canvas />
+<!-- The user's own draft annotations (Canvas strokes + element pin badges)
+  hide while viewing someone else's imported session, so the page shows
+  exactly one overlay at a time and the imported context is unambiguous.
+  Data is untouched — closing the viewer brings the draft visuals back. -->
+{#if !imported}
+  <Canvas />
+{/if}
 
-<!-- Persistent pin badges for elements already annotated this session -->
-{#each content.annotated as a (a.id)}
+<!-- Imported-session read-only overlay: metadata pill + per-annotation halos & badges -->
+{#if imported}
+  <div
+    class="imported-pill"
+    style:--pinta-accent={imported.accentColor}
+    role="status"
+    aria-label="Viewing imported Pinta session"
+  >
+    <span class="imported-pill__dot"></span>
+    <div class="imported-pill__text">
+      <span class="imported-pill__title" title={imported.title}>{imported.title}</span>
+      <span class="imported-pill__author">by {imported.author}</span>
+    </div>
+  </div>
+  {#each importedRects as ir (ir.id)}
+    {#if ir.matched && ir.rect}
+      <div
+        class="imported-hl"
+        style:--pinta-accent={imported.accentColor}
+        style:top="{ir.rect.top}px"
+        style:left="{ir.rect.left}px"
+        style:width="{ir.rect.width}px"
+        style:height="{ir.rect.height}px"
+      ></div>
+    {/if}
+    <div
+      class="imported-badge"
+      style:--pinta-accent={imported.accentColor}
+      style:top="{ir.badge.top}px"
+      style:left="{ir.badge.left}px"
+      title="Imported annotation #{ir.n}{ir.matched ? '' : ' — anchor not found, badge at original coords'}"
+      aria-label="Imported annotation {ir.n}"
+    >{ir.n}</div>
+  {/each}
+{/if}
+
+<!-- Persistent pin badges for elements already annotated this session.
+  Hidden while an imported session is being viewed — see the Canvas
+  guard above for the rationale. -->
+{#each !imported ? content.annotated : [] as a (a.id)}
   {@const r = rectOf(a.element)}
   {@const n = content.globalSeq(a.id)}
   {#if r}
@@ -535,9 +910,35 @@
       style:width="{selectedRect.width}px"
       style:height="{selectedRect.height}px"
     ></div>
+    {#if primaryBadgeNumber > 0}
+      <div
+        class="pin pin--multi"
+        style:top="{Math.max(0, selectedRect.top - 8)}px"
+        style:left="{Math.max(0, selectedRect.left + selectedRect.width - 16)}px"
+        title="Primary pick (live preview anchored here)"
+        aria-label="Primary pick"
+      >{primaryBadgeNumber}</div>
+    {/if}
+    {#each extraRects as ex (ex.el)}
+      <div
+        class="hl hl--selected hl--extra"
+        style:top="{ex.rect.top}px"
+        style:left="{ex.rect.left}px"
+        style:width="{ex.rect.width}px"
+        style:height="{ex.rect.height}px"
+      ></div>
+      <div
+        class="pin pin--multi"
+        style:top="{Math.max(0, ex.rect.top - 8)}px"
+        style:left="{Math.max(0, ex.rect.left + ex.rect.width - 16)}px"
+        title="Extra pick #{ex.n} — Ctrl/Cmd+click again to remove"
+        aria-label="Extra pick {ex.n}"
+      >{ex.n}</div>
+    {/each}
     <ElementEditor
       anchor={selectedRect}
       title={describe(selected)}
+      extraCount={extras.length}
       {liveText}
       {liveStyles}
       bind:comment={selectComment}
@@ -556,20 +957,52 @@
     anchor={pendingRect}
     title="{content.pending.kind}"
     bind:value={draftComment}
+    bind:images={draftImages}
     onsubmit={submitDraft}
     oncancel={() => {
       content.cancelPending();
       draftComment = "";
+      draftImages = [];
     }}
+  />
+{/if}
+
+{#if content.pendingImage && pendingImageRect}
+  {@const r = pendingImageRect}
+  <div
+    class="img-place"
+    style:top="{r.top}px"
+    style:left="{r.left}px"
+    style:width="{r.width}px"
+    style:height="{r.height}px"
+    onpointerdown={onImageDragStart}
+    role="button"
+    tabindex="0"
+    aria-label="Drag to reposition the placed image"
+  >
+    <img src={content.pendingImage.dataUrl} alt="" draggable="false" />
+    <div class="img-place__handle img-place__handle--nw" onpointerdown={(e) => onImageResizeStart(e, "nw")} aria-label="Resize from top-left" role="button" tabindex="0"></div>
+    <div class="img-place__handle img-place__handle--ne" onpointerdown={(e) => onImageResizeStart(e, "ne")} aria-label="Resize from top-right" role="button" tabindex="0"></div>
+    <div class="img-place__handle img-place__handle--sw" onpointerdown={(e) => onImageResizeStart(e, "sw")} aria-label="Resize from bottom-left" role="button" tabindex="0"></div>
+    <div class="img-place__handle img-place__handle--se" onpointerdown={(e) => onImageResizeStart(e, "se")} aria-label="Resize from bottom-right" role="button" tabindex="0"></div>
+  </div>
+  <CommentInput
+    anchor={r}
+    title={content.pendingImage.name ?? "image"}
+    bind:value={imageComment}
+    onsubmit={submitImage}
+    oncancel={cancelImage}
   />
 {/if}
 
 {#if content.mode !== "idle"}
   <div class="status">
     {#if content.mode === "select"}
-      Select mode · click to pick · Alt+S or Esc to exit
+      Select mode · click to pick{selected ? " · Ctrl/Cmd+click to add more" : ""} · Alt+S or Esc to exit
     {:else if content.mode === "draw"}
       Draw · {content.tool} · drag on page · Alt+P or Esc to exit
+    {:else if content.mode === "image"}
+      Image · drag to position · resize from corners · type comment + Save · Esc to cancel
     {/if}
   </div>
 {/if}

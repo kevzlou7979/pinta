@@ -12,6 +12,18 @@ const DRAW_LINE_WIDTH = 3;
 const SELECT_PADDING = 4;
 const SELECT_LABEL_FONT = "11px ui-sans-serif, system-ui, sans-serif";
 
+/**
+ * Optional knobs for composite rendering.
+ * - `badgeColorOverride`: paint every numbered badge with this color
+ *   instead of the per-annotation stroke color. Stroke colors are
+ *   left alone so the original markup intent is preserved. Used for
+ *   imported share sessions so a recipient can see "Mark's badges are
+ *   purple, Aileen's are teal" at a glance.
+ */
+export type CompositeOptions = {
+  badgeColorOverride?: string;
+};
+
 // Composites annotations onto the screenshot. Inputs and outputs are PNG
 // data URLs. Strokes/boundingRect are in CSS page pixels (matching the
 // CSS-pixel screenshot produced by captureFullPage).
@@ -23,6 +35,7 @@ const SELECT_LABEL_FONT = "11px ui-sans-serif, system-ui, sans-serif";
 export async function compositeAnnotations(
   screenshotDataUrl: string,
   annotations: Annotation[],
+  opts: CompositeOptions = {},
 ): Promise<string> {
   const img = await loadImage(screenshotDataUrl);
   const canvas = document.createElement("canvas");
@@ -33,11 +46,19 @@ export async function compositeAnnotations(
 
   ctx.drawImage(img, 0, 0);
 
-  annotations.forEach((a, i) => {
+  // Sequential rather than forEach — image-kind annotations need an
+  // async bitmap load before they can be drawn, and the existing
+  // ordering must be preserved (later annotations paint over earlier
+  // ones, e.g. a pin badge over a select halo).
+  for (let i = 0; i < annotations.length; i++) {
+    const a = annotations[i]!;
     const n = i + 1;
     const color = a.color || SELECT_COLOR;
+    const badgeColor = opts.badgeColorOverride ?? color;
     if (a.kind === "select") {
-      paintSelect(ctx, a, n);
+      paintSelect(ctx, a, n, badgeColor);
+    } else if (a.kind === "image") {
+      await paintPlacedImage(ctx, a, n, 0, badgeColor);
     } else {
       drawAnnotation(ctx, a.kind as DrawTool, a.strokes, {
         color,
@@ -46,9 +67,9 @@ export async function compositeAnnotations(
         translate: { x: 0, y: 0 },
       });
       const anchor = badgeAnchor(a.kind as DrawTool, a.strokes);
-      if (anchor) drawNumberBadge(ctx, anchor.x, anchor.y, n, color);
+      if (anchor) drawNumberBadge(ctx, anchor.x, anchor.y, n, badgeColor);
     }
-  });
+  }
 
   return canvas.toDataURL("image/png");
 }
@@ -69,6 +90,7 @@ export async function compositeAnnotationsToViewport(
   viewportDataUrl: string,
   annotations: Annotation[],
   viewport: { offsetY: number; width: number; height: number },
+  opts: CompositeOptions = {},
 ): Promise<string> {
   const img = await loadImage(viewportDataUrl);
   const canvas = document.createElement("canvas");
@@ -89,15 +111,19 @@ export async function compositeAnnotationsToViewport(
   const yMin = viewport.offsetY;
   const yMax = viewport.offsetY + viewport.height;
 
-  annotations.forEach((a, i) => {
+  for (let i = 0; i < annotations.length; i++) {
+    const a = annotations[i]!;
     const n = i + 1;
     const color = a.color || SELECT_COLOR;
+    const badgeColor = opts.badgeColorOverride ?? color;
     const anchorY = anchorYFor(a);
-    if (anchorY == null) return;
-    if (anchorY < yMin || anchorY >= yMax) return;
+    if (anchorY == null) continue;
+    if (anchorY < yMin || anchorY >= yMax) continue;
 
     if (a.kind === "select") {
-      paintSelectTranslated(ctx, a, n, viewport.offsetY);
+      paintSelectTranslated(ctx, a, n, viewport.offsetY, badgeColor);
+    } else if (a.kind === "image") {
+      await paintPlacedImage(ctx, a, n, viewport.offsetY, badgeColor);
     } else {
       const translated = a.strokes.map((p) => ({
         x: p.x,
@@ -110,9 +136,9 @@ export async function compositeAnnotationsToViewport(
         translate: { x: 0, y: 0 },
       });
       const anchor = badgeAnchor(a.kind as DrawTool, translated);
-      if (anchor) drawNumberBadge(ctx, anchor.x, anchor.y, n, color);
+      if (anchor) drawNumberBadge(ctx, anchor.x, anchor.y, n, badgeColor);
     }
-  });
+  }
 
   ctx.restore();
   return canvas.toDataURL("image/png");
@@ -123,6 +149,13 @@ export async function compositeAnnotationsToViewport(
 function anchorYFor(a: Annotation): number | null {
   if (a.kind === "select") {
     return a.target?.boundingRect ? a.target.boundingRect.y : null;
+  }
+  if (a.kind === "image") {
+    // Use the image's vertical center so a tall image that straddles a
+    // viewport boundary lands wherever the bulk of it is — matches what
+    // the user "sees" when they look at it on the page.
+    const p = a.images?.[0]?.placement;
+    return p ? p.y + p.height / 2 : null;
   }
   if (!a.strokes.length) return null;
   // Match the anchor used for badge placement so the badge and the
@@ -135,11 +168,48 @@ function anchorYFor(a: Annotation): number | null {
   return (first.y + last.y) / 2;
 }
 
+/**
+ * Stamps a kind:"image" annotation onto the canvas at its placement
+ * coords (subtract `offsetY` for the viewport-slice composite). Adds
+ * a numbered badge in the top-right corner so the agent can correlate
+ * each placed image with the side panel's annotation list.
+ *
+ * Silent no-op if the bitmap fails to load — better to ship the rest
+ * of the composite than fail the whole submit on one bad inline image.
+ */
+async function paintPlacedImage(
+  ctx: CanvasRenderingContext2D,
+  a: Annotation,
+  n: number,
+  offsetY: number,
+  badgeColor: string,
+): Promise<void> {
+  const img0 = a.images?.[0];
+  if (!img0?.dataUrl || !img0.placement) return;
+  const { x, y, width, height } = img0.placement;
+  let bmp: HTMLImageElement;
+  try {
+    bmp = await loadImage(img0.dataUrl);
+  } catch {
+    return;
+  }
+  ctx.save();
+  ctx.drawImage(bmp, x, y - offsetY, width, height);
+  // Outline so the placed image reads as "intended overlay" rather
+  // than original page content — matches the pink halo on screen.
+  ctx.strokeStyle = a.color || SELECT_COLOR;
+  ctx.lineWidth = 2;
+  ctx.strokeRect(x, y - offsetY, width, height);
+  ctx.restore();
+  drawNumberBadge(ctx, x + width, y - offsetY, n, badgeColor);
+}
+
 function paintSelectTranslated(
   ctx: CanvasRenderingContext2D,
   a: Annotation,
   n: number,
   offsetY: number,
+  badgeColor: string,
 ): void {
   const r = a.target?.boundingRect;
   if (!r) return;
@@ -155,13 +225,14 @@ function paintSelectTranslated(
   ctx.strokeRect(x, y, w, h);
   if (a.target?.selector) paintLabel(ctx, a.target.selector, x, y);
   ctx.restore();
-  drawNumberBadge(ctx, x + w, y, n, a.color || SELECT_COLOR);
+  drawNumberBadge(ctx, x + w, y, n, badgeColor);
 }
 
 function paintSelect(
   ctx: CanvasRenderingContext2D,
   a: Annotation,
   n: number,
+  badgeColor: string,
 ): void {
   const r = a.target?.boundingRect;
   if (!r) return;
@@ -184,7 +255,7 @@ function paintSelect(
 
   // Badge in the top-right corner of the select box so it doesn't
   // overlap the selector label that sits at the top-left.
-  drawNumberBadge(ctx, x + w, y, n, a.color || SELECT_COLOR);
+  drawNumberBadge(ctx, x + w, y, n, badgeColor);
 }
 
 function paintLabel(

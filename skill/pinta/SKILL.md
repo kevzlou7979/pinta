@@ -141,14 +141,27 @@ The 200 response body is the full session (with `claimedBy` and
 
 ## 4. Locate source files for each annotation
 
-Each annotation is one of two shapes:
+Each annotation is one of three shapes:
 
-**Element selection (`kind: "select"`)** — `target` is set:
-- `target.sourceFile` — if present (Vite plugin installed), open it directly.
-- Otherwise grep the project for `target.nearbyText[0]` (most specific text),
-  narrow with `target.nearbyText[1..]` if too generic.
-- `target.outerHTML` and `target.computedStyles` are useful evidence when
-  multiple files match.
+**Element selection (`kind: "select"`)** — `targets` is set (one or more):
+- `targets[]` — list of DOM targets the user picked. Single-click yields
+  one entry; Ctrl/Cmd+click on multiple elements yields N entries. Older
+  sessions may carry `target` (singular) instead — treat it as `[target]`
+  if `targets` is unset.
+- For each target: `target.sourceFile` — if present (Vite plugin
+  installed), open it directly. Otherwise grep the project for
+  `target.nearbyText[0]` (most specific text), narrow with
+  `target.nearbyText[1..]` if too generic. `target.outerHTML` and
+  `target.computedStyles` are useful evidence when multiple files match.
+- **`groupingMode`** (multi-target only) controls how to apply the comment:
+  - `"single-edit"` *(default)* — find **one** change that satisfies every
+    target. Look for a shared selector, a design-system token, or a
+    common ancestor that lets you make the change once. If targets span
+    different files, you may still need multiple Edit calls, but they
+    should express the *same* underlying decision.
+  - `"per-element"` — apply the comment as N independent edits, one per
+    target. The user has signaled they want each element changed
+    individually (e.g. "give all of these consistent spacing").
 - **`customCss`** — if set, the user typed raw CSS in the inline editor's
   CSS tab. Apply it as additions to the matching source rule. See §7.5
   below for framework heuristics.
@@ -157,6 +170,19 @@ Each annotation is one of two shapes:
 no DOM target. The `comment` describes intent; the screenshot shows what
 the drawing points at. Identify the area visually from the screenshot, then
 grep the codebase for nearby text you can read off the screenshot.
+
+**Placed image (`kind: "image"`)** — the user dropped a reference image
+*on the page* at a specific location to indicate "make this region look
+like this." `images[0]` carries the bitmap (`dataUrl` or `path`) and a
+`placement: {x, y, width, height}` in page-space coords (includes
+scrollY). To act on it:
+1. Read the image (see §7.4 for the data-URL → temp file pattern).
+2. Find the DOM region under `placement` — the composite screenshot
+   shows the image stamped at that spot, so visually identify the
+   element(s) it covers, then grep for nearby text from the original
+   screenshot region (or from anywhere `placement.y` would land).
+3. Apply the change in the codebase to make that region match the
+   reference visually.
 
 ## 5. Build a unified plan
 

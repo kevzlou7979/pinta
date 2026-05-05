@@ -32,6 +32,30 @@
     } finally {
       loading = false;
     }
+    // Imported sessions live in IndexedDB, not the companion — refresh
+    // them in parallel so a single ↻ click syncs both lists.
+    void app.refreshImported();
+  }
+
+  function viewImported(id: string) {
+    open = false;
+    app.viewImported(id);
+  }
+  async function forkImported(id: string) {
+    open = false;
+    const result = await app.forkImportedToLocal(id);
+    if (result === "would-overwrite") {
+      const ok = confirm(
+        "Forking will replace your current draft annotations on this URL. " +
+          "Continue and lose the current draft?",
+      );
+      if (!ok) return;
+      await app.forkImportedToLocal(id, { allowOverwrite: true });
+    }
+  }
+  async function removeImported(id: string) {
+    if (!confirm("Remove this imported session?")) return;
+    await app.removeImported(id);
   }
 
   onMount(() => {
@@ -112,8 +136,8 @@
   >
     <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 12a9 9 0 1 0 3-6.7L3 8"/><path d="M3 3v5h5"/><path d="M12 7v5l3 2"/></svg>
     <span>History</span>
-    {#if summaries.length > 0}
-      <span class="text-ink-500 dark:text-night-mute">({summaries.length})</span>
+    {#if summaries.length + app.importedSessions.length > 0}
+      <span class="text-ink-500 dark:text-night-mute">({summaries.length + app.importedSessions.length})</span>
     {/if}
     {#if loading}
       <span class="text-[10px] text-ink-400 dark:text-night-mute">…</span>
@@ -137,11 +161,83 @@
         </button>
       </div>
       <div class="p-2 space-y-1.5 max-h-72 overflow-y-auto">
-        {#if error}
+        {#if app.importedSessions.length > 0}
+          <div class="space-y-1.5">
+            <div class="text-[10px] uppercase tracking-wide text-ink-500 dark:text-night-mute font-semibold px-1">
+              Imported ({app.importedSessions.length})
+            </div>
+            {#each app.importedSessions as imp (imp.id)}
+              <div class="rounded border border-ink-200 px-2.5 py-1.5 text-[12px] dark:border-night-line">
+                <div class="flex items-center justify-between gap-2">
+                  <div class="flex items-center gap-1.5 min-w-0 flex-1">
+                    <span
+                      class="w-2 h-2 rounded-full shrink-0"
+                      style="background-color: {imp.manifest.accentColor};"
+                    ></span>
+                    <span class="text-ink-700 dark:text-night-text font-medium truncate" title={imp.manifest.title}>
+                      {imp.manifest.title}
+                    </span>
+                  </div>
+                  <span class="text-[10px] text-ink-400 dark:text-night-mute shrink-0">
+                    {relTime(imp.importedAt)}
+                  </span>
+                </div>
+                <div class="mt-0.5 flex items-center gap-1">
+                  <span
+                    class="inline-flex items-center gap-1 px-1.5 py-0.5 rounded-full text-white text-[10px] font-medium"
+                    style="background-color: {imp.manifest.accentColor};"
+                  >
+                    Imported · {imp.manifest.author}
+                  </span>
+                  <span class="text-[10px] text-ink-500 dark:text-night-mute">
+                    {imp.session.annotations.length} annotation{imp.session.annotations.length === 1 ? "" : "s"}
+                  </span>
+                </div>
+                {#if imp.manifest.description}
+                  <div class="mt-0.5 text-[11px] text-ink-600 dark:text-night-dim leading-tight italic">
+                    "{imp.manifest.description}"
+                  </div>
+                {/if}
+                <div class="mt-1 flex gap-1">
+                  <button
+                    type="button"
+                    class="text-[10px] px-1.5 py-0.5 rounded border border-ink-300 text-ink-700 hover:bg-ink-50 dark:border-night-line dark:text-night-dim dark:hover:bg-night-alt"
+                    onclick={() => viewImported(imp.id)}
+                  >
+                    View
+                  </button>
+                  <button
+                    type="button"
+                    class="text-[10px] px-1.5 py-0.5 rounded border border-ink-300 text-ink-700 hover:bg-ink-50 dark:border-night-line dark:text-night-dim dark:hover:bg-night-alt disabled:opacity-50"
+                    disabled={app.appMode !== "standalone"}
+                    title={app.appMode === "standalone" ? "Clone into a fresh editable session" : "Forking is only available in standalone mode"}
+                    onclick={() => forkImported(imp.id)}
+                  >
+                    Fork
+                  </button>
+                  <button
+                    type="button"
+                    class="ml-auto text-[10px] px-1.5 py-0.5 rounded text-ink-500 hover:text-red-600 dark:text-night-mute dark:hover:text-red-400"
+                    onclick={() => removeImported(imp.id)}
+                  >
+                    Remove
+                  </button>
+                </div>
+              </div>
+            {/each}
+          </div>
+          {#if summaries.length > 0}
+            <div class="border-t border-ink-200 dark:border-night-line my-1"></div>
+            <div class="text-[10px] uppercase tracking-wide text-ink-500 dark:text-night-mute font-semibold px-1">
+              Local sessions
+            </div>
+          {/if}
+        {/if}
+        {#if error && app.importedSessions.length === 0}
           <p class="text-[11px] text-red-600 dark:text-red-300 px-1">{error}</p>
-        {:else if summaries.length === 0}
+        {:else if summaries.length === 0 && app.importedSessions.length === 0}
           <p class="text-[11px] text-ink-500 dark:text-night-mute italic px-1">No sessions yet.</p>
-        {:else}
+        {:else if summaries.length > 0}
           {#each summaries as s (s.id)}
             {@const badge = statusBadge(s.status)}
             <div

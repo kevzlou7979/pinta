@@ -874,6 +874,126 @@ sees both the drawing and an actionable selector.
 - Migrating an in-flight standalone session to a companion when one
   appears mid-session.
 
+### Phase 11 — Import / Export `.pinta` for collaboration — Shipped
+
+A round-trippable share format so a developer, designer, or QA tester
+can hand a marked-up session to a teammate. Pinta sessions previously
+lived in IndexedDB on one machine; the existing `.zip` Markdown +
+screenshots download was human-readable but not re-importable. This
+phase closes the loop — export to a single `.pinta` file, import on
+any other machine, view (read-only) and **act on it** via the
+recipient's connected agent or a fork into their own draft.
+
+Partially answers Open question §9.6 (read-only sharing).
+
+**File format.** A schema-versioned JSON envelope, single self-contained
+file. Screenshots and per-annotation `images[]` are inlined as base64
+dataUrls so the file is portable; transient companion-side fields
+(`fullPageScreenshotPath`, `claimedBy`, `claimedAt`) are stripped on
+encode. Decoder enforces a 25 MB cap to keep a malicious file from
+blowing out IndexedDB on the recipient.
+
+```jsonc
+{
+  "$pinta": "1",
+  "manifest": {
+    "title": "Header redesign — round 2",
+    "author": "Mark",
+    "description": "Spacing tweaks on hero & nav",
+    "accentColor": "#7C3AED",
+    "exportedAt": 1746360000000
+  },
+  "session": { /* a Session payload, transient fields stripped */ }
+}
+```
+
+The manifest sits **outside** the `Session` type — wire contract
+between extension ↔ companion stays untouched, shareability is a
+side-panel + disk concern. Types in `shared/src/types.ts`:
+`SessionManifest`, `ImportedSession`, `PintaFile`. Encoder /
+decoder / validator in `extension/src/lib/pinta-file.ts`
+(round-trip-tested in `pinta-file.test.ts`).
+
+**Storage.** IDB schema bumped to v2 in `local-store.ts` with a new
+`imported_sessions` object store keyed by a fresh local id (so
+multiple imports of the same source file remain distinct). CRUD via
+`getImportedSessions` / `addImportedSession` / `removeImportedSession`.
+
+**Side-panel UI.**
+- **Export** — "Share file (.pinta)" entry in the existing Download
+  dropdown (standalone mode) and a separate "Share" button next to
+  Copy in the connected-mode footer. Both open an inline form: title,
+  author, description, accent color (6-swatch palette + custom). Author
+  + last-used accent persist to `chrome.storage.local`.
+- **Import** — top-level "Import" pill in the side-panel header
+  (visible in any mode). File picker accepts `.pinta` / JSON. On
+  successful decode the read-only viewer auto-opens so the user
+  immediately sees what they imported (the alternative — silent toast
+  + History entry — looked like nothing happened in connected mode).
+- **History** — imported sessions render as a separate `Imported (N)`
+  group at the top of the History dropdown, each row showing the
+  manifest's accent color as a chip + author tag, with View / Fork /
+  Remove actions.
+- **Read-only viewer** — replaces the active drafting UI when an
+  import is open. Title, author chip painted in the manifest's
+  accentColor, description, source URL, and `AnnotationCard` list
+  with `accentColorOverride + index` props so each card carries a
+  numbered colored badge. Footer flips to imported actions:
+  - **Send to agent** (connected mode) — submits a fresh `Session`
+    payload to the connected companion via HTTP `POST /v1/sessions`
+    with `status: "submitted"`, fresh annotation ids, and the
+    `autoApply` toggle from the footer checkbox. Active draft is
+    untouched.
+  - **Copy** — markdown via `formatSessionAsClipboard` for
+    claude.ai web / ChatGPT.
+  - **Fork** (standalone mode) — clones the imported annotations
+    into a new editable session for the current origin, with a
+    `confirm()` guard if the existing draft has annotations
+    (irreversible IDB overwrite otherwise).
+
+**Content-script overlay.** When a session is being viewed, the
+side panel sends `imported.show { manifest, annotations }` over
+`chrome.tabs.sendMessage`; the content script renders inside the
+existing shadow-DOM host:
+- A fixed-position metadata pill in the top-right (`title · by author`,
+  accent-colored dot).
+- For each imported annotation, a numbered halo + badge in
+  `--pinta-accent`. Anchored via `document.querySelector(target.selector)`
+  when possible; falls back to the annotation's stored stroke coords
+  with a "anchor not found" tooltip. Re-evaluated on every scroll /
+  resize via the existing `tick` reactive.
+- The user's own draft visuals (`<Canvas />` + `content.annotated[]`
+  pin badges) hide while viewing. Data is preserved — closing the
+  viewer restores them. Adding a new annotation also auto-closes the
+  viewer (the user has shifted from "looking" to "working").
+
+`imported.hide` clears the overlay back to the user's draft.
+
+**Wire-protocol changes (vs the original spec §6.2):**
+
+| Direction | Addition |
+|---|---|
+| chrome.tabs message | `imported.show` (side panel → content script) |
+| chrome.tabs message | `imported.hide` (side panel → content script) |
+| HTTP | reuses existing `POST /v1/sessions` for "Send imported to agent" — no new endpoint |
+
+No companion-side changes. The receiving end of a `.pinta` file may
+not have the project on disk at all, which matches the standalone-mode
+audience (Phase 10).
+
+**Bug fixes that shipped alongside Phase 11 work** (worth noting):
+- Glob-pattern matching in `url-patterns.ts` now treats trailing `/*`
+  as `(?:/.*)?` so `https://host/login/*` matches the bare `/login`.
+  Previous semantics required `/login/...` and the "Save pattern"
+  button looked like a no-op for routes whose path was the root of
+  a section.
+- Display-side dedupe of `app.session.annotations` by id — a corrupt
+  imported session or a duplicated WS broadcast no longer crashes
+  Svelte's keyed-each diffing with `each_key_duplicate` (which
+  previously froze the entire annotation list at "0").
+- `each` blocks in the side panel use composite keys (`${id}:${index}`)
+  for collision-safe diffing as a second line of defense.
+
 ---
 
 ## 9. Open questions
@@ -890,7 +1010,7 @@ These are real design decisions that need answering before phase 5, but can be d
 
 5. **Persisted annotations.** Should sessions be re-openable for follow-up, or are they single-shot? Probably the latter for v1.
 
-6. **Read-only mode.** Useful to share annotations with a teammate without auto-applying? Out of scope for v1.
+6. **Read-only mode.** Useful to share annotations with a teammate without auto-applying? *Partially answered by Phase 11* — `.pinta` share files round-trip a session between machines and open in a read-only viewer; the recipient can act on it (Send to agent / Copy / Fork) but can't edit the imported annotations themselves.
 
 ---
 

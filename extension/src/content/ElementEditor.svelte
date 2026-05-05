@@ -21,6 +21,13 @@
   type Props = {
     anchor: { top: number; left: number; width: number; height: number };
     title: string;
+    /**
+     * How many additional Ctrl/Cmd-clicked targets the user has queued
+     * onto this comment beyond the primary. 0 = single-select, N>0
+     * shows a "+ N more picks" pill so the user knows the comment will
+     * be applied to multiple elements.
+     */
+    extraCount?: number;
     liveText: string;
     liveStyles: LiveStyles;
     comment: string;
@@ -34,6 +41,7 @@
   let {
     anchor,
     title,
+    extraCount = 0,
     liveText,
     liveStyles,
     comment = $bindable(""),
@@ -377,7 +385,14 @@
   role="region"
   aria-label="Element editor"
 >
-  <div class="popup__head">{title}</div>
+  <div class="popup__head">
+    <span>{title}</span>
+    {#if extraCount > 0}
+      <span class="popup__extra-pill" title="Comment will apply to all {extraCount + 1} picked elements. Ctrl/Cmd+click on the page to add or remove.">
+        + {extraCount} more pick{extraCount > 1 ? "s" : ""}
+      </span>
+    {/if}
+  </div>
 
   <div class="tabs">
     {#each tabs as t (t.id)}

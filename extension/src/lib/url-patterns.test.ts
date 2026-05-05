@@ -36,6 +36,38 @@ describe("matchPattern", () => {
     ).toBe(false);
   });
 
+  // Regression: a trailing `/*` should match the bare prefix too. The
+  // earlier "require a / after the segment" semantics broke the
+  // common case of associating "/login/*" while sitting at "/login".
+  it("matches the bare prefix when the pattern ends with /*", () => {
+    expect(
+      matchPattern(
+        "https://secure-uat.insurative.ca/login",
+        "https://secure-uat.insurative.ca/login/*",
+      ),
+    ).toBe(true);
+  });
+
+  it("still matches descendants of a trailing /* prefix", () => {
+    expect(
+      matchPattern(
+        "https://secure-uat.insurative.ca/login/dashboard",
+        "https://secure-uat.insurative.ca/login/*",
+      ),
+    ).toBe(true);
+  });
+
+  it("does not match a sibling segment that shares a prefix", () => {
+    // `/login/*` should NOT match `/loginz` — the optional group
+    // requires either end-of-string or "/..." after the prefix.
+    expect(
+      matchPattern(
+        "https://secure-uat.insurative.ca/loginz",
+        "https://secure-uat.insurative.ca/login/*",
+      ),
+    ).toBe(false);
+  });
+
   it("matches subdomain wildcards", () => {
     expect(
       matchPattern(

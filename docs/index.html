@@ -311,6 +311,41 @@
     .btn:hover .arrow { transform: translateX(4px); }
     .btn-primary:hover .arrow { transform: translateX(8px); }
 
+    /* ---------- HERO DEMO ---------- */
+    .hero-demo {
+      margin: 56px auto 0;
+      max-width: 980px;
+      padding: 10px;
+      border-radius: 22px;
+      background:
+        linear-gradient(135deg, rgba(255,210,77,0.35), rgba(255,61,110,0.30) 40%, rgba(140,80,220,0.30) 80%, rgba(199,45,180,0.35)),
+        var(--paper);
+      border: 1px solid var(--line-strong);
+      box-shadow:
+        0 30px 80px rgba(199,45,125,0.20),
+        0 10px 24px rgba(22,17,13,0.08),
+        0 0 0 1px rgba(22,17,13,0.04);
+    }
+    .hero-demo-frame {
+      position: relative;
+      border-radius: 14px;
+      overflow: hidden;
+      background: var(--ink);
+      box-shadow: inset 0 0 0 1px rgba(255,255,255,0.04);
+    }
+    .hero-demo-frame img,
+    .hero-demo-frame video {
+      display: block;
+      width: 100%;
+      height: auto;
+    }
+    .hero-demo-frame video { cursor: zoom-in; }
+    .hero-demo-frame video:fullscreen { cursor: default; object-fit: contain; background: #000; }
+    @media (max-width: 720px) {
+      .hero-demo { margin-top: 40px; padding: 6px; border-radius: 18px; }
+      .hero-demo-frame { border-radius: 12px; }
+    }
+
     /* ---------- PROOF STRIP ---------- */
     .proof {
       border-top: 1px solid var(--line);
@@ -1233,6 +1268,7 @@
         <a href="#how">How it works</a>
         <a href="#features">Features</a>
         <a href="#install">Install</a>
+        <a href="privacy.html">Privacy</a>
         <button id="theme-toggle" class="theme-toggle" type="button" aria-label="Toggle dark mode" title="Toggle dark mode">
           <svg class="icon-moon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"/></svg>
           <svg class="icon-sun" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="4"/><path d="M12 2v2"/><path d="M12 20v2"/><path d="m4.93 4.93 1.41 1.41"/><path d="m17.66 17.66 1.41 1.41"/><path d="M2 12h2"/><path d="M20 12h2"/><path d="m6.34 17.66-1.41 1.41"/><path d="m19.07 4.93-1.41 1.41"/></svg>
@@ -1268,6 +1304,21 @@
           <svg width="16" height="16" viewBox="0 0 16 16" fill="currentColor" aria-hidden="true"><path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.013 8.013 0 0016 8c0-4.42-3.58-8-8-8z"/></svg>
           View on GitHub
         </a>
+      </div>
+      <div class="hero-demo" aria-label="Pinta in action">
+        <div class="hero-demo-frame">
+          <video
+            src="assets/screens/app.mp4"
+            poster="assets/screens/app-poster.jpg"
+            autoplay
+            muted
+            loop
+            playsinline
+            preload="metadata"
+            aria-label="Pinta annotation flow — circle a UI element, type a comment, and an agent edits the source.">
+            <img src="assets/screens/app.gif" alt="Pinta annotation flow — circle a UI element, type a comment, and an agent edits the source." loading="lazy" />
+          </video>
+        </div>
       </div>
     </div>
   </header>
@@ -1341,9 +1392,9 @@
   <section id="features">
     <div class="container">
       <div class="section-head">
-        <span class="eyebrow">What V1 includes</span>
+        <span class="eyebrow">What V1 includes · v0.2.0</span>
         <h2>The whole loop, shipped.</h2>
-        <p class="sub">Phases 0–5 of <a href="https://github.com/kevzlou7979/pinta/blob/main/spec/SPEC.md">the spec</a> are live. Source mapping (Phase 6) and polish (Phase 7) are next.</p>
+        <p class="sub">Phases 0–5 of <a href="https://github.com/kevzlou7979/pinta/blob/main/spec/SPEC.md">the spec</a> are live, plus the polish phases (8 inline editing, 9 protocol, 10 standalone, 11 share files). Source mapping (Phase 6) is next.</p>
       </div>
       <div class="features">
         <div class="feature">
@@ -1415,6 +1466,13 @@
           </div>
           <h3>Multi-project routing</h3>
           <p>Run a companion per project — each picks the next free port (7878, 7879, …) and registers in <code>~/.pinta/registry.json</code>. Side panel auto-routes the active tab via <code>.pinta.json</code> URL patterns; the <code>/pinta</code> skill finds the companion whose root matches the agent's <code>pwd</code>. No more wrong-project submits.</p>
+        </div>
+        <div class="feature">
+          <div class="ico">
+            <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M16 3h5v5"/><path d="M21 3 11 13"/><path d="M21 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h6"/></svg>
+          </div>
+          <h3>Share files for collaboration <span class="pill" style="background:rgba(199,45,180,0.14);color:#7c3aed;border:1px solid rgba(140,80,220,0.35);font-size:10px;padding:1px 6px;border-radius:999px;margin-left:6px;letter-spacing:0.04em;">v0.2.0</span></h3>
+          <p>Export any session as a single <code>.pinta</code> file — title, author, accent color, screenshots inlined. Drop it into another teammate's extension and it opens in a read-only viewer with a metadata pill on the page itself, accent-colored numbered halos at each target, and three actions in the footer: <strong>Send to agent</strong> (submits to <em>their</em> connected companion, your machine stays out of the loop), <strong>Copy</strong> (markdown for claude.ai web / ChatGPT), and <strong>Fork</strong> (clone into their own editable draft).</p>
         </div>
       </div>
     </div>
@@ -1592,7 +1650,7 @@ npx pinta-companion .
 }
 <span class="caret" aria-hidden="true"></span></code></pre>
         <p class="install-note">
-          <strong>Want to hack on Pinta itself?</strong> See <a href="https://github.com/kevzlou7979/pinta#development">Development</a> in the README — clone, <code>npm install</code>, <code>npm run build</code>, load unpacked.
+          <strong>Contributing to Pinta?</strong> See <a href="https://github.com/kevzlou7979/pinta#development">Development</a> in the README — clone, <code>npm install</code>, <code>npm run build</code>, load unpacked.
         </p>
       </div>
     </div>
@@ -1731,6 +1789,20 @@ npx pinta-companion .
         tick();
       }
       setTimeout(typeNext, 200);
+    })();
+
+    // ---------- Hero video click-to-fullscreen ----------
+    (function () {
+      var video = document.querySelector('.hero-demo-frame video');
+      if (!video) return;
+      var request = video.requestFullscreen || video.webkitRequestFullscreen || video.webkitEnterFullscreen;
+      if (!request) return;
+      video.addEventListener('click', function () {
+        try {
+          var p = request.call(video);
+          if (p && typeof p.catch === 'function') p.catch(function () {});
+        } catch (e) {}
+      });
     })();
   </script>
 

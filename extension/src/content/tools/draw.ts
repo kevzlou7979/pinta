@@ -1,6 +1,9 @@
 import type { AnnotationKind, Point } from "@pinta/shared";
 
-export type DrawTool = Exclude<AnnotationKind, "select">;
+// "image" is a placement tool (drag-resize handles) handled by a
+// separate overlay pipeline, not a stroke-based draw tool — exclude
+// it from DrawTool so the stroke renderers stay exhaustive.
+export type DrawTool = Exclude<AnnotationKind, "select" | "image">;
 
 export const DRAW_TOOLS: DrawTool[] = [
   "arrow",

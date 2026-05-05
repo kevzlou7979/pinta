@@ -1,6 +1,7 @@
 import type {
   Annotation,
   ClientMessage,
+  ImportedSession,
   ServerMessage,
   Session,
 } from "@pinta/shared";
@@ -15,7 +16,12 @@ import {
   save as saveLocal,
   clearOrigin as clearLocal,
   originOf,
+  getImportedSessions,
+  addImportedSession,
+  removeImportedSession,
 } from "./local-store.js";
+import { decodePintaFile } from "./pinta-file.js";
+import { uid } from "./id.js";
 
 const SELECTED_KEY = "pinta-selected-companion";
 
@@ -57,6 +63,14 @@ class ExtensionState {
   /** True while the first discovery scan is in flight. */
   scanning = $state(false);
 
+  /** Sessions imported from `.pinta` share files. Read-only — viewable
+   *  in History, optionally forkable into an editable local session. */
+  importedSessions = $state<ImportedSession[]>([]);
+  /** When set, the side panel renders a read-only viewer for this
+   *  imported session instead of the regular drafting UI. Closing the
+   *  viewer (or forking it) clears this back to null. */
+  viewingImportedId = $state<string | null>(null);
+
   private client: WsClient | null = null;
   private creatingSession = false;
   private lastUrl: string | null = null;
@@ -85,7 +99,170 @@ class ExtensionState {
    */
   async start(activeTabUrl: string | null): Promise<void> {
     this.lastUrl = activeTabUrl;
+    // Hydrate imported sessions in parallel with the scan — they live
+    // in IndexedDB and don't depend on which companion we land on.
+    void this.refreshImported();
     await this.rescan(activeTabUrl);
+  }
+
+  /** Reload imported sessions from IndexedDB. Called on start and after
+   *  any add/remove so the History panel stays in sync. */
+  async refreshImported(): Promise<void> {
+    try {
+      this.importedSessions = await getImportedSessions();
+    } catch (err) {
+      this.lastError = `imported sessions read failed: ${(err as Error).message}`;
+    }
+  }
+
+  /** Import a `.pinta` share file. Parses + validates, persists to IDB,
+   *  refreshes the in-memory list. Returns the new ImportedSession on
+   *  success; throws on validation failure so the caller can toast. */
+  async importPintaFile(file: File): Promise<ImportedSession> {
+    const text = await file.text();
+    const imported = decodePintaFile(text);
+    await addImportedSession(imported);
+    await this.refreshImported();
+    return imported;
+  }
+
+  async removeImported(id: string): Promise<void> {
+    await removeImportedSession(id).catch((err) => {
+      this.lastError = `imported session delete failed: ${(err as Error).message}`;
+    });
+    if (this.viewingImportedId === id) this.viewingImportedId = null;
+    await this.refreshImported();
+  }
+
+  /** Open the read-only viewer for an imported session. */
+  viewImported(id: string): void {
+    if (!this.importedSessions.some((s) => s.id === id)) return;
+    this.viewingImportedId = id;
+  }
+
+  /**
+   * Submit an imported session to the connected companion as a brand-new
+   * already-submitted session — the agent picks it up like any other
+   * submission and applies the changes. The user's active draft is left
+   * alone (no clobber). Connected mode only.
+   *
+   * Returns the new session id on success so callers can show a toast
+   * with a link / pointer; throws on transport failure.
+   */
+  async sendImportedToAgent(
+    id: string,
+    opts: { autoApply?: boolean } = {},
+  ): Promise<string | null> {
+    const imported = this.importedSessions.find((s) => s.id === id);
+    if (!imported) return null;
+    const base = this.httpBase();
+    if (!base) {
+      this.lastError =
+        "Send to agent requires a connected companion. Switch projects from the picker, or use Fork in standalone mode.";
+      return null;
+    }
+    const now = Date.now();
+    const payload: Session = {
+      id: crypto.randomUUID(),
+      url: this.lastUrl ?? imported.session.url,
+      projectRoot: "",
+      startedAt: now,
+      submittedAt: now,
+      // Fresh annotation ids so per-annotation status updates from the
+      // agent don't collide with anything in the source-side history.
+      annotations: imported.session.annotations.map((a) => ({
+        ...a,
+        id: uid("ann"),
+        status: undefined,
+        errorMessage: undefined,
+      })),
+      fullPageScreenshot: imported.session.fullPageScreenshot,
+      status: "submitted",
+      // Reuse the existing 'test' producer rather than adding a new
+      // enum value — the wire contract stays narrow, and the agent
+      // already handles 'test' submissions identically to extension ones.
+      producer: "test",
+      autoApply: opts.autoApply,
+    };
+    try {
+      const res = await fetch(`${base}/v1/sessions`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(payload),
+      });
+      if (!res.ok) {
+        const text = await res.text().catch(() => "");
+        throw new Error(`HTTP ${res.status}${text ? `: ${text.slice(0, 200)}` : ""}`);
+      }
+      return payload.id;
+    } catch (err) {
+      this.lastError = `send to agent failed: ${(err as Error).message}`;
+      return null;
+    }
+  }
+
+  /** Close the read-only viewer. */
+  closeImportedViewer(): void {
+    this.viewingImportedId = null;
+  }
+
+  /**
+   * Clone an imported session into a new editable standalone session
+   * for the current origin. Annotations get fresh ids so the fork
+   * doesn't collide with anything in the source agent's tracking. The
+   * fork lands as the active draft for the current URL.
+   */
+  /**
+   * Result of a fork attempt. `would-overwrite` means the active draft
+   * has unsaved annotations — the caller must re-invoke with
+   * `allowOverwrite: true` (typically after a `window.confirm`) to
+   * actually replace it. This guard exists because the cloned session
+   * is written through to IndexedDB at the same origin key as the
+   * existing draft, irreversibly clobbering it.
+   */
+  async forkImportedToLocal(
+    id: string,
+    opts: { allowOverwrite?: boolean } = {},
+  ): Promise<"forked" | "would-overwrite" | "no-op"> {
+    const imported = this.importedSessions.find((s) => s.id === id);
+    if (!imported) return "no-op";
+    if (this.appMode !== "standalone" || !this.currentOrigin) {
+      this.lastError =
+        "fork is only available in standalone mode (no companion selected)";
+      return "no-op";
+    }
+    if (
+      !opts.allowOverwrite &&
+      this.session &&
+      this.session.annotations.length > 0
+    ) {
+      return "would-overwrite";
+    }
+    const url = this.lastUrl ?? imported.session.url;
+    const cloned: Session = {
+      id: crypto.randomUUID(),
+      url,
+      projectRoot: "",
+      startedAt: Date.now(),
+      annotations: imported.session.annotations.map((a) => ({
+        ...a,
+        id: uid("ann"),
+        // Drop any agent-set lifecycle so the forked annotations start
+        // fresh — they haven't been picked up in this project yet.
+        status: undefined,
+        errorMessage: undefined,
+      })),
+      status: "drafting",
+      producer: "extension",
+    };
+    this.session = cloned;
+    this.viewingImportedId = null;
+    await saveLocal(this.currentOrigin, $state.snapshot(cloned) as Session).catch(
+      (err) => {
+        this.lastError = `local store write failed: ${(err as Error).message}`;
+      },
+    );
+    return "forked";
   }
 
   stop(): void {
@@ -330,6 +507,12 @@ class ExtensionState {
   }
 
   async addAnnotation(annotation: Annotation): Promise<void> {
+    // Adding a new annotation means the user has shifted from "looking
+    // at someone else's session" to "working on their own". Close the
+    // imported viewer so the annotation list they just contributed to is
+    // actually visible — without this, the new card lands in
+    // app.session.annotations but the viewer is rendered on top of it.
+    if (this.viewingImportedId) this.viewingImportedId = null;
     if (this.appMode === "standalone") {
       await this.mutateLocal((s) => ({
         ...s,

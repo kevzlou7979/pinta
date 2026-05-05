@@ -6,7 +6,8 @@ export type AnnotationKind =
   | "circle"
   | "freehand"
   | "pin"
-  | "select";
+  | "select"
+  | "image";
 
 export type AnnotationTarget = {
   selector: string;
@@ -33,7 +34,31 @@ export type Annotation = {
   strokes: Point[];
   color: string;
 
+  /**
+   * One or more DOM targets the annotation refers to. Multi-select
+   * (Ctrl/Cmd+click) populates this with N elements. Single-element
+   * annotations still set just one entry. Readers should prefer this
+   * field over the deprecated `target`.
+   */
+  targets?: AnnotationTarget[];
+
+  /**
+   * @deprecated since v0.3 — use `targets` (an array). Kept for one
+   * release so existing on-disk sessions still load. Readers should
+   * fall back to `[target]` only when `targets` is unset.
+   */
   target?: AnnotationTarget;
+
+  /**
+   * How the agent should interpret a multi-target annotation.
+   * - `"single-edit"` (default) — find one change that satisfies every
+   *   target (likely a shared selector / design-system token).
+   * - `"per-element"` — apply the comment as N independent edits, one
+   *   per target. Useful when the targets share intent but not framing
+   *   (e.g. "give all of these the same spacing").
+   * Ignored when `targets` has length 0 or 1.
+   */
+  groupingMode?: "single-edit" | "per-element";
 
   comment: string;
 
@@ -98,6 +123,15 @@ export type AnnotationImage = {
   path?: string;
   /** Optional original filename if dropped from disk. */
   name?: string;
+  /**
+   * Set on `kind: "image"` annotations — where the image is positioned
+   * on the page in page-space coords (i.e. includes scrollY). Used by
+   * the composite renderer to stamp the image onto the screenshot at
+   * the right spot, and by the agent as a hint about which region the
+   * user wants to look like the reference. Unset for plain inline
+   * reference images attached to the comment popover.
+   */
+  placement?: { x: number; y: number; width: number; height: number };
 };
 
 export type SessionStatus =
@@ -145,6 +179,43 @@ export type Session = {
    */
   claimedBy?: string;
   claimedAt?: number;
+};
+
+/**
+ * Wraps a Session for the share-file (`.pinta`) format. The author /
+ * title / accentColor live here rather than on Session itself so the
+ * wire contract between extension and companion stays untouched —
+ * shareability is purely a side-panel-and-disk concern.
+ */
+export type SessionManifest = {
+  title: string;
+  author: string;
+  description?: string;
+  /** Hex color used to tint imported annotation badges in the UI. */
+  accentColor: string;
+  exportedAt: number;
+};
+
+/**
+ * One imported session in IndexedDB. The original `session` is preserved
+ * verbatim (read-only); the local `id` keeps multiple imports of the same
+ * session distinguishable.
+ */
+export type ImportedSession = {
+  id: string;
+  manifest: SessionManifest;
+  session: Session;
+  importedAt: number;
+};
+
+/**
+ * Schema-versioned envelope of a `.pinta` share file. Validators must
+ * reject unknown `$pinta` values to leave room for future format changes.
+ */
+export type PintaFile = {
+  $pinta: "1";
+  manifest: SessionManifest;
+  session: Session;
 };
 
 export type ClientMessage =

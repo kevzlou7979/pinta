@@ -1,6 +1,11 @@
 <script lang="ts">
   import { onMount, onDestroy } from "svelte";
-  import type { Annotation, AnnotationTarget } from "@pinta/shared";
+  import type {
+    Annotation,
+    AnnotationTarget,
+    Session,
+    SessionManifest,
+  } from "@pinta/shared";
   import { app } from "../lib/state.svelte.js";
   import { uid } from "../lib/id.js";
   import {
@@ -12,6 +17,11 @@
     formatSessionAsClipboard,
     type ExportFormat,
   } from "../lib/format-clipboard.js";
+  import {
+    encodePintaFile,
+    pintaFilename,
+    PintaFileError,
+  } from "../lib/pinta-file.js";
   import { zipSync, strToU8 } from "fflate";
   import { theme, toggleTheme } from "../lib/theme.svelte.js";
   import { matchAny, suggestPattern } from "../lib/url-patterns.js";
@@ -20,8 +30,8 @@
   import AnnotationCard from "./AnnotationCard.svelte";
   import SessionHistory from "./SessionHistory.svelte";
 
-  type Tool = "select" | "arrow" | "rect" | "circle" | "freehand" | "pin";
-  type ActiveMode = "idle" | "select" | "draw";
+  type Tool = "select" | "arrow" | "rect" | "circle" | "freehand" | "pin" | "image";
+  type ActiveMode = "idle" | "select" | "draw" | "image";
 
   // SVG paths render reliably across fonts/OSes, follow currentColor in
   // both light + dark mode, and don't depend on unicode glyph coverage.
@@ -53,6 +63,13 @@
       label: "Pin",
       svg: '<path d="M12 22s7-7 7-12a7 7 0 0 0-14 0c0 5 7 12 7 12z"/><circle cx="12" cy="10" r="3"/>',
     },
+    {
+      id: "image",
+      label: "Image",
+      // Lucide image-plus — picture frame with a "+" badge so it's
+      // clearly an "insert an image" affordance, not a "view image" one.
+      svg: '<path d="M21 12v7a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h7"/><path d="m3 16 5-5c.928-.893 2.072-.893 3 0l5 5"/><path d="m14 14 1-1c.928-.893 2.072-.893 3 0l3 3"/><circle cx="9" cy="9" r="1.5" fill="currentColor"/><path d="M19 3v4"/><path d="M17 5h4"/>',
+    },
   ];
 
   let pageUrl = $state<string>("");
@@ -71,11 +88,16 @@
   let hmrDetected = $state<boolean | null>(null);
   let reloadingAt = $state<number | null>(null);
   let lastHandledSessionId = $state<string | null>(null);
+  let lastOverlaySessionId = $state<string | null>(null);
 
   type IncomingMsg = {
     type?: string;
     annotationId?: string;
+    /** Multi-select payload from the content script. */
+    targets?: AnnotationTarget[];
+    /** Single-select fallback (older content scripts) — promoted to targets[0]. */
     target?: AnnotationTarget;
+    groupingMode?: "single-edit" | "per-element";
     comment?: string;
     customCss?: string;
     cssChanges?: Record<string, string>;
@@ -92,6 +114,133 @@
   let downloadMenuOpen = $state(false);
   let bundleBusy = $state(false);
 
+  // Export-as-.pinta state — opens a small inline form when the user
+  // picks "Share file (.pinta)" from the download menu. Author + accent
+  // persist between exports via chrome.storage.local so they don't have
+  // to be retyped each time. Title/description default empty per export.
+  const PINTA_PREFS_KEY = "pinta-share-prefs";
+  const ACCENT_PALETTE = [
+    "#FF3D6E", // brand pink
+    "#7C3AED", // violet
+    "#0EA5E9", // sky
+    "#10B981", // emerald
+    "#F59E0B", // amber
+    "#1F2937", // slate-ink
+  ];
+  let pintaFormOpen = $state(false);
+  let pintaTitle = $state("");
+  let pintaAuthor = $state("");
+  let pintaDescription = $state("");
+  let pintaAccentColor = $state(ACCENT_PALETTE[0]!);
+  let importBusy = $state(false);
+  let importedSendBusy = $state(false);
+  let importedToastAt = $state<number | null>(null);
+  let importedToastLabel = $state<string | null>(null);
+  let importFileInput: HTMLInputElement | null = $state(null);
+
+  async function loadSharePrefs() {
+    try {
+      const stored = await chrome.storage?.local?.get(PINTA_PREFS_KEY);
+      const prefs = stored?.[PINTA_PREFS_KEY] as
+        | { author?: string; accentColor?: string }
+        | undefined;
+      if (prefs?.author) pintaAuthor = prefs.author;
+      if (prefs?.accentColor) pintaAccentColor = prefs.accentColor;
+    } catch {
+      // storage perm missing or restricted page — defaults are fine
+    }
+  }
+  async function saveSharePrefs() {
+    try {
+      await chrome.storage?.local?.set({
+        [PINTA_PREFS_KEY]: {
+          author: pintaAuthor,
+          accentColor: pintaAccentColor,
+        },
+      });
+    } catch {
+      // ignore — non-fatal
+    }
+  }
+
+  function openPintaExportForm() {
+    if (!annotations.length) return;
+    downloadMenuOpen = false;
+    if (!pintaTitle) {
+      // Suggest a title from the URL host so the form doesn't start blank.
+      const url = pageUrl || app.session?.url || "";
+      try {
+        const u = new URL(url);
+        pintaTitle = `${u.hostname} — ${new Date().toLocaleDateString()}`;
+      } catch {
+        pintaTitle = `Session — ${new Date().toLocaleDateString()}`;
+      }
+    }
+    pintaFormOpen = true;
+  }
+
+  function exportAsPinta() {
+    const session = app.session;
+    if (!session || !annotations.length) return;
+    const trimmedTitle = pintaTitle.trim();
+    const trimmedAuthor = pintaAuthor.trim();
+    if (!trimmedTitle || !trimmedAuthor) return;
+    const manifest: SessionManifest = {
+      title: trimmedTitle,
+      author: trimmedAuthor,
+      description: pintaDescription.trim() || undefined,
+      accentColor: pintaAccentColor,
+      exportedAt: Date.now(),
+    };
+    // Snapshot strips Svelte 5 reactive proxies so the JSON encoder
+    // sees plain objects (matches the local-store save pattern).
+    const snapshot = $state.snapshot(session) as Session;
+    const blob = encodePintaFile(snapshot, manifest);
+    const objUrl = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = objUrl;
+    a.download = pintaFilename(manifest, snapshot.url);
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    setTimeout(() => URL.revokeObjectURL(objUrl), 0);
+    void saveSharePrefs();
+    pintaFormOpen = false;
+  }
+
+  async function onImportFileChosen(ev: Event) {
+    const input = ev.target as HTMLInputElement;
+    const file = input.files?.[0];
+    input.value = ""; // allow re-importing the same file
+    if (!file) return;
+    importBusy = true;
+    app.lastError = null;
+    try {
+      const imported = await app.importPintaFile(file);
+      // Open the read-only viewer immediately so the user actually sees
+      // what they imported — without this, an import in connected mode
+      // looks like nothing happened (the imported session lands in
+      // History, not in the active draft, and the toast is short-lived).
+      app.viewImported(imported.id);
+      importedToastLabel = `Imported "${imported.manifest.title}"`;
+      importedToastAt = Date.now();
+      setTimeout(() => {
+        if (importedToastAt && Date.now() - importedToastAt >= 2500) {
+          importedToastAt = null;
+          importedToastLabel = null;
+        }
+      }, 2600);
+    } catch (err) {
+      const msg =
+        err instanceof PintaFileError
+          ? `Couldn't import: ${err.message}`
+          : `Import failed: ${(err as Error).message}`;
+      app.lastError = msg;
+    } finally {
+      importBusy = false;
+    }
+  }
+
   // Runtime-message handler is wired here (not inside the async onMount)
   // so the cleanup function returns sync — Svelte's onMount can't return
   // a Promise<cleanup>. The handler doesn't depend on async setup.
@@ -105,7 +254,17 @@
   ) => {
     if (sender?.id !== chrome.runtime.id) return;
     const m = msg as IncomingMsg;
-    if (m?.type === "annotation.target-selected" && m.target) {
+    if (m?.type === "annotation.target-selected") {
+      // Prefer plural targets[]; fall back to legacy single target.
+      // Skip the message if neither is present (no point making an
+      // annotation with nothing for the agent to act on).
+      const targets =
+        m.targets && m.targets.length > 0
+          ? m.targets
+          : m.target
+            ? [m.target]
+            : null;
+      if (!targets) return;
       const annotation: Annotation = {
         id: m.annotationId ?? uid("ann"),
         createdAt: Date.now(),
@@ -120,7 +279,12 @@
             : undefined,
         contentChange: m.contentChange,
         images: m.images && m.images.length > 0 ? m.images : undefined,
-        target: m.target,
+        targets,
+        // Keep `target` populated as the legacy single-target alias for
+        // one release (matches the @deprecated note in shared/types.ts)
+        // so older companion JSONs round-trip cleanly.
+        target: targets[0],
+        groupingMode: targets.length > 1 ? (m.groupingMode ?? "single-edit") : undefined,
         viewport: m.viewport ?? snapshotViewport(),
       };
       app.addAnnotation(annotation);
@@ -132,6 +296,8 @@
 
   onMount(async () => {
     chrome.runtime.onMessage.addListener(runtimeMessageHandler);
+
+    void loadSharePrefs();
 
     try {
       const [tab] = await chrome.tabs.query({
@@ -183,7 +349,21 @@
     }
   });
 
-  const annotations = $derived(app.session?.annotations ?? []);
+  // Dedupe by id at the display layer so a corrupted session (or a
+  // double-fire on the runtime-message → WS path) doesn't crash Svelte's
+  // keyed-each diffing with `each_key_duplicate`. First-seen wins so
+  // ordering is preserved.
+  const annotations = $derived.by(() => {
+    const raw = app.session?.annotations ?? [];
+    const seen = new Set<string>();
+    const out: Annotation[] = [];
+    for (const a of raw) {
+      if (seen.has(a.id)) continue;
+      seen.add(a.id);
+      out.push(a);
+    }
+    return out;
+  });
   const canSubmit = $derived(
     annotations.length > 0 && app.session?.status === "drafting",
   );
@@ -293,6 +473,20 @@
 
   async function setActive(tool: Tool | null) {
     if (activeTabId == null) return;
+    // Image tool is unusual: instead of switching the page into a "wait
+    // for input" mode, we kick off a file picker first. The page only
+    // enters image-placement mode once the user has actually picked a
+    // file — otherwise an accidental click on the Image button would
+    // leave a placeholder overlay floating on the page with nothing in
+    // it. The runtime message is sent from inside `onImageFilePicked`.
+    if (tool === "image") {
+      // Always re-fire the picker — re-clicking the active Image tool
+      // should let the user pick a different image (instead of being a
+      // toggle-off, which is what it was for stroke tools).
+      activeTool = "image";
+      pickImageFile();
+      return;
+    }
     const next = tool;
     const mode: ActiveMode =
       next == null ? "idle" : next === "select" ? "select" : "draw";
@@ -315,6 +509,53 @@
         app.lastError = `couldn't reach page: ${msg}`;
       }
     }
+  }
+
+  let imageFileInput: HTMLInputElement | undefined = $state();
+
+  function pickImageFile() {
+    if (!imageFileInput) return;
+    // Reset value so picking the same file twice still fires `change`.
+    imageFileInput.value = "";
+    imageFileInput.click();
+  }
+
+  async function onImageFilePicked(e: Event) {
+    const input = e.target as HTMLInputElement;
+    const file = input.files?.[0];
+    if (!file || activeTabId == null) {
+      activeTool = null;
+      return;
+    }
+    if (!file.type.startsWith("image/")) {
+      app.lastError = `not an image: ${file.type || file.name}`;
+      activeTool = null;
+      return;
+    }
+    try {
+      const dataUrl = await fileToDataUrl(file);
+      await chrome.tabs.sendMessage(activeTabId, {
+        type: "image.place",
+        dataUrl,
+        mediaType: file.type || "image/png",
+        name: file.name,
+      });
+      // Page is now in image-placement mode — the user drags / resizes
+      // the image, types a comment, hits Save in the popover. We don't
+      // hold onto activeTool here since the workflow lives on the page.
+    } catch (err) {
+      app.lastError = `couldn't load image: ${(err as Error).message}`;
+      activeTool = null;
+    }
+  }
+
+  function fileToDataUrl(file: File): Promise<string> {
+    return new Promise((resolve, reject) => {
+      const reader = new FileReader();
+      reader.onload = () => resolve(reader.result as string);
+      reader.onerror = () => reject(reader.error ?? new Error("read failed"));
+      reader.readAsDataURL(file);
+    });
   }
 
   function snapshotViewport() {
@@ -440,6 +681,59 @@
       hmrDetected = hasHmr;
       if (!hasHmr && autoReloadEnabled) reloadActiveTab();
     });
+  });
+
+  // Reset on-page badges whenever the session id flips. Covers the
+  // drafting → submitted → done → new-draft transition (server creates a
+  // fresh session id so the next batch numbers from 1) and any other path
+  // that swaps session.id without going through cancelSession's manual
+  // clear. Skips the very first non-null assignment so we don't wipe
+  // unrelated tabs the moment the side panel boots.
+  $effect(() => {
+    const id = app.session?.id ?? null;
+    if (id === lastOverlaySessionId) return;
+    const previous = lastOverlaySessionId;
+    lastOverlaySessionId = id;
+    if (previous === null) return;
+    if (activeTabId == null) return;
+    chrome.tabs
+      .sendMessage(activeTabId, { type: "annotated.clear" })
+      .catch(() => {});
+  });
+
+  // Push the imported-session overlay (metadata pill + per-annotation
+  // halos / badges) to the active tab whenever the user opens or closes
+  // the read-only viewer. The content script reads the manifest's
+  // accentColor to tint everything in the chosen palette so multiple
+  // shared sessions stay visually distinguishable.
+  $effect(() => {
+    if (activeTabId == null) return;
+    const viewing = app.viewingImportedId
+      ? app.importedSessions.find((s) => s.id === app.viewingImportedId)
+      : null;
+    if (viewing) {
+      chrome.tabs
+        .sendMessage(activeTabId, {
+          type: "imported.show",
+          imported: {
+            title: viewing.manifest.title,
+            author: viewing.manifest.author,
+            accentColor: viewing.manifest.accentColor,
+            // Snapshot strips Svelte 5 reactive proxies before crossing
+            // the runtime-message boundary (chrome.runtime uses
+            // structuredClone internally and chokes on them otherwise).
+            annotations: $state.snapshot(viewing.session.annotations),
+          },
+        })
+        .catch(() => {
+          // content script not injected on this URL — silently fine,
+          // the side-panel cards are still visible
+        });
+    } else {
+      chrome.tabs
+        .sendMessage(activeTabId, { type: "imported.hide" })
+        .catch(() => {});
+    }
   });
 
   async function copyToClipboard() {
@@ -875,27 +1169,145 @@
       </div>
     {/if}
 
-    {#if !showAssociatePrompt}
+    {#if app.viewingImportedId}
+      {@const imp = app.importedSessions.find((s) => s.id === app.viewingImportedId)}
+      {#if imp}
+        <section class="space-y-2">
+          <div class="flex items-start justify-between gap-2">
+            <div class="min-w-0 flex-1">
+              <h2 class="text-sm font-semibold text-ink-900 dark:text-night-text truncate" title={imp.manifest.title}>
+                {imp.manifest.title}
+              </h2>
+              <div class="mt-1 flex items-center gap-1.5 flex-wrap">
+                <span
+                  class="inline-flex items-center gap-1 px-1.5 py-0.5 rounded-full text-white text-[10px] font-medium"
+                  style="background-color: {imp.manifest.accentColor};"
+                >
+                  Imported · {imp.manifest.author}
+                </span>
+                <span class="text-[10px] text-ink-500 dark:text-night-mute">
+                  Imported view
+                </span>
+              </div>
+              {#if imp.manifest.description}
+                <p class="mt-1 text-[12px] text-ink-700 dark:text-night-dim italic">
+                  "{imp.manifest.description}"
+                </p>
+              {/if}
+              <p class="mt-1 text-[11px] text-ink-500 dark:text-night-mute font-mono truncate" title={imp.session.url}>
+                {imp.session.url}
+              </p>
+            </div>
+            <button
+              type="button"
+              class="shrink-0 text-ink-500 hover:text-ink-900 dark:text-night-mute dark:hover:text-night-text text-lg leading-none px-1"
+              onclick={() => app.closeImportedViewer()}
+              aria-label="Close viewer"
+              title="Close"
+            >
+              ✕
+            </button>
+          </div>
+          <h3 class="text-xs uppercase tracking-wide text-ink-500 dark:text-night-mute font-medium pt-1">
+            Annotations ({imp.session.annotations.length})
+          </h3>
+          {#if imp.session.annotations.length === 0}
+            <p class="text-xs text-ink-500 dark:text-night-dim italic">
+              This session has no annotations.
+            </p>
+          {:else}
+            <ul class="space-y-2">
+              {#each imp.session.annotations as a, i (`${a.id}:${i}`)}
+                <AnnotationCard
+                  annotation={a}
+                  canEdit={false}
+                  accentColorOverride={imp.manifest.accentColor}
+                  index={i + 1}
+                  onremove={() => {}}
+                  onsave={() => {}}
+                />
+              {/each}
+            </ul>
+          {/if}
+          {#if imp.session.fullPageScreenshot}
+            <details class="mt-2">
+              <summary class="text-xs text-ink-600 dark:text-night-dim cursor-pointer">
+                Show full-page screenshot
+              </summary>
+              <img
+                src={imp.session.fullPageScreenshot}
+                alt="Full-page screenshot from imported session"
+                class="mt-2 w-full rounded border border-ink-200 dark:border-night-line"
+              />
+            </details>
+          {/if}
+        </section>
+      {:else}
+        <p class="text-xs text-ink-500 dark:text-night-dim italic">
+          Imported session not found.
+          <button
+            type="button"
+            class="ml-1 underline underline-offset-2"
+            onclick={() => app.closeImportedViewer()}
+          >
+            close
+          </button>
+        </p>
+      {/if}
+    {:else if !showAssociatePrompt}
     <section class="space-y-2">
       <div class="flex items-center justify-between gap-2">
         <h2 class="text-xs uppercase tracking-wide text-ink-500 dark:text-night-mute font-medium">
           Tool
         </h2>
-        {#if app.appMode !== "standalone"}
+        <div class="flex items-center gap-1.5">
+          <button
+            type="button"
+            class="inline-flex items-center gap-1 rounded-full border border-ink-200 bg-white text-ink-600 hover:text-brand-pink hover:border-ink-400 dark:border-night-line dark:bg-night-alt dark:text-night-dim dark:hover:text-brand-pink-light dark:hover:border-night-line2 text-[11px] font-medium h-7 px-2.5 transition-colors disabled:opacity-50"
+            onclick={() => importFileInput?.click()}
+            disabled={importBusy}
+            title="Import a .pinta file shared by a teammate"
+          >
+            <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" y1="3" x2="12" y2="15"/></svg>
+            <span>{importBusy ? "Importing…" : "Import"}</span>
+          </button>
           <SessionHistory />
-        {/if}
+        </div>
       </div>
-      <div class="grid grid-cols-5 gap-1">
+      <input
+        bind:this={importFileInput}
+        type="file"
+        accept=".pinta,application/json"
+        class="hidden"
+        onchange={onImportFileChosen}
+      />
+      {#if importedToastAt && importedToastLabel}
+        <div
+          class="rounded-md border border-emerald-300 bg-emerald-50 text-emerald-800 dark:border-emerald-800/50 dark:bg-emerald-950/40 dark:text-emerald-200 text-[11px] px-2.5 py-1.5"
+          role="status"
+        >
+          {importedToastLabel} — see History.
+        </div>
+      {/if}
+      <input
+        bind:this={imageFileInput}
+        type="file"
+        accept="image/*"
+        class="hidden"
+        onchange={onImageFilePicked}
+        aria-hidden="true"
+      />
+      <div class="grid grid-cols-6 gap-1">
         {#each TOOLS as t (t.id)}
           <button
             type="button"
             class={[
-              "rounded-md border py-2 text-sm flex flex-col items-center gap-0.5 disabled:opacity-50 transition-colors",
+              "rounded-md border py-2 text-sm flex flex-col items-center gap-0.5 disabled:opacity-50 disabled:cursor-not-allowed transition-colors",
               activeTool === t.id
                 ? "bg-brand-pink text-white border-brand-pink shadow-inner ring-2 ring-brand-pink/30 dark:ring-brand-pink/50"
                 : "bg-white text-ink-700 border-ink-300 hover:bg-brand-cream hover:border-brand-pink/40 dark:bg-night-card dark:text-night-text dark:border-night-line dark:hover:bg-night-line dark:hover:border-night-line2",
             ].join(" ")}
-            disabled={activeTabId == null}
+            disabled={activeTabId == null || sessionPending || allDone}
             onclick={() => setActive(activeTool === t.id ? null : t.id)}
             title={t.label}
             aria-pressed={activeTool === t.id}
@@ -934,19 +1346,21 @@
         <input
           type="text"
           placeholder="CSS selector (e.g. .submit-btn)"
-          class="w-full rounded-md border border-ink-300 bg-white text-ink-900 px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-brand-pink dark:border-night-line dark:bg-night-alt dark:text-night-text dark:placeholder-night-mute"
+          class="w-full rounded-md border border-ink-300 bg-white text-ink-900 px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-brand-pink dark:border-night-line dark:bg-night-alt dark:text-night-text dark:placeholder-night-mute disabled:opacity-50"
           bind:value={selector}
+          disabled={sessionPending || allDone}
         />
         <textarea
           placeholder="What do you want changed?"
           rows={3}
-          class="w-full rounded-md border border-ink-300 bg-white text-ink-900 px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-brand-pink dark:border-night-line dark:bg-night-alt dark:text-night-text dark:placeholder-night-mute"
+          class="w-full rounded-md border border-ink-300 bg-white text-ink-900 px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-brand-pink dark:border-night-line dark:bg-night-alt dark:text-night-text dark:placeholder-night-mute disabled:opacity-50"
           bind:value={comment}
+          disabled={sessionPending || allDone}
         ></textarea>
         <button
           type="button"
           class="w-full rounded-md bg-brand-pink text-white text-sm font-medium py-2 hover:bg-brand-magenta dark:hover:bg-brand-pink-light disabled:opacity-50"
-          disabled={!selector.trim() || !comment.trim()}
+          disabled={!selector.trim() || !comment.trim() || sessionPending || allDone}
           onclick={addAnnotationFromForm}
         >
           Add annotation
@@ -978,7 +1392,7 @@
         </p>
       {:else}
         <ul class="space-y-2">
-          {#each annotations as annotation (annotation.id)}
+          {#each annotations as annotation, i (`${annotation.id}:${i}`)}
             <AnnotationCard
               {annotation}
               canEdit={canEditAnnotations}
@@ -1016,6 +1430,176 @@
     class="border-t border-ink-200 p-3 bg-white dark:border-night-line dark:bg-night-card space-y-2"
     class:hidden={showAssociatePrompt}
   >
+    {#if app.viewingImportedId}
+      {@const impFooter = app.importedSessions.find((s) => s.id === app.viewingImportedId)}
+      {#if impFooter}
+        {#if app.appMode === "connected"}
+          <label
+            class="flex items-start gap-2 text-[12px] text-ink-700 dark:text-night-dim cursor-pointer select-none"
+          >
+            <input
+              type="checkbox"
+              class="mt-0.5 accent-brand-pink"
+              bind:checked={autoApplyEnabled}
+            />
+            <span class="flex-1 leading-snug">
+              Auto-apply (no agent confirmation)
+              <span class="block text-[11px] text-ink-500 dark:text-night-mute">
+                Skip the agent's "reply 'go' to apply" step. Plan is still shown
+                briefly. Off by default — turn on for fast iteration.
+              </span>
+            </span>
+          </label>
+        {/if}
+        <div class="flex items-center gap-2 flex-wrap">
+          <button
+            type="button"
+            class="flex-1 min-w-[140px] rounded-md bg-brand-pink text-white text-sm font-medium py-2 hover:bg-brand-magenta dark:hover:bg-brand-pink-light disabled:opacity-50 inline-flex items-center justify-center gap-1.5"
+            disabled={app.appMode !== "connected" || impFooter.session.annotations.length === 0 || importedSendBusy}
+            title={app.appMode === "connected" ? "Submit these annotations to your agent as a new session — your active draft is left alone" : "Connect to a companion to send to an agent"}
+            onclick={async () => {
+              if (app.appMode !== "connected") return;
+              importedSendBusy = true;
+              const newId = await app.sendImportedToAgent(impFooter.id, {
+                autoApply: autoApplyEnabled,
+              });
+              importedSendBusy = false;
+              if (newId) {
+                importedToastLabel = "Submitted to agent";
+                importedToastAt = Date.now();
+                setTimeout(() => {
+                  if (importedToastAt && Date.now() - importedToastAt >= 2500) {
+                    importedToastAt = null;
+                    importedToastLabel = null;
+                  }
+                }, 2600);
+                app.closeImportedViewer();
+              }
+            }}
+          >
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><line x1="22" y1="2" x2="11" y2="13"/><polygon points="22 2 15 22 11 13 2 9 22 2"/></svg>
+            {importedSendBusy ? "Sending…" : "Send to agent"}
+          </button>
+          <button
+            type="button"
+            class="rounded-md border border-ink-300 bg-white text-ink-700 text-sm font-medium px-3 py-2 hover:bg-ink-50 dark:border-night-line dark:bg-night-alt dark:text-night-dim dark:hover:bg-night-line dark:hover:text-night-text disabled:opacity-50"
+            disabled={impFooter.session.annotations.length === 0}
+            title="Copy these annotations as markdown — paste into claude.ai web, ChatGPT, or another agent"
+            onclick={async () => {
+              try {
+                const text = formatSessionAsClipboard({
+                  url: impFooter.session.url,
+                  annotations: impFooter.session.annotations,
+                });
+                await navigator.clipboard.writeText(text);
+                copiedAt = Date.now();
+                setTimeout(() => {
+                  if (copiedAt && Date.now() - copiedAt >= 2000) copiedAt = null;
+                }, 2100);
+              } catch (err) {
+                app.lastError = `clipboard write failed: ${(err as Error).message}`;
+              }
+            }}
+          >
+            {copiedAt ? "✓" : "Copy"}
+          </button>
+          <button
+            type="button"
+            class="rounded-md border border-ink-300 bg-white text-ink-700 text-sm font-medium px-3 py-2 hover:bg-ink-50 dark:border-night-line dark:bg-night-alt dark:text-night-dim dark:hover:bg-night-line dark:hover:text-night-text disabled:opacity-50"
+            disabled={app.appMode !== "standalone"}
+            title={app.appMode === "standalone" ? "Clone these annotations into your editable session for this URL (replaces current draft)" : "Forking is only available in standalone mode — use Send to agent instead"}
+            onclick={async () => {
+              const result = await app.forkImportedToLocal(impFooter.id);
+              if (result === "would-overwrite") {
+                const ok = confirm(
+                  "Forking will replace your current draft annotations on this URL. " +
+                    "Continue and lose the current draft?",
+                );
+                if (!ok) return;
+                await app.forkImportedToLocal(impFooter.id, { allowOverwrite: true });
+              }
+            }}
+          >
+            Fork
+          </button>
+        </div>
+      {/if}
+    {:else if pintaFormOpen}
+      <div class="rounded-md border border-ink-300 bg-ink-50 dark:border-night-line dark:bg-night-alt p-3 space-y-2">
+        <div class="flex items-center justify-between">
+          <span class="text-xs font-medium text-ink-700 dark:text-night-text">Share session as .pinta</span>
+          <button
+            type="button"
+            class="text-ink-500 dark:text-night-mute hover:text-ink-900 dark:hover:text-night-text text-xs"
+            onclick={() => (pintaFormOpen = false)}
+            aria-label="Cancel export"
+          >
+            ✕
+          </button>
+        </div>
+        <label class="block text-[11px] text-ink-600 dark:text-night-dim">
+          Title
+          <input
+            type="text"
+            bind:value={pintaTitle}
+            class="mt-0.5 w-full rounded border border-ink-300 bg-white text-ink-900 px-2 py-1 text-xs focus:outline-none focus:ring-2 focus:ring-brand-pink dark:border-night-line dark:bg-night-card dark:text-night-text"
+            placeholder="Header redesign — round 2"
+          />
+        </label>
+        <label class="block text-[11px] text-ink-600 dark:text-night-dim">
+          Author
+          <input
+            type="text"
+            bind:value={pintaAuthor}
+            class="mt-0.5 w-full rounded border border-ink-300 bg-white text-ink-900 px-2 py-1 text-xs focus:outline-none focus:ring-2 focus:ring-brand-pink dark:border-night-line dark:bg-night-card dark:text-night-text"
+            placeholder="Your name"
+          />
+        </label>
+        <label class="block text-[11px] text-ink-600 dark:text-night-dim">
+          Description (optional)
+          <textarea
+            rows={2}
+            bind:value={pintaDescription}
+            class="mt-0.5 w-full rounded border border-ink-300 bg-white text-ink-900 px-2 py-1 text-xs focus:outline-none focus:ring-2 focus:ring-brand-pink dark:border-night-line dark:bg-night-card dark:text-night-text"
+            placeholder="Spacing tweaks on hero & nav"
+          ></textarea>
+        </label>
+        <div class="text-[11px] text-ink-600 dark:text-night-dim">
+          <span>Accent color</span>
+          <div class="flex items-center gap-1.5 mt-1 flex-wrap">
+            {#each ACCENT_PALETTE as swatch}
+              <button
+                type="button"
+                class="w-5 h-5 rounded-full border-2 transition-transform hover:scale-110"
+                class:border-ink-900={pintaAccentColor === swatch}
+                class:dark:border-white={pintaAccentColor === swatch}
+                class:border-transparent={pintaAccentColor !== swatch}
+                style="background-color: {swatch};"
+                aria-label="Use {swatch}"
+                aria-pressed={pintaAccentColor === swatch}
+                onclick={() => (pintaAccentColor = swatch)}
+              ></button>
+            {/each}
+            <input
+              type="color"
+              bind:value={pintaAccentColor}
+              class="w-5 h-5 rounded border border-ink-300 dark:border-night-line cursor-pointer"
+              aria-label="Custom color"
+              title="Custom color"
+            />
+          </div>
+        </div>
+        <button
+          type="button"
+          class="w-full rounded-md bg-brand-pink text-white text-sm font-medium py-1.5 hover:bg-brand-magenta dark:hover:bg-brand-pink-light disabled:opacity-50"
+          disabled={!pintaTitle.trim() || !pintaAuthor.trim()}
+          onclick={exportAsPinta}
+        >
+          Download .pinta
+        </button>
+      </div>
+    {/if}
+    {#if !app.viewingImportedId}
     {#if app.appMode === "connected" && !allDone && app.session?.status === "drafting"}
       <label
         class="flex items-start gap-2 text-[12px] text-ink-700 dark:text-night-dim cursor-pointer select-none"
@@ -1126,6 +1710,14 @@
                   <span class="font-medium">Plain text</span>
                   <span class="block text-[10px] text-ink-500 dark:text-night-mute">.txt — text only</span>
                 </button>
+                <button
+                  type="button"
+                  class="w-full text-left px-3 py-2 text-xs text-ink-800 dark:text-night-text hover:bg-ink-50 dark:hover:bg-night-line border-t border-ink-200 dark:border-night-line"
+                  onclick={openPintaExportForm}
+                >
+                  <span class="font-medium">Share file (.pinta)</span>
+                  <span class="block text-[10px] text-ink-500 dark:text-night-mute">re-importable by a teammate</span>
+                </button>
               </div>
             {/if}
           </div>
@@ -1190,6 +1782,16 @@
           >
             {copiedAt ? "✓" : "Copy"}
           </button>
+          <button
+            type="button"
+            class="rounded-md border border-ink-300 bg-white text-ink-700 text-sm font-medium px-3 hover:bg-ink-50 dark:border-night-line dark:bg-night-alt dark:text-night-dim dark:hover:bg-night-line dark:hover:text-night-text inline-flex items-center gap-1"
+            title="Export this session as a .pinta file a teammate can import"
+            onclick={openPintaExportForm}
+            aria-label="Share as .pinta"
+          >
+            <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
+            Share
+          </button>
         {/if}
         {#if app.session?.status === "submitted" || app.session?.status === "applying"}
           <button
@@ -1232,6 +1834,7 @@
           <span class="text-[11px] text-ink-500 dark:text-night-mute">No HMR detected</span>
         {/if}
       </div>
+    {/if}
     {/if}
   </footer>
 </div>

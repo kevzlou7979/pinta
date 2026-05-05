@@ -29,21 +29,33 @@ function escapeRe(s: string): string {
  * Compile a glob pattern into a regex. `*` and `**` both compile to
  * `.*` — see file header for the rationale (URLs are not filesystem
  * trees; users expect `/foo/*` to match nested paths).
+ *
+ * Trailing `/*` (or `/**`) is special-cased to make the trailing
+ * separator optional so the pattern matches both the bare segment and
+ * its descendants — `/login/*` matches `/login`, `/login/`, and
+ * `/login/dashboard`. This is what users expect from a glob like
+ * "this section of the site" and matches how `chrome.match_patterns`
+ * treats path wildcards.
  */
 function compile(pattern: string): RegExp {
   const norm = normalize(pattern);
+  const trailingGlob = /\/\*+$/.test(norm);
+  const body = trailingGlob ? norm.replace(/\/\*+$/, "") : norm;
   const out: string[] = [];
-  for (let i = 0; i < norm.length; i++) {
-    const ch = norm[i];
+  for (let i = 0; i < body.length; i++) {
+    const ch = body[i];
     if (ch === "*") {
       // Collapse `**` to a single `.*` to keep the regex tidy.
-      if (norm[i + 1] === "*") i++;
+      if (body[i + 1] === "*") i++;
       out.push(".*");
     } else {
       out.push(escapeRe(ch!));
     }
   }
-  return new RegExp(`^${out.join("")}$`, "i");
+  // The optional `(?:/.*)?` lets the URL end exactly at the prefix or
+  // continue with `/...` — without it, `/foo/*` would reject `/foo`.
+  const tail = trailingGlob ? "(?:/.*)?" : "";
+  return new RegExp(`^${out.join("")}${tail}$`, "i");
 }
 
 export function matchPattern(url: string, pattern: string): boolean {

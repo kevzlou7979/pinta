@@ -8,11 +8,15 @@
 // IDB's quota is a fraction of available disk space (gigabytes typically)
 // and stores binary data efficiently.
 
-import type { Session } from "@pinta/shared";
+import type { ImportedSession, Session } from "@pinta/shared";
 
 const DB_NAME = "pinta-standalone";
-const DB_VERSION = 1;
+// v2 added the imported_sessions store. createObjectStore is idempotent
+// against `objectStoreNames.contains`, so the v1 → v2 migration is just
+// "create if missing" — no data backfill needed.
+const DB_VERSION = 2;
 const STORE = "sessions";
+const IMPORTED_STORE = "imported_sessions";
 
 let dbPromise: Promise<IDBDatabase> | null = null;
 
@@ -25,6 +29,11 @@ function openDb(): Promise<IDBDatabase> {
       if (!db.objectStoreNames.contains(STORE)) {
         // Keyed by URL origin (e.g. "https://staging.example.com").
         db.createObjectStore(STORE, { keyPath: "origin" });
+      }
+      if (!db.objectStoreNames.contains(IMPORTED_STORE)) {
+        // Keyed by the local ImportedSession.id, not the source session
+        // id — multiple imports of the same source file remain distinct.
+        db.createObjectStore(IMPORTED_STORE, { keyPath: "id" });
       }
     };
     req.onsuccess = () => resolve(req.result);
@@ -60,6 +69,42 @@ export async function clearOrigin(origin: string): Promise<void> {
   return new Promise((resolve, reject) => {
     const tx = db.transaction(STORE, "readwrite");
     tx.objectStore(STORE).delete(origin);
+    tx.oncomplete = () => resolve();
+    tx.onerror = () => reject(tx.error);
+  });
+}
+
+export async function getImportedSessions(): Promise<ImportedSession[]> {
+  const db = await openDb();
+  return new Promise((resolve, reject) => {
+    const tx = db.transaction(IMPORTED_STORE, "readonly");
+    const req = tx.objectStore(IMPORTED_STORE).getAll();
+    req.onsuccess = () => {
+      const rows = (req.result as ImportedSession[] | undefined) ?? [];
+      // Most-recent first so the History panel shows the newest import
+      // at the top without callers having to re-sort.
+      rows.sort((a, b) => b.importedAt - a.importedAt);
+      resolve(rows);
+    };
+    req.onerror = () => reject(req.error);
+  });
+}
+
+export async function addImportedSession(s: ImportedSession): Promise<void> {
+  const db = await openDb();
+  return new Promise((resolve, reject) => {
+    const tx = db.transaction(IMPORTED_STORE, "readwrite");
+    tx.objectStore(IMPORTED_STORE).put(s);
+    tx.oncomplete = () => resolve();
+    tx.onerror = () => reject(tx.error);
+  });
+}
+
+export async function removeImportedSession(id: string): Promise<void> {
+  const db = await openDb();
+  return new Promise((resolve, reject) => {
+    const tx = db.transaction(IMPORTED_STORE, "readwrite");
+    tx.objectStore(IMPORTED_STORE).delete(id);
     tx.oncomplete = () => resolve();
     tx.onerror = () => reject(tx.error);
   });

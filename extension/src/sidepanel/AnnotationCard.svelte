@@ -9,6 +9,15 @@
      *  agent decides which annotation to start with. Per-annotation
      *  status (done / error / applying) still wins over this. */
     pending?: boolean;
+    /** When set, replaces the status indicator with a numbered badge in
+     *  this hex color. Used by the imported-session read-only viewer so
+     *  each shared session's annotations are visibly tagged with the
+     *  exporter's chosen accent color. */
+    accentColorOverride?: string;
+    /** 1-based position of this annotation in its session. Required when
+     *  `accentColorOverride` is set so the numbered badge has something
+     *  to render. Ignored otherwise. */
+    index?: number;
     onremove: () => void;
     onsave: (comment: string) => void;
   };
@@ -16,12 +25,25 @@
     annotation,
     canEdit,
     pending = false,
+    accentColorOverride,
+    index,
     onremove,
     onsave,
   }: Props = $props();
 
   let editing = $state(false);
   let draftComment = $state(annotation.comment);
+
+  // Read targets[] when present, fall back to [target] for older
+  // sessions persisted before v0.3. Empty if neither is set (drawing
+  // annotations without a resolved target).
+  const targets = $derived(
+    annotation.targets && annotation.targets.length > 0
+      ? annotation.targets
+      : annotation.target
+        ? [annotation.target]
+        : [],
+  );
 
   function startEdit() {
     draftComment = annotation.comment;
@@ -60,9 +82,17 @@
   class:opacity-90={annotation.status === "done"}
 >
   <div class="flex items-start gap-2">
-    <!-- Status indicator -->
+    <!-- Status indicator (or numbered badge in imported read-only mode) -->
     <div class="pt-0.5 shrink-0">
-      {#if annotation.status === "done"}
+      {#if accentColorOverride && typeof index === "number"}
+        <span
+          class="inline-flex items-center justify-center w-5 h-5 rounded-full text-white text-[10px] font-bold leading-none"
+          style="background-color: {accentColorOverride};"
+          aria-label="annotation {index}"
+        >
+          {index}
+        </span>
+      {:else if annotation.status === "done"}
         <span
           class="inline-flex items-center justify-center w-4 h-4 rounded-full bg-emerald-600 text-white text-[10px] font-bold leading-none"
           title="Done"
@@ -95,14 +125,36 @@
     </div>
 
     <div class="min-w-0 flex-1">
-      <div class="flex items-center gap-1.5 text-[11px] text-ink-500 dark:text-night-mute">
+      <div class="flex items-center gap-1.5 text-[11px] text-ink-500 dark:text-night-mute flex-wrap">
         <span class="uppercase tracking-wide font-medium"
           >{annotation.kind}</span
         >
-        {#if annotation.target?.selector}
-          <span class="truncate font-mono">{annotation.target.selector}</span>
+        {#if targets.length === 1 && targets[0]?.selector}
+          <span class="truncate font-mono">{targets[0]!.selector}</span>
+        {:else if targets.length > 1}
+          <span
+            class="inline-flex items-center gap-1 px-1.5 py-0.5 rounded-full bg-blue-100 text-blue-800 dark:bg-blue-950/60 dark:text-blue-200 text-[10px] font-semibold uppercase tracking-wide"
+            title={annotation.groupingMode === "per-element"
+              ? "Agent applies the comment as N independent edits, one per target"
+              : "Agent finds one change that satisfies every target"}
+          >
+            {targets.length} picks
+            {#if annotation.groupingMode === "per-element"}
+              · per-element
+            {/if}
+          </span>
         {/if}
       </div>
+      {#if targets.length > 1}
+        <ul class="mt-1 space-y-0.5 text-[10px] font-mono text-ink-500 dark:text-night-mute">
+          {#each targets as t, i (i + (t.selector ?? ""))}
+            <li class="flex items-baseline gap-1.5 truncate">
+              <span class="text-blue-600 dark:text-blue-400 font-semibold shrink-0">{i + 1}.</span>
+              <span class="truncate" title={t.selector}>{t.selector}</span>
+            </li>
+          {/each}
+        </ul>
+      {/if}
 
       {#if editing}
         <textarea

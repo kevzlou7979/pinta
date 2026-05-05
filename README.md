@@ -6,6 +6,10 @@
 
 <p align="center"><strong>Annotate your running web app. Let an AI agent do the edits.</strong></p>
 
+<p align="center">
+  <img src="docs/assets/screens/app.gif" alt="Pinta annotation flow — circle a UI element, type a comment, and an agent edits the source." width="860" />
+</p>
+
 Circle a button. Point at a heading. Type *"make this tonal"*. Pinta
 captures the annotation, snapshots the page, and hands it to your coding
 agent — Claude Code, Cursor, or any MCP-compatible tool — which edits the
@@ -23,6 +27,19 @@ matching source files for you.
 
 Recent additions on top of the original V1 pipeline:
 
+- **`.pinta` share files — collaboration without source access** *(v0.2.0)*. Export
+  any session as a single self-contained `.pinta` file (manifest with
+  title / author / description / accent color, plus the session JSON
+  with screenshots inlined). A teammate, designer, or QA tester can
+  drop the file into their Pinta extension and it lands in **History →
+  Imported (N)**, opens in a read-only viewer, and surfaces three
+  actions: **Send to agent** (submits to *their* connected companion
+  as a new session — your machine isn't in the loop), **Copy** (the
+  markdown for claude.ai web / ChatGPT), and **Fork** (clone into
+  their own editable draft, in standalone mode). The page itself
+  shows a metadata pill in the top-right and accent-colored numbered
+  halos at each annotation's target so a recipient sees at a glance
+  whose marks are whose. See `spec/SPEC.md` §8 Phase 11.
 - **Standalone mode** — the side panel works fully without a companion.
   Designed for QA / testers hitting deployed URLs (no Node, no project
   on disk, no companion to start). Annotations live in the browser
@@ -105,6 +122,7 @@ See [`spec/SPEC.md` §7–9](spec/SPEC.md) for the full status of each.
 | MCP server for Cursor / Cline / Continue / Zed / Windsurf | shipped |
 | Aider adapter (poll script) | shipped |
 | Copy-to-clipboard fallback for claude.ai web / ChatGPT / etc. | shipped |
+| Import / Export `.pinta` share files — round-trippable session collaboration | shipped |
 | `pinta-companion` published to npm — `npx pinta-companion .` | shipped |
 | `vite-plugin-pinta` for instant source mapping | planned (Phase 6) |
 | Drag-reorder annotations, group by file, undo last edit via git | planned (Phase 7) |

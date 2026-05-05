@@ -1,7 +1,28 @@
 import type { Annotation, Point } from "@pinta/shared";
 import type { DrawTool } from "./tools/draw.js";
 
-export type Mode = "idle" | "select" | "draw";
+export type Mode = "idle" | "select" | "draw" | "image";
+
+/**
+ * In-flight image placement. Set when the user picks a file in the
+ * side panel; the page enters `image` mode and renders a positioned,
+ * draggable, resizable overlay whose final coords land on the
+ * Annotation as `images[0].placement`.
+ */
+export type PendingImage = {
+  /** Image MIME — preserved verbatim so JPEGs stay JPEGs. */
+  mediaType: string;
+  /** Inline base64 dataUrl for the bitmap. */
+  dataUrl: string;
+  /** Optional original filename, surfaced in the popover header. */
+  name?: string;
+  /** Page-coords top-left of the overlay (includes scrollY). */
+  x: number;
+  y: number;
+  /** Pixel size of the overlay in CSS pixels. */
+  width: number;
+  height: number;
+};
 
 export type Draft = {
   id: string;
@@ -26,6 +47,12 @@ class ContentState {
 
   // The just-completed stroke awaiting a comment.
   pending = $state<Draft | null>(null);
+
+  // Image being positioned on the page. Set when the side panel hands
+  // over a picked file; cleared on submit / cancel. While set, the
+  // Overlay renders a draggable + resizable bitmap so the user can
+  // place it where the agent should "match this region to."
+  pendingImage = $state<PendingImage | null>(null);
 
   // DOM elements the user has annotated in the current page session.
   // Each gets a numbered pin badge in the overlay AND keeps the inline
@@ -70,6 +97,51 @@ class ContentState {
       // keep `pending` so the user can finish typing the comment even
       // after switching away accidentally
     }
+    if (next !== "image") {
+      this.pendingImage = null;
+    }
+  }
+
+  /**
+   * Center a freshly-picked image in the current viewport at a sane
+   * default size (capped by both the natural image dimensions and a
+   * fraction of the viewport so it never blocks the whole page on
+   * first drop). Page-coord placement, so it rides scroll naturally.
+   */
+  setPendingImage(input: { mediaType: string; dataUrl: string; name?: string; naturalWidth: number; naturalHeight: number }): void {
+    const vw = window.innerWidth;
+    const vh = window.innerHeight;
+    const maxW = vw * 0.6;
+    const maxH = vh * 0.6;
+    const ratio = input.naturalWidth / input.naturalHeight;
+    let width = Math.min(input.naturalWidth, maxW);
+    let height = width / ratio;
+    if (height > maxH) {
+      height = maxH;
+      width = height * ratio;
+    }
+    const x = window.scrollX + (vw - width) / 2;
+    const y = window.scrollY + (vh - height) / 2;
+    this.pendingImage = {
+      mediaType: input.mediaType,
+      dataUrl: input.dataUrl,
+      name: input.name,
+      x,
+      y,
+      width,
+      height,
+    };
+    this.mode = "image";
+  }
+
+  updatePendingImage(patch: Partial<Pick<PendingImage, "x" | "y" | "width" | "height">>): void {
+    if (!this.pendingImage) return;
+    this.pendingImage = { ...this.pendingImage, ...patch };
+  }
+
+  cancelPendingImage(): void {
+    this.pendingImage = null;
+    if (this.mode === "image") this.mode = "idle";
   }
 
   setTool(t: DrawTool) {
