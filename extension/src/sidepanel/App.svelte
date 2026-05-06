@@ -368,9 +368,23 @@
     annotations.length > 0 && app.session?.status === "drafting",
   );
   const canEditAnnotations = $derived(app.session?.status === "drafting");
-  const allDone = $derived(
-    app.session?.status === "done" || app.session?.status === "error",
-  );
+  // True when there's nothing left for the agent to do. Two paths:
+  //   1. Session-level status flipped to done/error by the companion.
+  //   2. Session is in flight (submitted/applying), every annotation has
+  //      individually settled (✓ or !), but the session-level flip hasn't
+  //      arrived. Without this fallback, the footer leaks both
+  //      "waiting for agent" AND the per-card ✓s at the same time.
+  // Empty drafts are explicitly excluded so `every` on [] doesn't
+  // trivially light up the done UI before the user has done anything.
+  const allDone = $derived.by(() => {
+    const status = app.session?.status;
+    if (status === "done" || status === "error") return true;
+    if (status !== "submitted" && status !== "applying") return false;
+    if (annotations.length === 0) return false;
+    return annotations.every(
+      (a) => a.status === "done" || a.status === "error",
+    );
+  });
   // Light up the per-annotation spinner the instant the user submits —
   // don't wait for the agent to flip individual statuses to "applying".
   // Sitting idle between Submit and the first agent edit is bad UX.
@@ -1734,13 +1748,15 @@
       {:else if allDone}
         <button
           type="button"
-          class="flex-1 rounded-md bg-brand-pink text-white text-sm font-medium py-2 hover:bg-brand-magenta dark:hover:bg-brand-pink-light"
+          class="flex-1 rounded-md bg-brand-pink text-white text-sm font-medium py-2 hover:bg-brand-magenta dark:hover:bg-brand-pink-light inline-flex items-center justify-center gap-1.5"
           onclick={cancelSession}
         >
           {#if app.session?.status === "error"}
-            Start new batch (some failed)
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 5v14"/><path d="M5 12h14"/></svg>
+            Start a new batch (some failed)
           {:else}
-            ✓ Done — start new batch
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 5v14"/><path d="M5 12h14"/></svg>
+            Annotate again — start a new batch
           {/if}
         </button>
         <button
@@ -1755,6 +1771,23 @@
         >
           {reloadingAt ? "↻…" : "↻"}
         </button>
+      {:else if app.session?.status === "submitted" || app.session?.status === "applying"}
+        <div
+          class="w-full rounded-md bg-brand-pink/85 text-white text-sm font-medium py-2 inline-flex items-center justify-center gap-1.5 cursor-default select-none"
+          role="status"
+        >
+          <span
+            class="inline-block w-3 h-3 rounded-full border-2 border-white/70 border-t-transparent animate-spin"
+            aria-hidden="true"
+          ></span>
+          {#if capturing}
+            Capturing screenshot…
+          {:else if app.session?.status === "submitted"}
+            Submitted — waiting for agent
+          {:else}
+            Agent is applying changes…
+          {/if}
+        </div>
       {:else}
         <button
           type="button"
@@ -1764,10 +1797,6 @@
         >
           {#if capturing}
             Capturing screenshot…
-          {:else if app.session?.status === "submitted"}
-            Submitted — waiting for agent
-          {:else if app.session?.status === "applying"}
-            Agent is applying changes…
           {:else}
             Send to agent
           {/if}
@@ -1793,17 +1822,6 @@
             Share
           </button>
         {/if}
-        {#if app.session?.status === "submitted" || app.session?.status === "applying"}
-          <button
-            type="button"
-            class="rounded-md border border-ink-300 bg-white text-ink-700 text-sm font-medium px-3 hover:bg-ink-50 dark:border-night-line dark:bg-night-alt dark:text-night-dim dark:hover:bg-night-line dark:hover:text-night-text"
-            title="Cancel this session and start fresh"
-            onclick={cancelSession}
-            aria-label="Cancel session"
-          >
-            ✕
-          </button>
-        {/if}
       {/if}
     </div>
     {#if app.appMode === "standalone" && annotations.length === 0}
@@ -1812,7 +1830,7 @@
       </p>
     {:else if app.session?.status === "submitted"}
       <p class="text-[11px] text-ink-500 dark:text-night-mute text-center">
-        Stuck? Click ✕ to cancel and start a new session.
+        The agent will pick this up shortly.
       </p>
     {:else if app.session?.status === "applying"}
       <p class="text-[11px] text-ink-500 dark:text-night-mute text-center">

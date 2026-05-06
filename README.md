@@ -114,7 +114,7 @@ See [`spec/SPEC.md` §7–9](spec/SPEC.md) for the full status of each.
 | Auto-reload after edits — HMR detection (Vite / Webpack / Next.js / Parcel) | shipped |
 | Dark mode — popup, side panel, landing page (system + localStorage) | shipped |
 | Auto-apply toggle — skip the agent's "reply 'go'" gate, opt-in | shipped |
-| Cancel-session button — escape stuck `submitted` / `applying` state | shipped |
+| Live submit-footer status — pending pill while submitted/applying, "Annotate again" once every card has settled | shipped |
 | Companion server — HTTP + WebSocket + SSE push + JSON store + per-project registry | shipped |
 | Multi-project mode — auto port allocation, URL-pattern routing, strict per-project scoping | shipped |
 | First-claim-wins session claim (multi-terminal coordination, e.g. Claude Dock) | shipped |
