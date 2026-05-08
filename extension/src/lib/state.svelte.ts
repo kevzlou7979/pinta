@@ -4,7 +4,14 @@ import type {
   ImportedSession,
   ServerMessage,
   Session,
+  SessionModule,
 } from "@pinta/shared";
+import {
+  BUILTIN_MODULES,
+  getModuleSpec,
+  moduleIsConfigured,
+  type ModuleSpec,
+} from "./modules.js";
 import { WsClient, type WsClientStatus } from "./ws-client.js";
 import {
   discoverCompanions,
@@ -71,6 +78,28 @@ class ExtensionState {
    *  viewer (or forking it) clears this back to null. */
   viewingImportedId = $state<string | null>(null);
 
+  /**
+   * Per-module enable + settings, persisted to chrome.storage.local under
+   * the `pinta-modules` key. Keyed by module id; modules without an entry
+   * are treated as disabled with empty settings. The Settings panel
+   * mutates this; submit reads from it.
+   */
+  modules = $state<
+    Record<
+      string,
+      { enabled: boolean; settings: Record<string, string | boolean> }
+    >
+  >({});
+  /**
+   * Per-session opt-in checkboxes — module ids the user has ticked for
+   * the current submit. In-memory only; cleared on each new session so
+   * the user always has to consciously opt in (matches the existing
+   * `autoApply` / `includeScreenshot` pattern).
+   */
+  tickedModules = $state<Record<string, boolean>>({});
+  /** True when Settings panel is open in the side panel. */
+  viewingSettings = $state<boolean>(false);
+
   private client: WsClient | null = null;
   private creatingSession = false;
   private lastUrl: string | null = null;
@@ -102,8 +131,120 @@ class ExtensionState {
     // Hydrate imported sessions in parallel with the scan — they live
     // in IndexedDB and don't depend on which companion we land on.
     void this.refreshImported();
+    void this.loadModules();
     await this.rescan(activeTabUrl);
   }
+
+  // ─── Modules (built-in integrations like GitLab Issues) ─────────────
+
+  private static readonly MODULES_KEY = "pinta-modules";
+
+  /** Pull module enable/settings from chrome.storage.local. */
+  async loadModules(): Promise<void> {
+    try {
+      const stored = await chrome.storage?.local?.get(
+        ExtensionState.MODULES_KEY,
+      );
+      const raw = stored?.[ExtensionState.MODULES_KEY] as
+        | typeof this.modules
+        | undefined;
+      if (raw && typeof raw === "object") {
+        this.modules = raw;
+      }
+    } catch {
+      // storage missing (test env) — defaults are fine
+    }
+  }
+
+  private async saveModules(): Promise<void> {
+    try {
+      await chrome.storage?.local?.set({
+        [ExtensionState.MODULES_KEY]: $state.snapshot(this.modules),
+      });
+    } catch {
+      // ignore — non-fatal, in-memory state still wins
+    }
+  }
+
+  /** Initialize a missing module entry with defaults from its spec. */
+  private ensureModuleEntry(spec: ModuleSpec): void {
+    if (this.modules[spec.id]) return;
+    const settings: Record<string, string | boolean> = {};
+    for (const field of spec.settings) {
+      if (field.default !== undefined) settings[field.key] = field.default;
+    }
+    this.modules[spec.id] = { enabled: false, settings };
+  }
+
+  setModuleEnabled(id: string, enabled: boolean): void {
+    const spec = getModuleSpec(id);
+    if (!spec) return;
+    this.ensureModuleEntry(spec);
+    this.modules[id]!.enabled = enabled;
+    if (!enabled) {
+      // Untick it for the current submit too — having a disabled module
+      // still queued would be confusing.
+      delete this.tickedModules[id];
+    }
+    void this.saveModules();
+  }
+
+  setModuleSetting(
+    id: string,
+    key: string,
+    value: string | boolean,
+  ): void {
+    const spec = getModuleSpec(id);
+    if (!spec) return;
+    this.ensureModuleEntry(spec);
+    this.modules[id]!.settings[key] = value;
+    void this.saveModules();
+  }
+
+  /** True iff the module is enabled AND every required setting is filled. */
+  moduleReady(id: string): boolean {
+    const spec = getModuleSpec(id);
+    const entry = this.modules[id];
+    if (!spec || !entry || !entry.enabled) return false;
+    return moduleIsConfigured(spec, entry.settings);
+  }
+
+  setModuleTicked(id: string, ticked: boolean): void {
+    if (ticked) this.tickedModules[id] = true;
+    else delete this.tickedModules[id];
+  }
+
+  /** Compose the SessionModule[] payload for a submit, picking only
+   *  ready + ticked modules. Returns undefined when nothing is active so
+   *  the field is omitted from the wire instead of appearing as an
+   *  empty array. */
+  buildSessionModules(): SessionModule[] | undefined {
+    const out: SessionModule[] = [];
+    for (const spec of BUILTIN_MODULES) {
+      if (!this.tickedModules[spec.id]) continue;
+      if (!this.moduleReady(spec.id)) continue;
+      const settings = this.modules[spec.id]?.settings ?? {};
+      out.push({
+        id: spec.id,
+        // Snapshot strips Svelte 5 reactive proxies before crossing the
+        // structuredClone boundary on chrome.runtime / fetch().
+        settings: $state.snapshot(settings) as Record<
+          string,
+          string | boolean
+        >,
+      });
+    }
+    return out.length > 0 ? out : undefined;
+  }
+
+  /** Reset per-session ticked modules. Called on each new session start
+   *  so the user has to re-tick (matches autoApply / includeScreenshot
+   *  behavior). */
+  resetTickedModules(): void {
+    this.tickedModules = {};
+  }
+
+  // ─── /Modules ───────────────────────────────────────────────────────
 
   /** Reload imported sessions from IndexedDB. Called on start and after
    *  any add/remove so the History panel stays in sync. */
@@ -183,6 +324,12 @@ class ExtensionState {
       // already handles 'test' submissions identically to extension ones.
       producer: "test",
       autoApply: opts.autoApply,
+      // Modules ride along with imported sessions too — recipients of a
+      // shared `.pinta` may want to file the friend's annotations as
+      // GitLab issues against their *own* project. Modules are stripped
+      // from share-file exports, so configuration is always the
+      // recipient's own.
+      modules: this.buildSessionModules(),
     };
     try {
       const res = await fetch(`${base}/v1/sessions`, {
@@ -339,6 +486,20 @@ class ExtensionState {
         // is possible (zero companions, or many with no URL match).
         const next = this.pickCompanion(this.companions, activeTabUrl);
         await this.connectTo(next);
+      } else if (
+        activeTabUrl &&
+        stillSelected.urlPatterns.length > 0 &&
+        !matchAny(activeTabUrl, stillSelected.urlPatterns)
+      ) {
+        // Tab moved to a URL the current project doesn't claim, and no
+        // other project claimed it either (urlMatch was null). Stay
+        // connected so a multi-page draft survives — the user might be
+        // briefly off-route inside the same review (e.g. opened a
+        // /pricing page that the project's URL patterns don't list).
+        // Each annotation carries its own `url` so attribution stays
+        // correct even when added on a non-claimed page. Catch-all
+        // companions (no urlPatterns) take this branch implicitly via
+        // the predicate above.
       } else if (stillSelected !== this.selectedCompanion) {
         // Stay put but refresh the cached entry (urlPatterns may have
         // changed since last scan).
@@ -513,14 +674,21 @@ class ExtensionState {
     // actually visible — without this, the new card lands in
     // app.session.annotations but the viewer is rendered on top of it.
     if (this.viewingImportedId) this.viewingImportedId = null;
+    // Stamp the page URL the annotation was created on so multi-page
+    // sessions stay correctly attributed when the user navigates between
+    // routes. Skill / GitLab module fall back to `session.url` if absent.
+    const stamped: Annotation = {
+      ...annotation,
+      url: annotation.url ?? this.lastUrl ?? this.session?.url,
+    };
     if (this.appMode === "standalone") {
       await this.mutateLocal((s) => ({
         ...s,
-        annotations: [...s.annotations, annotation],
+        annotations: [...s.annotations, stamped],
       }));
       return;
     }
-    this.send({ type: "annotation.add", annotation });
+    this.send({ type: "annotation.add", annotation: stamped });
   }
 
   async updateAnnotation(id: string, patch: Partial<Annotation>): Promise<void> {
@@ -551,7 +719,13 @@ class ExtensionState {
     // No-op in standalone — the side panel hides Submit there. Defensive
     // guard so a stray call (e.g. from a hotkey) doesn't crash.
     if (this.appMode === "standalone") return;
-    this.send({ type: "session.submit", screenshot, autoApply });
+    const modules = this.buildSessionModules();
+    this.send({
+      type: "session.submit",
+      screenshot,
+      autoApply,
+      modules,
+    });
   }
 
   /**
@@ -648,11 +822,19 @@ class ExtensionState {
   private onMessage(msg: ServerMessage): void {
     switch (msg.type) {
       case "session.created":
-      case "session.synced":
+      case "session.synced": {
+        const previousSessionId = this.session?.id ?? null;
         this.session = msg.session;
         this.creatingSession = false;
         this.lastError = null;
+        // A new session started → drop ticked module checkboxes so the
+        // user has to consciously opt in for the next submit. Mirrors
+        // how autoApply / includeScreenshot behave per-batch.
+        if (msg.session.id !== previousSessionId) {
+          this.resetTickedModules();
+        }
         break;
+      }
       case "session.applying":
         if (this.session) this.session.status = "applying";
         break;

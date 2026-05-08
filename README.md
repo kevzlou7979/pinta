@@ -27,6 +27,35 @@ matching source files for you.
 
 Recent additions on top of the original V1 pipeline:
 
+- **Built-in modules — agent-side integrations triggered per submit** *(v0.3.0)*.
+  Pinta now ships with built-in *modules* that ride along on a session and
+  hand the agent extra work after the source edits land. The first one is
+  **GitLab Issues**: enable it once in **Settings**, tick **Create GitLab
+  issues** in the footer before submitting, and the agent files one issue
+  per annotation via the user's `glab` CLI — auth comes from
+  `glab auth login`, **no tokens stored or transmitted**. Issue body
+  embeds the full-page screenshot (uploaded to the GitLab project's
+  uploads endpoint), the selector, source file, and the annotated page
+  URL. Before filing, the agent prompts in chat for batch metadata —
+  domain (`client` / `server` / `shared` → label `domain:<choice>`),
+  extra tags, assignees, or `later` to defer entirely. The screenshot
+  is auto-checked + locked when the module is ticked so issues never
+  go out without visual context. Module spec lives in
+  `extension/src/lib/modules.ts`; new modules just add an entry there
+  plus matching agent instructions in `skill/pinta/SKILL.md` §7.9.
+- **Per-page annotations across navigation** *(v0.3.0)*. Reviews of a
+  multi-route flow no longer fall apart on the first link click. Each
+  annotation now carries its own `url`; the side panel filters the
+  list to the page you're currently looking at and surfaces a chip
+  *"N on M other pages"* with **Open** buttons to jump between routes.
+  Pin badges repaint automatically after navigation / hard reload via
+  an `overlay.ready` handshake — open the page again, the halos come
+  back. One Send-to-agent submits the whole multi-page batch as a
+  single session; the skill keys off `annotation.url` so the GitLab
+  module files each issue against the right page, and route-scoped
+  grep narrows source-file lookup. Stays connected when the user
+  briefly visits a URL the project doesn't claim — drafts no longer
+  silently wipe.
 - **`.pinta` share files — collaboration without source access** *(v0.2.0)*. Export
   any session as a single self-contained `.pinta` file (manifest with
   title / author / description / accent color, plus the session JSON
@@ -123,6 +152,8 @@ See [`spec/SPEC.md` §7–9](spec/SPEC.md) for the full status of each.
 | Aider adapter (poll script) | shipped |
 | Copy-to-clipboard fallback for claude.ai web / ChatGPT / etc. | shipped |
 | Import / Export `.pinta` share files — round-trippable session collaboration | shipped |
+| Per-page annotations across navigation — per-annotation URL, side-panel filter, halo replay | shipped |
+| Built-in modules — GitLab Issues via `glab` CLI (no tokens stored), screenshot embed, chat-based metadata prompt | shipped |
 | `pinta-companion` published to npm — `npx pinta-companion .` | shipped |
 | `vite-plugin-pinta` for instant source mapping | planned (Phase 6) |
 | Drag-reorder annotations, group by file, undo last edit via git | planned (Phase 7) |

@@ -110,6 +110,15 @@ export type Annotation = {
   status?: AnnotationStatus;
   /** Set when status === "error" so the side panel can show what failed. */
   errorMessage?: string;
+
+  /**
+   * Page URL the annotation was created on. Set by the extension at
+   * creation time so a single Session can carry annotations from
+   * multiple routes (multi-page reviews of a SPA flow). The skill keys
+   * off this when filing per-page output (e.g. GitLab issues). Older
+   * sessions may lack it; readers fall back to `session.url`.
+   */
+  url?: string;
 };
 
 export type AnnotationImage = {
@@ -179,6 +188,27 @@ export type Session = {
    */
   claimedBy?: string;
   claimedAt?: number;
+
+  /**
+   * Built-in modules the user opted into for this submit. Each entry
+   * carries the module's id and the user-supplied settings the agent
+   * needs to do its work (project ids, tokens, etc.). The skill ships
+   * the per-module agent instructions; the wire only carries the kind +
+   * config so the contract stays narrow.
+   *
+   * Stripped from `.pinta` share-file exports — see
+   * `extension/src/lib/pinta-file.ts:stripTransient`. Secrets in the
+   * settings map (e.g. GitLab personal access tokens) must never travel
+   * between machines via the share-file path.
+   */
+  modules?: SessionModule[];
+};
+
+export type SessionModule = {
+  /** Stable id, e.g. `"gitlab-issues"`. The skill matches on this. */
+  id: string;
+  /** Free-form module-specific config (project ids, tokens, labels …). */
+  settings: Record<string, string | boolean>;
 };
 
 /**
@@ -223,7 +253,12 @@ export type ClientMessage =
   | { type: "annotation.add"; annotation: Annotation }
   | { type: "annotation.update"; id: string; patch: Partial<Annotation> }
   | { type: "annotation.remove"; id: string }
-  | { type: "session.submit"; screenshot: string; autoApply?: boolean };
+  | {
+      type: "session.submit";
+      screenshot: string;
+      autoApply?: boolean;
+      modules?: SessionModule[];
+    };
 
 export type ServerMessage =
   | { type: "session.created"; session: Session }

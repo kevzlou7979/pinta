@@ -94,12 +94,30 @@ indefinitely (see §9 — loop after each session, never stop on your own).
   "projectRoot": "/abs/path",
   "annotations": [...],
   "fullPageScreenshotPath": ".pinta/sessions/{id}.png",
-  "status": "submitted"
+  "status": "submitted",
+  "modules": [{ "id": "gitlab-issues", "settings": { ... } }]
 }
 ```
 
+> **`modules` (optional).** When the user opts into a built-in
+> integration on this submit (currently: GitLab Issues), the array
+> rides along on the session. **You MUST run §7.9 after §7** when this
+> field is present — skipping it means the user's request to file
+> issues / post messages / etc. silently fails. Treat `session.modules`
+> as a hard checkpoint, not a footnote.
+
 The screenshot is on disk at `{projectRoot}/{fullPageScreenshotPath}` —
 read it with the Read tool (it's a PNG; the visual UI will display it).
+
+> **Multi-page sessions.** Each `annotation` may carry its own `url`
+> (set by the extension when the user is reviewing a flow that spans
+> multiple routes). Treat `annotation.url ?? session.url` as the
+> per-annotation page anchor — use it when grepping for the right
+> source file (route-scoped first, project-wide fallback) and when any
+> module needs to record the page an annotation belongs to (e.g. the
+> GitLab Issues module's per-issue body). The session-level `url` is
+> the page the session was first opened on; do not assume it covers
+> every annotation.
 
 > **Sanity-check** the session's `projectRoot` matches your cwd. Multi-
 > project mode discovery should make this reliable, but if a stale
@@ -142,6 +160,15 @@ The 200 response body is the full session (with `claimedBy` and
 ## 4. Locate source files for each annotation
 
 Each annotation is one of three shapes:
+
+> **Per-annotation URL.** If `annotation.url` is set and differs from
+> `session.url`, the user captured this annotation on a *different*
+> route within the same review. When grepping (no Vite plugin), prefer
+> the source files associated with that route first — most projects
+> have a router file (e.g. `src/routes/`, `pages/`, `app/`) where the
+> URL path maps to a component file. Fall back to a project-wide grep
+> only if a route-scoped search returns nothing. This avoids
+> false-positive matches when two pages share text/selectors.
 
 **Element selection (`kind: "select"`)** — `targets` is set (one or more):
 - `targets[]` — list of DOM targets the user picked. Single-click yields
@@ -314,10 +341,213 @@ For **each** annotation, in order:
    ```
 
 When every annotation is `done` or `error`, the companion auto-rolls the
-session status (so step 8 below is optional unless you want a final summary).
+session status. **Do not jump to §8 yet** — there are two checkpoints
+between source-edits-applied and session-done.
 
-After all annotations: run the project's lint / test / typecheck commands
-(read package.json scripts; `npm run check`, `npm test`, etc.).
+After all annotations:
+
+1. Run the project's lint / test / typecheck commands (read
+   package.json scripts; `npm run check`, `npm test`, etc.).
+2. **CHECK `session.modules`.** If it exists and is non-empty, you
+   **must** run §7.9 now, in array order. Skipping it silently breaks
+   the user's opt-in (e.g. they checked "Create GitLab issues" and got
+   nothing). If `session.modules` is empty / undefined, skip §7.9.
+3. Only then proceed to §8.
+
+## 7.9 Modules — run after the source edits land
+
+If the session has `modules` set, the user has opted into one or more
+built-in Pinta integrations for this submit. Run each module after the
+annotations are applied (and tests/lints pass), in array order. Match
+on `module.id`.
+
+**Pinta does not store or transmit credentials.** Modules delegate auth
+to whatever tool the user already has configured on their machine
+(typically a CLI authed via its own login command). Never ask the user
+for a token; if a tool isn't authed, surface that and stop.
+
+If a module fails partway through, mark the session `error` with a
+descriptive message and stop further modules. Do NOT roll back actions
+that have already happened (e.g. issues already created) — match how
+source edits behave today.
+
+### Module: `gitlab-issues`
+
+Create one GitLab issue per annotation using the **`glab` CLI** on the
+user's machine. `glab` reads its own auth from the user's keyring /
+config (set up once via `glab auth login`). Pinta never sees the token.
+
+**Preflight — once per session, before iterating annotations:**
+
+```bash
+# 1. glab is installed?
+command -v glab >/dev/null 2>&1 || {
+  curl -sf -X POST "$BASE/v1/sessions/$SESSION_ID/status" \
+    -H "Content-Type: application/json" \
+    -d '{"status":"error","errorMessage":"glab CLI not found. Install it (https://gitlab.com/gitlab-org/cli) and run `glab auth login`, then re-submit."}'
+  exit 0
+}
+
+# 2. glab is authenticated?
+glab auth status >/dev/null 2>&1 || {
+  curl -sf -X POST "$BASE/v1/sessions/$SESSION_ID/status" \
+    -H "Content-Type: application/json" \
+    -d '{"status":"error","errorMessage":"glab is not authenticated. Run `glab auth login` and re-submit."}'
+  exit 0
+}
+```
+
+**Settings** the extension provides on `module.settings` (all optional):
+- `project_id` — numeric id or `group/project` path. **Leave-blank
+  default**: glab uses the GitLab remote of the current git repo
+  (your cwd). Set this only when you want to file issues against a
+  different project than the code lives in.
+- `labels` — comma-separated string. Apply to every issue.
+
+**Ask the user for batch metadata — once per session, before filing.**
+After source edits land but before invoking `glab issue create`, prompt
+the user in chat for three things that apply to the entire batch
+(same values used on every issue). Stay concise — one message, three
+fields, fixed format. **Do not file anything until they reply.**
+
+```
+Before I file these GitLab issues:
+
+- **Domain?** client / server / shared / skip
+- **Extra tags?** comma-separated (e.g. "polish, a11y") or skip
+- **Assignees?** comma-separated usernames (e.g. "@kevin, @maria") or skip
+
+Reply with the values you want, e.g. `domain: client, tags: polish, assignees: @kevin`,
+`skip` to file with just the defaults, or `later` to defer and not file
+anything on this submit.
+```
+
+**`later` short-circuit.** If the user's reply is `later` (case-insensitive,
+trimmed) or some clear intent variant ("not now", "defer", "hold off"),
+**do not run `glab issue create` at all** for this submit. The source
+edits already applied — that's not rolled back. Tell the user briefly:
+
+> Skipped GitLab filing for this batch. Source edits are still in place
+> — re-submit anytime with `Create GitLab issues` re-ticked when you're
+> ready to file.
+
+Then proceed to §8 / §9. Do **not** mark the session as `error` — this
+is a normal exit, not a failure.
+
+Otherwise, parse the user's reply leniently. Treat each field as optional —
+missing / "skip" / empty values are fine, just omit them downstream.
+Compose the final label set for `glab` like this:
+
+```
+FINAL_LABELS = (settings.labels)              # from module Settings (may be empty)
+             + ("domain:" + DOMAIN)           # if user picked client/server/shared
+             + EXTRA_TAGS                     # if user gave any
+```
+
+Comma-join the non-empty pieces. Pass to `--label`. If the user says
+`skip` or replies with no parseable fields, fall back to just
+`settings.labels` (which may itself be empty — that's fine, glab
+handles no `--label`).
+
+For assignees, pass each as a separate `--assignee` to `glab` (the
+flag is repeatable). Strip leading `@` if the user typed it — `glab`
+expects bare usernames.
+
+**Screenshot upload — once per session, before iterating annotations.**
+If `session.fullPageScreenshotPath` is set, the user opted into
+"Include full-page screenshot" on this submit and wants the image
+*embedded in every issue*. Upload it to GitLab once and reuse the
+returned markdown reference across all issues:
+
+```bash
+SCREENSHOT_MD=""
+if [ -n "$FULL_PAGE_SCREENSHOT_PATH" ]; then
+  ABS_SCREENSHOT="$PROJECT_ROOT/$FULL_PAGE_SCREENSHOT_PATH"
+  if [ -f "$ABS_SCREENSHOT" ]; then
+    # `glab api projects/:id/uploads` returns JSON with a pre-rendered
+    # `markdown` field like `![screenshot](/uploads/abc/file.png)`.
+    # Use the user's project_id override if set; otherwise resolve the
+    # current repo's project id via `glab repo view`.
+    if [ -n "$module_settings_project_id" ]; then
+      UPLOAD_PROJECT_ID="$module_settings_project_id"
+    else
+      UPLOAD_PROJECT_ID=$(glab repo view --output json 2>/dev/null \
+        | python -c "import sys,json; print(json.load(sys.stdin).get('id',''))")
+    fi
+    if [ -n "$UPLOAD_PROJECT_ID" ]; then
+      # URL-encode group/project paths (they contain `/`).
+      ENCODED_ID=$(python -c "import sys,urllib.parse; print(urllib.parse.quote(sys.argv[1], safe=''))" "$UPLOAD_PROJECT_ID")
+      UPLOAD_RESPONSE=$(glab api "projects/$ENCODED_ID/uploads" \
+        -F "file=@$ABS_SCREENSHOT" 2>/dev/null || true)
+      SCREENSHOT_MD=$(printf '%s' "$UPLOAD_RESPONSE" \
+        | python -c "import sys,json; print(json.load(sys.stdin).get('markdown',''))" 2>/dev/null || true)
+    fi
+  fi
+fi
+```
+
+If the upload fails (auth scope missing, network blip, project not
+writable), `SCREENSHOT_MD` ends up empty — proceed and skip the
+screenshot embed; don't fail the whole submission. Issues still get
+filed without the image.
+
+**Per-issue body template** (one issue per annotation):
+- Title: first sentence of `annotation.comment`, capped at ~80 chars.
+  If the comment is empty, fall back to `annotation.target.selector` or
+  the annotation kind.
+- Body (Markdown):
+  ```
+  {full annotation.comment}
+
+  - **Selector:** `{annotation.target.selector}`
+  - **Source file:** `{annotation.target.sourceFile}` (omit line if absent)
+  - **Page:** {annotation.url ?? session.url}
+
+  {SCREENSHOT_MD if non-empty — emits an inline image embed. Omit the
+  whole line otherwise.}
+
+  *Filed by Pinta · session `{session.id}` · annotation `{annotation.id}`*
+  ```
+
+**glab invocation** (per annotation):
+
+```bash
+# Build the body in a temp file so newlines/quotes don't fight the shell.
+BODY=$(mktemp); trap 'rm -f "$BODY"' EXIT
+{
+  printf '%s\n\n' "$ANNOTATION_COMMENT"
+  printf -- '- **Selector:** `%s`\n' "$SELECTOR"
+  [ -n "$SOURCE_FILE" ] && printf -- '- **Source file:** `%s`\n' "$SOURCE_FILE"
+  printf -- '- **Page:** %s\n' "$PAGE_URL"
+  if [ -n "$SCREENSHOT_MD" ]; then
+    printf '\n%s\n' "$SCREENSHOT_MD"
+  fi
+  printf '\n*Filed by Pinta · session `%s` · annotation `%s`*\n' \
+    "$SESSION_ID" "$ANNOTATION_ID"
+} > "$BODY"
+
+# Optional --repo only when the user explicitly overrode project_id.
+# FINAL_LABELS is the comma-joined result from the chat prompt step
+# above (settings.labels + domain:X + extra tags). May be empty.
+# ASSIGNEE_FLAGS is the array form: --assignee user1 --assignee user2
+# (glab accepts the flag repeatedly). May be empty.
+glab issue create \
+  ${module_settings_project_id:+--repo "$module_settings_project_id"} \
+  --title "{first sentence}" \
+  --description "$(cat "$BODY")" \
+  ${FINAL_LABELS:+--label "$FINAL_LABELS"} \
+  ${ASSIGNEE_FLAGS} \
+  --no-editor
+```
+
+`glab issue create --no-editor` prints the new issue URL on stdout —
+capture it into the per-annotation status update so the user sees
+"filed as #42" alongside the ✓.
+
+If a single `glab issue create` invocation fails, mark **that
+annotation** as error (with stderr captured into `errorMessage`),
+continue with the next annotation, and at the end mark the session
+`error` if any failed.
 
 ## 8. (Optional) Final session summary
 

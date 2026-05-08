@@ -29,6 +29,8 @@
   import StatusPill from "./StatusPill.svelte";
   import AnnotationCard from "./AnnotationCard.svelte";
   import SessionHistory from "./SessionHistory.svelte";
+  import SettingsPanel from "./SettingsPanel.svelte";
+  import { BUILTIN_MODULES } from "../lib/modules.js";
 
   type Tool = "select" | "arrow" | "rect" | "circle" | "freehand" | "pin" | "image";
   type ActiveMode = "idle" | "select" | "draw" | "image";
@@ -105,7 +107,30 @@
     images?: import("@pinta/shared").AnnotationImage[];
     viewport?: { scrollY: number; width: number; height: number };
     annotation?: Annotation;
+    /** `overlay.ready` carries the active page URL the script just mounted on. */
+    url?: string;
   };
+
+  /**
+   * Push every select-mode annotation from the current draft whose
+   * stored URL matches `url` to the given tab so the content script
+   * can repaint its pin badge. Best-effort; silently no-ops if the
+   * content script isn't listening.
+   */
+  function replayAnnotationsToTab(tabId: number, url: string): void {
+    const sessionUrl = app.session?.url ?? "";
+    const all = app.session?.annotations ?? [];
+    for (const ann of all) {
+      if (ann.kind !== "select") continue;
+      const annUrl = ann.url ?? sessionUrl;
+      if (annUrl !== url) continue;
+      chrome.tabs
+        .sendMessage(tabId, { type: "annotated.replay", annotation: ann })
+        .catch(() => {
+          // Content script not (yet) listening — skip.
+        });
+    }
+  }
 
   let projectMenuOpen = $state(false);
   let associating = $state(false);
@@ -254,6 +279,14 @@
   ) => {
     if (sender?.id !== chrome.runtime.id) return;
     const m = msg as IncomingMsg;
+    if (m?.type === "overlay.ready" && sender.tab?.id != null) {
+      // Content script just mounted (page reload / SPA nav). Push back
+      // any select-mode annotations from the current draft that were
+      // captured on this URL so their pin badges re-paint.
+      const url = m.url ?? "";
+      replayAnnotationsToTab(sender.tab.id, url);
+      return;
+    }
     if (m?.type === "annotation.target-selected") {
       // Prefer plural targets[]; fall back to legacy single target.
       // Skip the message if neither is present (no point making an
@@ -349,6 +382,24 @@
     }
   });
 
+  // Proactive replay: when the side panel opens AFTER the content
+  // script already mounted (so its `overlay.ready` ping was lost),
+  // push pin-badge replays as soon as we have a session + active tab.
+  // The content script dedupes against `content.annotated` so a
+  // double-fire (handshake + this) is safe.
+  let lastReplayKey = $state<string>("");
+  $effect(() => {
+    const tabId = activeTabId;
+    const url = pageUrl;
+    const sessionId = app.session?.id;
+    const annCount = app.session?.annotations.length ?? 0;
+    if (tabId == null || !url || !sessionId) return;
+    const key = `${tabId}:${url}:${sessionId}:${annCount}`;
+    if (key === lastReplayKey) return;
+    lastReplayKey = key;
+    replayAnnotationsToTab(tabId, url);
+  });
+
   // Dedupe by id at the display layer so a corrupted session (or a
   // double-fire on the runtime-message → WS path) doesn't crash Svelte's
   // keyed-each diffing with `each_key_duplicate`. First-seen wins so
@@ -364,6 +415,61 @@
     }
     return out;
   });
+  // Per-page filtering. Annotations carry their own `url` (set when
+  // captured); fall back to session.url for legacy payloads where that
+  // field was missing. The list shows only annotations belonging to the
+  // page the user is currently looking at — `otherPages` powers the
+  // "N on M other pages" chip above the list.
+  const annotationsHere = $derived.by(() => {
+    const sessionUrl = app.session?.url ?? "";
+    const here = pageUrl;
+    return annotations.filter(
+      (a) => (a.url ?? sessionUrl) === here,
+    );
+  });
+  const otherPages = $derived.by(() => {
+    const sessionUrl = app.session?.url ?? "";
+    const here = pageUrl;
+    const map = new Map<string, Annotation[]>();
+    for (const a of annotations) {
+      const u = a.url ?? sessionUrl;
+      if (u === here) continue;
+      if (!map.has(u)) map.set(u, []);
+      map.get(u)!.push(a);
+    }
+    return [...map.entries()];
+  });
+  const elsewhereCount = $derived(
+    otherPages.reduce((n, [, anns]) => n + anns.length, 0),
+  );
+  let otherPagesExpanded = $state(false);
+  /**
+   * Pretty-print a URL for the "other pages" chip. Strips the origin
+   * when it matches the current page's origin (since the user already
+   * knows which app they're in) and shows the path + query so similar
+   * routes are still distinguishable.
+   */
+  function formatOtherPageUrl(u: string): string {
+    try {
+      const here = new URL(pageUrl || "http://localhost");
+      const there = new URL(u);
+      if (there.origin === here.origin) {
+        return there.pathname + there.search;
+      }
+      return u;
+    } catch {
+      return u;
+    }
+  }
+  async function openOtherPage(u: string): Promise<void> {
+    if (activeTabId == null) return;
+    try {
+      await chrome.tabs.update(activeTabId, { url: u });
+    } catch {
+      // Tab gone or URL invalid — silently no-op; the user can navigate manually.
+    }
+    otherPagesExpanded = false;
+  }
   const canSubmit = $derived(
     annotations.length > 0 && app.session?.status === "drafting",
   );
@@ -398,8 +504,23 @@
   const hasDrawingAnnotation = $derived(
     annotations.some((a) => a.kind !== "select"),
   );
+  // True when at least one ticked module needs the screenshot embedded
+  // in its output (e.g. GitLab Issues attaches it to every issue body).
+  // While true, the screenshot toggle is forced on and locked — the
+  // module would otherwise file empty issues missing the visual context
+  // the user just spent time capturing.
+  const screenshotRequiredByModule = $derived.by(() => {
+    for (const spec of BUILTIN_MODULES) {
+      if (!spec.recommendsScreenshot) continue;
+      if (app.tickedModules[spec.id]) return true;
+    }
+    return false;
+  });
+  const screenshotLocked = $derived(
+    hasDrawingAnnotation || screenshotRequiredByModule,
+  );
   $effect(() => {
-    if (hasDrawingAnnotation && !includeScreenshot) {
+    if (screenshotLocked && !includeScreenshot) {
       includeScreenshot = true;
     }
   });
@@ -1183,7 +1304,9 @@
       </div>
     {/if}
 
-    {#if app.viewingImportedId}
+    {#if app.viewingSettings}
+      <SettingsPanel />
+    {:else if app.viewingImportedId}
       {@const imp = app.importedSessions.find((s) => s.id === app.viewingImportedId)}
       {#if imp}
         <section class="space-y-2">
@@ -1286,6 +1409,16 @@
             <span>{importBusy ? "Importing…" : "Import"}</span>
           </button>
           <SessionHistory />
+          <button
+            type="button"
+            class="inline-flex items-center justify-center w-7 h-7 rounded-full border border-ink-200 bg-white text-ink-600 hover:text-brand-pink hover:border-ink-400 dark:border-night-line dark:bg-night-alt dark:text-night-dim dark:hover:text-brand-pink-light dark:hover:border-night-line2 transition-colors"
+            onclick={() => (app.viewingSettings = !app.viewingSettings)}
+            title="Pinta settings — modules, integrations"
+            aria-label="Open settings"
+            aria-pressed={app.viewingSettings}
+          >
+            <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>
+          </button>
         </div>
       </div>
       <input
@@ -1385,7 +1518,7 @@
     <section class="space-y-2">
       <div class="flex items-center justify-between">
         <h2 class="text-xs uppercase tracking-wide text-ink-500 dark:text-night-mute font-medium">
-          Annotations ({annotations.length})
+          Annotations ({annotationsHere.length}{annotations.length !== annotationsHere.length ? ` / ${annotations.length}` : ""})
         </h2>
         {#if canEditAnnotations && annotations.length > 0}
           <button
@@ -1400,13 +1533,52 @@
           </button>
         {/if}
       </div>
-      {#if annotations.length === 0}
+      {#if otherPages.length > 0}
+        <div class="rounded-md border border-ink-200 dark:border-night-line bg-ink-50/70 dark:bg-night-alt/40">
+          <button
+            type="button"
+            class="w-full flex items-center justify-between gap-2 px-2.5 py-1.5 text-[11px] text-ink-700 dark:text-night-dim hover:bg-ink-100/70 dark:hover:bg-night-line/40 rounded-md"
+            onclick={() => (otherPagesExpanded = !otherPagesExpanded)}
+            aria-expanded={otherPagesExpanded}
+          >
+            <span class="flex items-center gap-1.5 min-w-0">
+              <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="10"/><path d="M12 16v-4"/><path d="M12 8h.01"/></svg>
+              <span class="truncate">
+                {elsewhereCount} on {otherPages.length} other {otherPages.length === 1 ? "page" : "pages"}
+              </span>
+            </span>
+            <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" class:rotate-180={otherPagesExpanded}><polyline points="6 9 12 15 18 9"/></svg>
+          </button>
+          {#if otherPagesExpanded}
+            <ul class="px-2 pb-2 pt-0.5 space-y-1">
+              {#each otherPages as [u, anns] (u)}
+                <li class="flex items-center gap-2 text-[11px] text-ink-700 dark:text-night-dim">
+                  <span class="flex-1 min-w-0 truncate font-mono" title={u}>{formatOtherPageUrl(u)}</span>
+                  <span class="shrink-0 text-ink-500 dark:text-night-mute tabular-nums">{anns.length}</span>
+                  <button
+                    type="button"
+                    class="shrink-0 px-1.5 py-0.5 rounded border border-ink-200 dark:border-night-line text-ink-700 dark:text-night-dim hover:bg-ink-100 dark:hover:bg-night-line/60"
+                    onclick={() => openOtherPage(u)}
+                    aria-label="Open {u}"
+                    title="Navigate this tab to {u}"
+                  >
+                    Open
+                  </button>
+                </li>
+              {/each}
+            </ul>
+          {/if}
+        </div>
+      {/if}
+      {#if annotationsHere.length === 0}
         <p class="text-xs text-ink-500 dark:text-night-dim italic">
-          No annotations yet. Pick a tool above.
+          {annotations.length === 0
+            ? "No annotations yet. Pick a tool above."
+            : "No annotations on this page. Use the chip above to jump to siblings, or annotate something here."}
         </p>
       {:else}
         <ul class="space-y-2">
-          {#each annotations as annotation, i (`${annotation.id}:${i}`)}
+          {#each annotationsHere as annotation, i (`${annotation.id}:${i}`)}
             <AnnotationCard
               {annotation}
               canEdit={canEditAnnotations}
@@ -1442,7 +1614,7 @@
 
   <footer
     class="border-t border-ink-200 p-3 bg-white dark:border-night-line dark:bg-night-card space-y-2"
-    class:hidden={showAssociatePrompt}
+    class:hidden={showAssociatePrompt || app.viewingSettings}
   >
     {#if app.viewingImportedId}
       {@const impFooter = app.importedSessions.find((s) => s.id === app.viewingImportedId)}
@@ -1633,18 +1805,18 @@
       </label>
       <label
         class="flex items-start gap-2 text-[12px] text-ink-700 dark:text-night-dim select-none"
-        class:cursor-pointer={!hasDrawingAnnotation}
-        class:cursor-not-allowed={hasDrawingAnnotation}
+        class:cursor-pointer={!screenshotLocked}
+        class:cursor-not-allowed={screenshotLocked}
       >
         <input
           type="checkbox"
           class="mt-0.5 accent-brand-pink"
           bind:checked={includeScreenshot}
-          disabled={hasDrawingAnnotation}
+          disabled={screenshotLocked}
         />
         <span class="flex-1 leading-snug">
           Include full-page screenshot
-          {#if hasDrawingAnnotation}
+          {#if screenshotLocked}
             <span class="text-brand-pink dark:text-brand-pink-light font-medium">(required)</span>
           {/if}
           <span class="block text-[11px] text-ink-500 dark:text-night-mute">
@@ -1652,6 +1824,10 @@
               A drawing is in this batch — the agent has no DOM target for
               freehand / arrow / circle / rect / pin annotations, so the
               screenshot is the only context it has.
+            {:else if screenshotRequiredByModule}
+              Required because a module below needs the screenshot embedded
+              in its output (e.g. GitLab issues attach it to every body).
+              Untick the module to unlock this.
             {:else}
               Adds visual context for the agent. ~1.5–2k extra vision tokens
               per submit. Off by default — selectors + nearby text are usually
@@ -1660,7 +1836,98 @@
           </span>
         </span>
       </label>
+      {#each BUILTIN_MODULES as moduleSpec (moduleSpec.id)}
+        {@const moduleReady = app.moduleReady(moduleSpec.id)}
+        {@const ticked = !!app.tickedModules[moduleSpec.id]}
+        {#if moduleReady}
+          <label
+            class="flex items-start gap-2 text-[12px] text-ink-700 dark:text-night-dim cursor-pointer select-none"
+          >
+            <input
+              type="checkbox"
+              class="mt-0.5 accent-brand-pink"
+              checked={ticked}
+              onchange={(e) =>
+                app.setModuleTicked(
+                  moduleSpec.id,
+                  (e.currentTarget as HTMLInputElement).checked,
+                )}
+            />
+            <span class="flex-1 leading-snug">
+              <span class="inline-flex items-center gap-1.5 flex-wrap">
+                {moduleSpec.sessionCheckboxLabel}
+                {#if ticked}
+                  <span class="inline-flex items-center text-[10px] uppercase tracking-wide font-semibold text-emerald-700 dark:text-emerald-300 bg-emerald-100 dark:bg-emerald-950/50 border border-emerald-300 dark:border-emerald-800/50 rounded-full px-1.5 py-0.5" title="This module will run on the next submit">
+                    Will run
+                  </span>
+                {/if}
+              </span>
+              <span class="block text-[11px] text-ink-500 dark:text-night-mute">
+                {moduleSpec.sessionCheckboxHint}
+              </span>
+            </span>
+          </label>
+        {/if}
+      {/each}
     {/if}
+
+    {#snippet downloadDropdown()}
+      <div class="relative">
+        <button
+          type="button"
+          class="h-full rounded-md border border-ink-300 bg-white text-ink-700 text-sm font-medium px-3 hover:bg-ink-50 dark:border-night-line dark:bg-night-alt dark:text-night-dim dark:hover:bg-night-line dark:hover:text-night-text inline-flex items-center gap-1"
+          title="Download annotations as a file an agent can read"
+          onclick={() => (downloadMenuOpen = !downloadMenuOpen)}
+          aria-haspopup="menu"
+          aria-expanded={downloadMenuOpen}
+        >
+          <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
+          <svg width="9" height="9" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="6 9 12 15 18 9"/></svg>
+        </button>
+        {#if downloadMenuOpen}
+          <div
+            class="absolute right-0 bottom-full mb-1 w-56 z-30 rounded-md border border-ink-300 bg-white shadow-lg dark:border-night-line dark:bg-night-alt overflow-hidden"
+            role="menu"
+          >
+            <button
+              type="button"
+              class="w-full text-left px-3 py-2 text-xs text-ink-800 dark:text-night-text hover:bg-ink-50 dark:hover:bg-night-line disabled:opacity-50"
+              disabled={bundleBusy}
+              onclick={() => downloadBundle("md")}
+            >
+              <span class="font-medium">
+                {bundleBusy ? "Capturing screenshot…" : "Markdown + screenshot"}
+              </span>
+              <span class="block text-[10px] text-ink-500 dark:text-night-mute">.zip — most context for agents</span>
+            </button>
+            <button
+              type="button"
+              class="w-full text-left px-3 py-2 text-xs text-ink-800 dark:text-night-text hover:bg-ink-50 dark:hover:bg-night-line border-t border-ink-200 dark:border-night-line"
+              onclick={() => downloadAs("md")}
+            >
+              <span class="font-medium">Markdown</span>
+              <span class="block text-[10px] text-ink-500 dark:text-night-mute">.md — text only</span>
+            </button>
+            <button
+              type="button"
+              class="w-full text-left px-3 py-2 text-xs text-ink-800 dark:text-night-text hover:bg-ink-50 dark:hover:bg-night-line border-t border-ink-200 dark:border-night-line"
+              onclick={() => downloadAs("txt")}
+            >
+              <span class="font-medium">Plain text</span>
+              <span class="block text-[10px] text-ink-500 dark:text-night-mute">.txt — text only</span>
+            </button>
+            <button
+              type="button"
+              class="w-full text-left px-3 py-2 text-xs text-ink-800 dark:text-night-text hover:bg-ink-50 dark:hover:bg-night-line border-t border-ink-200 dark:border-night-line"
+              onclick={openPintaExportForm}
+            >
+              <span class="font-medium">Share file (.pinta)</span>
+              <span class="block text-[10px] text-ink-500 dark:text-night-mute">re-importable by a teammate</span>
+            </button>
+          </div>
+        {/if}
+      </div>
+    {/snippet}
 
     <div class="flex gap-2">
       {#if app.appMode === "standalone"}
@@ -1680,61 +1947,7 @@
           {/if}
         </button>
         {#if annotations.length > 0}
-          <div class="relative">
-            <button
-              type="button"
-              class="h-full rounded-md border border-ink-300 bg-white text-ink-700 text-sm font-medium px-3 hover:bg-ink-50 dark:border-night-line dark:bg-night-alt dark:text-night-dim dark:hover:bg-night-line dark:hover:text-night-text inline-flex items-center gap-1"
-              title="Download annotations as a file an agent can read"
-              onclick={() => (downloadMenuOpen = !downloadMenuOpen)}
-              aria-haspopup="menu"
-              aria-expanded={downloadMenuOpen}
-            >
-              <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
-              <svg width="9" height="9" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="6 9 12 15 18 9"/></svg>
-            </button>
-            {#if downloadMenuOpen}
-              <div
-                class="absolute right-0 bottom-full mb-1 w-56 z-30 rounded-md border border-ink-300 bg-white shadow-lg dark:border-night-line dark:bg-night-alt overflow-hidden"
-                role="menu"
-              >
-                <button
-                  type="button"
-                  class="w-full text-left px-3 py-2 text-xs text-ink-800 dark:text-night-text hover:bg-ink-50 dark:hover:bg-night-line disabled:opacity-50"
-                  disabled={bundleBusy}
-                  onclick={() => downloadBundle("md")}
-                >
-                  <span class="font-medium">
-                    {bundleBusy ? "Capturing screenshot…" : "Markdown + screenshot"}
-                  </span>
-                  <span class="block text-[10px] text-ink-500 dark:text-night-mute">.zip — most context for agents</span>
-                </button>
-                <button
-                  type="button"
-                  class="w-full text-left px-3 py-2 text-xs text-ink-800 dark:text-night-text hover:bg-ink-50 dark:hover:bg-night-line border-t border-ink-200 dark:border-night-line"
-                  onclick={() => downloadAs("md")}
-                >
-                  <span class="font-medium">Markdown</span>
-                  <span class="block text-[10px] text-ink-500 dark:text-night-mute">.md — text only</span>
-                </button>
-                <button
-                  type="button"
-                  class="w-full text-left px-3 py-2 text-xs text-ink-800 dark:text-night-text hover:bg-ink-50 dark:hover:bg-night-line border-t border-ink-200 dark:border-night-line"
-                  onclick={() => downloadAs("txt")}
-                >
-                  <span class="font-medium">Plain text</span>
-                  <span class="block text-[10px] text-ink-500 dark:text-night-mute">.txt — text only</span>
-                </button>
-                <button
-                  type="button"
-                  class="w-full text-left px-3 py-2 text-xs text-ink-800 dark:text-night-text hover:bg-ink-50 dark:hover:bg-night-line border-t border-ink-200 dark:border-night-line"
-                  onclick={openPintaExportForm}
-                >
-                  <span class="font-medium">Share file (.pinta)</span>
-                  <span class="block text-[10px] text-ink-500 dark:text-night-mute">re-importable by a teammate</span>
-                </button>
-              </div>
-            {/if}
-          </div>
+          {@render downloadDropdown()}
           <button
             type="button"
             class="rounded-md border border-ink-300 bg-white text-ink-700 text-sm font-medium px-3 hover:bg-ink-50 dark:border-night-line dark:bg-night-alt dark:text-night-dim dark:hover:bg-night-line dark:hover:text-night-text"
@@ -1811,16 +2024,7 @@
           >
             {copiedAt ? "✓" : "Copy"}
           </button>
-          <button
-            type="button"
-            class="rounded-md border border-ink-300 bg-white text-ink-700 text-sm font-medium px-3 hover:bg-ink-50 dark:border-night-line dark:bg-night-alt dark:text-night-dim dark:hover:bg-night-line dark:hover:text-night-text inline-flex items-center gap-1"
-            title="Export this session as a .pinta file a teammate can import"
-            onclick={openPintaExportForm}
-            aria-label="Share as .pinta"
-          >
-            <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
-            Share
-          </button>
+          {@render downloadDropdown()}
         {/if}
       {/if}
     </div>

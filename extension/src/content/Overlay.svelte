@@ -71,8 +71,17 @@
         mediaType?: string;
         name?: string;
         imported?: ImportedOverlay;
+        annotation?: Annotation;
       };
       if (m?.type === "mode.set" && m.mode) setMode(m.mode, m.tool);
+      else if (m?.type === "annotated.replay" && m.annotation) {
+        // Side panel is rehydrating us after navigation. Re-resolve the
+        // selector and stamp a pin badge on the matching element. We
+        // capture the element's *current* style/innerHTML as the
+        // rollback snapshot — the element wasn't mutated by us this
+        // time, so a future remove should leave it unchanged.
+        replayAnnotation(m.annotation);
+      }
       else if (m?.type === "image.place" && m.dataUrl) {
         // Side panel handed us a freshly-picked file. Decode natural
         // dimensions before pushing into state so the overlay can size
@@ -128,6 +137,17 @@
       }
     };
     chrome.runtime.onMessage.addListener(handler);
+    // Tell the side panel we're alive so it can replay any annotations
+    // from the current draft that were created on this URL — pins get
+    // re-painted on reload / SPA nav. Best-effort: if no side panel is
+    // open the message just dispatches into the void.
+    try {
+      void chrome.runtime
+        .sendMessage({ type: "overlay.ready", url: location.href })
+        ?.catch(() => {});
+    } catch {
+      // No extension context available — ignore.
+    }
     return () => chrome.runtime.onMessage.removeListener(handler);
   });
 
@@ -175,6 +195,34 @@
   $effect(() => {
     if (content.mode !== "select") return;
 
+    // Re-enable pointer events on disabled form controls while in select
+    // mode. Many CSS frameworks (Tailwind's `disabled:pointer-events-none`,
+    // MUI `.Mui-disabled`, etc.) hide disabled elements from the cursor
+    // entirely — without this override, mouse events would pass straight
+    // through and the user couldn't even highlight them.
+    const styleEl = document.createElement("style");
+    styleEl.dataset.pintaSelectModeOverride = "1";
+    styleEl.textContent = `
+      button[disabled], input[disabled], select[disabled], textarea[disabled],
+      fieldset[disabled], fieldset[disabled] *,
+      [aria-disabled="true"], [aria-disabled="true"] * {
+        pointer-events: auto !important;
+        cursor: crosshair !important;
+      }
+    `;
+    document.head.appendChild(styleEl);
+
+    function isDisabledFormControl(el: Element): boolean {
+      // Native `disabled` on form elements suppresses `click` per HTML
+      // spec — that's the case we route through `mousedown` below.
+      // `aria-disabled="true"` does NOT suppress click in browsers, but
+      // some component libs (Radix, Headless UI) intercept and swallow
+      // it; cheaper to treat it the same.
+      if ("disabled" in el && (el as HTMLButtonElement).disabled) return true;
+      if (el.getAttribute("aria-disabled") === "true") return true;
+      return el.closest("fieldset[disabled]") !== null;
+    }
+
     function onMove(e: MouseEvent) {
       if (selected) return;
       const el = e.target as Element | null;
@@ -184,6 +232,18 @@
       }
       if (isOurNode(el)) return;
       hovered = el;
+    }
+    function onMouseDown(e: MouseEvent) {
+      // `click` doesn't fire on natively-disabled form controls, so route
+      // their `mousedown` through the same selection path. Plain (non-
+      // disabled) elements continue to use the `click` handler — switching
+      // everything to mousedown would change select-on-press semantics
+      // and risk firing on accidental drag-starts.
+      if (e.button !== 0) return;
+      const el = e.target as Element | null;
+      if (!el || isOurNode(el)) return;
+      if (!isDisabledFormControl(el)) return;
+      onClick(e);
     }
     function onClick(e: MouseEvent) {
       const el = e.target as Element | null;
@@ -233,12 +293,15 @@
       else setMode("idle");
     }
     document.addEventListener("mousemove", onMove, true);
+    document.addEventListener("mousedown", onMouseDown, true);
     document.addEventListener("click", onClick, true);
     document.addEventListener("keydown", onKey, true);
     return () => {
       document.removeEventListener("mousemove", onMove, true);
+      document.removeEventListener("mousedown", onMouseDown, true);
       document.removeEventListener("click", onClick, true);
       document.removeEventListener("keydown", onKey, true);
+      styleEl.remove();
     };
   });
 
@@ -562,6 +625,46 @@
     if (el.innerHTML !== entry.originalInnerHtml) {
       el.innerHTML = entry.originalInnerHtml;
     }
+  }
+
+  /**
+   * Re-attach a pin badge for a previously-recorded select-mode
+   * annotation after the content script was re-injected (page reload /
+   * navigation). Only kind="select" is replayed in v1 — drawing strokes
+   * are skipped because their canvas would need scroll-anchored
+   * page-coords that don't transplant cleanly across page geometry
+   * changes.
+   *
+   * Selector resolution is best-effort: if the page's DOM diverged from
+   * when the annotation was captured, querySelector returns null and we
+   * silently skip the halo. The side-panel card still appears for the
+   * user to edit/remove.
+   */
+  function replayAnnotation(ann: Annotation): void {
+    if (ann.kind !== "select") return;
+    const targets = ann.targets ?? (ann.target ? [ann.target] : []);
+    const primary = targets[0];
+    if (!primary) return;
+    let el: Element | null = null;
+    try {
+      el = document.querySelector(primary.selector);
+    } catch {
+      // Invalid selector (e.g. contains :has() in older Chrome) — skip.
+      return;
+    }
+    if (!el) return;
+    // Skip if already painted (defensive — re-mounts from frame nav can
+    // double-fire the overlay.ready handshake).
+    if (content.annotated.some((a) => a.id === ann.id)) return;
+    // Snapshot the element's current state so a future Remove leaves it
+    // unchanged (we didn't mutate anything during replay).
+    const html = el as HTMLElement;
+    content.recordAnnotated(
+      ann.id,
+      el,
+      html.style?.cssText ?? "",
+      html.innerHTML,
+    );
   }
 
   function submitSelect() {

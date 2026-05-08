@@ -1392,9 +1392,9 @@
   <section id="features">
     <div class="container">
       <div class="section-head">
-        <span class="eyebrow">What V1 includes · v0.2.0</span>
+        <span class="eyebrow">What V1 includes · v0.3.0</span>
         <h2>The whole loop, shipped.</h2>
-        <p class="sub">Phases 0–5 of <a href="https://github.com/kevzlou7979/pinta/blob/main/spec/SPEC.md">the spec</a> are live, plus the polish phases (8 inline editing, 9 protocol, 10 standalone, 11 share files). Source mapping (Phase 6) is next.</p>
+        <p class="sub">Phases 0–5 of <a href="https://github.com/kevzlou7979/pinta/blob/main/spec/SPEC.md">the spec</a> are live, plus the polish phases (8 inline editing, 9 protocol, 10 standalone, 11 share files, 12 built-in modules + multi-page annotations). Source mapping (Phase 6) is next.</p>
       </div>
       <div class="features">
         <div class="feature">
@@ -1473,6 +1473,20 @@
           </div>
           <h3>Share files for collaboration <span class="pill" style="background:rgba(199,45,180,0.14);color:#7c3aed;border:1px solid rgba(140,80,220,0.35);font-size:10px;padding:1px 6px;border-radius:999px;margin-left:6px;letter-spacing:0.04em;">v0.2.0</span></h3>
           <p>Export any session as a single <code>.pinta</code> file — title, author, accent color, screenshots inlined. Drop it into another teammate's extension and it opens in a read-only viewer with a metadata pill on the page itself, accent-colored numbered halos at each target, and three actions in the footer: <strong>Send to agent</strong> (submits to <em>their</em> connected companion, your machine stays out of the loop), <strong>Copy</strong> (markdown for claude.ai web / ChatGPT), and <strong>Fork</strong> (clone into their own editable draft).</p>
+        </div>
+        <div class="feature">
+          <div class="ico">
+            <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 7h18"/><path d="M3 12h18"/><path d="M3 17h18"/><circle cx="6" cy="7" r="1.2" fill="currentColor"/><circle cx="9" cy="12" r="1.2" fill="currentColor"/><circle cx="6" cy="17" r="1.2" fill="currentColor"/></svg>
+          </div>
+          <h3>Per-page annotations across navigation <span class="pill" style="background:rgba(255,61,110,0.14);color:#c72d7d;border:1px solid rgba(255,61,110,0.35);font-size:10px;padding:1px 6px;border-radius:999px;margin-left:6px;letter-spacing:0.04em;">v0.3.0</span></h3>
+          <p>Review a multi-route flow as one session. Annotations stay pinned to the page they were drawn on; the side panel filters to your current page and shows a chip <em>"N on M other pages"</em> with <strong>Open</strong> buttons to jump between routes. Pin badges repaint automatically on reload / SPA nav via an <code>overlay.ready</code> handshake. One submit covers the whole batch — each annotation carries its own <code>url</code> so the agent files / groups output per page.</p>
+        </div>
+        <div class="feature">
+          <div class="ico">
+            <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 2 4 6v6c0 5 3.5 8.5 8 10 4.5-1.5 8-5 8-10V6z"/><path d="m9 12 2 2 4-4"/></svg>
+          </div>
+          <h3>Built-in modules — GitLab Issues <span class="pill" style="background:rgba(255,61,110,0.14);color:#c72d7d;border:1px solid rgba(255,61,110,0.35);font-size:10px;padding:1px 6px;border-radius:999px;margin-left:6px;letter-spacing:0.04em;">v0.3.0</span></h3>
+          <p>Tick <strong>Create GitLab issues</strong> next to Submit and the agent files one issue per annotation via your <code>glab</code> CLI. <strong>No tokens stored anywhere</strong> — auth comes from <code>glab auth login</code> on your machine. Each issue body embeds the full-page screenshot (uploaded to the project's uploads endpoint), the selector, source file, and the annotated page URL. Before filing, the agent prompts in chat for batch metadata: <em>domain</em> (<code>client</code> / <code>server</code> / <code>shared</code> → <code>domain:&lt;choice&gt;</code> label), <em>extra tags</em>, <em>assignees</em>, or <code>later</code> to defer entirely.</p>
         </div>
       </div>
     </div>

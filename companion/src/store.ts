@@ -185,12 +185,18 @@ export class SessionStore {
     sessionId: string,
     screenshot?: string,
     autoApply?: boolean,
+    modules?: Session["modules"],
   ): Promise<Session> {
     const session = this.requireSession(sessionId);
     session.status = "submitted";
     session.submittedAt = Date.now();
     if (screenshot) session.fullPageScreenshot = screenshot;
     if (autoApply !== undefined) session.autoApply = autoApply;
+    // Persist the per-submit module opt-in so the agent (which only
+    // sees the JSON on disk) can act on it. Empty array is treated as
+    // "no modules" — same as undefined — so we never write [] either.
+    if (modules && modules.length > 0) session.modules = modules;
+    else delete session.modules;
     await this.extractScreenshot(session);
     await this.persist(session);
     this.notifyChange(session);

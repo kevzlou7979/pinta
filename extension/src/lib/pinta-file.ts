@@ -23,14 +23,25 @@ const SCHEMA_VERSION = "1" as const;
  *  out IndexedDB. ~25 MB is enough for ~10 full-page screenshots. */
 export const MAX_PINTA_FILE_BYTES = 25 * 1024 * 1024;
 
-/** Strip companion-side / claim metadata that shouldn't travel between
- *  machines. Disk-extracted screenshot paths are dropped — recipients
- *  don't have the project on disk, so only the inlined base64 matters. */
+/** Strip companion-side / claim metadata + module config that shouldn't
+ *  travel between machines.
+ *  - Disk-extracted screenshot paths are dropped (recipients don't have
+ *    the project on disk).
+ *  - `modules` is dropped because module settings can carry secrets
+ *    (e.g. a GitLab personal access token). The recipient configures
+ *    their own modules in their own Settings; nothing leaks via share. */
 function stripTransient(session: Session): Session {
-  const { fullPageScreenshotPath, claimedBy, claimedAt, ...rest } = session;
+  const {
+    fullPageScreenshotPath,
+    claimedBy,
+    claimedAt,
+    modules,
+    ...rest
+  } = session;
   void fullPageScreenshotPath;
   void claimedBy;
   void claimedAt;
+  void modules;
   return rest;
 }
 

@@ -118,9 +118,13 @@ async function dispatch(
         active.id,
         msg.screenshot,
         msg.autoApply,
+        msg.modules,
       );
+      const modulesNote = submitted.modules?.length
+        ? `, modules: ${submitted.modules.map((m) => m.id).join(",")}`
+        : "";
       log(
-        `session.submit ${submitted.id} (${submitted.annotations.length} annotations${submitted.autoApply ? ", auto-apply" : ""})`,
+        `session.submit ${submitted.id} (${submitted.annotations.length} annotations${submitted.autoApply ? ", auto-apply" : ""}${modulesNote})`,
       );
       return submitted;
     }
