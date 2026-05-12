@@ -924,6 +924,31 @@
     }
     return out;
   });
+
+  // Report how many imported selectors actually resolved on this page —
+  // the side panel renders "N of M located" so the user knows whether
+  // they're on the matching deployment / route. Deduped by counts so
+  // scroll / resize ticks (which re-derive importedRects) don't flood
+  // the message channel.
+  let importedLocatedKey = $state<string>("");
+  $effect(() => {
+    if (!imported) {
+      importedLocatedKey = "";
+      return;
+    }
+    const total = imported.annotations.length;
+    const matched = importedRects.filter((r) => r.matched).length;
+    const key = `${matched}:${total}`;
+    if (key === importedLocatedKey) return;
+    importedLocatedKey = key;
+    try {
+      void chrome.runtime
+        .sendMessage({ type: "imported.located", matched, total })
+        ?.catch(() => {});
+    } catch {
+      // Extension context gone — ignore.
+    }
+  });
 </script>
 
 <!-- The user's own draft annotations (Canvas strokes + element pin badges)

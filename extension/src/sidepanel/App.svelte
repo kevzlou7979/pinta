@@ -109,7 +109,16 @@
     annotation?: Annotation;
     /** `overlay.ready` carries the active page URL the script just mounted on. */
     url?: string;
+    /** `imported.located` — content script reports selector-resolution count. */
+    matched?: number;
+    total?: number;
   };
+
+  /** Selector-resolution count for the currently-viewed imported session,
+   *  reported by the content script after it resolves each annotation's
+   *  selector against the live DOM. Null = no report yet (or no imported
+   *  session being viewed). */
+  let importedLocated = $state<{ matched: number; total: number } | null>(null);
 
   /**
    * Push every select-mode annotation from the current draft whose
@@ -285,6 +294,10 @@
       // captured on this URL so their pin badges re-paint.
       const url = m.url ?? "";
       replayAnnotationsToTab(sender.tab.id, url);
+      return;
+    }
+    if (m?.type === "imported.located" && typeof m.matched === "number" && typeof m.total === "number") {
+      importedLocated = { matched: m.matched, total: m.total };
       return;
     }
     if (m?.type === "annotation.target-selected") {
@@ -847,6 +860,9 @@
       ? app.importedSessions.find((s) => s.id === app.viewingImportedId)
       : null;
     if (viewing) {
+      // Reset the located indicator so a stale count from a previous
+      // viewer doesn't briefly show while the new one is resolving.
+      importedLocated = null;
       chrome.tabs
         .sendMessage(activeTabId, {
           type: "imported.show",
@@ -865,6 +881,7 @@
           // the side-panel cards are still visible
         });
     } else {
+      importedLocated = null;
       chrome.tabs
         .sendMessage(activeTabId, { type: "imported.hide" })
         .catch(() => {});
@@ -1345,9 +1362,34 @@
               ✕
             </button>
           </div>
-          <h3 class="text-xs uppercase tracking-wide text-ink-500 dark:text-night-mute font-medium pt-1">
-            Annotations ({imp.session.annotations.length})
-          </h3>
+          <div class="flex items-center justify-between gap-2 pt-1">
+            <h3 class="text-xs uppercase tracking-wide text-ink-500 dark:text-night-mute font-medium">
+              Annotations ({imp.session.annotations.length})
+            </h3>
+            {#if importedLocated && importedLocated.total > 0}
+              {@const allLocated = importedLocated.matched === importedLocated.total}
+              <span
+                class="inline-flex items-center gap-1 px-1.5 py-0.5 rounded-full text-[10px] font-medium border"
+                class:border-emerald-300={allLocated}
+                class:bg-emerald-50={allLocated}
+                class:text-emerald-800={allLocated}
+                class:dark:border-emerald-800={allLocated}
+                class:dark:bg-emerald-950={allLocated}
+                class:dark:text-emerald-200={allLocated}
+                class:border-amber-300={!allLocated}
+                class:bg-amber-50={!allLocated}
+                class:text-amber-800={!allLocated}
+                class:dark:border-amber-800={!allLocated}
+                class:dark:bg-amber-950={!allLocated}
+                class:dark:text-amber-200={!allLocated}
+                title={allLocated
+                  ? "Every annotation's selector resolved on the current page."
+                  : "Some selectors didn't match — you may be on a different route or the DOM has changed since the export."}
+              >
+                {importedLocated.matched} of {importedLocated.total} located
+              </span>
+            {/if}
+          </div>
           {#if imp.session.annotations.length === 0}
             <p class="text-xs text-ink-500 dark:text-night-dim italic">
               This session has no annotations.
@@ -1403,7 +1445,7 @@
             class="inline-flex items-center gap-1 rounded-full border border-ink-200 bg-white text-ink-600 hover:text-brand-pink hover:border-ink-400 dark:border-night-line dark:bg-night-alt dark:text-night-dim dark:hover:text-brand-pink-light dark:hover:border-night-line2 text-[11px] font-medium h-7 px-2.5 transition-colors disabled:opacity-50"
             onclick={() => importFileInput?.click()}
             disabled={importBusy}
-            title="Import a .pinta file shared by a teammate"
+            title="Import a .pinta or .md file shared by a teammate"
           >
             <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" y1="3" x2="12" y2="15"/></svg>
             <span>{importBusy ? "Importing…" : "Import"}</span>
@@ -1424,7 +1466,7 @@
       <input
         bind:this={importFileInput}
         type="file"
-        accept=".pinta,application/json"
+        accept=".pinta,.md,.markdown,application/json,text/markdown"
         class="hidden"
         onchange={onImportFileChosen}
       />

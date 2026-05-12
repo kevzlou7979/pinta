@@ -27,7 +27,7 @@ import {
   addImportedSession,
   removeImportedSession,
 } from "./local-store.js";
-import { decodePintaFile } from "./pinta-file.js";
+import { decodePintaFile, decodePintaMarkdown } from "./pinta-file.js";
 import { uid } from "./id.js";
 
 const SELECTED_KEY = "pinta-selected-companion";
@@ -256,12 +256,19 @@ class ExtensionState {
     }
   }
 
-  /** Import a `.pinta` share file. Parses + validates, persists to IDB,
-   *  refreshes the in-memory list. Returns the new ImportedSession on
-   *  success; throws on validation failure so the caller can toast. */
+  /** Import a `.pinta` share file or a Pinta-exported `.md` markdown
+   *  file. Parses + validates, persists to IDB, refreshes the in-memory
+   *  list. Routes by file extension; falls back to a JSON sniff if the
+   *  extension is missing or wrong. Throws on validation failure so the
+   *  caller can toast. */
   async importPintaFile(file: File): Promise<ImportedSession> {
     const text = await file.text();
-    const imported = decodePintaFile(text);
+    const name = file.name.toLowerCase();
+    const isMarkdown =
+      name.endsWith(".md") ||
+      name.endsWith(".markdown") ||
+      (!name.endsWith(".pinta") && !text.trimStart().startsWith("{"));
+    const imported = isMarkdown ? decodePintaMarkdown(text) : decodePintaFile(text);
     await addImportedSession(imported);
     await this.refreshImported();
     return imported;

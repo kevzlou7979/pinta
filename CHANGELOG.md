@@ -4,6 +4,86 @@ Notable changes shipped on top of the original V1 pipeline. Newest first.
 For the architectural design behind each item, see
 [`spec/SPEC.md`](spec/SPEC.md).
 
+## 0.3.0 — 2026-05-11
+
+### Added
+
+- **Per-page annotations across navigation.** Multi-route reviews no
+  longer fall apart on the first link click. Each `Annotation` now
+  carries its own `url`, stamped at creation time. The side panel
+  filters the list to the active page and surfaces a small chip
+  *"N on M other pages"* with **Open** buttons to jump back to any
+  annotated route. After navigation or hard reload, an
+  `overlay.ready` handshake re-pushes the page's select-mode
+  annotations to the freshly-injected content script so pin halos
+  repaint automatically. One **Send to agent** still submits the
+  whole multi-page batch as a single session — the skill keys off
+  `annotation.url` (falling back to `session.url`) so GitLab issues
+  file against the correct page and source-file grep can scope to
+  the matching route. `rescan()` no longer wipes the in-progress
+  draft when the user briefly visits a URL the project doesn't claim
+  — the draft survives and re-arms once they navigate back.
+
+- **Built-in modules — agent-side integrations triggered per submit.**
+  Sessions can now carry a `modules` field listing per-submit
+  integrations to run after the source edits land. Module spec lives
+  in `extension/src/lib/modules.ts`; new modules add an entry plus
+  matching agent instructions in `skill/pinta/SKILL.md` §7.9.
+  Per-module settings (auth, defaults) are persisted in
+  `chrome.storage.local` under `pinta-modules`; the side-panel
+  footer renders each enabled module as a tickable checkbox so the
+  user opts in per submit. A "Will run" emerald pill confirms the
+  selection before submit.
+
+- **GitLab Issues module.** First built-in module. Enable once in
+  **Settings → GitLab Issues** (project ID + base URL), tick
+  **Create GitLab issues** in the footer before submit, and the
+  agent files one issue per annotation. Auth is delegated to the
+  user's local `glab` CLI (`glab auth login`) — **no tokens stored
+  or transmitted**. The full-page screenshot is uploaded to the
+  project's `/uploads` endpoint once per session and embedded as
+  markdown in each issue body, alongside the selector, source file,
+  and per-annotation page URL. Before filing, the agent prompts in
+  chat for batch metadata:
+
+  - **Domain** — `client` / `server` / `shared` → `domain:<choice>` label
+  - **Extra tags** — comma-separated (e.g. `polish, a11y`)
+  - **Assignees** — comma-separated usernames
+
+  Reply `skip` to file with just the defaults, or `later` to defer
+  filing entirely on this submit (source edits still apply).
+
+- **Screenshot lock for module dependencies.** Modules can declare
+  `recommendsScreenshot: true` (GitLab Issues does). When such a
+  module is ticked, **Include full-page screenshot** auto-checks
+  AND locks — the side panel disables the checkbox and updates the
+  hint to explain why. Prevents filing GitLab issues without visual
+  context.
+
+- **Markdown import.** The Import button now accepts both `.pinta`
+  share files and the markdown the Copy button produces (`.md` /
+  `.markdown`). The MD format is lossy compared to `.pinta` — no
+  screenshot bitmap, no drawing geometry, no inline-editor data —
+  but selectors + outerHTML + nearbyText + comments survive, which
+  is enough to view, **Send to agent**, or **Fork** into an editable
+  draft. Dispatch is by file extension with a JSON sniff as
+  fallback so missing/wrong extensions still route correctly.
+
+- **"N of M located" indicator for imported sessions.** When viewing
+  an imported `.pinta` / `.md` session, the side panel now shows an
+  emerald/amber pill — *"3 of 4 located"* — counting how many of
+  the imported annotations' selectors actually resolved on the
+  current page. Emerald when all hit, amber when any miss, so a
+  recipient instantly knows whether they're on the right route /
+  deployment for the share file.
+
+### Changed
+
+- Side panel splits annotations into `annotationsHere` /
+  `annotationsElsewhere` and surfaces the latter via the chip.
+  `canSubmit` and `allDone` still gate off the full session set so
+  multi-page submits remain one shot.
+
 ## 0.2.0 — 2026-04-29
 
 ### Added

@@ -128,7 +128,7 @@
     <header>
       <div class="crumb"><a href="./">← Pinta</a></div>
       <h1>Privacy Policy</h1>
-      <p class="sub">Effective 2026-04-29 · Pinta v0.2.0</p>
+      <p class="sub">Effective 2026-05-11 · Pinta v0.3.0</p>
     </header>
 
     <div class="callout">
@@ -182,7 +182,17 @@
     <h2>6. Third-party resources</h2>
     <p>The extension bundles its fonts (Poppins) — no runtime fetch from Google Fonts. The landing page at <a href="https://kevzlou7979.github.io/pinta/">kevzlou7979.github.io/pinta</a> does load Google Fonts; that's a static site, not the extension. The extension itself makes no network calls beyond <code>localhost</code>.</p>
 
-    <h2>7. How to delete your data</h2>
+    <h2>7. Optional integrations (built-in modules)</h2>
+    <p>Starting in v0.3.0, Pinta supports opt-in <strong>modules</strong> — agent-side integrations the user explicitly enables in Settings and explicitly ticks per submit. When ticked, the agent runs the module after applying source edits. Modules are the only path by which Pinta-related actions can send data off your machine, and they only run when you opt in twice (Settings + per-submit checkbox).</p>
+    <h3>GitLab Issues</h3>
+    <ul>
+      <li><strong>Auth is delegated to the user's local <code>glab</code> CLI.</strong> Pinta does not handle, store, or transmit GitLab tokens. <code>glab auth login</code> is the user's responsibility; Pinta only invokes <code>glab</code> as a subprocess.</li>
+      <li><strong>When ticked at submit time</strong>, the agent files one issue per annotation against the GitLab project ID you configured in Settings. The issue body includes the annotation comment, target selector, source file path, and the page URL.</li>
+      <li><strong>The full-page screenshot is uploaded once</strong> per submitted session to the configured GitLab project's <code>/uploads</code> endpoint (via <code>glab api</code>) and embedded as markdown in each issue body. Screenshot capture is locked on whenever this module is ticked so issues never go out without visual context.</li>
+      <li>Other built-in modules, when shipped, will be documented here with the same opt-in semantics.</li>
+    </ul>
+
+    <h2>8. How to delete your data</h2>
     <ul>
       <li><strong>Standalone sessions</strong> — open the side panel, hit the <strong>✕</strong> next to Copy. Or in Chrome DevTools → Application → IndexedDB → delete <code>pinta-standalone</code>.</li>
       <li><strong>Companion sessions</strong> — delete <code>.pinta/sessions/</code> from inside your project root.</li>
@@ -190,13 +200,13 @@
       <li><strong>Uninstall</strong> — removing the extension removes everything except files the companion wrote to your project (which are yours to manage).</li>
     </ul>
 
-    <h2>8. Children</h2>
+    <h2>9. Children</h2>
     <p>Pinta is a developer tool. It is not directed at children under 13.</p>
 
-    <h2>9. Changes to this policy</h2>
+    <h2>10. Changes to this policy</h2>
     <p>Material changes will be reflected by bumping the effective date at the top of this page and noted in the <a href="https://github.com/kevzlou7979/pinta/blob/main/CHANGELOG.md">CHANGELOG</a>.</p>
 
-    <h2>10. Contact</h2>
+    <h2>11. Contact</h2>
     <p>Open an issue at <a href="https://github.com/kevzlou7979/pinta/issues">github.com/kevzlou7979/pinta/issues</a> or email <a href="mailto:kevzlou7979@gmail.com">kevzlou7979@gmail.com</a>.</p>
 
     <footer>

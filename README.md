@@ -68,7 +68,14 @@ Recent additions on top of the original V1 pipeline:
   their own editable draft, in standalone mode). The page itself
   shows a metadata pill in the top-right and accent-colored numbered
   halos at each annotation's target so a recipient sees at a glance
-  whose marks are whose. See `spec/SPEC.md` §8 Phase 11.
+  whose marks are whose. **In v0.3.0** the Import button also
+  accepts the markdown the Copy button produces (`.md` /
+  `.markdown`) — lossy compared to `.pinta` (no screenshot bitmap,
+  no drawing geometry) but enough to view, **Send to agent**, or
+  **Fork**. When viewing an imported session, an emerald/amber pill
+  ("3 of 4 located") shows how many selectors actually resolved on
+  the current page so a recipient knows whether they're on the
+  matching route. See `spec/SPEC.md` §8 Phase 11.
 - **Standalone mode** — the side panel works fully without a companion.
   Designed for QA / testers hitting deployed URLs (no Node, no project
   on disk, no companion to start). Annotations live in the browser
@@ -151,7 +158,7 @@ See [`spec/SPEC.md` §7–9](spec/SPEC.md) for the full status of each.
 | MCP server for Cursor / Cline / Continue / Zed / Windsurf | shipped |
 | Aider adapter (poll script) | shipped |
 | Copy-to-clipboard fallback for claude.ai web / ChatGPT / etc. | shipped |
-| Import / Export `.pinta` share files — round-trippable session collaboration | shipped |
+| Import / Export `.pinta` share files (+ markdown import, "N of M located" indicator) — round-trippable session collaboration | shipped |
 | Per-page annotations across navigation — per-annotation URL, side-panel filter, halo replay | shipped |
 | Built-in modules — GitLab Issues via `glab` CLI (no tokens stored), screenshot embed, chat-based metadata prompt | shipped |
 | `pinta-companion` published to npm — `npx pinta-companion .` | shipped |
@@ -432,4 +439,4 @@ Issues and PRs welcome. Before opening a PR:
 
 ## License
 
-MIT — see [`LICENSE`](LICENSE) (TBD).
+MIT — see [`LICENSE`](LICENSE).
