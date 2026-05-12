@@ -304,6 +304,16 @@
       box-shadow: var(--shadow-sm);
     }
     .btn-ghost:hover { border-color: var(--ink); }
+    .btn-secondary {
+      background: var(--paper); color: var(--ink);
+      border-color: var(--line-strong);
+      box-shadow: var(--shadow-sm);
+      cursor: pointer;
+      font-family: inherit;
+    }
+    .btn-secondary:hover { border-color: var(--pink); color: var(--pink); }
+    .btn-secondary code { color: inherit; background: transparent; padding: 0; }
+    .btn-secondary .copy-status:not(:empty) { min-width: 38px; opacity: 1; color: var(--pink); }
     .btn .arrow {
       display: inline-flex; align-items: center;
       transition: transform .35s cubic-bezier(.2,.7,.2,1.4);
@@ -1002,6 +1012,8 @@
         transparent 70%);
     }
     [data-theme="dark"] .btn-ghost { background: var(--paper); }
+    [data-theme="dark"] .btn-secondary { background: var(--paper); }
+    [data-theme="dark"] .btn-secondary:hover { color: var(--pink); border-color: var(--pink); }
     [data-theme="dark"] .nav-cta {
       background: #1c1632;
       color: #ffffff !important;
@@ -1285,7 +1297,7 @@
   <header class="hero" id="top">
     <div class="container">
       <span class="hero-logo-wrap"><img class="hero-logo" src="assets/icons/icon-256.png" alt="Pinta logo" width="108" height="108" /></span>
-      <div><span class="pill"><span class="pulse"></span> V1.1 — multi-project routing shipped</span></div>
+      <div><span class="pill"><span class="pulse"></span> v0.3.0 — per-page annotations + GitLab Issues</span></div>
       <h1 class="hero-title"><span class="type" data-type="Annotate your running app.">Annotate your running app.</span><br /><span class="grad type" data-type="Let an agent do the edits.">Let an agent do the edits.</span></h1>
       <p class="lede">
         Circle a button. Point at a heading. Type <em>"make this tonal"</em>.
@@ -1294,12 +1306,18 @@
         source files for you.
       </p>
       <div class="cta">
-        <a class="btn btn-primary" href="#install">
-          Get started
+        <a class="btn btn-primary" href="https://chrome.google.com/webstore/search/pinta" target="_blank" rel="noopener">
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm-1.41 13.59L8 13l1.41-1.41L10.59 13l3-3L15 11.41l-4.41 4.18zM12 6a6 6 0 0 1 5.92 5h-3.06A3 3 0 0 0 12 9V6z"/></svg>
+          Install for Chrome
           <span class="arrow" aria-hidden="true">
-            <svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor"><path d="M8 5v14l11-7z"/></svg>
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor"><path d="M8 5v14l11-7z"/></svg>
           </span>
         </a>
+        <button class="btn btn-secondary" type="button" data-copy="npx pinta-companion ." title="Copy to clipboard">
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>
+          <code style="font-family: 'JetBrains Mono', monospace; font-size: 0.9em;">npx pinta-companion .</code>
+          <span class="copy-status" aria-live="polite" style="font-size: 11px; opacity: 0.6; min-width: 0; transition: min-width 0.15s, opacity 0.15s;"></span>
+        </button>
         <a class="btn btn-ghost" href="https://github.com/kevzlou7979/pinta">
           <svg width="16" height="16" viewBox="0 0 16 16" fill="currentColor" aria-hidden="true"><path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.013 8.013 0 0016 8c0-4.42-3.58-8-8-8z"/></svg>
           View on GitHub
@@ -1636,13 +1654,23 @@
     <div class="container">
       <div class="section-head">
         <span class="eyebrow">Install &amp; run</span>
-        <h2>Two commands.</h2>
+        <h2>Two steps.</h2>
         <p class="sub">Install the Chrome extension, run the companion in your project, annotate. Node 20+ and Chrome (or any Chromium-based browser).</p>
+        <div class="cta" style="margin-top: 24px;">
+          <a class="btn btn-primary" href="https://chrome.google.com/webstore/search/pinta" target="_blank" rel="noopener">
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm-1.41 13.59L8 13l1.41-1.41L10.59 13l3-3L15 11.41l-4.41 4.18zM12 6a6 6 0 0 1 5.92 5h-3.06A3 3 0 0 0 12 9V6z"/></svg>
+            1. Install for Chrome
+          </a>
+          <button class="btn btn-secondary" type="button" data-copy="npx pinta-companion ." title="Copy to clipboard">
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>
+            <span>2.&nbsp;</span><code style="font-family: 'JetBrains Mono', monospace; font-size: 0.9em;">npx pinta-companion .</code>
+            <span class="copy-status" aria-live="polite" style="font-size: 11px; opacity: 0.6; min-width: 0; transition: min-width 0.15s, opacity 0.15s;"></span>
+          </button>
+        </div>
       </div>
       <div class="install-wrap">
         <pre>
-<span class="term-bar"><span class="dot r"></span><span class="dot y"></span><span class="dot g"></span><span class="label">~/your-project  —  zsh</span></span><code># 1. Install the extension
-#    Chrome Web Store: https://chrome.google.com/webstore  (search "Pinta")
+<span class="term-bar"><span class="dot r"></span><span class="dot y"></span><span class="dot g"></span><span class="label">~/your-project  —  zsh</span></span><code># 1. Install the extension from the Chrome Web Store (button above)
 
 # 2. Run the companion in your project root
 npx pinta-companion .
@@ -1803,6 +1831,32 @@ npx pinta-companion .
         tick();
       }
       setTimeout(typeNext, 200);
+    })();
+
+    // ---------- Copy-to-clipboard buttons (data-copy="...") ----------
+    (function () {
+      document.querySelectorAll('button[data-copy]').forEach(function (btn) {
+        btn.addEventListener('click', function () {
+          var text = btn.getAttribute('data-copy') || '';
+          var status = btn.querySelector('.copy-status');
+          var done = function (ok) {
+            if (!status) return;
+            status.textContent = ok ? 'copied' : 'press copy';
+            setTimeout(function () { status.textContent = ''; }, 1600);
+          };
+          if (navigator.clipboard && navigator.clipboard.writeText) {
+            navigator.clipboard.writeText(text).then(function () { done(true); }, function () { done(false); });
+          } else {
+            try {
+              var ta = document.createElement('textarea');
+              ta.value = text; ta.style.position = 'fixed'; ta.style.opacity = '0';
+              document.body.appendChild(ta); ta.select();
+              done(document.execCommand('copy'));
+              document.body.removeChild(ta);
+            } catch (e) { done(false); }
+          }
+        });
+      });
     })();
 
     // ---------- Hero video click-to-fullscreen ----------

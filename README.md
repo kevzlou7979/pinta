@@ -193,20 +193,30 @@ See [`spec/SPEC.md` §7–9](spec/SPEC.md) for the full status of each.
 
 ## Quickstart
 
-**Prerequisites:** Node 20+, Chrome (or Chromium-based browser), and a
+**Two steps.** Node 20+, Chrome (or any Chromium-based browser), and a
 coding agent — Claude Code is the reference; Cursor / Cline / Continue / Zed
 work via MCP.
 
+### 1. Install the Chrome extension
+
+[**Install Pinta for Chrome →**](https://chrome.google.com/webstore/search/pinta)
+(Chrome Web Store). Open the side panel from the toolbar.
+
+### 2. Run the companion in your project
+
 ```bash
-# 1. Install the extension from the Chrome Web Store
-#    https://chrome.google.com/webstore  (search "Pinta")
-
-# 2. Run the companion in your project root
 npx pinta-companion .
+```
 
-# 3. In Claude Code:
+Then in Claude Code:
+
+```
 /pinta
 ```
+
+That's it. Annotate, hit **Send to agent**, and Claude Code picks up
+the session and edits the source files. No clone, no build, no token
+to copy.
 
 For Cursor / Cline / Continue / Zed, drop this into your agent's MCP
 config:
