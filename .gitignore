@@ -6,6 +6,8 @@ build/
 .DS_Store
 .env
 .env.local
+.npmrc
+.npmrc.*
 *.log
 **/.claude/dock.local.json
 **/.claude/dock.json
