@@ -199,7 +199,7 @@ work via MCP.
 
 ### 1. Install the Chrome extension
 
-[**Install Pinta for Chrome →**](https://chrome.google.com/webstore/search/pinta)
+[**Install Pinta for Chrome →**](https://chromewebstore.google.com/detail/pinta/gnobpbogpbgdcpfjhbajfnbcfpbcnhah)
 (Chrome Web Store). Open the side panel from the toolbar.
 
 ### 2. Run the companion in your project
