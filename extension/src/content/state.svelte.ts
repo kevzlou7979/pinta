@@ -68,6 +68,24 @@ class ContentState {
       createdAt: number;
       originalCssText: string;
       originalInnerHtml: string;
+      /** Original CSS selector for re-resolving when the SPA detaches
+       *  the recorded element via re-render. Set by replay and live
+       *  annotation paths; absent for legacy entries (will simply skip
+       *  re-resolve on detach). */
+      selector?: string;
+      /** Full outerHTML of the original element — used as a fallback
+       *  match key when the CSS selector no longer hits on re-render
+       *  (CSS-in-JS / hashed class names / restructured parents). */
+      outerHTML?: string;
+      /** Text snippets surrounding the element — final fallback for
+       *  finding the equivalent element after a render that changed
+       *  both the selector AND the outerHTML. */
+      nearbyText?: string[];
+      /** URL of the page the annotation was created on. Badges only
+       *  render when this matches the content script's current
+       *  location.href — without this, the rect cache would leak
+       *  badges from one SPA route onto another. */
+      url?: string;
     }[]
   >([]);
 
@@ -214,6 +232,10 @@ class ContentState {
     element: Element,
     originalCssText: string,
     originalInnerHtml: string,
+    selector?: string,
+    outerHTML?: string,
+    nearbyText?: string[],
+    url?: string,
   ): number {
     this.annotated = [
       ...this.annotated,
@@ -223,9 +245,87 @@ class ContentState {
         createdAt: Date.now(),
         originalCssText,
         originalInnerHtml,
+        selector,
+        outerHTML,
+        nearbyText,
+        url,
       },
     ];
     return this.globalSeq(id);
+  }
+
+  /**
+   * For every annotated entry whose element is no longer in the DOM,
+   * try to re-resolve via three fallback strategies in order:
+   *   1. Stored CSS selector — fast, works when the SPA preserved class names.
+   *   2. outerHTML match — handles CSS-in-JS / hashed classes that broke the selector.
+   *   3. nearbyText match — last resort when both selector AND markup changed.
+   *
+   * Called by the content script on a debounced MutationObserver tick so
+   * badges follow the SPA through subsequent re-renders without needing
+   * a fresh user action. Returns the number of entries successfully
+   * re-attached.
+   */
+  reresolveDetached(): number {
+    let updated = 0;
+    const next = this.annotated.map((a) => {
+      if (document.contains(a.element)) return a;
+      const el = this.findElementForEntry(a);
+      if (!el || el === a.element) return a;
+      updated++;
+      return { ...a, element: el };
+    });
+    if (updated > 0) this.annotated = next;
+    return updated;
+  }
+
+  /**
+   * Tier-1 / tier-2 / tier-3 fallback search. Public so the replay
+   * handler can use the same logic for initial paint.
+   */
+  findElementForEntry(a: {
+    selector?: string;
+    outerHTML?: string;
+    nearbyText?: string[];
+  }): Element | null {
+    // Tier 1: original CSS selector.
+    if (a.selector) {
+      try {
+        const el = document.querySelector(a.selector);
+        if (el) return el;
+      } catch {
+        // Invalid selector (e.g. :has() in older Chrome) — fall through.
+      }
+    }
+    // Tier 2: full outerHTML match. Iterate over candidates that share
+    // the tag of the recorded outerHTML to avoid a full-document walk.
+    if (a.outerHTML) {
+      const tag = a.outerHTML.match(/^<\s*([a-zA-Z][\w-]*)/)?.[1];
+      if (tag) {
+        const candidates = document.getElementsByTagName(tag);
+        for (let i = 0; i < candidates.length; i++) {
+          const c = candidates[i]!;
+          if (c.outerHTML === a.outerHTML) return c;
+        }
+      }
+    }
+    // Tier 3: nearbyText match. Pick the longest snippet (most distinctive)
+    // and find an element containing it. Imperfect but better than losing
+    // the badge entirely.
+    if (a.nearbyText && a.nearbyText.length > 0) {
+      const snippet = [...a.nearbyText]
+        .sort((x, y) => y.length - x.length)
+        .find((s) => s.trim().length >= 4);
+      if (snippet) {
+        const trimmed = snippet.trim();
+        const all = document.body.getElementsByTagName("*");
+        for (let i = 0; i < all.length; i++) {
+          const c = all[i]!;
+          if ((c.textContent ?? "").includes(trimmed)) return c;
+        }
+      }
+    }
+    return null;
   }
 
   /** Look up the snapshot for an already-annotated element, if any. */

@@ -460,14 +460,14 @@ class ExtensionState {
     try {
       this.companions = await discoverCompanions();
 
-      // Wipe the locally-loaded session if we're entering routing — it
-      // gets re-hydrated below if we end up standalone, replaced by the
-      // companion's session if we end up connected.
-      const wasStandalone = !!this.currentOrigin;
-      if (wasStandalone) {
-        this.session = null;
-        this.currentOrigin = null;
-      }
+      // Don't pre-wipe the standalone session here. Both follow-up paths
+      // handle it themselves: connectTo() nulls `this.session` before the
+      // new WS handshake, and hydrateStandalone() is idempotent for the
+      // same origin. Pre-wiping caused the session.id $effect in App.svelte
+      // (line ~854) to fire a transient `annotated.clear` to the content
+      // script every time rescan ran on the same origin — which wiped all
+      // on-page pin badges even though nothing about the session had
+      // actually changed.
 
       const stillSelected = this.selectedCompanion
         ? this.companions.find(

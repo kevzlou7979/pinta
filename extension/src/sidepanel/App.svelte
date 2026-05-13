@@ -293,6 +293,13 @@
       // any select-mode annotations from the current draft that were
       // captured on this URL so their pin badges re-paint.
       const url = m.url ?? "";
+      // Adopt the content script's view of the URL as the source of
+      // truth for "what page is the user looking at". chrome.tabs API
+      // doesn't fire info.url for hash-only changes, so without this
+      // the filter mis-classifies annotations as "on another page".
+      if (url && sender.tab.id === activeTabId) {
+        pageUrl = url;
+      }
       replayAnnotationsToTab(sender.tab.id, url);
       return;
     }
@@ -332,6 +339,10 @@
         target: targets[0],
         groupingMode: targets.length > 1 ? (m.groupingMode ?? "single-edit") : undefined,
         viewport: m.viewport ?? snapshotViewport(),
+        // Stamp from the content script's location.href — authoritative
+        // for SPAs where chrome.tabs.onUpdated misses hash/pushState changes
+        // and the side panel's lastUrl can be stale.
+        url: m.url,
       };
       app.addAnnotation(annotation);
       activeTool = null;
@@ -467,7 +478,10 @@
       const here = new URL(pageUrl || "http://localhost");
       const there = new URL(u);
       if (there.origin === here.origin) {
-        return there.pathname + there.search;
+        // Include the hash so hash-routed SPAs (/#claims/active) are
+        // distinguishable in the chip — otherwise every hash route on
+        // the same origin renders as just "/".
+        return there.pathname + there.search + there.hash;
       }
       return u;
     } catch {
@@ -747,11 +761,17 @@
     }
   }
 
-  function clearAllAnnotations() {
+  async function clearAllAnnotations() {
     if (!annotations.length) return;
-    // Snapshot ids first — removeAnnotation mutates the list as it goes.
-    const ids = annotations.map((a) => a.id);
-    for (const id of ids) removeAnnotation(id);
+    // Use the full session-reset path so EVERYTHING goes — pin badges,
+    // inline DOM mutations, per-entry rect cache, session annotations
+    // (across all pages), and the session metadata itself. Standalone
+    // mode automatically spawns a fresh session for the current origin
+    // so the user can keep annotating without an extra click. The
+    // per-annotation `annotated.remove` path used to leave stale
+    // entries in content.annotated when annotations were stamped with
+    // URLs other than the active tab's — bulk-clear avoids that.
+    await cancelSession();
   }
 
   async function cancelSession() {

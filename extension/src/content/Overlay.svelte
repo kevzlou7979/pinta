@@ -16,6 +16,14 @@
   let extras: Element[] = $state([]);
   let comment = $state("");
   let tick = $state(0);
+  // Reactive mirror of `location.href`. Updated whenever the content
+  // script detects a client-side route change (hashchange / popstate /
+  // pushState) so the badge template can filter to annotations made on
+  // the current page only — without this, the rect cache would let
+  // badges from one SPA route bleed onto every other route.
+  let currentUrl = $state<string>(
+    typeof location !== "undefined" ? location.href : "",
+  );
 
   /**
    * Read-only overlay for an imported `.pinta` session being viewed in
@@ -115,6 +123,9 @@
         const { entry } = content.removeAnnotatedById(m.annotationId);
         if (entry) restoreFromSnapshot(entry);
         content.removeCommittedById(m.annotationId);
+        // Drop the matching rect cache so a future replay doesn't pick
+        // up the removed entry's last-known position.
+        lastRectByEntry.delete(m.annotationId);
         // Also drop the in-flight pending draft if its id was just removed
         // — guards the corner case where the user removes from the side
         // panel while still typing the comment.
@@ -126,6 +137,10 @@
         content.clearCommitted();
         if (content.pending) content.cancelPending();
         if (content.inProgress) content.cancelInProgress();
+        // Drop the rect cache too — otherwise stale page-coord rects
+        // would resurrect ghost badges if the side panel later replays
+        // a different annotation that happens to reuse the same id.
+        lastRectByEntry.clear();
       } else if (m?.type === "imported.show" && m.imported) {
         // Clear any in-progress UI so the read-only overlay renders cleanly.
         clearSelectState();
@@ -141,14 +156,73 @@
     // from the current draft that were created on this URL — pins get
     // re-painted on reload / SPA nav. Best-effort: if no side panel is
     // open the message just dispatches into the void.
-    try {
-      void chrome.runtime
-        .sendMessage({ type: "overlay.ready", url: location.href })
-        ?.catch(() => {});
-    } catch {
-      // No extension context available — ignore.
-    }
-    return () => chrome.runtime.onMessage.removeListener(handler);
+    const pingUrl = () => {
+      try {
+        void chrome.runtime
+          .sendMessage({ type: "overlay.ready", url: location.href })
+          ?.catch(() => {});
+      } catch {
+        // No extension context available — ignore.
+      }
+    };
+    pingUrl();
+    // SPA route change: the content script stays alive, but the DOM
+    // typically re-renders so previously-painted pin badges point at
+    // detached elements. We DON'T clear annotated here — the MutationObserver
+    // below re-resolves selectors when the SPA finishes rendering, so
+    // badges follow the element through subsequent re-renders. The ping
+    // is just to update the side panel's view of the current URL.
+    const onRouteChange = () => {
+      currentUrl = location.href;
+      queueMicrotask(pingUrl);
+    };
+    // Watch DOM mutations and re-resolve detached annotated elements
+    // by their stored selectors. SPAs often render multiple times
+    // during navigation (loading skeleton → loaded data); without this,
+    // the first replay finds an element that gets detached on a later
+    // render and the badge silently disappears.
+    let mutationTimer: ReturnType<typeof setTimeout> | null = null;
+    const mo = new MutationObserver(() => {
+      if (mutationTimer) return;
+      mutationTimer = setTimeout(() => {
+        mutationTimer = null;
+        if (content.annotated.length === 0) return;
+        content.reresolveDetached();
+        // Force a layout-tick bump so rectOf re-runs for entries whose
+        // element references didn't change but whose page position did
+        // (e.g. SPA moved the element within the same DOM subtree).
+        tick += 1;
+      }, 100);
+    });
+    mo.observe(document.body, { childList: true, subtree: true });
+    // chrome.tabs.onUpdated doesn't fire info.url for hash-only changes
+    // and history.pushState is invisible to it too. The content script
+    // sees these via native events, so re-ping on any client-side route
+    // change. Without this, the side panel's pageUrl stays stale and
+    // newly-created annotations land under the wrong page in the chip.
+    addEventListener("hashchange", onRouteChange);
+    addEventListener("popstate", onRouteChange);
+    const origPushState = history.pushState;
+    const origReplaceState = history.replaceState;
+    history.pushState = function (...args) {
+      const ret = origPushState.apply(this, args as Parameters<typeof origPushState>);
+      onRouteChange();
+      return ret;
+    };
+    history.replaceState = function (...args) {
+      const ret = origReplaceState.apply(this, args as Parameters<typeof origReplaceState>);
+      onRouteChange();
+      return ret;
+    };
+    return () => {
+      chrome.runtime.onMessage.removeListener(handler);
+      removeEventListener("hashchange", onRouteChange);
+      removeEventListener("popstate", onRouteChange);
+      history.pushState = origPushState;
+      history.replaceState = origReplaceState;
+      mo.disconnect();
+      if (mutationTimer) clearTimeout(mutationTimer);
+    };
   });
 
   // Hotkeys — Alt+letter for clean access without finger-twisting chords.
@@ -466,6 +540,7 @@
       target,
       targets: target ? [target] : undefined,
       viewport: snapshotViewport(),
+      url: location.href,
     };
     chrome.runtime.sendMessage({ type: "annotation.draw-committed", annotation });
     content.recordCommitted(annotation);
@@ -640,22 +715,33 @@
    * silently skip the halo. The side-panel card still appears for the
    * user to edit/remove.
    */
-  function replayAnnotation(ann: Annotation): void {
+  function replayAnnotation(ann: Annotation, attempt = 0): void {
     if (ann.kind !== "select") return;
     const targets = ann.targets ?? (ann.target ? [ann.target] : []);
     const primary = targets[0];
     if (!primary) return;
-    let el: Element | null = null;
-    try {
-      el = document.querySelector(primary.selector);
-    } catch {
-      // Invalid selector (e.g. contains :has() in older Chrome) — skip.
+    // Skip if already painted (defensive — re-mounts from frame nav can
+    // double-fire the overlay.ready handshake). Checked first so retries
+    // that race with another replay path bail cleanly.
+    if (content.annotated.some((a) => a.id === ann.id)) return;
+    // 3-tier resolve: selector → outerHTML → nearbyText. Same logic the
+    // MutationObserver uses for re-resolve, so initial paint and
+    // subsequent re-renders behave consistently.
+    const el = content.findElementForEntry({
+      selector: primary.selector,
+      outerHTML: primary.outerHTML,
+      nearbyText: primary.nearbyText,
+    });
+    if (!el) {
+      // SPA might not have rendered the new view yet. Retry with backoff
+      // (50ms, 200ms, 500ms, 1000ms) before giving up — covers most
+      // framework render delays without burning time on dead selectors.
+      const delays = [50, 200, 500, 1000];
+      if (attempt < delays.length) {
+        setTimeout(() => replayAnnotation(ann, attempt + 1), delays[attempt]);
+      }
       return;
     }
-    if (!el) return;
-    // Skip if already painted (defensive — re-mounts from frame nav can
-    // double-fire the overlay.ready handshake).
-    if (content.annotated.some((a) => a.id === ann.id)) return;
     // Snapshot the element's current state so a future Remove leaves it
     // unchanged (we didn't mutate anything during replay).
     const html = el as HTMLElement;
@@ -664,6 +750,10 @@
       el,
       html.style?.cssText ?? "",
       html.innerHTML,
+      primary.selector,
+      primary.outerHTML,
+      primary.nearbyText,
+      ann.url ?? location.href,
     );
   }
 
@@ -696,7 +786,16 @@
     // Only the primary gets a snapshot — extras are not mutated by the
     // editor, so they don't need rollback bookkeeping.
     if (originalCssText !== null && originalInnerHtml !== null) {
-      content.recordAnnotated(annId, selected, originalCssText, originalInnerHtml);
+      content.recordAnnotated(
+        annId,
+        selected,
+        originalCssText,
+        originalInnerHtml,
+        targets[0]?.selector,
+        targets[0]?.outerHTML,
+        targets[0]?.nearbyText,
+        location.href,
+      );
     }
     chrome.runtime.sendMessage({
       type: "annotation.target-selected",
@@ -711,6 +810,7 @@
         : undefined,
       images: hasImages ? selectImages : undefined,
       viewport: snapshotViewport(),
+      url: location.href,
     });
     // Keep the inline preview applied — the user wants a cumulative
     // visual of all queued edits. The annotation's snapshot is in
@@ -755,6 +855,7 @@
       // the screenshot — e.g. an agent reading just the .md file.
       target: resolveDrawingTarget(draft) ?? undefined,
       images: draftImages.length ? draftImages : undefined,
+      url: location.href,
     };
     chrome.runtime.sendMessage({
       type: "annotation.draw-committed",
@@ -793,16 +894,69 @@
     };
   }
 
-  function rectOf(el: Element | null): {
+  // Per-annotation rect cache. Updated whenever rectOf sees the element
+  // connected, used as fallback when the element is detached during SPA
+  // re-renders. Cached values are stored in page coords (viewport rect +
+  // scrollY/X at capture time) so we can re-derive the viewport rect
+  // even if the user scrolled while the element was missing — keeps the
+  // badge pinned to where the content WAS rather than vanishing.
+  const lastRectByEntry = new Map<
+    string,
+    {
+      top: number;
+      left: number;
+      width: number;
+      height: number;
+      scrollX: number;
+      scrollY: number;
+    }
+  >();
+
+  function rectOf(
+    el: Element | null,
+    id?: string,
+  ): {
     top: number;
     left: number;
     width: number;
     height: number;
   } | null {
-    if (!el) return null;
     void tick;
-    const r = el.getBoundingClientRect();
-    return { top: r.top, left: r.left, width: r.width, height: r.height };
+    if (el && el.isConnected) {
+      const r = el.getBoundingClientRect();
+      const rect = {
+        top: r.top,
+        left: r.left,
+        width: r.width,
+        height: r.height,
+      };
+      if (id) {
+        lastRectByEntry.set(id, {
+          ...rect,
+          scrollX: window.scrollX,
+          scrollY: window.scrollY,
+        });
+      }
+      return rect;
+    }
+    // Element missing or detached. Try the cached page-coord rect from
+    // the last time we saw it connected, adjusted for any scroll that
+    // happened since. Badge stays put visually so the user keeps their
+    // bearings until the MutationObserver re-resolves the element.
+    if (id) {
+      const cached = lastRectByEntry.get(id);
+      if (cached) {
+        const dx = window.scrollX - cached.scrollX;
+        const dy = window.scrollY - cached.scrollY;
+        return {
+          top: cached.top - dy,
+          left: cached.left - dx,
+          width: cached.width,
+          height: cached.height,
+        };
+      }
+    }
+    return null;
   }
 
   function rectOfDraft(d: Draft | null): {
@@ -999,9 +1153,9 @@
   Hidden while an imported session is being viewed — see the Canvas
   guard above for the rationale. -->
 {#each !imported ? content.annotated : [] as a (a.id)}
-  {@const r = rectOf(a.element)}
+  {@const r = rectOf(a.element, a.id)}
   {@const n = content.globalSeq(a.id)}
-  {#if r}
+  {#if r && (!a.url || a.url === currentUrl)}
     <div
       class="pin"
       style:top="{Math.max(0, r.top - 8)}px"
