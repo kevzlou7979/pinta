@@ -6,7 +6,7 @@
   "author": "kevzlou7979 <kevzlou7979@gmail.com>",
   "repository": {
     "type": "git",
-    "url": "https://github.com/kevzlou7979/pinta.git",
+    "url": "git+https://github.com/kevzlou7979/pinta.git",
     "directory": "companion"
   },
   "homepage": "https://github.com/kevzlou7979/pinta#readme",
@@ -22,8 +22,8 @@
   ],
   "type": "module",
   "bin": {
-    "pinta-companion": "./dist/cli.cjs",
-    "pinta-mcp": "./dist/mcp-stdio.cjs"
+    "pinta-companion": "dist/cli.cjs",
+    "pinta-mcp": "dist/mcp-stdio.cjs"
   },
   "files": [
     "dist/cli.cjs",
