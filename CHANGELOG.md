@@ -4,6 +4,54 @@ Notable changes shipped on top of the original V1 pipeline. Newest first.
 For the architectural design behind each item, see
 [`spec/SPEC.md`](spec/SPEC.md).
 
+## 0.3.1 — 2026-05-13
+
+### Fixed
+
+- **Per-page annotation URLs survive hash routing.** Stamp
+  `annotation.url` from the content script's `location.href` so
+  hash-only navigations (e.g. `/#claims/active`) no longer fall back
+  to the stale `lastUrl` that Chrome's `tabs.onUpdated` failed to
+  report. Side panel adopts the content script's URL on every
+  `overlay.ready` ping; `formatOtherPageUrl` now includes the hash so
+  routes are distinguishable in the "other pages" chip.
+
+- **Side panel detects hash + pushState changes.** Content script
+  pings `overlay.ready` on `hashchange`, `popstate`, and
+  monkey-patched `history.pushState` / `replaceState`. SPAs that
+  route without a full page reload now update `pageUrl` reactively.
+
+- **Pin badges persist through SPA re-renders.** Each annotated
+  entry stores selector + outerHTML + nearbyText so a debounced
+  MutationObserver can re-resolve the element via a 3-tier fallback
+  (selector → outerHTML exact match → nearbyText snippet) when the
+  SPA tears down and re-renders the DOM. Last-known page-coord rect
+  is cached so badges stay pinned at their previous position until
+  the new element is found.
+
+- **`rectOf` no longer renders badges at (0,0) for detached elements.**
+  Returns `null` when `!el.isConnected`. Badges are filtered by URL
+  (`entry.url === currentUrl`) so the cached rect can't bleed badges
+  from one SPA route onto another.
+
+- **Removed transient session wipe in `rescan()`.** Was setting
+  `this.session = null` and immediately re-hydrating, which fired a
+  spurious `annotated.clear` to the content script via the
+  `session.id` `$effect`. Root cause of "badge appears then
+  vanishes" on every standalone-mode rescan.
+
+- **Clear button truly clears everything.** Top trash icon now
+  delegates to `cancelSession` — full reset of session annotations,
+  on-page badges, inline DOM mutations, pending draft, and the
+  per-entry rect cache. Standalone mode spawns a fresh empty session
+  so the user can keep annotating without an extra click.
+
+### Added
+
+- **`/release` skill.** Automates version bumps, CHANGELOG, build,
+  zip, git tag, npm publish, and GitHub release in one command.
+  Chrome Web Store upload remains manual.
+
 ## 0.3.0 — 2026-05-11
 
 ### Added
