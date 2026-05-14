@@ -869,6 +869,29 @@
       .catch(() => {});
   });
 
+  // Drive the page-edge processing pulse — content script paints a
+  // pulsating inset glow while the agent is picking up / applying the
+  // session so the user has visible confirmation that something is
+  // happening on a foreign machine. Off by default (Settings → Visual
+  // feedback). Tracks both `sessionPending` AND whether the user
+  // enabled the pulse, so flipping the toggle while a session is in
+  // flight starts / stops the glow immediately.
+  let lastProcessingPing = $state<string | null>(null);
+  $effect(() => {
+    const processing = sessionPending && app.pulseSettings.enabled;
+    const color = app.pulseSettings.color;
+    if (activeTabId == null) return;
+    const key = processing ? `on:${color}` : "off";
+    if (lastProcessingPing === key) return;
+    lastProcessingPing = key;
+    chrome.tabs
+      .sendMessage(activeTabId, {
+        type: processing ? "processing.start" : "processing.end",
+        color: processing ? color : undefined,
+      })
+      .catch(() => {});
+  });
+
   // Push the imported-session overlay (metadata pill + per-annotation
   // halos / badges) to the active tab whenever the user opens or closes
   // the read-only viewer. The content script reads the manifest's

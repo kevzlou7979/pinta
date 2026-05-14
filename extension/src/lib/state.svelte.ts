@@ -99,6 +99,16 @@ class ExtensionState {
   tickedModules = $state<Record<string, boolean>>({});
   /** True when Settings panel is open in the side panel. */
   viewingSettings = $state<boolean>(false);
+  /**
+   * Visual feedback toggles. `pulse` controls the pink/blue/etc.
+   * pulsating glow that surrounds the page edges while the agent is
+   * applying a session. Off by default — purely cosmetic.
+   * Persisted to chrome.storage.local under `pinta-pulse-settings`.
+   */
+  pulseSettings = $state<{ enabled: boolean; color: string }>({
+    enabled: false,
+    color: "#3B82F6",
+  });
 
   private client: WsClient | null = null;
   private creatingSession = false;
@@ -132,7 +142,52 @@ class ExtensionState {
     // in IndexedDB and don't depend on which companion we land on.
     void this.refreshImported();
     void this.loadModules();
+    void this.loadPulseSettings();
     await this.rescan(activeTabUrl);
+  }
+
+  // ─── Pulse settings (cosmetic processing-glow on the page edges) ────
+
+  private static readonly PULSE_KEY = "pinta-pulse-settings";
+
+  async loadPulseSettings(): Promise<void> {
+    try {
+      const stored = await chrome.storage?.local?.get(
+        ExtensionState.PULSE_KEY,
+      );
+      const raw = stored?.[ExtensionState.PULSE_KEY] as
+        | { enabled?: boolean; color?: string }
+        | undefined;
+      if (raw && typeof raw === "object") {
+        if (typeof raw.enabled === "boolean") this.pulseSettings.enabled = raw.enabled;
+        if (typeof raw.color === "string" && /^#[0-9a-fA-F]{6}$/.test(raw.color)) {
+          this.pulseSettings.color = raw.color;
+        }
+      }
+    } catch {
+      // storage missing — defaults stand
+    }
+  }
+
+  private async savePulseSettings(): Promise<void> {
+    try {
+      await chrome.storage?.local?.set({
+        [ExtensionState.PULSE_KEY]: $state.snapshot(this.pulseSettings),
+      });
+    } catch {
+      // ignore
+    }
+  }
+
+  setPulseEnabled(enabled: boolean): void {
+    this.pulseSettings.enabled = enabled;
+    void this.savePulseSettings();
+  }
+
+  setPulseColor(hex: string): void {
+    if (!/^#[0-9a-fA-F]{6}$/.test(hex)) return;
+    this.pulseSettings.color = hex;
+    void this.savePulseSettings();
   }
 
   // ─── Modules (built-in integrations like GitLab Issues) ─────────────

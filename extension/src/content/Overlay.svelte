@@ -24,6 +24,21 @@
   let currentUrl = $state<string>(
     typeof location !== "undefined" ? location.href : "",
   );
+  // Pulsating edge-glow shown while the agent is picking up and
+  // applying the session. Toggled by `processing.start` / `processing.end`
+  // messages the side panel sends when `sessionPending` flips. Off by
+  // default — user enables in Settings → Visual feedback and picks a
+  // color (blue / pink / green / purple / orange). Pure visual
+  // feedback; pointer-events: none so the user can still interact with
+  // their app while it's processing.
+  let isProcessing = $state(false);
+  let processingColor = $state<string>("#3B82F6");
+
+  function hexToRgbTriple(hex: string): string {
+    const m = /^#([0-9a-fA-F]{2})([0-9a-fA-F]{2})([0-9a-fA-F]{2})$/.exec(hex);
+    if (!m) return "59, 130, 246"; // fallback: blue
+    return `${parseInt(m[1]!, 16)}, ${parseInt(m[2]!, 16)}, ${parseInt(m[3]!, 16)}`;
+  }
 
   /**
    * Read-only overlay for an imported `.pinta` session being viewed in
@@ -82,6 +97,13 @@
         annotation?: Annotation;
       };
       if (m?.type === "mode.set" && m.mode) setMode(m.mode, m.tool);
+      else if (m?.type === "processing.start") {
+        if (typeof (msg as { color?: string }).color === "string") {
+          processingColor = (msg as { color: string }).color;
+        }
+        isProcessing = true;
+      }
+      else if (m?.type === "processing.end") isProcessing = false;
       else if (m?.type === "annotated.replay" && m.annotation) {
         // Side panel is rehydrating us after navigation. Re-resolve the
         // selector and stamp a pin badge on the matching element. We
@@ -1147,6 +1169,18 @@
       aria-label="Imported annotation {ir.n}"
     >{ir.n}</div>
   {/each}
+{/if}
+
+<!-- Processing pulse — pink pulsating glow around the viewport edges
+  while the agent is picking up / applying the session. Sits below the
+  pin badges in z-order but above the page content. Driven by
+  `processing.start` / `processing.end` messages from the side panel. -->
+{#if isProcessing}
+  <div
+    class="pinta-processing-pulse"
+    style:--pinta-pulse-rgb={hexToRgbTriple(processingColor)}
+    aria-hidden="true"
+  ></div>
 {/if}
 
 <!-- Persistent pin badges for elements already annotated this session.

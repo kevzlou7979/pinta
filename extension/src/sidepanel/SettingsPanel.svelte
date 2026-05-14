@@ -193,4 +193,78 @@
       More modules coming in future releases.
     </p>
   </div>
+
+  <div class="space-y-2">
+    <h3 class="text-xs uppercase tracking-wide text-ink-500 dark:text-night-mute font-medium">
+      Visual feedback
+    </h3>
+    <div
+      class="rounded-md border bg-white dark:bg-night-card p-3 space-y-2"
+      class:border-ink-200={!app.pulseSettings.enabled}
+      class:dark:border-night-line={!app.pulseSettings.enabled}
+      class:border-brand-pink={app.pulseSettings.enabled}
+      class:dark:border-brand-pink-light={app.pulseSettings.enabled}
+    >
+      <div class="flex items-start gap-2">
+        <div class="min-w-0 flex-1">
+          <div class="flex items-center gap-1.5">
+            <span class="text-sm font-semibold text-ink-900 dark:text-night-text">
+              Processing pulse
+            </span>
+          </div>
+          <p class="text-[12px] text-ink-700 dark:text-night-dim mt-0.5">
+            Pulsating glow around the page edges while the agent is
+            applying a session. Off by default.
+          </p>
+        </div>
+        <label class="shrink-0 inline-flex items-center cursor-pointer">
+          <input
+            type="checkbox"
+            class="sr-only peer"
+            checked={app.pulseSettings.enabled}
+            onchange={(e) =>
+              app.setPulseEnabled((e.currentTarget as HTMLInputElement).checked)}
+          />
+          <span
+            class="relative w-9 h-5 bg-ink-300 dark:bg-night-line rounded-full peer-checked:bg-brand-pink dark:peer-checked:bg-brand-pink-light transition-colors"
+            aria-hidden="true"
+          >
+            <span
+              class="absolute top-0.5 left-0.5 w-4 h-4 bg-white rounded-full transition-transform"
+              class:translate-x-4={app.pulseSettings.enabled}
+            ></span>
+          </span>
+        </label>
+      </div>
+
+      {#if app.pulseSettings.enabled}
+        <div class="pt-2 border-t border-ink-100 dark:border-night-line">
+          <span class="block text-[11px] text-ink-700 dark:text-night-dim mb-1.5">
+            Color
+          </span>
+          <div class="flex items-center gap-2 flex-wrap">
+            {#each [
+              { hex: "#3B82F6", name: "Blue" },
+              { hex: "#FF3D6E", name: "Pink" },
+              { hex: "#10B981", name: "Green" },
+              { hex: "#A855F7", name: "Purple" },
+              { hex: "#F59E0B", name: "Orange" },
+            ] as swatch (swatch.hex)}
+              <button
+                type="button"
+                class="w-7 h-7 rounded-full border-2 transition-transform hover:scale-110"
+                class:border-ink-900={app.pulseSettings.color.toLowerCase() === swatch.hex.toLowerCase()}
+                class:dark:border-night-text={app.pulseSettings.color.toLowerCase() === swatch.hex.toLowerCase()}
+                class:border-transparent={app.pulseSettings.color.toLowerCase() !== swatch.hex.toLowerCase()}
+                style:background-color={swatch.hex}
+                onclick={() => app.setPulseColor(swatch.hex)}
+                aria-label="{swatch.name} (current: {app.pulseSettings.color.toLowerCase() === swatch.hex.toLowerCase() ? 'selected' : 'click to select'})"
+                title={swatch.name}
+              ></button>
+            {/each}
+          </div>
+        </div>
+      {/if}
+    </div>
+  </div>
 </section>

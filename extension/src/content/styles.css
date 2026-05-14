@@ -519,3 +519,39 @@
     sans-serif;
   z-index: 4;
 }
+
+/* Processing pulse — pulsating edge-glow while the agent is applying
+   the session. Inset box-shadow draws the halo from inside the viewport
+   edges so it never adds a scrollbar; pointer-events: none so the user
+   can keep interacting with their app. Color is supplied as an "r, g, b"
+   triple via the --pinta-pulse-rgb custom property (default: blue). */
+.pinta-processing-pulse {
+  --pinta-pulse-rgb: 59, 130, 246;
+  position: fixed;
+  inset: 0;
+  pointer-events: none;
+  z-index: 2147483646;
+  animation: pinta-processing-pulse 1.6s ease-in-out infinite;
+  will-change: box-shadow;
+}
+@keyframes pinta-processing-pulse {
+  0%,
+  100% {
+    box-shadow:
+      inset 0 0 24px 4px rgba(var(--pinta-pulse-rgb), 0.35),
+      inset 0 0 80px 12px rgba(var(--pinta-pulse-rgb), 0.12);
+  }
+  50% {
+    box-shadow:
+      inset 0 0 48px 8px rgba(var(--pinta-pulse-rgb), 0.85),
+      inset 0 0 160px 24px rgba(var(--pinta-pulse-rgb), 0.35);
+  }
+}
+/* Respect users who can't tolerate motion — keep the glow but stop
+   the pulse so the visual cue is still present without flicker. */
+@media (prefers-reduced-motion: reduce) {
+  .pinta-processing-pulse {
+    animation: none;
+    box-shadow: inset 0 0 32px 6px rgba(var(--pinta-pulse-rgb), 0.5);
+  }
+}
