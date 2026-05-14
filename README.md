@@ -21,6 +21,16 @@ matching source files for you.
 > [`spec/SPEC.md`](spec/SPEC.md) for the design and
 > [Roadmap](#roadmap) for what's next.
 
+<p align="center">
+  <a href="https://kevzlou7979.github.io/pinta/"><strong>Website</strong></a>
+  &nbsp;·&nbsp;
+  <a href="https://chromewebstore.google.com/detail/pinta/gnobpbogpbgdcpfjhbajfnbcfpbcnhah">Chrome Web Store</a>
+  &nbsp;·&nbsp;
+  <a href="https://www.npmjs.com/package/pinta-companion">npm</a>
+  &nbsp;·&nbsp;
+  <a href="https://github.com/kevzlou7979/pinta/releases">Releases</a>
+</p>
+
 ---
 
 ## What's new
@@ -447,6 +457,18 @@ Issues and PRs welcome. Before opening a PR:
 
 ---
 
+## Creator
+
+**Mark Kevin Baldemor** ([@kevzlou7979](https://github.com/kevzlou7979)) — designed
+and built Pinta because the gap between "I can see what's wrong on this page"
+and "the agent edits the right file" was bigger than it had to be.
+
+If Pinta saved you time, the cheapest thank-you is a ⭐ on the
+[GitHub repo](https://github.com/kevzlou7979/pinta). Issues and PRs welcome
+too — see [Contributing](#contributing) above.
+
+---
+
 ## License
 
-MIT — see [`LICENSE`](LICENSE).
+MIT — see [`LICENSE`](LICENSE). Copyright (c) 2026 Mark Kevin Baldemor.
