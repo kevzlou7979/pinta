@@ -28,3 +28,115 @@ body {
   background-color: theme("colors.night.bg");
   color: theme("colors.night.text");
 }
+
+/* ---------------------------------------------------------------------
+ * Prism theme for Test Pilot code blocks.
+ * Tuned to match the side-panel mockup: pink commands, cyan flags,
+ * amber strings, violet variables, muted comments. Two palettes via
+ * the existing `.dark` toggle on <html>. Classes used here are Prism's
+ * default `.token.<kind>` selectors plus our custom `.token.parameter`
+ * (flags) injected in prism-setup.ts. */
+.pinta-code pre {
+  background: transparent;
+  margin: 0;
+  text-shadow: none;
+}
+.pinta-code code {
+  text-shadow: none;
+}
+/* Light palette */
+.pinta-code .token.comment,
+.pinta-code .token.prolog,
+.pinta-code .token.doctype,
+.pinta-code .token.cdata {
+  color: theme("colors.ink.500");
+  font-style: italic;
+}
+.pinta-code .token.punctuation {
+  color: theme("colors.ink.500");
+}
+.pinta-code .token.function {
+  color: theme("colors.brand.pink");
+  font-weight: 600;
+}
+.pinta-code .token.keyword,
+.pinta-code .token.builtin,
+.pinta-code .token.class-name {
+  color: theme("colors.brand.pink");
+}
+.pinta-code .token.parameter {
+  color: theme("colors.sky.600");
+}
+.pinta-code .token.string,
+.pinta-code .token.char,
+.pinta-code .token.attr-value {
+  color: theme("colors.amber.600");
+}
+.pinta-code .token.property,
+.pinta-code .token.tag,
+.pinta-code .token.attr-name {
+  color: theme("colors.sky.600");
+}
+.pinta-code .token.boolean,
+.pinta-code .token.number,
+.pinta-code .token.constant {
+  color: theme("colors.orange.600");
+}
+.pinta-code .token.variable,
+.pinta-code .token.symbol {
+  color: theme("colors.violet.600");
+}
+.pinta-code .token.operator,
+.pinta-code .token.entity {
+  color: theme("colors.ink.700");
+}
+.pinta-code .token.url {
+  color: theme("colors.emerald.600");
+  text-decoration: underline dotted;
+}
+
+/* Dark palette */
+.dark .pinta-code .token.comment,
+.dark .pinta-code .token.prolog,
+.dark .pinta-code .token.doctype,
+.dark .pinta-code .token.cdata {
+  color: theme("colors.night.mute");
+}
+.dark .pinta-code .token.punctuation {
+  color: theme("colors.night.dim");
+}
+.dark .pinta-code .token.function,
+.dark .pinta-code .token.keyword,
+.dark .pinta-code .token.builtin,
+.dark .pinta-code .token.class-name {
+  color: #ff7ab2;
+}
+.dark .pinta-code .token.parameter {
+  color: #7dd3fc;
+}
+.dark .pinta-code .token.string,
+.dark .pinta-code .token.char,
+.dark .pinta-code .token.attr-value {
+  color: #fcd34d;
+}
+.dark .pinta-code .token.property,
+.dark .pinta-code .token.tag,
+.dark .pinta-code .token.attr-name {
+  color: #7dd3fc;
+}
+.dark .pinta-code .token.boolean,
+.dark .pinta-code .token.number,
+.dark .pinta-code .token.constant {
+  color: #fdba74;
+}
+.dark .pinta-code .token.variable,
+.dark .pinta-code .token.symbol {
+  color: #c4b5fd;
+}
+.dark .pinta-code .token.operator,
+.dark .pinta-code .token.entity {
+  color: theme("colors.night.text");
+}
+.dark .pinta-code .token.url {
+  color: #6ee7b7;
+}

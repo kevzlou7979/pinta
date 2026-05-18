@@ -16,7 +16,12 @@ are red, no point spec-checking if the security audit caught a P0):
 
 1. **`/test`** — Vitest suites for `extension` + `companion`.
 2. **`/audit`** — security + performance walk of the Chrome extension.
-3. **`/spec`** — gaps between `spec/SPEC.md` and shipped code.
+3. **Svelte best-practices audit** — installs the official Svelte AI
+   skills (`svelte-code-writer`, `svelte-core-bestpractices`) if not
+   already present, then runs `@sveltejs/mcp svelte-autofixer` over
+   `extension/src/**/*.svelte` to surface reactivity / `$state` /
+   `$effect` mistakes Pinta's own audit checklist can't catch.
+4. **`/spec`** — gaps between `spec/SPEC.md` and shipped code.
 
 Each sub-skill produces its own report. `/staging`'s job is to:
 - Invoke them in sequence via the **Skill** tool.
@@ -72,7 +77,85 @@ If audit hits an internal error (couldn't WebFetch Svelte docs, can't
 read a file, etc.), surface that too — the audit is genuinely
 incomplete and the verdict shouldn't claim coverage it doesn't have.
 
-## 3. Run `/spec`
+## 3. Svelte best-practices audit
+
+Pinta's own `/audit` is opinionated about Svelte 5 reactivity but
+operates from a static checklist. The Svelte team ships a live
+autofixer (`svelte-autofixer` inside `@sveltejs/mcp`) that checks
+files against the *current* Svelte 5 grammar — catches missing
+`{#each}` keys, `{@html}` callsites, `$effect` malpractice
+("assigning a stateful variable inside an $effect"), mutable
+`Map` / `Set` usage where `SvelteMap` / `SvelteSet` belongs, and
+similar issues that drift as Svelte evolves.
+
+Source: https://svelte.dev/docs/ai/skills
+Tool: https://www.npmjs.com/package/@sveltejs/mcp
+
+The "install skills" path documented on the Svelte page is a Claude
+Code marketplace flow that doesn't currently expose a CLI install
+subcommand on `@sveltejs/mcp` (verified at v1.x — `--help` lists
+`list-sections`, `get-documentation`, `svelte-autofixer` only). The
+autofixer alone provides the linting value the staging gate needs;
+the prompt-style skills (`svelte-code-writer`,
+`svelte-core-bestpractices`) are advisory and outside the scope of an
+automated check.
+
+### 3.1. Run the autofixer over files touched in this branch
+
+`svelte-autofixer` takes a single path per invocation (no glob),
+so pick the files most likely to have new findings — anything
+modified since the last commit on `main`, plus any `.svelte` files
+in subdirectories of `extension/src/` that haven't been audited
+recently. Use `git status` + `git diff --name-only main...HEAD` to
+narrow the set.
+
+For each file:
+
+```bash
+npx -y @sveltejs/mcp@latest svelte-autofixer <path> 2>&1
+```
+
+(`.svelte.ts` / `.svelte.js` runes modules also work.)
+
+The output is a small JS object literal — `{ issues: [...],
+suggestions: [...], require_another_tool_call_after_fixing: bool }`.
+
+- **issues** — concrete things to fix (missing `{#each}` key,
+  `{@html}`, etc.). Roll up as `[svelte]` findings.
+- **suggestions** — style / idiom advice. Drop unless the user is
+  about to refactor anyway.
+
+### 3.2. Filter the output
+
+The autofixer is noisy. Drop these classes of finding when rolling up:
+
+- `{@html}` warnings on callsites already manually verified safe in
+  `/audit` (Pinta's `TOOLS[i].svg` constant, Prism-escaped highlight
+  output). The autofixer flags every `{@html}` regardless of
+  context.
+- `$effect` malpractice / "stateful variable assigned inside
+  $effect" suggestions on files NOT modified in this branch — they
+  are pre-existing patterns; only flag them when the diff actually
+  introduces a new one.
+- `bind:this` → action/attachment suggestions. Style-only.
+- `Found a mutable instance of the built-in Map/Set` — design
+  choice; flag in 🟡 only if introduced by this branch.
+
+### 3.3. What to keep
+
+- Missing `{#each}` key on a loop introduced in this branch
+  (correctness — Svelte's keyed-each diffing can break with positional
+  keys when items are deleted or reordered).
+- Any new `{@html}` callsite bound to a non-constant source — these
+  need a manual safety review and should appear in the roll-up.
+- New `$effect` that assigns a `$state` variable on every fire — real
+  reactivity leak.
+
+If the autofixer can't be invoked at all (npm unreachable, package
+moved, etc.), report it as "Svelte audit: skipped — <reason>" and
+continue. Don't abort the staging run for a tooling gap.
+
+## 4. Run `/spec`
 
 Independent of audit — invoke unconditionally (you want to know about
 spec drift even if the audit already caught the same code path from a
@@ -84,21 +167,23 @@ Skill(skill="spec")
 
 Capture verbatim.
 
-## 4. Roll up
+## 5. Roll up
 
-Merge findings from steps 2 + 3 into a single severity-grouped table.
-Drop duplicates (audit and spec both flagging the same issue gets
-listed once, with both attributions in parens):
+Merge findings from steps 2, 3, and 4 into a single severity-grouped
+table. Drop duplicates (audit and spec both flagging the same issue
+gets listed once, with attributions in parens):
 
 ```
 🔴 CRITICAL — must fix before deploy
-  • [audit] <finding>
-  • [spec]  <finding>
+  • [audit]  <finding>
+  • [svelte] <finding from svelte-autofixer>
+  • [spec]   <finding>
   • [audit + spec] <finding flagged by both>
 
 🟠 IMPORTANT — should fix or knowingly accept
-  • [audit] <finding>
-  • [spec]  <finding>
+  • [audit]  <finding>
+  • [svelte] <finding>
+  • [spec]   <finding>
 
 🟡 NICE TO FIX — defer if pressed for time
   • [spec] <finding>
@@ -107,7 +192,7 @@ listed once, with both attributions in parens):
 Then a separate **Tests** line stating the pass count from step 1
 (e.g. `✅ Tests: 6 + 14 passing across companion + extension`).
 
-## 5. Final verdict
+## 6. Final verdict
 
 Pick exactly one based on the merged severity:
 
@@ -122,7 +207,7 @@ Pick exactly one based on the merged severity:
 The verdict line is the most important sentence in the report — make
 it the last line and put it in bold.
 
-## 6. After the report
+## 7. After the report
 
 Don't auto-fix anything. `/staging` is a decision tool, not an action
 tool. Two follow-ups the user might invoke:
@@ -132,10 +217,12 @@ tool. Two follow-ups the user might invoke:
 
 ## Notes
 
-- Run-time budget: roughly 30–90s wall clock depending on how
+- Run-time budget: roughly 60–120s wall clock depending on how
   recently the codebase was scanned. /test is sub-second; /audit
-  fetches Svelte docs (skippable in offline mode); /spec walks
-  ~800 lines of spec + cross-references.
+  fetches Svelte docs (skippable in offline mode); the Svelte
+  autofixer first run takes ~15-30s to fetch the npm package,
+  subsequent runs are near-instant; /spec walks ~800 lines of spec +
+  cross-references.
 - If any sub-skill is missing on disk (`.claude/skills/<name>/SKILL.md`
   not present), STOP and tell the user which one is missing — don't
   silently skip it. The whole point of /staging is unified coverage.

@@ -26,6 +26,7 @@ import {
   getImportedSessions,
   addImportedSession,
   removeImportedSession,
+  clearImportedSessions,
 } from "./local-store.js";
 import { decodePintaFile, decodePintaMarkdown } from "./pinta-file.js";
 import { uid } from "./id.js";
@@ -33,6 +34,48 @@ import { uid } from "./id.js";
 const SELECTED_KEY = "pinta-selected-companion";
 
 export type ExtensionMode = "draw" | "select" | "review" | "idle";
+
+/** What the user has done with a test row in the current catalog. */
+export type TestPilotStatus = "untested" | "pass" | "fail";
+
+/** A single test row in the catalog. */
+export type TestPilotTest = {
+  id: string;
+  test: string;
+  expected: string;
+  /** Local-only — not part of the agent's catalog JSON. */
+  status: TestPilotStatus;
+  /** Per-row detail cache, populated when the user clicks "?". */
+  detail?: { steps: string[]; askedAt: number };
+};
+
+/** A heading group within the catalog (e.g. "1.1 Authentication"). */
+export type TestPilotSection = {
+  title: string;
+  tests: TestPilotTest[];
+};
+
+/** The full catalog extracted from one imported markdown doc. */
+export type TestPilotCatalog = {
+  docId: string;
+  filename: string;
+  importedAt: number;
+  sections: TestPilotSection[];
+  /** Optional human-authored metadata. Editable inline from the
+   *  Test Pilot header; preserved across re-imports of the same docId
+   *  so the user doesn't have to retype it. Surfaced in the exported
+   *  markdown report. */
+  title?: string;
+  author?: string;
+  description?: string;
+};
+
+/** In-flight query metadata so we can route the eventual session.synced
+ *  to the right Test Pilot slot. */
+export type TestPilotPending =
+  | { kind: "doc-parse"; sessionId: string; filename: string }
+  | { kind: "doc-generate"; sessionId: string; startedAt: number }
+  | { kind: "detail-steps"; sessionId: string; testId: string };
 
 /**
  * Top-level connection mode.
@@ -110,8 +153,53 @@ class ExtensionState {
     color: "#3B82F6",
   });
 
+  /**
+   * Test Pilot — interactive module state. The user imports a markdown
+   * test spec; the agent extracts a catalog of sections + test rows
+   * (via a `kind: "query"` session with `op: "doc-parse"`). Each row
+   * can be marked Pass / Fail locally and can be expanded via the
+   * "?" button to ask the agent for detailed steps (`op: "detail-steps"`).
+   *
+   * Persisted to chrome.storage.local under `pinta-test-pilot:current`.
+   * `pending` tracks an in-flight query session so the side panel can
+   * show loading state and route the eventual `session.synced` back
+   * into this slot instead of the annotation draft.
+   */
+  testPilot = $state<{
+    catalog: TestPilotCatalog | null;
+    /** Singleton slot for doc-parse / doc-generate. Those are blocking
+     *  flows the user sees as a full-panel overlay, so one at a time. */
+    pending: TestPilotPending | null;
+    /** Concurrent in-flight detail-steps fetches, keyed by testId. The
+     *  user can click ? on AUTH-01, go back, click ? on AUTH-02, and
+     *  both spinners run side-by-side until the agent answers each. */
+    pendingDetails: Record<string, { askedAt: number }>;
+    error: string | null;
+  }>({ catalog: null, pending: null, pendingDetails: {}, error: null });
+
+  /** Timer that fires if a Test Pilot query never gets a response —
+   *  prevents the "Asking the agent…" spinner from sticking forever
+   *  when no `/pinta` skill is listening, or the agent crashed mid-run. */
+  private testPilotTimer: ReturnType<typeof setTimeout> | null = null;
+  /** Per-testId timers for concurrent detail fetches. Same purpose as
+   *  `testPilotTimer` but one-per-row so each ? can time out
+   *  independently. */
+  private detailTimers = new Map<string, ReturnType<typeof setTimeout>>();
+  /** Hard ceiling for any single Test Pilot query (doc-parse or
+   *  detail-steps). Generous — long markdown docs take a while — but
+   *  bounded. After this we surface a recovery message. */
+  private static readonly TEST_PILOT_TIMEOUT_MS = 120_000;
+  /** doc-generate is materially slower — the agent reads the whole
+   *  project and writes a fresh UAT spec. Bump the ceiling so a
+   *  legitimate multi-minute scan isn't killed early. */
+  private static readonly TEST_PILOT_GENERATE_TIMEOUT_MS = 600_000;
+
   private client: WsClient | null = null;
   private creatingSession = false;
+  /** Timer that recovers a stuck `creatingSession = true` if the
+   *  companion never echoes back `session.created` / `session.synced`. */
+  private creatingSessionTimer: ReturnType<typeof setTimeout> | null = null;
+  private static readonly CREATE_SESSION_TIMEOUT_MS = 10_000;
   private lastUrl: string | null = null;
   /** Origin currently driving the standalone-mode session (IDB key). */
   private currentOrigin: string | null = null;
@@ -143,6 +231,7 @@ class ExtensionState {
     void this.refreshImported();
     void this.loadModules();
     void this.loadPulseSettings();
+    void this.loadTestPilot();
     await this.rescan(activeTabUrl);
   }
 
@@ -188,6 +277,366 @@ class ExtensionState {
     if (!/^#[0-9a-fA-F]{6}$/.test(hex)) return;
     this.pulseSettings.color = hex;
     void this.savePulseSettings();
+  }
+
+  // ─── Test Pilot (interactive module) ───────────────────────────────
+
+  private static readonly TEST_PILOT_KEY = "pinta-test-pilot:current";
+
+  async loadTestPilot(): Promise<void> {
+    try {
+      const stored = await chrome.storage?.local?.get(
+        ExtensionState.TEST_PILOT_KEY,
+      );
+      const raw = stored?.[ExtensionState.TEST_PILOT_KEY] as
+        | TestPilotCatalog
+        | undefined;
+      if (raw && typeof raw === "object" && Array.isArray(raw.sections)) {
+        this.testPilot.catalog = raw;
+      }
+    } catch {
+      // storage missing (test env) — defaults are fine
+    }
+  }
+
+  private async saveTestPilot(): Promise<void> {
+    try {
+      if (this.testPilot.catalog) {
+        await chrome.storage?.local?.set({
+          [ExtensionState.TEST_PILOT_KEY]: $state.snapshot(
+            this.testPilot.catalog,
+          ),
+        });
+      } else {
+        await chrome.storage?.local?.remove(ExtensionState.TEST_PILOT_KEY);
+      }
+    } catch {
+      // ignore
+    }
+  }
+
+  /**
+   * User imported a markdown test doc. Fire a one-shot
+   * `module.query.submit` carrying the raw doc; the companion creates
+   * a fresh ephemeral session, attaches a `kind: "query"` annotation
+   * with the JSON-encoded request, and extracts the content to
+   * `.pinta/test-docs/{docId}.md` for the agent to read. When the
+   * agent calls `mark_session_done(id, payload)`, `onMessage` routes
+   * the eventual `session.synced` into `testPilot.catalog`.
+   */
+  /**
+   * Ask the agent to generate a fresh UAT markdown spec for the whole
+   * app from project context, then return the parsed catalog. Same
+   * result shape as importTestDoc — just no markdown to upload.
+   */
+  async generateTestDoc(): Promise<void> {
+    if (!this.client || this.connectionStatus !== "connected") {
+      this.testPilot.error =
+        "No companion connected. Start `pinta-companion .` in your project to use Test Pilot.";
+      return;
+    }
+    const docId = crypto.randomUUID();
+    const url = this.lastUrl ?? "";
+    this.testPilot.error = null;
+    this.testPilot.pending = {
+      kind: "doc-generate",
+      sessionId: "",
+      startedAt: Date.now(),
+    };
+    this.armTestPilotTimeout();
+    const queryComment = JSON.stringify({ op: "generate-doc", docId });
+    const settings = this.modules["test-pilot"]?.settings ?? {};
+    this.send({
+      type: "module.query.submit",
+      url,
+      moduleId: "test-pilot",
+      moduleSettings: settings,
+      queryComment,
+    });
+  }
+
+  async importTestDoc(filename: string, content: string): Promise<void> {
+    if (!this.client || this.connectionStatus !== "connected") {
+      this.testPilot.error =
+        "No companion connected. Start `pinta-companion .` in your project to use Test Pilot.";
+      return;
+    }
+    const docId = crypto.randomUUID();
+    const url = this.lastUrl ?? "";
+    this.testPilot.error = null;
+    this.testPilot.pending = { kind: "doc-parse", sessionId: "", filename };
+    this.armTestPilotTimeout();
+    const queryComment = JSON.stringify({
+      op: "doc-parse",
+      docId,
+      filename,
+      content,
+    });
+    const settings = this.modules["test-pilot"]?.settings ?? {};
+    this.send({
+      type: "module.query.submit",
+      url,
+      moduleId: "test-pilot",
+      moduleSettings: settings,
+      queryComment,
+    });
+  }
+
+  /**
+   * User clicked the "?" on a test row in the catalog. Fire another
+   * query session with `op: "detail-steps"` and the test id.
+   *
+   * `overrideDetailedSteps` lets the detail view's inline "Details"
+   * checkbox flip verbosity per re-ask without permanently changing
+   * the module-wide setting. Pass undefined (default) to honor the
+   * module's `detailed_steps` setting verbatim.
+   */
+  async fetchDetailSteps(
+    testId: string,
+    opts: { overrideDetailedSteps?: boolean } = {},
+  ): Promise<void> {
+    if (!this.client || this.connectionStatus !== "connected") {
+      this.testPilot.error =
+        "No companion connected. Start `pinta-companion .` in your project to use Test Pilot.";
+      return;
+    }
+    const catalog = this.testPilot.catalog;
+    if (!catalog) return;
+    // Already in flight — don't double-submit (e.g. user clicked ? while
+    // the spinner was still running on that same row).
+    if (this.testPilot.pendingDetails[testId]) return;
+    let section: TestPilotSection | null = null;
+    for (const s of catalog.sections) {
+      if (s.tests.some((t) => t.id === testId)) {
+        section = s;
+        break;
+      }
+    }
+    if (!section) return;
+    const url = this.lastUrl ?? "";
+    this.testPilot.error = null;
+    this.testPilot.pendingDetails[testId] = { askedAt: Date.now() };
+    this.armDetailTimeout(testId);
+    const queryComment = JSON.stringify({
+      op: "detail-steps",
+      docId: catalog.docId,
+      testId,
+      sectionTitle: section.title,
+    });
+    const baseSettings = this.modules["test-pilot"]?.settings ?? {};
+    const settings: Record<string, string | boolean> =
+      opts.overrideDetailedSteps !== undefined
+        ? { ...baseSettings, detailed_steps: opts.overrideDetailedSteps }
+        : baseSettings;
+    this.send({
+      type: "module.query.submit",
+      url,
+      moduleId: "test-pilot",
+      moduleSettings: settings,
+      queryComment,
+    });
+  }
+
+  /** Cancel an in-flight detail fetch (user clicked Cancel under the
+   *  spinner). Removes the entry and clears its timer. */
+  cancelDetailFetch(testId: string): void {
+    if (!this.testPilot.pendingDetails[testId]) return;
+    this.clearDetailTimer(testId);
+    delete this.testPilot.pendingDetails[testId];
+  }
+
+  private armDetailTimeout(testId: string): void {
+    this.clearDetailTimer(testId);
+    const t = setTimeout(() => {
+      if (!this.testPilot.pendingDetails[testId]) return;
+      delete this.testPilot.pendingDetails[testId];
+      this.detailTimers.delete(testId);
+      this.testPilot.error =
+        `Timed out waiting for the agent to get steps for ${testId}. ` +
+        `Make sure \`/pinta\` is running in a Claude Code terminal for this project, then try again.`;
+    }, ExtensionState.TEST_PILOT_TIMEOUT_MS);
+    this.detailTimers.set(testId, t);
+  }
+
+  private clearDetailTimer(testId: string): void {
+    const t = this.detailTimers.get(testId);
+    if (t) {
+      clearTimeout(t);
+      this.detailTimers.delete(testId);
+    }
+  }
+
+  /** User clicked Cancel on a stuck Test Pilot spinner. */
+  cancelTestPilotPending(): void {
+    if (!this.testPilot.pending) return;
+    this.clearTestPilotTimeout();
+    this.testPilot.pending = null;
+    this.testPilot.error = "Cancelled.";
+  }
+
+  /**
+   * Arm a fresh timeout for the current `testPilot.pending`. If it
+   * fires, the user gets a recovery message explaining the most
+   * common cause (no `/pinta` agent listening). doc-generate uses a
+   * much longer ceiling because a full-app scan is legitimately slow.
+   */
+  private armTestPilotTimeout(): void {
+    this.clearTestPilotTimeout();
+    const pending = this.testPilot.pending;
+    if (!pending) return;
+    const ms =
+      pending.kind === "doc-generate"
+        ? ExtensionState.TEST_PILOT_GENERATE_TIMEOUT_MS
+        : ExtensionState.TEST_PILOT_TIMEOUT_MS;
+    this.testPilotTimer = setTimeout(() => {
+      if (!this.testPilot.pending) return;
+      const what =
+        this.testPilot.pending.kind === "doc-parse"
+          ? "parse the test doc"
+          : this.testPilot.pending.kind === "doc-generate"
+            ? "generate the test spec"
+            : "get the test steps";
+      this.testPilot.pending = null;
+      this.testPilot.error =
+        `Timed out waiting for the agent to ${what}. ` +
+        `Make sure \`/pinta\` is running in a Claude Code terminal for this project, then try again.`;
+    }, ms);
+  }
+
+  private clearTestPilotTimeout(): void {
+    if (this.testPilotTimer) {
+      clearTimeout(this.testPilotTimer);
+      this.testPilotTimer = null;
+    }
+  }
+
+  /**
+   * Fetch with a hard timeout via AbortController. Without this, a
+   * hung companion (FD-leak, blocked event loop, antivirus stalling
+   * the socket) wedges every caller's UI spinner forever.
+   */
+  private static async fetchWithTimeout(
+    input: RequestInfo,
+    init: RequestInit & { timeoutMs?: number } = {},
+  ): Promise<Response> {
+    const { timeoutMs = 8_000, ...rest } = init;
+    const ctrl = new AbortController();
+    const t = setTimeout(() => ctrl.abort(), timeoutMs);
+    try {
+      return await fetch(input, { ...rest, signal: ctrl.signal });
+    } catch (err) {
+      if ((err as Error).name === "AbortError") {
+        throw new Error(`request timed out after ${timeoutMs}ms`);
+      }
+      throw err;
+    } finally {
+      clearTimeout(t);
+    }
+  }
+
+  /**
+   * Centralized setter for `creatingSession` that pairs the flag with a
+   * recovery timer. When set true, schedules a 10s fallback that clears
+   * the flag and surfaces an error — guards against the wedge where
+   * the companion is reachable but never echoes back `session.created`
+   * (e.g. mid-crash, broken pipe).
+   */
+  private markCreatingSession(active: boolean, reason?: string): void {
+    if (this.creatingSessionTimer) {
+      clearTimeout(this.creatingSessionTimer);
+      this.creatingSessionTimer = null;
+    }
+    this.creatingSession = active;
+    if (!active) return;
+    this.creatingSessionTimer = setTimeout(() => {
+      if (!this.creatingSession) return;
+      this.creatingSession = false;
+      this.creatingSessionTimer = null;
+      this.lastError =
+        reason ??
+        "Couldn't start a session — the companion didn't respond. Check that pinta-companion is running.";
+    }, ExtensionState.CREATE_SESSION_TIMEOUT_MS);
+  }
+
+  setTestStatus(testId: string, status: TestPilotStatus): void {
+    const catalog = this.testPilot.catalog;
+    if (!catalog) return;
+    for (const section of catalog.sections) {
+      for (const t of section.tests) {
+        if (t.id === testId) {
+          t.status = status;
+          void this.saveTestPilot();
+          return;
+        }
+      }
+    }
+  }
+
+  /** Render a markdown report from the current catalog. */
+  exportResults(): string {
+    const c = this.testPilot.catalog;
+    if (!c) return "# Test Pilot — no catalog loaded\n";
+    let pass = 0,
+      fail = 0,
+      untested = 0;
+    for (const s of c.sections) {
+      for (const t of s.tests) {
+        if (t.status === "pass") pass++;
+        else if (t.status === "fail") fail++;
+        else untested++;
+      }
+    }
+    const total = pass + fail + untested;
+    const today = new Date().toISOString().slice(0, 10);
+    const heading = c.title?.trim() || c.filename;
+    let out = `# Test Pilot results — ${heading}\n`;
+    const metaBits: string[] = [`Run on ${today}`];
+    if (c.author?.trim()) metaBits.push(`by ${c.author.trim()}`);
+    metaBits.push(
+      `${pass}/${total} passed, ${fail} failed, ${untested} untested`,
+    );
+    out += `_${metaBits.join(", ")}_\n\n`;
+    if (c.description?.trim()) out += `${c.description.trim()}\n\n`;
+    for (const s of c.sections) {
+      out += `## ${s.title}\n\n`;
+      out += `| ID | Test | Expected | Result |\n`;
+      out += `|----|------|----------|--------|\n`;
+      for (const t of s.tests) {
+        const result =
+          t.status === "pass"
+            ? "✓ Pass"
+            : t.status === "fail"
+              ? "✗ Fail"
+              : "⚠ Untested";
+        const id = t.id.replace(/\|/g, "\\|");
+        const test = t.test.replace(/\|/g, "\\|").replace(/\n/g, " ");
+        const expected = t.expected.replace(/\|/g, "\\|").replace(/\n/g, " ");
+        out += `| ${id} | ${test} | ${expected} | ${result} |\n`;
+      }
+      out += `\n`;
+    }
+    return out;
+  }
+
+  clearTestPilot(): void {
+    this.clearTestPilotTimeout();
+    this.testPilot.catalog = null;
+    this.testPilot.pending = null;
+    this.testPilot.error = null;
+    void this.saveTestPilot();
+    // Also wipe the on-disk copy of the spec. UAT docs often contain
+    // real credentials / internal URLs — leaving them lying around in
+    // .pinta/test-docs/ after the user has cleared the catalog is a
+    // surprise leak. Fire-and-forget; companion absence is fine.
+    const base = this.httpBase();
+    if (base) {
+      void ExtensionState.fetchWithTimeout(`${base}/v1/test-docs`, {
+        method: "DELETE",
+        timeoutMs: 5_000,
+      }).catch(() => {
+        // best effort — disk cleanup failure isn't actionable in the UI
+      });
+    }
   }
 
   // ─── Modules (built-in integrations like GitLab Issues) ─────────────
@@ -254,6 +703,18 @@ class ExtensionState {
     this.ensureModuleEntry(spec);
     this.modules[id]!.settings[key] = value;
     void this.saveModules();
+    // Flipping `detailed_steps` should make the next test-row open
+    // re-fetch fresh steps — otherwise the cached `test.detail` from
+    // the previous mode would hide the change from the user.
+    if (id === "test-pilot" && key === "detailed_steps") {
+      const catalog = this.testPilot.catalog;
+      if (catalog) {
+        for (const section of catalog.sections) {
+          for (const t of section.tests) delete t.detail;
+        }
+        void this.saveTestPilot();
+      }
+    }
   }
 
   /** True iff the module is enabled AND every required setting is filled. */
@@ -337,6 +798,37 @@ class ExtensionState {
     await this.refreshImported();
   }
 
+  /**
+   * Wipe both local (companion-side) and imported (IDB-side) session
+   * history. The companion preserves the drafting session if one is
+   * active, so the user doesn't lose work in flight. Best-effort on each
+   * leg — one failure doesn't block the other.
+   */
+  async clearAllHistory(): Promise<void> {
+    const base = this.httpBase();
+    if (base) {
+      try {
+        const res = await ExtensionState.fetchWithTimeout(`${base}/v1/sessions`, {
+          method: "DELETE",
+          timeoutMs: 8_000,
+        });
+        if (!res.ok) {
+          const text = await res.text().catch(() => "");
+          throw new Error(`HTTP ${res.status}${text ? `: ${text.slice(0, 200)}` : ""}`);
+        }
+      } catch (err) {
+        this.lastError = `clear sessions failed: ${(err as Error).message}`;
+      }
+    }
+    try {
+      await clearImportedSessions();
+      this.viewingImportedId = null;
+    } catch (err) {
+      this.lastError = `clear imported failed: ${(err as Error).message}`;
+    }
+    await this.refreshImported();
+  }
+
   /** Open the read-only viewer for an imported session. */
   viewImported(id: string): void {
     if (!this.importedSessions.some((s) => s.id === id)) return;
@@ -394,10 +886,11 @@ class ExtensionState {
       modules: this.buildSessionModules(),
     };
     try {
-      const res = await fetch(`${base}/v1/sessions`, {
+      const res = await ExtensionState.fetchWithTimeout(`${base}/v1/sessions`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(payload),
+        timeoutMs: 8_000,
       });
       if (!res.ok) {
         const text = await res.text().catch(() => "");
@@ -650,7 +1143,7 @@ class ExtensionState {
     this.client?.stop();
     this.client = null;
     this.session = null;
-    this.creatingSession = false;
+    this.markCreatingSession(false);
     this.selectedCompanion = companion;
     if (!companion) {
       this.connectionStatus = "disconnected";
@@ -661,6 +1154,13 @@ class ExtensionState {
       onMessage: (msg) => this.onMessage(msg),
       onStatusChange: (status) => {
         this.connectionStatus = status;
+        // When the WS disconnects mid-create, the companion will never
+        // echo back the session-created response that clears the flag.
+        // Drop the flag here so the user can retry instead of being
+        // stuck on a no-op spinner.
+        if (status === "disconnected" && this.creatingSession) {
+          this.markCreatingSession(false);
+        }
       },
     });
     this.client.start();
@@ -725,7 +1225,7 @@ class ExtensionState {
     }
 
     if (!this.client) return;
-    this.creatingSession = true;
+    this.markCreatingSession(true);
     this.send({ type: "session.create", url });
   }
 
@@ -850,8 +1350,12 @@ class ExtensionState {
       }
     }
     this.session = null;
-    this.creatingSession = true;
-    this.send({ type: "session.create", url });
+    this.markCreatingSession(true);
+    // `force: true` tells the companion to discard any active drafting
+    // session before creating a fresh one. Without it the server's
+    // drafting-idempotency echoes the old session right back and the
+    // annotations the user just cleared silently resurrect.
+    this.send({ type: "session.create", url, force: true });
   }
 
   /**
@@ -861,13 +1365,19 @@ class ExtensionState {
   async associateUrl(pattern: string): Promise<string[]> {
     const base = this.httpBase();
     if (!base) throw new Error("no companion selected");
-    const res = await fetch(`${base}/v1/url-patterns`, {
+    const res = await ExtensionState.fetchWithTimeout(`${base}/v1/url-patterns`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ pattern }),
+      timeoutMs: 5_000,
     });
     if (!res.ok) throw new Error(`HTTP ${res.status}`);
-    const body = (await res.json()) as { urlPatterns: string[] };
+    let body: { urlPatterns: string[] };
+    try {
+      body = (await res.json()) as { urlPatterns: string[] };
+    } catch {
+      throw new Error("companion returned a non-JSON response");
+    }
     // Update local cache so the picker reflects the change immediately.
     if (this.selectedCompanion) {
       this.selectedCompanion = {
@@ -883,11 +1393,64 @@ class ExtensionState {
 
   private onMessage(msg: ServerMessage): void {
     switch (msg.type) {
+      case "module.query.created": {
+        // Companion confirmed our interactive-module submit. Pin the
+        // session id so the eventual session.synced for that id flows
+        // into the right slot instead of stomping the annotation draft.
+        // Detail-steps queries are tracked per-testId in pendingDetails
+        // and identify themselves by the queryComment op — they don't
+        // need to pin a sessionId here. Only doc-parse/doc-generate use
+        // the singleton `pending` slot.
+        if (
+          msg.moduleId === "test-pilot" &&
+          this.testPilot.pending &&
+          !this.testPilot.pending.sessionId &&
+          ExtensionState.queryOp(msg.session) !== "detail-steps"
+        ) {
+          this.testPilot.pending.sessionId = msg.session.id;
+        }
+        break;
+      }
       case "session.created":
       case "session.synced": {
+        // Route Test Pilot query session events away from the regular
+        // annotation flow so the draft isn't disturbed. Detect by EITHER
+        // the pinned sessionId OR the session.modules payload — the
+        // companion's store.submit() notifyChange can broadcast
+        // session.synced before the targeted module.query.created ack
+        // arrives, leaving pending.sessionId still empty. Without the
+        // modules-based fallback, the ephemeral test-pilot session
+        // (status: submitted) replaces this.session here, sessionPending
+        // flips true, and the page-edge processing pulse never stops
+        // because handleTestPilotSync (run on the eventual done event)
+        // doesn't touch this.session.status.
+        const isInteractiveModuleSession =
+          msg.session.modules?.some((m) => m.id === "test-pilot") ?? false;
+        if (isInteractiveModuleSession) {
+          // Concurrent detail-steps fetches live in pendingDetails,
+          // keyed by testId pulled from the session's query annotation
+          // — that's how we tell two parallel ? clicks apart.
+          const op = ExtensionState.queryOp(msg.session);
+          if (op === "detail-steps") {
+            const testId = ExtensionState.queryField(msg.session, "testId");
+            if (testId) this.handleDetailSync(msg.session, testId);
+            return;
+          }
+        }
+        if (
+          this.testPilot.pending &&
+          (this.testPilot.pending.sessionId === msg.session.id ||
+            isInteractiveModuleSession)
+        ) {
+          if (!this.testPilot.pending.sessionId) {
+            this.testPilot.pending.sessionId = msg.session.id;
+          }
+          this.handleTestPilotSync(msg.session);
+          return;
+        }
         const previousSessionId = this.session?.id ?? null;
         this.session = msg.session;
-        this.creatingSession = false;
+        this.markCreatingSession(false);
         this.lastError = null;
         // A new session started → drop ticked module checkboxes so the
         // user has to consciously opt in for the next submit. Mirrors
@@ -909,6 +1472,179 @@ class ExtensionState {
       case "error":
         this.lastError = msg.message;
         break;
+    }
+  }
+
+  /** Pull a field from the first query annotation's JSON comment. The
+   *  companion attaches a single `kind: "query"` annotation whose
+   *  `comment` is the JSON we sent as `queryComment` — that's our only
+   *  channel for correlating per-request data (testId, op) back through
+   *  the WebSocket roundtrip. */
+  private static queryField(session: Session, field: string): string | null {
+    const annot = session.annotations.find((a) => a.kind === "query");
+    if (!annot?.comment) return null;
+    try {
+      const parsed = JSON.parse(annot.comment) as Record<string, unknown>;
+      const v = parsed[field];
+      return typeof v === "string" ? v : null;
+    } catch {
+      return null;
+    }
+  }
+  private static queryOp(session: Session): string | null {
+    return ExtensionState.queryField(session, "op");
+  }
+
+  /** Concurrent detail-steps response handler. Routed here when the
+   *  session's query annotation says `op: "detail-steps"`. Looks up the
+   *  pending entry by testId; if the user already cancelled (entry
+   *  absent), the response is silently dropped. */
+  private handleDetailSync(session: Session, testId: string): void {
+    const entry = this.testPilot.pendingDetails[testId];
+    if (!entry) return; // already cancelled / timed out
+    if (session.status === "done") {
+      this.clearDetailTimer(testId);
+      const summary = session.appliedSummary ?? "";
+      try {
+        const payload = JSON.parse(summary) as {
+          type?: string;
+          [k: string]: unknown;
+        };
+        if (payload.type === "test-pilot-detail") {
+          this.applyDetailResult(payload);
+        } else {
+          this.testPilot.error =
+            "Agent returned an unrecognized response. Check the skill version.";
+        }
+      } catch (err) {
+        this.testPilot.error = `Couldn't parse agent response: ${(err as Error).message}`;
+      }
+      delete this.testPilot.pendingDetails[testId];
+    } else if (session.status === "error") {
+      this.clearDetailTimer(testId);
+      this.testPilot.error =
+        session.errorMessage ?? `Test Pilot query failed for ${testId}.`;
+      delete this.testPilot.pendingDetails[testId];
+    }
+  }
+
+  /**
+   * Route a Test Pilot query session's lifecycle into the testPilot
+   * state slot. The session itself is ephemeral; we only care about
+   * the final `status === "done"` payload (or an `error`).
+   */
+  private handleTestPilotSync(session: Session): void {
+    if (!this.testPilot.pending) return;
+    if (session.status === "done") {
+      this.clearTestPilotTimeout();
+      const summary = session.appliedSummary ?? "";
+      try {
+        const payload = JSON.parse(summary) as {
+          type?: string;
+          [k: string]: unknown;
+        };
+        if (payload.type === "test-pilot-catalog") {
+          this.applyCatalogResult(payload);
+        } else if (payload.type === "test-pilot-detail") {
+          this.applyDetailResult(payload);
+        } else {
+          this.testPilot.error =
+            "Agent returned an unrecognized response. Check the skill version.";
+        }
+      } catch (err) {
+        this.testPilot.error = `Couldn't parse agent response: ${(err as Error).message}`;
+      }
+      this.testPilot.pending = null;
+    } else if (session.status === "error") {
+      this.clearTestPilotTimeout();
+      this.testPilot.error =
+        session.errorMessage ?? "Test Pilot query failed.";
+      this.testPilot.pending = null;
+    }
+  }
+
+  private applyCatalogResult(payload: { [k: string]: unknown }): void {
+    const sections = Array.isArray(payload.sections) ? payload.sections : [];
+    const newDocId =
+      typeof payload.docId === "string" ? payload.docId : crypto.randomUUID();
+    // Carry over user-authored metadata when re-importing the same doc
+    // so the user's title/author/description survive a Re-import click.
+    const prior = this.testPilot.catalog;
+    const carry = prior && prior.docId === newDocId
+      ? { title: prior.title, author: prior.author, description: prior.description }
+      : {};
+    const catalog: TestPilotCatalog = {
+      docId: newDocId,
+      filename:
+        typeof payload.filename === "string"
+          ? payload.filename
+          : (this.testPilot.pending?.kind === "doc-parse"
+              ? this.testPilot.pending.filename
+              : this.testPilot.pending?.kind === "doc-generate"
+                ? "generated-tests.md"
+                : "test-spec.md"),
+      importedAt: Date.now(),
+      sections: sections.map((s: any) => ({
+        title: String(s?.title ?? "Untitled"),
+        tests: Array.isArray(s?.tests)
+          ? s.tests.map((t: any) => ({
+              id: String(t?.id ?? "??"),
+              test: String(t?.test ?? ""),
+              expected: String(t?.expected ?? ""),
+              status: "untested" as TestPilotStatus,
+            }))
+          : [],
+      })),
+      ...carry,
+    };
+    this.testPilot.catalog = catalog;
+    this.testPilot.error = null;
+    void this.saveTestPilot();
+  }
+
+  /** Update the user-authored metadata on the active catalog. Empty
+   *  strings are normalized to `undefined` so the UI can fall back to
+   *  placeholders. Persists immediately. */
+  setTestPilotMeta(patch: {
+    title?: string;
+    author?: string;
+    description?: string;
+  }): void {
+    const c = this.testPilot.catalog;
+    if (!c) return;
+    const norm = (v: string | undefined) => {
+      if (v === undefined) return undefined;
+      const trimmed = v.trim();
+      return trimmed === "" ? undefined : trimmed;
+    };
+    if ("title" in patch) c.title = norm(patch.title);
+    if ("author" in patch) c.author = norm(patch.author);
+    if ("description" in patch) c.description = norm(patch.description);
+    void this.saveTestPilot();
+  }
+
+  private applyDetailResult(payload: { [k: string]: unknown }): void {
+    const testId =
+      typeof payload.testId === "string"
+        ? payload.testId
+        : this.testPilot.pending?.kind === "detail-steps"
+          ? this.testPilot.pending.testId
+          : null;
+    if (!testId) return;
+    const steps = Array.isArray(payload.steps)
+      ? payload.steps.map((s) => String(s))
+      : [];
+    const catalog = this.testPilot.catalog;
+    if (!catalog) return;
+    for (const section of catalog.sections) {
+      for (const t of section.tests) {
+        if (t.id === testId) {
+          t.detail = { steps, askedAt: Date.now() };
+          this.testPilot.error = null;
+          void this.saveTestPilot();
+          return;
+        }
+      }
     }
   }
 }

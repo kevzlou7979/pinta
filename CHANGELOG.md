@@ -4,6 +4,69 @@ Notable changes shipped on top of the original V1 pipeline. Newest first.
 For the architectural design behind each item, see
 [`spec/SPEC.md`](spec/SPEC.md).
 
+## Unreleased
+
+### Added
+
+- **Test Pilot — interactive UAT module** in its own side-panel tab.
+  Import a hand-written markdown test spec or let the agent generate
+  one from project context; step through the resulting catalog row by
+  row with **Pass / Fail / Untested** marking. Per-row **?** fetches
+  step-by-step instructions from the agent — rendered with light
+  markdown (inline `code`, fenced code blocks with Prism syntax
+  highlighting, `> Note:` callouts) and per-block copy-to-clipboard.
+  Verbosity is controlled by a **Detailed help steps** module setting:
+  off (default) gives short tester-friendly steps; on gives deeper
+  technical context (curl, payloads, env vars). Toggling the setting
+  invalidates every cached `test.detail` so the next row-open
+  re-fetches at the new verbosity. The whole catalog exports as a
+  markdown report with pass/fail/total tallies. Specs and results
+  persist to `chrome.storage.local` (`pinta-test-pilot:current`) and
+  `.pinta/test-docs/{docId}.md` respectively; clearing the catalog
+  wipes both via the new `DELETE /v1/test-docs` endpoint (UAT specs
+  often carry real credentials, so retention is intentionally tight).
+  Wire-protocol-wise this is a new **interactive module surface**:
+  `kind: "query"` annotations carry a JSON-encoded request via a new
+  `module.query.submit` WS message, and the agent answers via
+  `mark_session_done` with a structured payload that the extension
+  routes back into the Test Pilot tab. See `spec/SPEC.md` §8 Phase 12.
+
+- **`module.query.created` server message** — companion's targeted ack
+  for `module.query.submit`. Lets the extension pin the resulting
+  session id to the right interactive-module slot.
+
+- **`session.create` flags `ephemeral` and `force`** — ephemeral
+  sessions (Test Pilot queries) don't take over `activeId` so the
+  user's annotation draft is preserved alongside; `force: true`
+  discards any existing drafting session so the side-panel "Clear"
+  button doesn't resurrect cleared annotations via the server's
+  drafting-idempotency.
+
+### Fixed
+
+- **Detailed help steps toggle now invalidates cached row detail.**
+  Flipping `detailed_steps` in Settings used to leave previously-fetched
+  steps in place — the user would untick the deep-help setting and
+  still see the verbose technical version. `setModuleSetting` now
+  walks the catalog and clears `test.detail` on every row when the
+  setting changes for the `test-pilot` module, so the next row-open
+  re-fetches at the new verbosity.
+
+- **CORS / CSRF hardening on companion writes.** `DELETE /v1/sessions`,
+  `DELETE /v1/test-docs`, and `POST /v1/url-patterns` previously
+  allowed `Origin: *` writes. A malicious page in the user's own
+  browser could have wiped session history or injected URL patterns
+  by fetching `http://127.0.0.1:7878/v1/sessions` with method DELETE.
+  The companion now mirrors the Origin for `chrome-extension://*`
+  requests and rejects cross-origin writes from any other browser
+  page (no-Origin tools like curl / native CLIs still work).
+
+### Changed
+
+- **Test Pilot button labels.** Renamed "Generate MD with Agent" →
+  **Generate Test Script** and "Import .md test spec" → **Import Test
+  Script** for clarity in the empty-state CTA.
+
 ## 0.3.1 — 2026-05-13
 
 ### Fixed

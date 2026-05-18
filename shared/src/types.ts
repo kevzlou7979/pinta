@@ -7,7 +7,16 @@ export type AnnotationKind =
   | "freehand"
   | "pin"
   | "select"
-  | "image";
+  | "image"
+  /**
+   * Test Pilot module queries — annotation has no DOM target. Its
+   * `comment` carries a JSON-encoded query (e.g. parse a doc, fetch
+   * detail steps for a test id) and the agent answers via
+   * `mark_session_done(id, appliedSummary)` with structured JSON.
+   * Side panel routes these sessions away from the annotation list
+   * into the Test Pilot tab.
+   */
+  | "query";
 
 export type AnnotationTarget = {
   selector: string;
@@ -249,7 +258,26 @@ export type PintaFile = {
 };
 
 export type ClientMessage =
-  | { type: "session.create"; url: string }
+  | {
+      type: "session.create";
+      url: string;
+      /**
+       * If true, the companion creates a fresh session even when a
+       * drafting session already exists, and does NOT set it as the
+       * active session. Used by interactive modules (Test Pilot) to
+       * run a query alongside the user's annotation draft without
+       * stomping it. Omit / false for the normal annotation flow.
+       */
+      ephemeral?: boolean;
+      /**
+       * If true, the companion discards any existing drafting session
+       * before creating a fresh one. Used by the side panel's "Clear"
+       * / "Cancel and restart" actions — without this, the server's
+       * drafting-idempotency would echo back the existing session and
+       * its annotations would silently resurrect. Implied non-ephemeral.
+       */
+      force?: boolean;
+    }
   | { type: "annotation.add"; annotation: Annotation }
   | { type: "annotation.update"; id: string; patch: Partial<Annotation> }
   | { type: "annotation.remove"; id: string }
@@ -258,6 +286,24 @@ export type ClientMessage =
       screenshot: string;
       autoApply?: boolean;
       modules?: SessionModule[];
+    }
+  | {
+      /**
+       * One-shot bundled submit for interactive modules. Companion
+       * creates a fresh ephemeral session, attaches a single
+       * `kind: "query"` annotation built from `queryComment`, attaches
+       * the module config, marks `submitted`, and broadcasts the
+       * result via `session.synced`. Extension routes by the returned
+       * session id to dispatch the eventual `done` payload to the
+       * right interactive-module slot.
+       *
+       * Used by Test Pilot for both doc-parse and detail-steps queries.
+       */
+      type: "module.query.submit";
+      url: string;
+      moduleId: string;
+      moduleSettings: Record<string, string | boolean>;
+      queryComment: string;
     };
 
 export type ServerMessage =
@@ -265,4 +311,18 @@ export type ServerMessage =
   | { type: "session.synced"; session: Session }
   | { type: "session.applying" }
   | { type: "session.done"; summary: string }
+  | {
+      /**
+       * Companion's ack for a `module.query.submit`. Carries the
+       * freshly-created session so the extension can pin
+       * `testPilot.pending.sessionId` to it and route the eventual
+       * `session.synced` (status: done | error) into the correct
+       * interactive-module slot. The companion also broadcasts a
+       * normal `session.synced` for the same session — both are safe
+       * to receive; the extension uses the first one to capture the id.
+       */
+      type: "module.query.created";
+      moduleId: string;
+      session: Session;
+    }
   | { type: "error"; message: string };

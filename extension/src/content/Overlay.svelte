@@ -293,29 +293,88 @@
 
     // Re-enable pointer events on disabled form controls while in select
     // mode. Many CSS frameworks (Tailwind's `disabled:pointer-events-none`,
-    // MUI `.Mui-disabled`, etc.) hide disabled elements from the cursor
-    // entirely — without this override, mouse events would pass straight
-    // through and the user couldn't even highlight them.
+    // MUI `.Mui-disabled`, Radix's `[data-disabled]`, etc.) hide disabled
+    // elements from the cursor entirely — without this override, mouse
+    // events would pass straight through and the user couldn't even
+    // highlight them.
     const styleEl = document.createElement("style");
     styleEl.dataset.pintaSelectModeOverride = "1";
     styleEl.textContent = `
       button[disabled], input[disabled], select[disabled], textarea[disabled],
       fieldset[disabled], fieldset[disabled] *,
-      [aria-disabled="true"], [aria-disabled="true"] * {
+      [aria-disabled="true"], [aria-disabled="true"] *,
+      [data-disabled], [data-disabled] * {
         pointer-events: auto !important;
         cursor: crosshair !important;
       }
     `;
     document.head.appendChild(styleEl);
 
+    // Wrappers with `pointer-events: none` (tooltip hosts, decorative
+    // overlays) silently block events from reaching disabled descendants
+    // — CSS on the descendant alone can't fix this because the parent
+    // never propagates the event. Walk up from each disabled element on
+    // select-mode entry, force ancestors with computed `pointer-events:
+    // none` to `auto`, and stash originals so cleanup restores the page.
+    const DISABLED_SELECTOR =
+      'button[disabled], input[disabled], select[disabled], textarea[disabled], ' +
+      'fieldset[disabled], [aria-disabled="true"], [data-disabled]';
+    const restoredPointerEvents: Array<{
+      el: HTMLElement;
+      original: string;
+    }> = [];
+    function unblockAncestorsOf(el: Element): void {
+      let cur: HTMLElement | null = el as HTMLElement;
+      while (
+        cur &&
+        cur !== document.body &&
+        cur !== document.documentElement
+      ) {
+        // Re-enter guard: skip ancestors we've already touched.
+        if (cur.dataset.pintaPeRestored) {
+          cur = cur.parentElement;
+          continue;
+        }
+        if (getComputedStyle(cur).pointerEvents === "none") {
+          restoredPointerEvents.push({
+            el: cur,
+            original: cur.style.pointerEvents ?? "",
+          });
+          cur.style.pointerEvents = "auto";
+          cur.dataset.pintaPeRestored = "1";
+        }
+        cur = cur.parentElement;
+      }
+    }
+    for (const el of document.querySelectorAll(DISABLED_SELECTOR)) {
+      unblockAncestorsOf(el);
+    }
+    // Catch disabled elements that mount AFTER select mode begins
+    // (e.g. user toggles a section, opens a modal). Cheap MutationObserver
+    // that only fires when childList changes.
+    const disabledMo = new MutationObserver((records) => {
+      for (const r of records) {
+        for (const node of r.addedNodes) {
+          if (!(node instanceof Element)) continue;
+          if (node.matches?.(DISABLED_SELECTOR)) unblockAncestorsOf(node);
+          for (const child of node.querySelectorAll?.(DISABLED_SELECTOR) ?? []) {
+            unblockAncestorsOf(child);
+          }
+        }
+      }
+    });
+    disabledMo.observe(document.body, { childList: true, subtree: true });
+
     function isDisabledFormControl(el: Element): boolean {
       // Native `disabled` on form elements suppresses `click` per HTML
       // spec — that's the case we route through `mousedown` below.
-      // `aria-disabled="true"` does NOT suppress click in browsers, but
-      // some component libs (Radix, Headless UI) intercept and swallow
-      // it; cheaper to treat it the same.
+      // `aria-disabled="true"` and `data-disabled` do NOT suppress click
+      // in browsers, but some component libs (Radix, Headless UI,
+      // shadcn/ui) intercept and swallow it; cheaper to treat them the
+      // same.
       if ("disabled" in el && (el as HTMLButtonElement).disabled) return true;
       if (el.getAttribute("aria-disabled") === "true") return true;
+      if (el.hasAttribute("data-disabled")) return true;
       return el.closest("fieldset[disabled]") !== null;
     }
 
@@ -398,6 +457,17 @@
       document.removeEventListener("click", onClick, true);
       document.removeEventListener("keydown", onKey, true);
       styleEl.remove();
+      disabledMo.disconnect();
+      // Restore pointer-events on ancestors we modified so the page's
+      // post-select-mode interactivity is exactly what it was before.
+      for (const { el, original } of restoredPointerEvents) {
+        if (original) {
+          el.style.pointerEvents = original;
+        } else {
+          el.style.removeProperty("pointer-events");
+        }
+        delete el.dataset.pintaPeRestored;
+      }
     };
   });
 

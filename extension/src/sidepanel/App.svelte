@@ -30,7 +30,15 @@
   import AnnotationCard from "./AnnotationCard.svelte";
   import SessionHistory from "./SessionHistory.svelte";
   import SettingsPanel from "./SettingsPanel.svelte";
+  import TestPilotTab from "./TestPilotTab.svelte";
   import { BUILTIN_MODULES } from "../lib/modules.js";
+
+  type SidePanelTab = "annotate" | "test-pilot";
+  // Active tab in the main panel area. Persists across side-panel
+  // re-opens via chrome.storage.local (`pinta-active-tab`). Only the
+  // "test-pilot" tab is conditionally rendered — gated on the module
+  // being enabled in Settings.
+  let activeTab = $state<SidePanelTab>("annotate");
 
   type Tool = "select" | "arrow" | "rect" | "circle" | "freehand" | "pin" | "image";
   type ActiveMode = "idle" | "select" | "draw" | "image";
@@ -355,6 +363,17 @@
     chrome.runtime.onMessage.addListener(runtimeMessageHandler);
 
     void loadSharePrefs();
+    // Restore the last-used tab. If Test Pilot was active but the
+    // module has since been disabled, fall back to Annotate.
+    try {
+      const stored = await chrome.storage?.local?.get("pinta-active-tab");
+      const raw = stored?.["pinta-active-tab"];
+      if (raw === "test-pilot" || raw === "annotate") {
+        activeTab = raw;
+      }
+    } catch {
+      // ignore — storage unavailable
+    }
 
     try {
       const [tab] = await chrome.tabs.query({
@@ -1266,7 +1285,20 @@
         {/if}
       </div>
     </div>
-    <div class="flex items-center gap-2 shrink-0">
+    <div class="flex items-center gap-1.5 shrink-0">
+      <!-- History + Settings live in the header so every module
+           (Annotate, Test Pilot, …) shares the same access point. -->
+      <SessionHistory />
+      <button
+        type="button"
+        class="w-7 h-7 inline-flex items-center justify-center rounded-full border border-ink-200 bg-white text-ink-600 hover:text-brand-pink hover:border-ink-400 dark:border-night-line dark:bg-night-alt dark:text-night-dim dark:hover:text-brand-pink-light dark:hover:border-night-line2 transition-colors"
+        onclick={() => (app.viewingSettings = !app.viewingSettings)}
+        title="Pinta settings — modules, integrations"
+        aria-label="Open settings"
+        aria-pressed={app.viewingSettings}
+      >
+        <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>
+      </button>
       <button
         type="button"
         class="w-7 h-7 inline-flex items-center justify-center rounded-full border border-ink-200 bg-white text-ink-600 hover:text-brand-pink hover:border-ink-400 dark:border-night-line dark:bg-night-alt dark:text-night-dim dark:hover:text-brand-pink-light dark:hover:border-night-line2 transition-colors"
@@ -1364,8 +1396,47 @@
       </div>
     {/if}
 
+    {#if !app.viewingSettings && !app.viewingImportedId && !showAssociatePrompt && app.moduleReady("test-pilot")}
+      <nav class="flex items-center gap-1 border-b border-ink-200 dark:border-night-line -mx-3 px-3 mb-1">
+        <button
+          type="button"
+          class="px-3 py-1.5 text-xs font-medium border-b-2 -mb-px transition-colors"
+          class:border-brand-pink={activeTab === "annotate"}
+          class:text-ink-900={activeTab === "annotate"}
+          class:dark:text-night-text={activeTab === "annotate"}
+          class:border-transparent={activeTab !== "annotate"}
+          class:text-ink-500={activeTab !== "annotate"}
+          class:dark:text-night-mute={activeTab !== "annotate"}
+          onclick={() => {
+            activeTab = "annotate";
+            void chrome.storage?.local?.set({ "pinta-active-tab": "annotate" });
+          }}
+        >
+          Annotate
+        </button>
+        <button
+          type="button"
+          class="px-3 py-1.5 text-xs font-medium border-b-2 -mb-px transition-colors"
+          class:border-brand-pink={activeTab === "test-pilot"}
+          class:text-ink-900={activeTab === "test-pilot"}
+          class:dark:text-night-text={activeTab === "test-pilot"}
+          class:border-transparent={activeTab !== "test-pilot"}
+          class:text-ink-500={activeTab !== "test-pilot"}
+          class:dark:text-night-mute={activeTab !== "test-pilot"}
+          onclick={() => {
+            activeTab = "test-pilot";
+            void chrome.storage?.local?.set({ "pinta-active-tab": "test-pilot" });
+          }}
+        >
+          Test Pilot
+        </button>
+      </nav>
+    {/if}
+
     {#if app.viewingSettings}
       <SettingsPanel />
+    {:else if !app.viewingImportedId && !showAssociatePrompt && activeTab === "test-pilot" && app.moduleReady("test-pilot")}
+      <TestPilotTab />
     {:else if app.viewingImportedId}
       {@const imp = app.importedSessions.find((s) => s.id === app.viewingImportedId)}
       {#if imp}
@@ -1492,17 +1563,6 @@
           >
             <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" y1="3" x2="12" y2="15"/></svg>
             <span>{importBusy ? "Importing…" : "Import"}</span>
-          </button>
-          <SessionHistory />
-          <button
-            type="button"
-            class="inline-flex items-center justify-center w-7 h-7 rounded-full border border-ink-200 bg-white text-ink-600 hover:text-brand-pink hover:border-ink-400 dark:border-night-line dark:bg-night-alt dark:text-night-dim dark:hover:text-brand-pink-light dark:hover:border-night-line2 transition-colors"
-            onclick={() => (app.viewingSettings = !app.viewingSettings)}
-            title="Pinta settings — modules, integrations"
-            aria-label="Open settings"
-            aria-pressed={app.viewingSettings}
-          >
-            <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>
           </button>
         </div>
       </div>
@@ -1699,7 +1759,11 @@
 
   <footer
     class="border-t border-ink-200 p-3 bg-white dark:border-night-line dark:bg-night-card space-y-2"
-    class:hidden={showAssociatePrompt || app.viewingSettings}
+    class:hidden={showAssociatePrompt ||
+      app.viewingSettings ||
+      (activeTab === "test-pilot" &&
+        app.moduleReady("test-pilot") &&
+        !app.viewingImportedId)}
   >
     {#if app.viewingImportedId}
       {@const impFooter = app.importedSessions.find((s) => s.id === app.viewingImportedId)}
@@ -1921,7 +1985,7 @@
           </span>
         </span>
       </label>
-      {#each BUILTIN_MODULES as moduleSpec (moduleSpec.id)}
+      {#each BUILTIN_MODULES.filter((m) => m.mode === "per-submit") as moduleSpec (moduleSpec.id)}
         {@const moduleReady = app.moduleReady(moduleSpec.id)}
         {@const ticked = !!app.tickedModules[moduleSpec.id]}
         {#if moduleReady}

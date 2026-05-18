@@ -37,6 +37,25 @@ matching source files for you.
 
 Recent additions on top of the original V1 pipeline:
 
+- **Test Pilot — interactive UAT module in its own side-panel tab** *(post-v0.3.1)*.
+  Import a hand-written markdown test spec (or let the agent generate
+  one from project context), get a tested catalog of sections + rows
+  to step through manually. Each row can be marked **Pass / Fail /
+  Untested**; clicking the **?** asks the agent for step-by-step
+  instructions, rendered with light markdown (inline `code`, fenced
+  blocks with syntax highlighting, `> Note:` callouts) and per-block
+  copy-to-clipboard. A **Detailed help steps** setting in the module
+  config toggles between short tester-friendly steps (default, fewer
+  tokens) and deeper technical context (curl, payloads, env vars).
+  Export the whole catalog as a markdown report with pass/fail/total
+  tallies (pipe through `pandoc results.md -o results.pdf` for PDF).
+  Wire-protocol-wise this is a new **interactive module surface**:
+  `kind: "query"` annotations carry the JSON-encoded request via a new
+  `module.query.submit` WS message; the agent answers via
+  `mark_session_done` with a structured payload that the extension
+  routes back into the Test Pilot tab. UAT specs live in
+  `.pinta/test-docs/` and are wiped when the catalog is cleared
+  (specs often carry real credentials). See `spec/SPEC.md` §8 Phase 12.
 - **Built-in modules — agent-side integrations triggered per submit** *(v0.3.0)*.
   Pinta now ships with built-in *modules* that ride along on a session and
   hand the agent extra work after the source edits land. The first one is
@@ -171,6 +190,7 @@ See [`spec/SPEC.md` §7–9](spec/SPEC.md) for the full status of each.
 | Import / Export `.pinta` share files (+ markdown import, "N of M located" indicator) — round-trippable session collaboration | shipped |
 | Per-page annotations across navigation — per-annotation URL, side-panel filter, halo replay | shipped |
 | Built-in modules — GitLab Issues via `glab` CLI (no tokens stored), screenshot embed, chat-based metadata prompt | shipped |
+| Test Pilot — interactive UAT module (import / agent-generate spec, Pass/Fail catalog, per-step copy, markdown export) | shipped |
 | `pinta-companion` published to npm — `npx pinta-companion .` | shipped |
 | `vite-plugin-pinta` for instant source mapping | planned (Phase 6) |
 | Drag-reorder annotations, group by file, undo last edit via git | planned (Phase 7) |

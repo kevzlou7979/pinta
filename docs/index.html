@@ -1506,6 +1506,13 @@
           <h3>Built-in modules — GitLab Issues <span class="pill" style="background:rgba(255,61,110,0.14);color:#c72d7d;border:1px solid rgba(255,61,110,0.35);font-size:10px;padding:1px 6px;border-radius:999px;margin-left:6px;letter-spacing:0.04em;">v0.3.0</span></h3>
           <p>Tick <strong>Create GitLab issues</strong> next to Submit and the agent files one issue per annotation via your <code>glab</code> CLI. <strong>No tokens stored anywhere</strong> — auth comes from <code>glab auth login</code> on your machine. Each issue body embeds the full-page screenshot (uploaded to the project's uploads endpoint), the selector, source file, and the annotated page URL. Before filing, the agent prompts in chat for batch metadata: <em>domain</em> (<code>client</code> / <code>server</code> / <code>shared</code> → <code>domain:&lt;choice&gt;</code> label), <em>extra tags</em>, <em>assignees</em>, or <code>later</code> to defer entirely.</p>
         </div>
+        <div class="feature">
+          <div class="ico">
+            <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><line x1="22" y1="2" x2="11" y2="13"/><polygon points="22 2 15 22 11 13 2 9 22 2"/></svg>
+          </div>
+          <h3>Test Pilot — interactive UAT module <span class="pill" style="background:rgba(255,61,110,0.14);color:#c72d7d;border:1px solid rgba(255,61,110,0.35);font-size:10px;padding:1px 6px;border-radius:999px;margin-left:6px;letter-spacing:0.04em;">new</span></h3>
+          <p>Open the <strong>Test Pilot</strong> tab in the side panel: import a hand-written markdown UAT spec or let the agent generate one from your project context. Step through the resulting catalog row-by-row, marking each <strong>Pass / Fail / Untested</strong>. Click the <strong>?</strong> on a row and the agent walks the tester through step-by-step instructions — short tester-friendly steps by default, or deeper technical context (curl, payloads, env vars) when you flip the <em>Detailed help steps</em> setting. Steps render with inline code, syntax-highlighted fenced blocks, and per-block copy-to-clipboard. Export the whole catalog as a markdown report with pass/fail/total tallies — pipe through <code>pandoc</code> for PDF.</p>
+        </div>
       </div>
     </div>
   </section>

@@ -361,6 +361,14 @@ built-in Pinta integrations for this submit. Run each module after the
 annotations are applied (and tests/lints pass), in array order. Match
 on `module.id`.
 
+> **Module modes:** §7.9 covers **per-submit** modules (e.g. GitLab
+> Issues) that run *after* source edits land. **Interactive** modules
+> (e.g. Test Pilot, §7.10) own the entire session lifecycle and
+> replace the apply/lint/test loop instead of following it. The
+> session shape distinguishes them: a `test-pilot` session always
+> carries exactly one `kind: "query"` annotation. If you see that
+> pattern, jump straight to §7.10 and skip everything above.
+
 **Pinta does not store or transmit credentials.** Modules delegate auth
 to whatever tool the user already has configured on their machine
 (typically a CLI authed via its own login command). Never ask the user
@@ -548,6 +556,251 @@ If a single `glab issue create` invocation fails, mark **that
 annotation** as error (with stderr captured into `errorMessage`),
 continue with the next annotation, and at the end mark the session
 `error` if any failed.
+
+## 7.10 Module: `test-pilot` (interactive)
+
+`test-pilot` is an **interactive** module — it does **not** edit
+source files and does **not** follow the normal apply/lint/test loop
+in §7. A `test-pilot` session always carries exactly one annotation
+with `kind: "query"` whose `comment` is a JSON string describing the
+operation. The agent's job is to answer the question and return
+structured JSON via `mark_session_done(id, appliedSummary)`.
+
+If you see a session with:
+- `modules[].id === "test-pilot"`, AND
+- exactly one annotation with `kind: "query"`
+
+then handle it via this section. Skip §7 entirely. Skip §7.9. The
+session's lifecycle is just `submitted → applying → done | error`.
+
+Always start by parsing the query annotation's `comment` as JSON. It
+will have an `op` field that picks the sub-handler.
+
+### 7.10.1 `op: "doc-parse"` — extract the test catalog
+
+The user just imported a markdown test spec. The companion has
+already written it to `.pinta/test-docs/{docId}.md` and stripped the
+inline content from the annotation. The query comment after the
+companion is:
+
+```json
+{ "op": "doc-parse", "docId": "abc-123", "filename": "qa-spec.md" }
+```
+
+1. `mark_session_applying({id})`.
+2. Read `.pinta/test-docs/{docId}.md` with the `Read` tool.
+3. Parse the markdown. The conventional shape is:
+   - **Sections** are H1/H2/H3 headings (e.g. `## 1.1 Authentication (Email -> DOB -> PIN)`).
+   - **Tests** under each section are a markdown table with columns
+     like `ID | Test | Expected Result | P/F`. Tolerate variants —
+     more / fewer columns, different header text, numbered lists,
+     `**ID:** ...` patterns, even Gherkin Given/When/Then.
+   - Extract per test: `id` (e.g. `AUTH-01`), `test` (description),
+     `expected` (expected outcome).
+4. Build the catalog payload:
+
+```json
+{
+  "type": "test-pilot-catalog",
+  "docId": "abc-123",
+  "filename": "qa-spec.md",
+  "sections": [
+    {
+      "title": "1.1 Authentication (Email -> DOB -> PIN)",
+      "tests": [
+        {
+          "id": "AUTH-01",
+          "test": "Open a valid claim deep-link (SUT token in URL)",
+          "expected": "Redirects to the claim and lands on the email-entry step"
+        }
+      ]
+    }
+  ]
+}
+```
+
+5. `mark_session_done({id, summary: JSON.stringify(payload)})`.
+
+If the doc has no recognizable test catalog, call
+`mark_session_error({id, errorMessage: "Couldn't find any test tables in {filename}. Expected markdown tables with columns like ID | Test | Expected Result, or a numbered list under section headings."})`.
+
+Keep the JSON faithful to the doc — don't invent tests that aren't
+there. The user is going to check them off; spurious rows are worse
+than missing ones.
+
+### 7.10.1b `op: "generate-doc"` — write a UAT spec for the whole app
+
+The user clicked **"Generate MD with Agent"** in the empty-state Test
+Pilot tab. There is no markdown to read — your job is to produce one
+from project context, write it to disk, and then return the parsed
+catalog in the same shape `doc-parse` would return.
+
+The query annotation's `comment`:
+
+```json
+{ "op": "generate-doc", "docId": "abc-123" }
+```
+
+1. `mark_session_applying({id})`.
+2. **Scan the project enough to design a UAT spec.** Read the obvious
+   anchors: `package.json` (framework + scripts), the routes / pages
+   directory, top-level component folders, and any existing docs
+   (`README.md`, `docs/`, `spec/`). The goal is to understand what
+   user-facing flows exist — not to exhaustively read every file.
+3. **Design the test catalog.** Group tests by user-facing area
+   (Authentication, Dashboard, Settings, etc.) — these become H2/H3
+   sections. Inside each section, enumerate concrete pass/fail tests
+   the user can run in a browser. Conventions:
+   - Each test gets a stable ID (`AUTH-01`, `DASH-02`, …).
+   - Each test has a one-line description and a one-line expected
+     result.
+   - **Don't invent flows that don't exist.** If a route or feature
+     isn't actually in the code, omit it.
+   - **Don't bake in real credentials** — use placeholders
+     (`<test-email>`, `<staging-token>`).
+4. **Write the markdown to disk** at
+   `.pinta/test-docs/{docId}.md`. Use a conventional layout the
+   companion's parser handles natively — section headings followed by
+   pipe tables, e.g.:
+
+   ```markdown
+   # UAT — <app name>
+
+   ## 1.1 Authentication
+
+   | ID | Test | Expected Result |
+   |----|------|-----------------|
+   | AUTH-01 | Open valid claim deep-link | Lands on email-entry step |
+   | AUTH-02 | Submit registered email | Generic confirmation; moves to DOB |
+   ```
+
+5. **Re-parse the markdown you just wrote** the same way as
+   `doc-parse` (§7.10.1) and build the catalog payload — same JSON
+   shape, with the `filename` set to a sensible default like
+   `generated-tests.md`:
+
+   ```json
+   {
+     "type": "test-pilot-catalog",
+     "docId": "abc-123",
+     "filename": "generated-tests.md",
+     "sections": [ ... ]
+   }
+   ```
+
+6. `mark_session_done({id, summary: JSON.stringify(payload)})`.
+
+**Rules specific to `generate-doc`:**
+
+- **Do not ask the user clarifying questions.** This is autoApply mode;
+  the user expects a result, not a back-and-forth. If you genuinely
+  can't determine what to test (empty project, no recognizable
+  framework), `mark_session_error` with a clear explanation rather
+  than guessing.
+- **Bound your scan.** Don't read more than ~30-40 files. The goal is
+  a useful starter spec, not exhaustive coverage. The user will
+  iterate.
+- **Prefer breadth over depth.** A catalog with 8 sections of 4-6
+  tests each is better than one section of 30 deep tests.
+- **No source edits.** Like the other Test Pilot ops, the only file
+  you write is `.pinta/test-docs/{docId}.md`.
+
+### 7.10.2 `op: "detail-steps"` — generate concrete steps for one test
+
+The user clicked the "?" icon on a row in the catalog. The query
+comment:
+
+```json
+{
+  "op": "detail-steps",
+  "docId": "abc-123",
+  "testId": "LIST-05",
+  "sectionTitle": "1.2 Claim Listing"
+}
+```
+
+1. `mark_session_applying({id})`.
+2. Read `.pinta/test-docs/{docId}.md`.
+3. Locate the row by `testId`. Capture the full row (description +
+   expected) plus the section context.
+4. **Check the `detailed_steps` setting** on the session's
+   `test-pilot` module entry (path: `modules[i].settings.detailed_steps`
+   where `modules[i].id === "test-pilot"`). This controls verbosity:
+
+   **`detailed_steps === false` (default — token-saver mode):**
+   Write simple steps a manual QA tester can follow. This is *not* a
+   dev runbook — assume the tester is clicking around a browser, not
+   running shell scripts.
+   - **3–6 steps**, almost always. If you have 10, you're over-engineering.
+   - **One UI action per step**: navigate, click, type, observe.
+   - **Plain English**, short sentences. No curl, no API endpoints, no
+     headers, no JSON bodies, no env vars, no internal class names.
+   - **No fenced code blocks** unless the step truly requires a literal
+     string the tester must paste (rare). Inline `` `code `` is fine
+     for short things like a URL path, a field name, or a button label.
+   - **No "preconditions" step that mints data via the backend.** If
+     the test needs a specific account state, describe it in plain
+     words ("Use a test account whose CFR expired > 90 days ago — see
+     the QA seed list") and let the tester pick from the team's seed
+     data. Don't generate setup commands.
+   - **Last step is the verification** — what they should see.
+
+   Good vs bad (default mode):
+   - ✅ *"Open `/claims` in an Incognito window and sign in as the
+     expired-CFR test user."*
+   - ❌ *"Run `curl -X POST http://localhost:8083/api/v1/admin/claims ...`
+     to register a CFR."*
+
+   **`detailed_steps === true` (deep-help mode):**
+   Tester wants more technical context — they're debugging or writing
+   a new test from scratch. Now it's OK to:
+   - Include 6–12 steps with finer-grained breakdown.
+   - Use fenced code blocks for sample API calls (curl), request/
+     response payloads, sample DB seed commands.
+   - Reference specific URLs, endpoint paths, internal flag names, and
+     env vars where they help.
+   - Still keep each step focused on one thing — verbose ≠ rambling.
+   - Mark optional/expert-only steps with `> Note:` callouts so the
+     happy path stays scannable.
+
+   Either way: **the last step is always the verification.**
+
+5. Build the detail payload:
+
+```json
+{
+  "type": "test-pilot-detail",
+  "docId": "abc-123",
+  "testId": "LIST-05",
+  "title": "Open Claim List with an EXPIRED CFR (>90d)",
+  "expected": "Expired CFR shown as EXPIRED, deep-link disabled",
+  "steps": [
+    "Sign in as a test user whose CFR expired more than 90 days ago.",
+    "Open the Claim List page.",
+    "Find the expired CFR row — confirm it shows the `EXPIRED` label.",
+    "Click the row and confirm nothing happens (the deep link is disabled)."
+  ]
+}
+```
+
+6. `mark_session_done({id, summary: JSON.stringify(payload)})`.
+
+If the test isn't in the doc, `mark_session_error` with a clear
+message ("Test {testId} not found in {filename}.").
+
+### `test-pilot` operating rules
+
+- **No source edits.** Don't touch any file outside
+  `.pinta/test-docs/`. Don't `git add`, don't run tests, don't lint.
+- **No annotations to apply.** The query annotation isn't a bug
+  report; it's a request.
+- **Skip §7 entirely.** The normal annotation loop doesn't apply.
+- **Skip §7.9 (other modules).** Interactive modules own the entire
+  session lifecycle.
+- **`appliedSummary` is structured JSON.** Always
+  `JSON.stringify({...})` your payload. The extension parses it on
+  the other side. If the JSON is malformed the user sees a parse
+  error in the Test Pilot tab.
 
 ## 8. (Optional) Final session summary
 

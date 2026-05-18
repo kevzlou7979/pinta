@@ -37,7 +37,19 @@ function openDb(): Promise<IDBDatabase> {
       }
     };
     req.onsuccess = () => resolve(req.result);
-    req.onerror = () => reject(req.error);
+    req.onerror = () => {
+      // Invalidate the cached promise so subsequent callers retry
+      // instead of awaiting the same poisoned rejection forever
+      // (Firefox private mode, transient corruption, browser
+      // mid-shutdown).
+      dbPromise = null;
+      reject(req.error);
+    };
+  });
+  // If the promise rejects later for any reason, also clear the cache
+  // so the next caller gets a fresh open attempt.
+  dbPromise.catch(() => {
+    dbPromise = null;
   });
   return dbPromise;
 }
@@ -60,7 +72,21 @@ export async function save(origin: string, session: Session): Promise<void> {
     const tx = db.transaction(STORE, "readwrite");
     tx.objectStore(STORE).put({ origin, session });
     tx.oncomplete = () => resolve();
-    tx.onerror = () => reject(tx.error);
+    tx.onerror = () => {
+      const err = tx.error;
+      // Quota errors are user-actionable (clear data / drop big
+      // pasted images) — distinguish them from generic IDB failures
+      // so callers can surface a friendlier message.
+      if (err && err.name === "QuotaExceededError") {
+        reject(
+          new Error(
+            "browser storage quota exceeded — drop large pasted images, or clear data for this site",
+          ),
+        );
+        return;
+      }
+      reject(err ?? new Error("indexeddb write failed"));
+    };
   });
 }
 
@@ -105,6 +131,16 @@ export async function removeImportedSession(id: string): Promise<void> {
   return new Promise((resolve, reject) => {
     const tx = db.transaction(IMPORTED_STORE, "readwrite");
     tx.objectStore(IMPORTED_STORE).delete(id);
+    tx.oncomplete = () => resolve();
+    tx.onerror = () => reject(tx.error);
+  });
+}
+
+export async function clearImportedSessions(): Promise<void> {
+  const db = await openDb();
+  return new Promise((resolve, reject) => {
+    const tx = db.transaction(IMPORTED_STORE, "readwrite");
+    tx.objectStore(IMPORTED_STORE).clear();
     tx.oncomplete = () => resolve();
     tx.onerror = () => reject(tx.error);
   });

@@ -116,6 +116,36 @@
           <div class="space-y-2 pt-2 border-t border-ink-100 dark:border-night-line">
             {#each spec.settings as field (field.key)}
               {@const value = settingValue(spec, field)}
+              {#if field.type === "boolean"}
+                <!-- Inline checkbox layout — keeps boolean toggles tight
+                     and reads more like a real setting row. -->
+                <div class="text-[11px] text-ink-700 dark:text-night-dim">
+                  <label class="flex items-center gap-2 cursor-pointer">
+                    <input
+                      type="checkbox"
+                      class="accent-brand-pink shrink-0"
+                      checked={value === true}
+                      onchange={(e) =>
+                        app.setModuleSetting(
+                          spec.id,
+                          field.key,
+                          (e.currentTarget as HTMLInputElement).checked,
+                        )}
+                    />
+                    <span class="flex items-center gap-1">
+                      {field.label}
+                      {#if field.required}
+                        <span class="text-brand-pink dark:text-brand-pink-light" title="Required">*</span>
+                      {/if}
+                    </span>
+                  </label>
+                  {#if field.hint}
+                    <p class="text-[10px] text-ink-500 dark:text-night-mute mt-0.5 leading-tight pl-6">
+                      {field.hint}
+                    </p>
+                  {/if}
+                </div>
+              {:else}
               <label class="block text-[11px] text-ink-700 dark:text-night-dim">
                 <span class="flex items-center gap-1">
                   {field.label}
@@ -123,19 +153,7 @@
                     <span class="text-brand-pink dark:text-brand-pink-light" title="Required">*</span>
                   {/if}
                 </span>
-                {#if field.type === "boolean"}
-                  <input
-                    type="checkbox"
-                    class="mt-1 accent-brand-pink"
-                    checked={value === true}
-                    onchange={(e) =>
-                      app.setModuleSetting(
-                        spec.id,
-                        field.key,
-                        (e.currentTarget as HTMLInputElement).checked,
-                      )}
-                  />
-                {:else if field.type === "secret"}
+                {#if field.type === "secret"}
                   <div class="mt-0.5 relative">
                     <input
                       type={revealedSecrets[`${spec.id}:${field.key}`] ? "text" : "password"}
@@ -178,6 +196,7 @@
                   </span>
                 {/if}
               </label>
+              {/if}
             {/each}
             {#if !ready}
               <p class="text-[11px] text-amber-700 dark:text-amber-300 leading-snug">

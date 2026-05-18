@@ -128,14 +128,44 @@ async function handle(
   const method = (req.method ?? "GET").toUpperCase();
   const path = url.pathname;
 
-  // CORS for local dev (extension content scripts may call directly)
-  res.setHeader("Access-Control-Allow-Origin", "*");
-  res.setHeader("Access-Control-Allow-Methods", "GET, POST, OPTIONS");
+  // CORS for local dev. Reads (GET) are open — any tool on the user's
+  // machine should be able to probe /v1/health. Writes (POST/PUT/DELETE)
+  // are gated: only the extension itself, the agent's localhost CLI
+  // (no-Origin), or an explicitly-permitted origin may mutate state.
+  // Without this, a malicious page in the user's *own* browser could
+  // CSRF the companion (DELETE /v1/sessions, POST /v1/url-patterns)
+  // because the server binds to 127.0.0.1 — which doesn't help when the
+  // attacker is already a tab in the same browser.
+  const reqOrigin = req.headers.origin ?? "";
+  const isExtensionOrigin = reqOrigin.startsWith("chrome-extension://");
+  const isReadMethod = method === "GET" || method === "HEAD";
+  const writeAllowed = !reqOrigin || isExtensionOrigin;
+
+  // ACAO mirroring: echo the request's Origin when it's a Chrome
+  // extension (so the browser allows credentialed fetches), else "*"
+  // for the read-only case. Methods/headers are constant.
+  res.setHeader(
+    "Access-Control-Allow-Origin",
+    isExtensionOrigin ? reqOrigin : "*",
+  );
+  res.setHeader("Vary", "Origin");
+  res.setHeader(
+    "Access-Control-Allow-Methods",
+    "GET, POST, DELETE, OPTIONS",
+  );
   res.setHeader("Access-Control-Allow-Headers", "Content-Type");
   if (method === "OPTIONS") {
     res.statusCode = 204;
     res.end();
     return;
+  }
+
+  // Reject cross-origin writes from non-extension pages. Same-origin or
+  // no-Origin (Node CLI, curl, native fetch without Origin header) pass
+  // through; only browser-tab attacks are blocked.
+  if (!isReadMethod && !writeAllowed) {
+    log(`rejected ${method} ${path} from origin ${reqOrigin}`);
+    return sendJson(res, 403, { error: "forbidden cross-origin write" });
   }
 
   if (method === "GET" && path === "/v1/health") {
@@ -193,6 +223,25 @@ async function handle(
     return sendJson(res, 200, store.getActive());
   }
 
+  if (method === "DELETE" && path === "/v1/test-docs") {
+    // Wipe the entire .pinta/test-docs/ directory. Called when the
+    // user hits "Clear catalog" in Test Pilot — keeps the on-disk
+    // copy of (potentially credential-bearing) UAT specs in lock-step
+    // with the side panel's catalog state.
+    await store.purgeAllTestDocs();
+    log("test-docs cleared");
+    return sendJson(res, 200, { ok: true });
+  }
+
+  if (method === "DELETE" && path === "/v1/sessions") {
+    // Wipe every persisted session + screenshot. Drafting session (if
+    // any) is preserved by the store. Called from the side panel's
+    // History → Clear button.
+    await store.purgeAllSessions();
+    log("sessions cleared");
+    return sendJson(res, 200, { ok: true });
+  }
+
   if (method === "GET" && path === "/v1/sessions") {
     // Recent sessions, newest first. Light summary — no annotation bodies
     // — so the side panel history view stays fast even with many sessions.
@@ -240,24 +289,42 @@ async function handle(
       }
     }
 
-    // Push on every transition into the submitted state.
+    let alive = true;
+    const tearDown = (reason: string) => {
+      if (!alive) return;
+      alive = false;
+      clearInterval(keepalive);
+      unsubscribe();
+      log(`sse stream closed (${reason})`);
+    };
+
+    // Push on every transition into the submitted state. Wrap the
+    // write in try/catch — if the agent's TCP socket half-closed, a
+    // synchronous write throws and would otherwise propagate up
+    // through the store's listener loop, blocking other subscribers.
     const unsubscribe = store.subscribe((session) => {
-      if (session.status === "submitted") {
+      if (!alive) return;
+      if (session.status !== "submitted") return;
+      try {
         res.write(`event: session\ndata: ${JSON.stringify(session)}\n\n`);
+      } catch (err) {
+        tearDown(`write failed: ${(err as Error).message}`);
       }
     });
 
     // Periodic comment keeps proxies / agents from idle-closing the
     // connection. SSE comments start with `:` and are ignored by clients.
     const keepalive = setInterval(() => {
-      res.write(`: keepalive ${Date.now()}\n\n`);
+      if (!alive) return;
+      try {
+        res.write(`: keepalive ${Date.now()}\n\n`);
+      } catch (err) {
+        tearDown(`keepalive write failed: ${(err as Error).message}`);
+      }
     }, 20_000);
 
-    req.on("close", () => {
-      clearInterval(keepalive);
-      unsubscribe();
-      log("ws stream closed");
-    });
+    req.on("close", () => tearDown("client closed"));
+    res.on("error", (err) => tearDown(`response error: ${err.message}`));
     return;
   }
 

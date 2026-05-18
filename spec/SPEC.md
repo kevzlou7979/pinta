@@ -90,29 +90,40 @@ Phase 10.
 ## 4. Core concepts
 
 ### Annotation
-A single mark-up: one drawing or selection plus an optional comment.
+A single mark-up: one drawing, selection, or interactive-module query
+plus an optional comment. Canonical type in `shared/src/types.ts`.
 
 ```ts
 type Annotation = {
   id: string;                         // uuid
   createdAt: number;
 
-  // The mark
-  kind: 'arrow' | 'rect' | 'circle' | 'freehand' | 'pin' | 'select';
+  // The mark. "image" annotations are pasted/dropped reference images
+  // placed in page-space; "query" annotations carry a JSON-encoded
+  // request from an interactive module (e.g. Test Pilot) and have no
+  // DOM target — see §8 Phase 12.
+  kind: 'arrow' | 'rect' | 'circle' | 'freehand' | 'pin' | 'select'
+      | 'image' | 'query';
   strokes: Point[];                   // page coordinates
   color: string;
 
-  // What it points at — drawings auto-resolve via elementFromPoint at
-  // commit time, so this is populated for every annotation in practice.
-  target?: {
-    selector: string;                 // computed CSS selector
-    outerHTML: string;                // truncated to ~2KB
-    computedStyles: Record<string, string>;
-    nearbyText: string[];             // for grep fallback
-    boundingRect: { x: number; y: number; width: number; height: number };
-    sourceFile?: string;              // from Vite plugin if installed
-    sourceLine?: number;
-  };
+  // Page URL the annotation was created on. Lets a single Session
+  // carry annotations from multiple routes of a SPA flow. Skill keys
+  // off this for per-page output; falls back to `session.url`.
+  url?: string;
+
+  // What it points at. Multi-select (Ctrl/Cmd+click) populates the
+  // `targets` array; single-target legacy paths still set `target`.
+  // Readers should prefer `targets` and fall back to `[target]`.
+  targets?: AnnotationTarget[];
+  /** @deprecated since v0.3 — use `targets`. Kept for one release. */
+  target?: AnnotationTarget;
+
+  // How the agent should interpret a multi-target annotation:
+  // - "single-edit" (default): one change that satisfies every target.
+  // - "per-element": apply as N independent edits, one per target.
+  // Ignored when `targets` has length 0 or 1.
+  groupingMode?: 'single-edit' | 'per-element';
 
   // The intent
   comment: string;
@@ -133,12 +144,27 @@ type Annotation = {
   errorMessage?: string;
 };
 
+type AnnotationTarget = {
+  selector: string;                 // computed CSS selector
+  outerHTML: string;                // truncated to ~2 KB, sanitized
+  computedStyles: Record<string, string>;
+  nearbyText: string[];             // for grep fallback
+  boundingRect: { x: number; y: number; width: number; height: number };
+  sourceFile?: string;              // from Vite plugin if installed
+  sourceLine?: number;
+};
+
 type AnnotationImage = {
   id: string;            // "image1", "image2" — used in [imageN] refs
   mediaType: string;     // "image/png", "image/jpeg"
   dataUrl?: string;      // inline base64 (current shape)
   path?: string;         // disk path, set if companion extracts later
   name?: string;         // original filename if dropped from disk
+  // Set on `kind: "image"` annotations — where the image is placed on
+  // the page in page-space coords (includes scrollY). Composite renderer
+  // stamps the image onto the screenshot at this position. Unset for
+  // inline reference images attached to a comment popover.
+  placement?: { x: number; y: number; width: number; height: number };
 };
 ```
 
@@ -179,6 +205,18 @@ type Session = {
   // (>5 min without a status-update heartbeat) auto-release.
   claimedBy?: string;
   claimedAt?: number;
+
+  // Phase 12 — built-in modules the user opted into for this submit.
+  // Each entry pairs a stable module id with user-supplied settings the
+  // agent needs (project ids, labels, feature flags, etc.). Stripped
+  // from `.pinta` share-file exports so secrets in module settings
+  // (e.g. GitLab tokens) never travel between machines.
+  modules?: SessionModule[];
+};
+
+type SessionModule = {
+  id: string;                          // e.g. "gitlab-issues", "test-pilot"
+  settings: Record<string, string | boolean>;
 };
 ```
 
@@ -263,41 +301,90 @@ type ExtensionState = {
 
 **HTTP API (versioned)**
 
+Reads (GET) are open. Writes (POST / DELETE) reject requests carrying
+a browser `Origin` other than `chrome-extension://*` so a tab in the
+user's own browser can't CSRF the companion — see `companion/src/server.ts`.
+
 ```
-GET  /v1/sessions/active            → current session or null
-GET  /v1/sessions/:id               → full session
-POST /v1/sessions/:id/status        → update status
-GET  /v1/sessions/poll              → long-poll for next submitted session
-GET  /v1/health                     → health check
+GET    /v1/health                                          → { ok, projectRoot, port, urlPatterns, registryId, version, pid }
+GET    /v1/registry                                        → snapshot of every running companion
+GET    /v1/url-patterns                                    → on-disk patterns from .pinta.json
+POST   /v1/url-patterns                                    → { pattern } → updated patterns[]
+GET    /v1/sessions                                        → slim history list (no annotation bodies)
+GET    /v1/sessions/active                                 → current session or null
+GET    /v1/sessions/poll                                   → long-poll for next submitted session (25s)
+GET    /v1/sessions/stream                                 → SSE push (event: session\ndata: {...})
+POST   /v1/sessions                                        → ingest a fully-formed session (test path)
+GET    /v1/sessions/:id                                    → full session
+POST   /v1/sessions/:id/status                             → { status, summary?, errorMessage? }
+POST   /v1/sessions/:id/claim                              → { claimerId } → 200 winner | 409 already-claimed
+POST   /v1/sessions/:id/annotations/:annId/status          → { status, errorMessage? }
+DELETE /v1/sessions                                        → wipe history (preserves any active drafting session)
+DELETE /v1/test-docs                                       → wipe .pinta/test-docs/ (Test Pilot, Phase 12)
 ```
 
 **WebSocket protocol** (extension ↔ companion)
 
 ```ts
 type ClientMessage =
-  | { type: 'session.create', url: string }
-  | { type: 'annotation.add', annotation: Annotation }
-  | { type: 'annotation.update', id: string, patch: Partial<Annotation> }
-  | { type: 'annotation.remove', id: string }
-  | { type: 'session.submit', screenshot: string };
+  | {
+      type: 'session.create';
+      url: string;
+      // Phase 12 — interactive modules create ephemeral sessions that
+      // don't take over `activeId`, so the user's annotation draft is
+      // left alone while a Test Pilot query runs alongside it.
+      ephemeral?: boolean;
+      // v0.3.1 — discard any existing drafting session before creating
+      // a fresh one. Set by side-panel "Clear" so the server's
+      // drafting-idempotency doesn't resurrect the cleared annotations.
+      force?: boolean;
+    }
+  | { type: 'annotation.add'; annotation: Annotation }
+  | { type: 'annotation.update'; id: string; patch: Partial<Annotation> }
+  | { type: 'annotation.remove'; id: string }
+  | {
+      type: 'session.submit';
+      screenshot: string;             // "" allowed (opt-in, no-screenshot mode)
+      autoApply?: boolean;            // Phase 7 — skip the "reply 'go'" gate
+      modules?: SessionModule[];      // Phase 12 — per-submit module opt-ins
+    }
+  // Phase 12 — one-shot bundled submit for interactive modules.
+  // Companion creates an ephemeral session, attaches a single
+  // `kind: "query"` annotation built from `queryComment`, marks
+  // submitted, and broadcasts the result via session.synced.
+  | {
+      type: 'module.query.submit';
+      url: string;
+      moduleId: string;
+      moduleSettings: Record<string, string | boolean>;
+      queryComment: string;
+    };
 
 type ServerMessage =
-  | { type: 'session.created', session: Session }
-  | { type: 'session.synced', session: Session }
+  | { type: 'session.created'; session: Session }
+  | { type: 'session.synced'; session: Session }
   | { type: 'session.applying' }
-  | { type: 'session.done', summary: string }
-  | { type: 'error', message: string };
+  | { type: 'session.done'; summary: string }
+  // Phase 12 — companion's targeted ack for a module.query.submit.
+  // Lets the extension pin the resulting session id to the right
+  // interactive-module slot. The companion also broadcasts a normal
+  // session.synced for the same session.
+  | { type: 'module.query.created'; moduleId: string; session: Session }
+  | { type: 'error'; message: string };
 ```
 
 **MCP tools exposed**
 
 ```
-get_pending_session()             → Session | null
-get_session(id)                   → Session
-mark_session_applying(id)         → void
-mark_session_done(id, summary)    → void
-mark_session_error(id, error)     → void
-get_screenshot(annotation_id)     → base64 PNG (cropped)
+get_pending_session()                          → Session | null
+get_session(id)                                → Session
+mark_session_applying(id)                      → void
+mark_session_done(id, summary)                 → void
+mark_session_error(id, error)                  → void
+mark_annotation_applying(sessionId, annId)     → void   // Phase 9
+mark_annotation_done(sessionId, annId)         → void   // Phase 9
+mark_annotation_error(sessionId, annId, error) → void   // Phase 9
+get_screenshot(annotation_id)                  → base64 PNG (cropped)
 ```
 
 **Process model**: long-running. Started once per project, runs until killed. Multiple agents can connect simultaneously (only one applies, others observe).
@@ -993,6 +1080,113 @@ audience (Phase 10).
   previously froze the entire annotation list at "0").
 - `each` blocks in the side panel use composite keys (`${id}:${index}`)
   for collision-safe diffing as a second line of defense.
+
+### Phase 12 — Built-in modules + Test Pilot — Shipped
+
+The annotation → agent → source-edits loop covers visual changes, but
+real teams need more: filing issues alongside the edit, running UAT
+test scripts against the page, design-system checks, etc. Phase 12
+adds **built-in modules** — small, agent-side integrations the user
+opts into per submit (or per interactive surface). Each module ships
+inside the extension with a settings schema and matching agent
+instructions in the `/pinta` skill; new modules just add an entry to
+`extension/src/lib/modules.ts` plus a §7.9 / §7.10 block in the skill.
+
+Two module surface kinds:
+
+- **`mode: "per-submit"`** — module ticks alongside the user's
+  annotation batch and runs after the agent's source edits land
+  (e.g. GitLab Issues files one ticket per annotation). Surfaces as a
+  footer checkbox; carried on the wire as
+  `session.modules: SessionModule[]`.
+- **`mode: "interactive"`** — module owns its own tab in the side
+  panel and drives the agent directly via one-shot ephemeral sessions
+  carrying a `kind: "query"` annotation (Test Pilot). Surfaces as a
+  top-level tab; carried on the wire as the new
+  `module.query.submit` ClientMessage.
+
+**Shipped modules (v0.3.0+):**
+
+- **GitLab Issues (`per-submit`).** Files one issue per annotation via
+  the user's `glab` CLI on their machine — auth comes from
+  `glab auth login`, **no tokens stored, transmitted, or written to
+  disk by Pinta**. Issue body embeds the full-page screenshot
+  (uploaded to the project's GitLab uploads endpoint), the selector,
+  source file, and annotated page URL. Before filing, the agent
+  prompts in chat for batch metadata (domain label, extra tags,
+  assignees, or `later` to skip). The screenshot checkbox auto-locks
+  ON when this module is ticked. Settings (`project_id`, `labels`)
+  are optional overrides; the common case ("blank") just lets `glab`
+  auto-detect from the current repo's remote.
+
+- **Test Pilot (`interactive`).** Imports or agent-generates a
+  markdown UAT spec, extracts a tested catalog, and lets a manual
+  tester step through it row by row. Three operations driven via
+  `module.query.submit`:
+
+  - `op: "doc-parse"` — the user imports a hand-written `.md` test
+    spec. The query carries the full file content; companion writes
+    it to `.pinta/test-docs/{docId}.md` and strips the inline content
+    before persisting the session JSON. Agent reads the file via
+    standard `Read` tool, extracts sections + test rows, returns a
+    `test-pilot-catalog` payload via `mark_session_done`.
+  - `op: "generate-doc"` — agent walks the project (routes,
+    components, auth flow) and writes a fresh UAT spec from scratch,
+    same return shape. ~600s ceiling vs 120s for the other ops.
+  - `op: "detail-steps"` — the user clicks `?` on a row; agent
+    returns a `test-pilot-detail` payload with 3–6 (default) or 6–12
+    (`detailed_steps: true`) step instructions. Side panel renders
+    them with light markdown (inline code, fenced code blocks via
+    Prism, `> Note:` callouts) and per-block copy-to-clipboard.
+
+  The module exposes one setting — `detailed_steps: boolean` — that
+  toggles between tester-friendly short steps (default, fewer tokens)
+  and deeper technical steps (verbose, with curl/payload examples).
+  Flipping the toggle invalidates every cached `test.detail` in the
+  current catalog so the next row-open re-fetches at the new
+  verbosity.
+
+  Results persist to `chrome.storage.local` under
+  `pinta-test-pilot:current`. Catalog rows can be marked Pass / Fail
+  / Untested; the tab exports the whole catalog as a markdown report
+  for sharing or PDF conversion via pandoc. Clearing the catalog
+  also wipes `.pinta/test-docs/` via `DELETE /v1/test-docs` — UAT
+  specs often carry real credentials or internal URLs so retention
+  is intentionally tight.
+
+**Annotation shape.** A new `kind: "query"` carries the JSON-encoded
+request in `comment`. The annotation has no DOM target, no strokes,
+and never appears in the regular annotation list — the extension's
+`onMessage` routes the eventual `session.synced` into the matching
+module slot instead of the draft.
+
+**Wire-protocol changes (vs the original spec §6.2 / Phases 9 & 11):**
+
+| Direction | Addition |
+|---|---|
+| Type   | `Annotation.kind = "query"` (interactive-module queries) |
+| Type   | `Session.modules: SessionModule[]` + `SessionModule` |
+| WS     | `module.query.submit` (extension → companion) |
+| WS     | `module.query.created` (companion → extension targeted ack) |
+| WS     | `session.submit` carries `modules?: SessionModule[]` |
+| HTTP   | `DELETE /v1/test-docs` (wipe `.pinta/test-docs/`) |
+| Skill  | `/pinta` §7.9 (per-submit modules) + §7.10 (Test Pilot ops) |
+| Storage | `chrome.storage.local["pinta-test-pilot:current"]` (extension) |
+| Disk   | `.pinta/test-docs/{docId}.md` (companion) |
+
+**Security posture.** Localhost binding plus an Origin check on every
+write endpoint (added with Phase 12): destructive routes like
+`DELETE /v1/sessions` and `DELETE /v1/test-docs` reject browser-tab
+requests carrying a non-extension Origin so a malicious page in the
+user's own browser can't CSRF the companion. Module settings that
+carry secrets (e.g. future tokens) are stripped from `.pinta`
+share-file exports so they never travel between machines.
+
+**Out of scope for first cut:**
+- Per-tester sign-off / completion form on the exported catalog
+  (parked; see memory `test-pilot-signoff-spec.md`).
+- Custom user-authored modules (today's set is built-in only).
+- Multi-catalog concurrency in Test Pilot (one catalog at a time).
 
 ---
 

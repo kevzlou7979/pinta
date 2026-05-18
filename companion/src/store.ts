@@ -1,4 +1,4 @@
-import { mkdir, writeFile, readdir, readFile } from "node:fs/promises";
+import { mkdir, writeFile, readdir, readFile, unlink, rm } from "node:fs/promises";
 import { join } from "node:path";
 import { randomUUID } from "node:crypto";
 import type {
@@ -39,7 +39,18 @@ export class SessionStore {
   }
 
   private notifyChange(session: Session): void {
-    for (const fn of this.listeners) fn(session);
+    // Isolate listeners so one dying subscriber (closed WS, broken
+    // SSE pipe) can't poison the rest of the chain and leave the
+    // store in a half-broadcast state.
+    for (const fn of this.listeners) {
+      try {
+        fn(session);
+      } catch (err) {
+        // Listeners are best-effort — swallow & log so the store loop
+        // continues. SSE/WS write failures are the most likely cause.
+        console.warn("[store] listener threw:", (err as Error).message);
+      }
+    }
   }
 
   private get sessionsDir(): string {
@@ -53,6 +64,124 @@ export class SessionStore {
 
   private absScreenshotPath(id: string): string {
     return join(this.sessionsDir, `${id}.png`);
+  }
+
+  private get testDocsDir(): string {
+    return join(this.projectRoot, ".pinta", "test-docs");
+  }
+
+  /**
+   * Test Pilot "doc-parse" queries carry the full markdown doc in the
+   * query annotation's comment as JSON `{op, docId, filename, content}`.
+   * Write the content out to `.pinta/test-docs/{docId}.md` so the agent
+   * can read it from disk via the standard Read tool, and strip the
+   * inline content from the annotation before persisting. Mutates the
+   * session in place. No-op for sessions that aren't doc-parse queries.
+   */
+  private async extractTestDocContent(session: Session): Promise<void> {
+    if (!session.modules?.some((m) => m.id === "test-pilot")) return;
+    for (const ann of session.annotations) {
+      if (ann.kind !== "query" || !ann.comment) continue;
+      let parsed: unknown;
+      try {
+        parsed = JSON.parse(ann.comment);
+      } catch {
+        continue;
+      }
+      if (
+        !parsed ||
+        typeof parsed !== "object" ||
+        (parsed as { op?: unknown }).op !== "doc-parse"
+      ) {
+        continue;
+      }
+      const p = parsed as {
+        op: "doc-parse";
+        docId: string;
+        filename: string;
+        content?: string;
+      };
+      if (typeof p.content !== "string") continue;
+      await mkdir(this.testDocsDir, { recursive: true });
+      const ext = p.filename.toLowerCase().endsWith(".md") ? "md" : "md";
+      const filePath = join(this.testDocsDir, `${p.docId}.${ext}`);
+      await writeFile(filePath, p.content, "utf8");
+      // Sweep prior imports — only one catalog is active at a time, and
+      // older docs would otherwise linger on disk indefinitely. Specs
+      // can contain real credentials / internal URLs; bounded retention
+      // limits the blast radius if the project root is shared or backed up.
+      await this.purgeStaleTestDocs(p.docId);
+      // Strip the inline content from the annotation so the persisted
+      // session JSON stays small. The agent reads the file via docId.
+      ann.comment = JSON.stringify({
+        op: p.op,
+        docId: p.docId,
+        filename: p.filename,
+      });
+    }
+  }
+
+  /**
+   * Remove every file in `.pinta/test-docs/` that doesn't belong to
+   * `keepDocId`. Tolerates a missing directory.
+   */
+  private async purgeStaleTestDocs(keepDocId: string): Promise<void> {
+    try {
+      const entries = await readdir(this.testDocsDir);
+      for (const name of entries) {
+        if (name.startsWith(`${keepDocId}.`)) continue;
+        try {
+          await unlink(join(this.testDocsDir, name));
+        } catch {
+          // best-effort — locked file, race with cleanup, etc.
+        }
+      }
+    } catch {
+      // dir doesn't exist yet — nothing to clean.
+    }
+  }
+
+  /**
+   * Wipe every persisted session + screenshot from `.pinta/sessions/`
+   * and drop them from the in-memory map. The currently-active drafting
+   * session is preserved so a user mid-edit doesn't lose their work.
+   * Called by DELETE /v1/sessions when the user clears their history.
+   */
+  async purgeAllSessions(): Promise<void> {
+    const keepId =
+      this.activeId && this.sessions.get(this.activeId)?.status === "drafting"
+        ? this.activeId
+        : null;
+    for (const id of [...this.sessions.keys()]) {
+      if (id === keepId) continue;
+      this.sessions.delete(id);
+    }
+    if (!keepId) this.activeId = null;
+    try {
+      const files = await readdir(this.sessionsDir);
+      for (const f of files) {
+        const isKeptJson = keepId && f === `${keepId}.json`;
+        const isKeptPng = keepId && f === `${keepId}.png`;
+        if (isKeptJson || isKeptPng) continue;
+        try {
+          await unlink(join(this.sessionsDir, f));
+        } catch {
+          // best-effort
+        }
+      }
+    } catch {
+      // dir may not exist yet
+    }
+  }
+
+  /** Wipe the entire test-docs directory. Called by the companion's
+   *  DELETE /v1/test-docs endpoint when the user clears their catalog. */
+  async purgeAllTestDocs(): Promise<void> {
+    try {
+      await rm(this.testDocsDir, { recursive: true, force: true });
+    } catch {
+      // already gone / permission issue — caller treats as success.
+    }
   }
 
   /**
@@ -110,18 +239,44 @@ export class SessionStore {
   createSession(input: {
     url: string;
     producer?: SessionProducer;
+    /**
+     * When true, force a brand-new session even if the user already
+     * has a drafting session in flight, and do NOT take over `activeId`.
+     * Used by interactive modules (e.g. Test Pilot) that run query
+     * sessions alongside the user's annotation draft.
+     */
+    ephemeral?: boolean;
+    /**
+     * When true, drop any existing drafting session before creating a
+     * new one. Set by the side panel's "Clear" action — without this,
+     * the drafting-idempotency below would echo back the existing
+     * session and its annotations would silently resurrect.
+     */
+    force?: boolean;
   }): Session {
     // Idempotent on the drafting session. The side panel sends
     // session.create whenever it reconnects (e.g. user navigated tabs and
     // we re-routed back to this companion). Without this guard, a fresh
     // session would replace the user's in-progress draft and the
     // annotations they'd already added would silently disappear from view.
-    const existing = this.getActive();
-    if (existing && existing.status === "drafting") {
-      // Update the URL in case the user is now on a different page in
-      // the same project — annotations still carry their per-target URL.
-      if (input.url) existing.url = input.url;
-      return existing;
+    if (!input.ephemeral && !input.force) {
+      const existing = this.getActive();
+      if (existing && existing.status === "drafting") {
+        // Update the URL in case the user is now on a different page in
+        // the same project — annotations still carry their per-target URL.
+        if (input.url) existing.url = input.url;
+        return existing;
+      }
+    }
+    if (input.force) {
+      // User explicitly asked to discard the active draft (Clear button).
+      // Delete it outright instead of leaving an empty `drafting` row in
+      // session history.
+      const existing = this.getActive();
+      if (existing && existing.status === "drafting") {
+        this.sessions.delete(existing.id);
+        if (this.activeId === existing.id) this.activeId = null;
+      }
     }
     const session: Session = {
       id: randomUUID(),
@@ -133,7 +288,12 @@ export class SessionStore {
       producer: input.producer ?? "extension",
     };
     this.sessions.set(session.id, session);
-    this.activeId = session.id;
+    // Ephemeral sessions don't become "active" — the user's annotation
+    // draft (if any) stays the active session. The extension routes
+    // status events by session.id so this still works end-to-end.
+    if (!input.ephemeral) {
+      this.activeId = session.id;
+    }
     return session;
   }
 
@@ -198,6 +358,7 @@ export class SessionStore {
     if (modules && modules.length > 0) session.modules = modules;
     else delete session.modules;
     await this.extractScreenshot(session);
+    await this.extractTestDocContent(session);
     await this.persist(session);
     this.notifyChange(session);
     this.notifyWaiters(session);

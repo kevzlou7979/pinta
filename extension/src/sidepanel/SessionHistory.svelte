@@ -23,10 +23,18 @@
   async function refresh() {
     loading = true;
     try {
-      const res = await fetch("http://127.0.0.1:7878/v1/sessions");
-      if (!res.ok) throw new Error(`HTTP ${res.status}`);
-      summaries = (await res.json()) as Summary[];
-      error = null;
+      const base = app.httpBase();
+      if (!base) {
+        // Standalone mode (no companion). Show an empty companion-side
+        // list — the imported sessions still load below.
+        summaries = [];
+        error = null;
+      } else {
+        const res = await fetch(`${base}/v1/sessions`);
+        if (!res.ok) throw new Error(`HTTP ${res.status}`);
+        summaries = (await res.json()) as Summary[];
+        error = null;
+      }
     } catch (err) {
       error = (err as Error).message;
     } finally {
@@ -56,6 +64,27 @@
   async function removeImported(id: string) {
     if (!confirm("Remove this imported session?")) return;
     await app.removeImported(id);
+  }
+
+  let clearing = $state(false);
+  async function clearAll() {
+    if (clearing) return;
+    const parts: string[] = [];
+    if (summaries.length > 0) parts.push(`${summaries.length} local`);
+    if (app.importedSessions.length > 0) parts.push(`${app.importedSessions.length} imported`);
+    if (parts.length === 0) return;
+    const msg =
+      `Clear ${parts.join(" + ")} session${
+        summaries.length + app.importedSessions.length === 1 ? "" : "s"
+      }? Your active draft (if any) is kept. This can't be undone.`;
+    if (!confirm(msg)) return;
+    clearing = true;
+    try {
+      await app.clearAllHistory();
+      await refresh();
+    } finally {
+      clearing = false;
+    }
   }
 
   onMount(() => {
@@ -109,6 +138,42 @@
     return `${Math.floor(seconds / 86_400)}d ago`;
   }
 
+  // Some agents (notably Test Pilot) stuff structured JSON into
+  // `appliedSummary` — the raw payload is for the extension to consume,
+  // not for humans, and it can contain test data / URLs / emails. Map
+  // known shapes to a clean label; opaque JSON gets a generic label
+  // rather than being dumped to the panel.
+  function friendlySummary(raw: string): string {
+    const trimmed = raw.trim();
+    if (!trimmed.startsWith("{") && !trimmed.startsWith("[")) return raw;
+    try {
+      const parsed = JSON.parse(trimmed) as { type?: string; [k: string]: unknown };
+      if (parsed && typeof parsed === "object") {
+        switch (parsed.type) {
+          case "test-pilot-catalog": {
+            const sections = Array.isArray(parsed.sections) ? parsed.sections : [];
+            const tests = sections.reduce(
+              (n: number, s: any) => n + (Array.isArray(s?.tests) ? s.tests.length : 0),
+              0,
+            );
+            return `Test Pilot catalog · ${sections.length} section${
+              sections.length === 1 ? "" : "s"
+            }, ${tests} test${tests === 1 ? "" : "s"}`;
+          }
+          case "test-pilot-detail": {
+            const id = typeof parsed.testId === "string" ? parsed.testId : "";
+            return id ? `Test Pilot detail · ${id}` : "Test Pilot detail";
+          }
+          default:
+            return "Agent response";
+        }
+      }
+    } catch {
+      // Not JSON after all — fall through and show the original text.
+    }
+    return raw;
+  }
+
   function shortUrl(u: string): string {
     try {
       const url = new URL(u);
@@ -123,44 +188,62 @@
     open = !open;
     if (open) refresh();
   }
+
+  let totalCount = $derived(summaries.length + app.importedSessions.length);
 </script>
 
 <div class="relative" bind:this={rootEl}>
   <button
     type="button"
-    class="inline-flex items-center gap-1 rounded-full border border-ink-200 bg-white text-ink-600 hover:text-brand-pink hover:border-ink-400 dark:border-night-line dark:bg-night-alt dark:text-night-dim dark:hover:text-brand-pink-light dark:hover:border-night-line2 text-[11px] font-medium h-7 px-2.5 transition-colors"
+    class="relative w-7 h-7 inline-flex items-center justify-center rounded-full border border-ink-200 bg-white text-ink-600 hover:text-brand-pink hover:border-ink-400 dark:border-night-line dark:bg-night-alt dark:text-night-dim dark:hover:text-brand-pink-light dark:hover:border-night-line2 transition-colors"
     onclick={toggle}
     aria-haspopup="dialog"
     aria-expanded={open}
-    title="Session history"
+    aria-label="Session history"
+    title={totalCount > 0 ? `Session history (${totalCount})` : "Session history"}
   >
-    <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 12a9 9 0 1 0 3-6.7L3 8"/><path d="M3 3v5h5"/><path d="M12 7v5l3 2"/></svg>
-    <span>History</span>
-    {#if summaries.length + app.importedSessions.length > 0}
-      <span class="text-ink-500 dark:text-night-mute">({summaries.length + app.importedSessions.length})</span>
+    <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 12a9 9 0 1 0 3-6.7L3 8"/><path d="M3 3v5h5"/><path d="M12 7v5l3 2"/></svg>
+    {#if totalCount > 0}
+      <span
+        class="absolute -top-1 -right-1 min-w-[14px] h-[14px] px-1 inline-flex items-center justify-center rounded-full bg-brand-pink text-white text-[9px] font-semibold leading-none dark:bg-brand-pink-light dark:text-night-bg"
+        aria-hidden="true"
+      >
+        {totalCount > 99 ? "99+" : totalCount}
+      </span>
     {/if}
     {#if loading}
-      <span class="text-[10px] text-ink-400 dark:text-night-mute">…</span>
+      <span class="absolute -bottom-1 -right-1 w-1.5 h-1.5 rounded-full bg-ink-400 dark:bg-night-mute animate-pulse" aria-hidden="true"></span>
     {/if}
   </button>
 
   {#if open}
     <div
-      class="absolute right-0 top-full mt-1 w-[320px] z-30 rounded-md border border-ink-300 bg-white shadow-lg dark:border-night-line dark:bg-night-alt"
+      class="absolute right-0 top-full mt-1 w-[min(420px,calc(100vw-16px))] z-30 rounded-md border border-ink-300 bg-white shadow-lg dark:border-night-line dark:bg-night-alt"
       role="dialog"
     >
-      <div class="px-3 py-2 border-b border-ink-200 dark:border-night-line flex items-center justify-between">
+      <div class="px-3 py-2 border-b border-ink-200 dark:border-night-line flex items-center justify-between gap-2">
         <span class="text-xs font-medium text-ink-700 dark:text-night-text">Session history</span>
-        <button
-          type="button"
-          class="text-[11px] text-ink-500 dark:text-night-dim hover:text-brand-pink dark:hover:text-brand-pink-light disabled:opacity-50"
-          onclick={refresh}
-          disabled={loading}
-        >
-          {loading ? "…" : "↻ Refresh"}
-        </button>
+        <div class="flex items-center gap-2.5">
+          <button
+            type="button"
+            class="text-[11px] text-ink-500 dark:text-night-dim hover:text-red-600 dark:hover:text-red-400 disabled:opacity-50"
+            onclick={clearAll}
+            disabled={clearing || loading || totalCount === 0}
+            title={totalCount === 0 ? "Nothing to clear" : "Clear all sessions (keeps active draft)"}
+          >
+            {clearing ? "…" : "🗑 Clear"}
+          </button>
+          <button
+            type="button"
+            class="text-[11px] text-ink-500 dark:text-night-dim hover:text-brand-pink dark:hover:text-brand-pink-light disabled:opacity-50"
+            onclick={refresh}
+            disabled={loading}
+          >
+            {loading ? "…" : "↻ Refresh"}
+          </button>
+        </div>
       </div>
-      <div class="p-2 space-y-1.5 max-h-72 overflow-y-auto">
+      <div class="p-2 space-y-1.5 max-h-[calc(100vh-120px)] overflow-y-auto">
         {#if app.importedSessions.length > 0}
           <div class="space-y-1.5">
             <div class="text-[10px] uppercase tracking-wide text-ink-500 dark:text-night-mute font-semibold px-1">
@@ -260,7 +343,7 @@
               {#if s.annotationCount > 0 || s.appliedSummary || s.errorMessage}
                 <div class="mt-0.5 text-[11px] text-ink-600 dark:text-night-dim leading-tight">
                   {#if s.appliedSummary}
-                    {s.appliedSummary}
+                    {friendlySummary(s.appliedSummary)}
                   {:else if s.errorMessage}
                     <span class="text-red-600 dark:text-red-300">{s.errorMessage}</span>
                   {:else}

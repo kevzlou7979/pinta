@@ -23,14 +23,30 @@ export type ModuleSettingSpec = {
   placeholder?: string;
 };
 
+/**
+ * How a module surfaces in the side panel.
+ * - "per-submit" — user opts in via a footer checkbox each submit. The
+ *   module runs after the agent's source edits land (e.g. GitLab
+ *   Issues files one issue per annotation).
+ * - "interactive" — module owns its own tab in the side panel. It
+ *   doesn't ride on annotation submits; the user drives it directly
+ *   from within the tab (e.g. Test Pilot imports a doc and runs
+ *   queries against the agent without touching source files).
+ */
+export type ModuleMode = "per-submit" | "interactive";
+
 export type ModuleSpec = {
   id: string;
   name: string;
   /** One-line description shown in the Settings card. */
   description: string;
-  /** What the user gets when they tick the per-session checkbox. */
+  /** Surface kind — drives where the module renders in the UI. */
+  mode: ModuleMode;
+  /** What the user gets when they tick the per-session checkbox.
+   *  Unused for "interactive" modules. */
   sessionCheckboxLabel: string;
-  /** Subtext under the per-session checkbox. */
+  /** Subtext under the per-session checkbox.
+   *  Unused for "interactive" modules. */
   sessionCheckboxHint: string;
   settings: ModuleSettingSpec[];
   /**
@@ -65,6 +81,7 @@ const GITLAB_ISSUES: ModuleSpec = {
   name: "GitLab Issues",
   description:
     "Create one GitLab issue per annotation. The agent applies your source edits first, then files the tickets via the `glab` CLI on your machine — auth comes from your `glab auth login`. No tokens stored.",
+  mode: "per-submit",
   sessionCheckboxLabel: "Create GitLab issues",
   sessionCheckboxHint:
     "After the agent finishes, file one issue per annotation using `glab` on your machine.",
@@ -87,7 +104,37 @@ const GITLAB_ISSUES: ModuleSpec = {
   ],
 };
 
-export const BUILTIN_MODULES: ModuleSpec[] = [GITLAB_ISSUES];
+/**
+ * Test Pilot — interactive module that imports a markdown test spec,
+ * extracts the test catalog via the agent, and lets the user check
+ * tests off (Pass / Fail) and ask for step-by-step instructions per
+ * test row. Lives in its own side-panel tab; never appears in the
+ * footer (no per-submit checkbox).
+ *
+ * No settings — the only state is the imported catalog, which lives
+ * in `chrome.storage.local` under a separate key (`pinta-test-pilot:current`)
+ * managed by the extension state class.
+ */
+const TEST_PILOT: ModuleSpec = {
+  id: "test-pilot",
+  name: "Test Pilot",
+  description:
+    "Import a markdown test spec; the agent extracts the test catalog and lets you check off tests as you run them. Click any row to get step-by-step instructions. Enable here, then open the new Test Pilot tab in the side panel.",
+  mode: "interactive",
+  sessionCheckboxLabel: "",
+  sessionCheckboxHint: "",
+  settings: [
+    {
+      key: "detailed_steps",
+      type: "boolean",
+      label: "Detailed help steps",
+      hint: "Off (default) — short, tester-friendly steps. Uses fewer tokens. On — deeper steps with technical context (URLs, payloads, code blocks). Slower and more expensive.",
+      default: false,
+    },
+  ],
+};
+
+export const BUILTIN_MODULES: ModuleSpec[] = [GITLAB_ISSUES, TEST_PILOT];
 
 export function getModuleSpec(id: string): ModuleSpec | null {
   return BUILTIN_MODULES.find((m) => m.id === id) ?? null;
