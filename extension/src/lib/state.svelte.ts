@@ -205,6 +205,22 @@ class ExtensionState {
   private currentOrigin: string | null = null;
 
   /**
+   * Origins the user has explicitly opted into standalone mode for via
+   * the "Use standalone for this site" button on the associate prompt.
+   * Persisted to `chrome.storage.local["pinta-standalone-origins"]` so
+   * the preference survives reloads. `rescan()` consults this set
+   * BEFORE auto-routing to a companion — without it, a tab on an
+   * unknown URL with a single running companion would silently get
+   * auto-picked back into that project on every navigation.
+   *
+   * Explicitly picking a companion from the project picker removes the
+   * current origin from the set (the user signaled "I do want this
+   * one"), so reverting from standalone is one click away.
+   */
+  private standaloneOrigins = new Set<string>();
+  private static readonly STANDALONE_ORIGINS_KEY = "pinta-standalone-origins";
+
+  /**
    * Top-level connection mode. Standalone whenever no companion is
    * currently selected — covers both "no companions running" (tester
    * case) and "companions exist but none matched this URL" (tester on
@@ -216,6 +232,15 @@ class ExtensionState {
     if (this.selectedCompanion) return "connected";
     if (this.scanning && this.companions.length === 0) return "discovering";
     return "standalone";
+  }
+
+  /** True if the active tab's origin has been opt-in pinned to
+   *  standalone mode. UI flag — App.svelte uses this to decorate the
+   *  picker / show a "managed standalone" hint instead of the normal
+   *  associate prompt. */
+  get isUrlPinnedStandalone(): boolean {
+    const origin = originOf(this.lastUrl);
+    return !!origin && this.standaloneOrigins.has(origin);
   }
 
   /**
@@ -231,6 +256,7 @@ class ExtensionState {
     void this.refreshImported();
     void this.loadModules();
     void this.loadPulseSettings();
+    void this.loadStandaloneOrigins();
     void this.loadTestPilot();
     await this.rescan(activeTabUrl);
   }
@@ -238,6 +264,66 @@ class ExtensionState {
   // ─── Pulse settings (cosmetic processing-glow on the page edges) ────
 
   private static readonly PULSE_KEY = "pinta-pulse-settings";
+
+  // ─── Standalone-origin opt-ins ─────────────────────────────────────
+
+  async loadStandaloneOrigins(): Promise<void> {
+    try {
+      const stored = await chrome.storage?.local?.get(
+        ExtensionState.STANDALONE_ORIGINS_KEY,
+      );
+      const raw = stored?.[ExtensionState.STANDALONE_ORIGINS_KEY] as
+        | string[]
+        | undefined;
+      if (Array.isArray(raw)) {
+        this.standaloneOrigins = new Set(
+          raw.filter((s): s is string => typeof s === "string"),
+        );
+      }
+    } catch {
+      // storage missing — empty set is fine
+    }
+  }
+
+  private async saveStandaloneOrigins(): Promise<void> {
+    try {
+      await chrome.storage?.local?.set({
+        [ExtensionState.STANDALONE_ORIGINS_KEY]: [
+          ...this.standaloneOrigins,
+        ],
+      });
+    } catch {
+      // ignore — in-memory set still drives current session behavior
+    }
+  }
+
+  /**
+   * Pin the current URL's origin to standalone mode. Disconnects any
+   * active companion + hydrates the local-store session for the origin.
+   * Persistent — survives reloads, navigations, and rescans until the
+   * user explicitly picks a companion from the project picker (which
+   * removes the origin via `select()`).
+   */
+  async pinCurrentUrlToStandalone(): Promise<void> {
+    const origin = originOf(this.lastUrl);
+    if (!origin) return;
+    this.standaloneOrigins.add(origin);
+    void this.saveStandaloneOrigins();
+    // Disconnect the active companion so the side panel immediately
+    // flips into standalone mode for this tab. Routing on subsequent
+    // rescans honors the set so it doesn't snap back.
+    await this.connectTo(null);
+    await this.hydrateStandalone(this.lastUrl);
+  }
+
+  /** Remove the current origin's standalone pin (used implicitly when
+   *  the user picks a companion). */
+  private unpinOriginFromStandalone(origin: string | null): void {
+    if (!origin) return;
+    if (this.standaloneOrigins.delete(origin)) {
+      void this.saveStandaloneOrigins();
+    }
+  }
 
   async loadPulseSettings(): Promise<void> {
     try {
@@ -417,17 +503,29 @@ class ExtensionState {
     this.testPilot.error = null;
     this.testPilot.pendingDetails[testId] = { askedAt: Date.now() };
     this.armDetailTimeout(testId);
+    // Compute the effective verbosity for this specific call. Overrides
+    // win; otherwise honor the module-wide setting.
+    const baseSettings = this.modules["test-pilot"]?.settings ?? {};
+    const effectiveDetailed =
+      opts.overrideDetailedSteps !== undefined
+        ? opts.overrideDetailedSteps
+        : baseSettings.detailed_steps === true;
+    // Carry the verbosity in BOTH the queryComment AND the module
+    // settings. The queryComment is the canonical per-call signal the
+    // agent reads first (single-place lookup, can't drift if the agent
+    // misses the deeper modules[].settings path). modules[].settings
+    // keeps backward-compat with the original wire contract.
     const queryComment = JSON.stringify({
       op: "detail-steps",
       docId: catalog.docId,
       testId,
       sectionTitle: section.title,
+      detailedSteps: effectiveDetailed,
     });
-    const baseSettings = this.modules["test-pilot"]?.settings ?? {};
-    const settings: Record<string, string | boolean> =
-      opts.overrideDetailedSteps !== undefined
-        ? { ...baseSettings, detailed_steps: opts.overrideDetailedSteps }
-        : baseSettings;
+    const settings: Record<string, string | boolean> = {
+      ...baseSettings,
+      detailed_steps: effectiveDetailed,
+    };
     this.send({
       type: "module.query.submit",
       url,
@@ -1017,6 +1115,18 @@ class ExtensionState {
       // on-page pin badges even though nothing about the session had
       // actually changed.
 
+      // Honor the user's explicit "use standalone for this origin"
+      // opt-in BEFORE anything else. Skips URL-match auto-routing and
+      // the single-companion auto-pick fallback so a tab on a pinned
+      // origin doesn't silently snap back to a companion when the
+      // user navigates within it.
+      const currentOrigin = originOf(activeTabUrl);
+      if (currentOrigin && this.standaloneOrigins.has(currentOrigin)) {
+        if (this.selectedCompanion) await this.connectTo(null);
+        await this.hydrateStandalone(activeTabUrl);
+        return;
+      }
+
       const stillSelected = this.selectedCompanion
         ? this.companions.find(
             (c) => c.port === this.selectedCompanion!.port,
@@ -1105,6 +1215,10 @@ class ExtensionState {
   async select(companion: Companion | null): Promise<void> {
     await this.connectTo(companion);
     if (companion) {
+      // User explicitly picked a companion — they want associated mode,
+      // not standalone. Clear any pin on the current origin so rescans
+      // honor the choice instead of pulling the rug.
+      this.unpinOriginFromStandalone(originOf(this.lastUrl));
       try {
         await chrome.storage?.local?.set({ [SELECTED_KEY]: companion.projectRoot });
       } catch {

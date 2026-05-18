@@ -257,7 +257,7 @@
   <!-- PARSING state ------------------------------------------------- -->
   <section class="space-y-3 p-3">
     <div class="flex items-center gap-2 text-sm text-ink-700 dark:text-night-dim">
-      <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="animate-spin"><path d="M21 12a9 9 0 1 1-6.219-8.56"/></svg>
+      <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="animate-spin text-brand-pink dark:text-brand-pink-light"><path d="M21 12a9 9 0 1 1-6.219-8.56"/></svg>
       <span>Parsing {app.testPilot.pending.filename}…</span>
     </div>
     <p class="text-[11px] text-ink-500 dark:text-night-mute leading-snug">
@@ -291,7 +291,7 @@
   <!-- GENERATING state ----------------------------------------------- -->
   <section class="space-y-3 p-3">
     <div class="flex items-center gap-2 text-sm text-ink-700 dark:text-night-dim">
-      <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="animate-spin"><path d="M21 12a9 9 0 1 1-6.219-8.56"/></svg>
+      <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="animate-spin text-brand-pink dark:text-brand-pink-light"><path d="M21 12a9 9 0 1 1-6.219-8.56"/></svg>
       <span>Generating tests for your app…</span>
     </div>
     <p class="text-[11px] text-ink-500 dark:text-night-mute leading-snug">
@@ -420,7 +420,7 @@
       {#if app.testPilot.pendingDetails[test.id]}
         <div class="space-y-2">
           <div class="flex items-center gap-2 text-[12px] text-ink-700 dark:text-night-dim">
-            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="animate-spin"><path d="M21 12a9 9 0 1 1-6.219-8.56"/></svg>
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="animate-spin text-brand-pink dark:text-brand-pink-light"><path d="M21 12a9 9 0 1 1-6.219-8.56"/></svg>
             <span>Asking the agent…</span>
           </div>
           <p class="text-[11px] text-ink-500 dark:text-night-mute leading-snug">
@@ -548,11 +548,7 @@
          the wrapper flex-wraps and buttons drop below the title block.
          Title is bold sans, allowed to wrap, never truncated. -->
     <div class="flex items-start justify-between gap-3 flex-wrap">
-      <div class="min-w-0 flex-1 flex items-start gap-2.5 basis-[200px]">
-        <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="text-brand-pink shrink-0 mt-1" aria-hidden="true">
-          <line x1="22" y1="2" x2="11" y2="13"/>
-          <polygon points="22 2 15 22 11 13 2 9 22 2"/>
-        </svg>
+      <div class="min-w-0 flex-1 basis-[200px]">
         <div class="min-w-0 flex-1 space-y-1">
         <!-- Title (or filename fallback) — click to edit -->
         {#if editingField === "title"}
@@ -713,17 +709,68 @@
     <div class="space-y-3">
       {#each app.testPilot.catalog.sections as section (section.title)}
         {@const collapsed = collapsedSections[section.title] ?? false}
+        {@const secPass = section.tests.filter((t) => t.status === "pass").length}
+        {@const secFail = section.tests.filter((t) => t.status === "fail").length}
+        {@const secTotal = section.tests.length}
+        {@const secPct = secTotal > 0 ? Math.round(((secPass + secFail) / secTotal) * 100) : 0}
         <div class="rounded-lg border border-ink-200 dark:border-night-line bg-ink-50 dark:bg-night-alt overflow-hidden">
           <button
             type="button"
-            class="w-full flex items-center justify-between gap-2 px-3 py-2.5 text-[12px] font-medium text-ink-900 dark:text-night-text hover:bg-ink-100 dark:hover:bg-night-line"
+            class="pinta-section-trigger w-full flex items-center justify-between gap-2 px-3 py-2.5 text-[12px] font-medium text-ink-900 dark:text-night-text hover:bg-ink-100 dark:hover:bg-night-line"
             onclick={() => (collapsedSections[section.title] = !collapsed)}
           >
             <span class="flex items-center gap-2 min-w-0">
               <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" class="transition-transform shrink-0" class:rotate-90={!collapsed}><polyline points="9 18 15 12 9 6"/></svg>
+              <!-- Flask icon — wiggles on section-trigger hover (see app.css).
+                   Subtle "chemistry / UAT lab" cue. The bubble dot above the
+                   spout drifts up on hover too. -->
+              <span class="relative inline-flex shrink-0 text-brand-pink dark:text-brand-pink-light" aria-hidden="true">
+                <svg
+                  class="pinta-flask-icon"
+                  width="14"
+                  height="14"
+                  viewBox="0 0 24 24"
+                  fill="none"
+                  stroke="currentColor"
+                  stroke-width="1.8"
+                  stroke-linecap="round"
+                  stroke-linejoin="round"
+                >
+                  <path d="M9 3h6" />
+                  <path d="M10 3v6.5L4.4 18.7A1.6 1.6 0 0 0 5.8 21h12.4a1.6 1.6 0 0 0 1.4-2.3L14 9.5V3" />
+                  <path d="M7.5 14.5h9" opacity="0.55" />
+                </svg>
+                <span
+                  class="pinta-flask-bubble absolute left-1/2 -translate-x-1/2 -top-0.5 w-1 h-1 rounded-full bg-brand-pink dark:bg-brand-pink-light opacity-0"
+                ></span>
+              </span>
               <span class="truncate font-bold">{section.title}</span>
             </span>
-            <span class="inline-flex items-center justify-center text-[11px] font-semibold text-ink-600 dark:text-night-dim bg-white/70 dark:bg-night-card/70 rounded px-2 py-0.5 shrink-0 tabular-nums">{section.tests.length}</span>
+            <!-- Per-section tally: pass · fail · % complete. Pass and
+                 fail are color-coded; pct is dim. Separators are thin
+                 vertical bars so the trio reads as one badge. Falls
+                 back to a single count chip if nothing has been tested
+                 yet (zero pass + zero fail) to keep the header tidy. -->
+            <span class="inline-flex items-center gap-1.5 text-[11px] font-semibold shrink-0 tabular-nums bg-white/70 dark:bg-night-card/70 rounded px-2 py-0.5">
+              {#if secPass + secFail === 0}
+                <span class="text-ink-600 dark:text-night-dim">{secTotal}</span>
+              {:else}
+                <span
+                  class="text-emerald-600 dark:text-emerald-400"
+                  title="{secPass} passed of {secTotal}"
+                >{secPass}</span>
+                <span class="w-px h-3 bg-ink-300 dark:bg-night-line" aria-hidden="true"></span>
+                <span
+                  class="text-red-600 dark:text-red-400"
+                  title="{secFail} failed of {secTotal}"
+                >{secFail}</span>
+                <span class="w-px h-3 bg-ink-300 dark:bg-night-line" aria-hidden="true"></span>
+                <span
+                  class="text-ink-700 dark:text-night-dim"
+                  title="{secPass + secFail} of {secTotal} tests run"
+                >{secPct}%</span>
+              {/if}
+            </span>
           </button>
           {#if !collapsed}
             <ul class="border-t border-ink-200 dark:border-night-line">
@@ -795,7 +842,7 @@
                         : `Ask for steps for ${test.id}`}
                     >
                       {#if detailLoading}
-                        <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="animate-spin" aria-hidden="true"><path d="M21 12a9 9 0 1 1-6.219-8.56"/></svg>
+                        <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="animate-spin text-brand-pink dark:text-brand-pink-light" aria-hidden="true"><path d="M21 12a9 9 0 1 1-6.219-8.56"/></svg>
                       {:else}
                         <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><path d="M9.09 9a3 3 0 0 1 5.83 1c0 2-3 3-3 3"/><line x1="12" y1="17" x2="12.01" y2="17"/></svg>
                       {/if}

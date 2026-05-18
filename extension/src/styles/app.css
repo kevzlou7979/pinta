@@ -140,3 +140,52 @@ body {
 .dark .pinta-code .token.url {
   color: #6ee7b7;
 }
+
+/* ---------------------------------------------------------------------
+ * Test Pilot — section-header flask icon. A subtle wiggle + color shift
+ * runs once per hover-in, with a small bubble drifting up from the spout.
+ * Pivots at the flask base so the wiggle reads as a real chemistry-set
+ * shake instead of a flat rotation around the SVG center.
+ */
+@keyframes pinta-flask-wiggle {
+  0%,
+  100% {
+    transform: rotate(0deg);
+  }
+  20% {
+    transform: rotate(-9deg);
+  }
+  50% {
+    transform: rotate(8deg);
+  }
+  80% {
+    transform: rotate(-4deg);
+  }
+}
+
+@keyframes pinta-flask-bubble {
+  0% {
+    transform: translateY(0);
+    opacity: 0;
+  }
+  25% {
+    opacity: 1;
+  }
+  100% {
+    transform: translateY(-7px);
+    opacity: 0;
+  }
+}
+
+.pinta-flask-icon {
+  transform-box: fill-box;
+  transform-origin: 50% 100%;
+}
+
+.pinta-section-trigger:hover .pinta-flask-icon {
+  animation: pinta-flask-wiggle 0.7s ease-in-out;
+}
+
+.pinta-section-trigger:hover .pinta-flask-bubble {
+  animation: pinta-flask-bubble 0.9s ease-out 0.05s;
+}

@@ -723,11 +723,27 @@ comment:
 2. Read `.pinta/test-docs/{docId}.md`.
 3. Locate the row by `testId`. Capture the full row (description +
    expected) plus the section context.
-4. **Check the `detailed_steps` setting** on the session's
-   `test-pilot` module entry (path: `modules[i].settings.detailed_steps`
-   where `modules[i].id === "test-pilot"`). This controls verbosity:
+4. **Determine the verbosity mode.** The query comment now carries the
+   per-call signal directly. Read it like this:
 
-   **`detailed_steps === false` (default — token-saver mode):**
+   ```
+   detailedSteps = queryComment.detailedSteps  // canonical, per-call
+   if detailedSteps === undefined:
+     detailedSteps = modules[i].settings.detailed_steps  // legacy fallback
+       where modules[i].id === "test-pilot"
+   if detailedSteps === undefined:
+     detailedSteps = false  // default = simple mode
+   ```
+
+   **Always check `queryComment.detailedSteps` FIRST.** The user has an
+   inline "Details" checkbox in the row detail view that flips this
+   per Re-ask; the module-wide setting is just the default. If you
+   ignore the per-call signal you'll be writing simple steps when the
+   user explicitly asked for deep ones (the common complaint).
+
+   ---
+
+   **`detailedSteps === false` (default — token-saver mode):**
    Write simple steps a manual QA tester can follow. This is *not* a
    dev runbook — assume the tester is clicking around a browser, not
    running shell scripts.
@@ -751,17 +767,42 @@ comment:
    - ❌ *"Run `curl -X POST http://localhost:8083/api/v1/admin/claims ...`
      to register a CFR."*
 
-   **`detailed_steps === true` (deep-help mode):**
-   Tester wants more technical context — they're debugging or writing
-   a new test from scratch. Now it's OK to:
-   - Include 6–12 steps with finer-grained breakdown.
-   - Use fenced code blocks for sample API calls (curl), request/
-     response payloads, sample DB seed commands.
-   - Reference specific URLs, endpoint paths, internal flag names, and
-     env vars where they help.
-   - Still keep each step focused on one thing — verbose ≠ rambling.
-   - Mark optional/expert-only steps with `> Note:` callouts so the
-     happy path stays scannable.
+   **`detailedSteps === true` (deep-help mode):**
+   Tester wants real technical depth — they're debugging, writing a
+   new test from scratch, or trying to understand the full mechanics.
+   Treat "this test looks simple" as a sign you should *go deeper*,
+   not as permission to dial back. **Minimum bar:**
+   - **At least 6 steps. Aim for 6–12.** Even if the surface action is
+     "click a URL," break out the prep, the click, the network/URL
+     verification, the DOM verification, the cleanup. If you're under
+     6 steps in deep mode, you're failing the user.
+   - **At least one fenced code block per response** — a curl, a sample
+     request/response body, a DB query, a console snippet, an env
+     export, *something* the user could paste. If the test is purely
+     UI, fence the literal URL or the expected DOM fragment so the
+     code-block density signals "deep mode" visually.
+   - **Reference specific endpoint paths, query params, header names,
+     internal flag names, and env vars** where they help. Don't hide
+     behind "the API endpoint" — name it (`POST /v1/sessions`).
+   - **Add `> Note:` callouts** for at least one optional / expert
+     observation per response (e.g. "verify the JWT `exp` claim in
+     DevTools → Application → Cookies", "the token query param is
+     stripped after first read — refresh leaks no PII").
+   - **Verification step** still goes last, but in deep mode it spans
+     multiple checks: visual + network + storage where applicable.
+
+   Good vs bad (deep mode), same test as above:
+   - ✅ Multi-line step like:
+     ```
+     Open DevTools → Network before the click. Paste the deep link:
+     ```bash
+     # claim-auth?token=eyJhbGc...
+     ```
+     Confirm the request returns 302 to `/email`, then the `token`
+     query string is stripped from the address bar.
+     ```
+   - ❌ *"Open the URL and confirm it loads"* — that's simple-mode
+     output regardless of which mode was requested.
 
    Either way: **the last step is always the verification.**
 

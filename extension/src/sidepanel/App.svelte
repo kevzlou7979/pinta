@@ -1384,15 +1384,46 @@
           </p>
         {/if}
 
-        {#if app.companions.length > 1 && !associatedAt}
+        <!-- "Or use standalone" escape hatch — for tabs the user
+             genuinely doesn't want associated with any project
+             (deployed staging URLs, GitHub Pages, third-party docs).
+             Pins the origin so subsequent rescans don't snap back to
+             the only running companion. Clears as soon as the user
+             explicitly picks a project from the picker.
+
+             Styled as a full-width outlined button so it reads as a
+             real action alongside the primary "Save pattern" button,
+             not a small dismissable link. -->
+        <div class="pt-1 space-y-2">
+          <div class="relative flex items-center">
+            <span class="flex-1 border-t border-amber-200/70 dark:border-amber-800/40"></span>
+            <span class="px-2 text-[10px] uppercase tracking-wider font-semibold text-amber-700 dark:text-amber-400">or</span>
+            <span class="flex-1 border-t border-amber-200/70 dark:border-amber-800/40"></span>
+          </div>
           <button
             type="button"
-            class="text-[11px] underline underline-offset-2 hover:no-underline text-amber-800 dark:text-amber-300"
-            onclick={() => (projectMenuOpen = true)}
+            class="w-full inline-flex items-center justify-center gap-1.5 rounded-md border-2 border-amber-500 dark:border-amber-500/70 bg-transparent hover:bg-amber-100 dark:hover:bg-amber-900/40 text-amber-800 dark:text-amber-200 text-xs font-semibold py-2 transition-colors"
+            onclick={() => app.pinCurrentUrlToStandalone()}
+            title="Annotate this site without associating it with any project. The session lives in IndexedDB; copy / download replace Submit."
           >
-            Or pick a different project →
+            <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+              <path d="M12 2v20" />
+              <path d="m17 5-5-3-5 3" />
+              <rect x="3" y="9" width="18" height="12" rx="2" />
+            </svg>
+            Use standalone for this site
           </button>
-        {/if}
+
+          {#if app.companions.length > 1 && !associatedAt}
+            <button
+              type="button"
+              class="block mx-auto text-[11px] underline underline-offset-2 hover:no-underline text-amber-800 dark:text-amber-300"
+              onclick={() => (projectMenuOpen = true)}
+            >
+              Or pick a different project →
+            </button>
+          {/if}
+        </div>
       </div>
     {/if}
 
@@ -1400,10 +1431,10 @@
       <nav class="flex items-center gap-1 border-b border-ink-200 dark:border-night-line -mx-3 px-3 mb-1">
         <button
           type="button"
-          class="px-3 py-1.5 text-xs font-medium border-b-2 -mb-px transition-colors"
+          class="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium border-b-2 -mb-px transition-colors"
           class:border-brand-pink={activeTab === "annotate"}
-          class:text-ink-900={activeTab === "annotate"}
-          class:dark:text-night-text={activeTab === "annotate"}
+          class:text-brand-pink={activeTab === "annotate"}
+          class:dark:text-brand-pink-light={activeTab === "annotate"}
           class:border-transparent={activeTab !== "annotate"}
           class:text-ink-500={activeTab !== "annotate"}
           class:dark:text-night-mute={activeTab !== "annotate"}
@@ -1412,14 +1443,19 @@
             void chrome.storage?.local?.set({ "pinta-active-tab": "annotate" });
           }}
         >
+          <!-- Pencil/edit glyph — matches the "mark up the page" mode -->
+          <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+            <path d="M12 20h9" />
+            <path d="M16.5 3.5a2.121 2.121 0 0 1 3 3L7 19l-4 1 1-4 12.5-12.5z" />
+          </svg>
           Annotate
         </button>
         <button
           type="button"
-          class="px-3 py-1.5 text-xs font-medium border-b-2 -mb-px transition-colors"
+          class="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium border-b-2 -mb-px transition-colors"
           class:border-brand-pink={activeTab === "test-pilot"}
-          class:text-ink-900={activeTab === "test-pilot"}
-          class:dark:text-night-text={activeTab === "test-pilot"}
+          class:text-brand-pink={activeTab === "test-pilot"}
+          class:dark:text-brand-pink-light={activeTab === "test-pilot"}
           class:border-transparent={activeTab !== "test-pilot"}
           class:text-ink-500={activeTab !== "test-pilot"}
           class:dark:text-night-mute={activeTab !== "test-pilot"}
@@ -1428,6 +1464,14 @@
             void chrome.storage?.local?.set({ "pinta-active-tab": "test-pilot" });
           }}
         >
+          <!-- Flask glyph — same visual identity as the Test Pilot
+               section headers, so the tab reads as "the chemistry-set
+               tab" at a glance. -->
+          <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+            <path d="M9 3h6" />
+            <path d="M10 3v6.5L4.4 18.7A1.6 1.6 0 0 0 5.8 21h12.4a1.6 1.6 0 0 0 1.4-2.3L14 9.5V3" />
+            <path d="M7.5 14.5h9" opacity="0.55" />
+          </svg>
           Test Pilot
         </button>
       </nav>

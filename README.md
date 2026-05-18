@@ -199,6 +199,83 @@ See [`spec/SPEC.md` §7–9](spec/SPEC.md) for the full status of each.
 
 ---
 
+## Modules included
+
+Pinta ships with two built-in **modules** — small agent-side
+integrations that extend the core annotation loop. Enable in
+**Settings**, opt in per submit (or per query for interactive modules).
+The wire contract stays narrow: each module carries a stable id and a
+small settings dict; the agent reads the id and routes to the matching
+handler in [`skill/pinta/SKILL.md`](skill/pinta/SKILL.md).
+
+### 🏷️  GitLab Issues  ·  *per-submit*
+
+File one GitLab issue per annotation. Tick **Create GitLab issues** in
+the footer before submitting, and the agent — after the source edits
+land — uses your `glab` CLI to file the tickets.
+
+- **No tokens stored, transmitted, or written to disk by Pinta.** Auth
+  comes from `glab auth login` on your own machine.
+- **Issue body embeds**: the full-page composited screenshot (uploaded
+  to the GitLab project's uploads endpoint), the selector, source file
+  path, and the annotated page URL.
+- **Chat-based metadata prompt**: before filing, the agent asks for
+  domain (`client` / `server` / `shared` → `domain:<choice>` label),
+  extra tags, assignees, or `later` to defer entirely.
+- **Screenshot auto-locks ON** when this module is ticked so issues
+  never go out without visual context.
+
+Settings: `project_id` (optional override) and `labels` (default tags).
+Leave both blank for the common case — `glab` auto-detects from your
+repo's GitLab remote.
+
+### 🧪  Test Pilot  ·  *interactive*
+
+A UAT module that lives in its own side-panel tab. Import a hand-written
+markdown test spec or let the agent generate one from project context,
+then step through the resulting catalog row-by-row.
+
+- **Pass / Fail / Untested** marking per row, with per-section tallies
+  in the catalog headers.
+- **Per-row "?"** asks the agent for step-by-step instructions; the
+  inline **Details** checkbox flips between short tester-friendly
+  steps and deeper technical context (curl, payloads, env vars,
+  `> Note:` callouts) per Re-ask.
+- **Markdown rendering** in the step list — inline `` `code ``,
+  fenced code blocks with Prism syntax highlighting (bash + json),
+  block-quote callouts. Each fenced block has a **Copy** button.
+- **Markdown export** of the whole catalog as a report with
+  pass/fail/total tallies. Pipe through `pandoc results.md -o results.pdf`
+  for a PDF version.
+- **Tight retention**: UAT specs live in `.pinta/test-docs/{docId}.md`
+  and are wiped via `DELETE /v1/test-docs` when you clear the catalog
+  (specs often carry real credentials, so the on-disk copy doesn't
+  linger).
+
+Wire-protocol-wise, Test Pilot is the first **interactive module
+surface**: a new `module.query.submit` WS message carries a
+`kind: "query"` annotation whose `comment` is a JSON-encoded request
+(`doc-parse`, `generate-doc`, or `detail-steps`). The agent answers
+via `mark_session_done` with a structured payload that the extension
+routes back into the Test Pilot tab. See
+[`spec/SPEC.md` §8 Phase 12](spec/SPEC.md#phase-12--built-in-modules--test-pilot--shipped)
+for the full design.
+
+### Writing your own
+
+Today's set is built-in only — Pinta doesn't load third-party modules.
+But the surface is small enough that adding a new one is straightforward:
+
+1. Add an entry to `extension/src/lib/modules.ts` with `id`, settings
+   schema, and `mode: "per-submit" | "interactive"`.
+2. Ship the matching agent instructions in `skill/pinta/SKILL.md`
+   (§7.9 for per-submit, §7.10 for interactive).
+3. (Optional) Pick an icon for the Settings panel + landing page.
+
+PRs welcome — see [Contributing](#contributing).
+
+---
+
 ## How it works
 
 ```
