@@ -19,6 +19,18 @@
   let error = $state<string | null>(null);
   let open = $state(false);
   let rootEl: HTMLDivElement | undefined = $state();
+  let triggerEl: HTMLButtonElement | undefined = $state();
+  // Pixel offset from the viewport top to where the dropdown should
+  // open. Computed when the popover opens (and on viewport resize while
+  // open) so the dropdown can use `position: fixed` — necessary because
+  // `absolute right-0` anchored to the trigger overflows the panel's
+  // left edge when the side panel is narrower than the dropdown's width.
+  let dropdownTop = $state(0);
+  function recomputeDropdownTop() {
+    if (!triggerEl) return;
+    const r = triggerEl.getBoundingClientRect();
+    dropdownTop = Math.round(r.bottom + 4);
+  }
 
   async function refresh() {
     loading = true;
@@ -186,8 +198,18 @@
 
   function toggle() {
     open = !open;
-    if (open) refresh();
+    if (open) {
+      recomputeDropdownTop();
+      refresh();
+    }
   }
+
+  $effect(() => {
+    if (!open) return;
+    const onResize = () => recomputeDropdownTop();
+    window.addEventListener("resize", onResize);
+    return () => window.removeEventListener("resize", onResize);
+  });
 
   let totalCount = $derived(summaries.length + app.importedSessions.length);
 </script>
@@ -195,6 +217,7 @@
 <div class="relative" bind:this={rootEl}>
   <button
     type="button"
+    bind:this={triggerEl}
     class="relative w-7 h-7 inline-flex items-center justify-center rounded-full border border-ink-200 bg-white text-ink-600 hover:text-brand-pink hover:border-ink-400 dark:border-night-line dark:bg-night-alt dark:text-night-dim dark:hover:text-brand-pink-light dark:hover:border-night-line2 transition-colors"
     onclick={toggle}
     aria-haspopup="dialog"
@@ -218,7 +241,8 @@
 
   {#if open}
     <div
-      class="absolute right-0 top-full mt-1 w-[min(420px,calc(100vw-16px))] z-30 rounded-md border border-ink-300 bg-white shadow-lg dark:border-night-line dark:bg-night-alt"
+      class="fixed right-2 w-[min(420px,calc(100vw-16px))] z-30 rounded-md border border-ink-300 bg-white shadow-lg dark:border-night-line dark:bg-night-alt"
+      style="top: {dropdownTop}px;"
       role="dialog"
     >
       <div class="px-3 py-2 border-b border-ink-200 dark:border-night-line flex items-center justify-between gap-2">
