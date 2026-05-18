@@ -106,6 +106,21 @@
   function onPickFile() {
     fileInput?.click();
   }
+
+  function clearMarks() {
+    const c = app.testPilot.catalog;
+    if (!c) return;
+    const marked = c.sections.reduce(
+      (n, s) => n + s.tests.filter((t) => t.status !== "untested").length,
+      0,
+    );
+    if (marked === 0) return;
+    const msg =
+      `Reset ${marked} marked test${marked === 1 ? "" : "s"} back to untested? ` +
+      `Cached step instructions will be cleared too. The spec itself isn't touched.`;
+    if (!confirm(msg)) return;
+    app.clearTestPilotMarks();
+  }
   async function onFileChange(e: Event) {
     const input = e.currentTarget as HTMLInputElement;
     const file = input.files?.[0];
@@ -660,6 +675,18 @@
         >
           <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="M3 12a9 9 0 0 1 9-9 9.75 9.75 0 0 1 6.74 2.74L21 8"/><path d="M21 3v5h-5"/><path d="M21 12a9 9 0 0 1-9 9 9.75 9.75 0 0 1-6.74-2.74L3 16"/><path d="M3 21v-5h5"/></svg>
           Re-import
+        </button>
+        <button
+          type="button"
+          class="inline-flex items-center gap-1 text-[11px] text-ink-700 dark:text-night-dim hover:text-red-600 dark:hover:text-red-400 px-2 py-1.5 rounded-md border border-ink-200 dark:border-night-line bg-white dark:bg-night-card disabled:opacity-50 disabled:cursor-not-allowed"
+          onclick={clearMarks}
+          disabled={t.pass + t.fail === 0}
+          title={t.pass + t.fail === 0
+            ? "Nothing to clear — no rows are marked yet"
+            : "Reset all Pass/Fail marks back to untested (keeps the catalog)"}
+        >
+          <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="M3 6h18"/><path d="M8 6V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/><path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6"/></svg>
+          Clear marks
         </button>
         <button
           type="button"

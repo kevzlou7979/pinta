@@ -421,7 +421,11 @@ class ExtensionState {
         "No companion connected. Start `pinta-companion .` in your project to use Test Pilot.";
       return;
     }
-    const docId = crypto.randomUUID();
+    // Reuse the existing catalog's docId so the agent overwrites
+    // `.pinta/test-docs/{docId}.md` in place — the file becomes a
+    // maintained artifact across spec revisions. A fresh UUID is minted
+    // only on the first generate (no prior catalog).
+    const docId = this.testPilot.catalog?.docId ?? crypto.randomUUID();
     const url = this.lastUrl ?? "";
     this.testPilot.error = null;
     this.testPilot.pending = {
@@ -447,7 +451,11 @@ class ExtensionState {
         "No companion connected. Start `pinta-companion .` in your project to use Test Pilot.";
       return;
     }
-    const docId = crypto.randomUUID();
+    // Same rationale as generateTestDoc — reuse the existing docId so a
+    // re-import overwrites `.pinta/test-docs/{docId}.md` in place. The
+    // companion's `extractTestDocContent` writes the new content; with
+    // a stable docId, no orphan files accumulate.
+    const docId = this.testPilot.catalog?.docId ?? crypto.randomUUID();
     const url = this.lastUrl ?? "";
     this.testPilot.error = null;
     this.testPilot.pending = { kind: "doc-parse", sessionId: "", filename };
@@ -1684,9 +1692,26 @@ class ExtensionState {
     // Carry over user-authored metadata when re-importing the same doc
     // so the user's title/author/description survive a Re-import click.
     const prior = this.testPilot.catalog;
-    const carry = prior && prior.docId === newDocId
+    const sameDoc = prior && prior.docId === newDocId;
+    const carry = sameDoc
       ? { title: prior.title, author: prior.author, description: prior.description }
       : {};
+    // Id-keyed merge so Pass/Fail marks and cached per-row detail steps
+    // survive across spec revisions. Same docId AND same test id means
+    // the user already ran this scenario — keep their state. Genuinely
+    // new ids come in untested; ids that disappear from the new spec
+    // are dropped (the test no longer exists). Tradeoff: if the agent
+    // ever renumbers an unchanged scenario, marks won't carry — the
+    // SKILL.md generate-doc rules call this out and instruct the agent
+    // to preserve stable ids during in-place regen.
+    const priorById = new Map<string, TestPilotTest>();
+    if (sameDoc) {
+      for (const section of prior.sections) {
+        for (const test of section.tests) {
+          priorById.set(test.id, test);
+        }
+      }
+    }
     const catalog: TestPilotCatalog = {
       docId: newDocId,
       filename:
@@ -1701,18 +1726,41 @@ class ExtensionState {
       sections: sections.map((s: any) => ({
         title: String(s?.title ?? "Untitled"),
         tests: Array.isArray(s?.tests)
-          ? s.tests.map((t: any) => ({
-              id: String(t?.id ?? "??"),
-              test: String(t?.test ?? ""),
-              expected: String(t?.expected ?? ""),
-              status: "untested" as TestPilotStatus,
-            }))
+          ? s.tests.map((t: any) => {
+              const id = String(t?.id ?? "??");
+              const carriedOver = priorById.get(id);
+              return {
+                id,
+                test: String(t?.test ?? ""),
+                expected: String(t?.expected ?? ""),
+                status: carriedOver?.status ?? ("untested" as TestPilotStatus),
+                detail: carriedOver?.detail,
+              };
+            })
           : [],
       })),
       ...carry,
     };
     this.testPilot.catalog = catalog;
     this.testPilot.error = null;
+    void this.saveTestPilot();
+  }
+
+  /** Reset every test row in the active catalog to `untested` and drop
+   *  cached per-row detail. Keeps the catalog structure intact (same
+   *  sections, same test ids, same metadata) — the user gets a clean
+   *  slate to re-run testing without losing the parsed spec or having
+   *  to clear and re-import. Persists immediately. No-op when there's
+   *  no catalog loaded. */
+  clearTestPilotMarks(): void {
+    const c = this.testPilot.catalog;
+    if (!c) return;
+    for (const section of c.sections) {
+      for (const test of section.tests) {
+        test.status = "untested";
+        test.detail = undefined;
+      }
+    }
     void this.saveTestPilot();
   }
 

@@ -630,10 +630,10 @@ than missing ones.
 
 ### 7.10.1b `op: "generate-doc"` — write a UAT spec for the whole app
 
-The user clicked **"Generate MD with Agent"** in the empty-state Test
-Pilot tab. There is no markdown to read — your job is to produce one
-from project context, write it to disk, and then return the parsed
-catalog in the same shape `doc-parse` would return.
+The user clicked **"Generate Test Script"** in the Test Pilot tab.
+Your job is to produce a markdown UAT spec from project context, write
+it to disk, and return the parsed catalog in the same shape
+`doc-parse` would return.
 
 The query annotation's `comment`:
 
@@ -641,16 +641,59 @@ The query annotation's `comment`:
 { "op": "generate-doc", "docId": "abc-123" }
 ```
 
+**The `docId` is the same one the user has seen on their last
+regenerate** — Pinta now keeps it stable across regenerations so
+`.pinta/test-docs/{docId}.md` is a maintained artifact, not a fresh
+UUID per click. This matters: it means an existing file at that path
+is *the user's current test spec*, possibly with team additions, and
+your job on regenerate is to **update it in place**, not start over.
+
 1. `mark_session_applying({id})`.
-2. **Scan the project enough to design a UAT spec.** Read the obvious
-   anchors: `package.json` (framework + scripts), the routes / pages
-   directory, top-level component folders, and any existing docs
-   (`README.md`, `docs/`, `spec/`). The goal is to understand what
-   user-facing flows exist — not to exhaustively read every file.
-3. **Design the test catalog.** Group tests by user-facing area
-   (Authentication, Dashboard, Settings, etc.) — these become H2/H3
-   sections. Inside each section, enumerate concrete pass/fail tests
-   the user can run in a browser. Conventions:
+
+2. **Check whether the spec already exists.** Try to `Read`
+   `.pinta/test-docs/{docId}.md`. Two paths from here:
+
+   **(a) File doesn't exist (first-time generate).** Skip to step 3
+   and produce a fresh spec.
+
+   **(b) File exists (regenerate / spec revision).** This is the
+   common case after the first generate. Your goal is to bring the
+   spec in line with the *current* code while preserving as much of
+   the existing spec as possible:
+   - **Read the existing spec carefully.** Note every section title
+     and every test id (`AUTH-01`, `CLAIM-03`, etc.). These ids are
+     load-bearing — the user's Pass/Fail marks survive in the
+     browser only when the *id* stays stable across regen.
+   - **Scan the current code** the same way you would for a fresh
+     spec (step 3 below) — routes, components, auth flow, etc.
+   - **Reconcile**:
+     - **Unchanged scenarios → keep the same id and the same row.**
+       Even if the wording could be polished, don't rewrite it — the
+       row id is what the marks key off, but a recipient comparing
+       the spec against the prior version will read the row text
+       too. Leave it alone unless the underlying scenario has
+       genuinely changed.
+     - **Renamed / refactored scenario → keep the same id, update
+       the row text.** A login flow that moved from email-then-DOB
+       to email-then-PIN keeps `AUTH-01`; only its description /
+       expected change.
+     - **New scenarios in the code that aren't in the spec → assign
+       the next free id within the right section.** If the
+       authentication section's highest existing id is `AUTH-07`,
+       new auth tests start at `AUTH-08`.
+     - **Scenarios that no longer exist in the code → remove from
+       the spec.** Don't leave dead rows behind.
+     - **Brand new feature areas → add a new section** with a fresh
+       id prefix.
+   - **Write the updated markdown back to the same path.** Overwrite,
+     don't create a sibling.
+
+3. **Design the test catalog** (first-time, or after the read above
+   if you need to fill in genuinely missing parts). Group tests by
+   user-facing area (Authentication, Dashboard, Settings, etc.) —
+   these become H2/H3 sections. Inside each section, enumerate
+   concrete pass/fail tests the user can run in a browser.
+   Conventions:
    - Each test gets a stable ID (`AUTH-01`, `DASH-02`, …).
    - Each test has a one-line description and a one-line expected
      result.
@@ -704,6 +747,13 @@ The query annotation's `comment`:
   tests each is better than one section of 30 deep tests.
 - **No source edits.** Like the other Test Pilot ops, the only file
   you write is `.pinta/test-docs/{docId}.md`.
+- **Stable ids are load-bearing.** When the file already exists,
+  carrying ids over from the prior spec is the difference between the
+  user's Pass/Fail marks surviving and the user losing all their
+  testing progress. If you renumber a scenario that hasn't changed
+  (e.g. AUTH-01 → AUTH-02 just because the section was reordered),
+  the browser-side merge can't match it up and the mark drops. Treat
+  ids like primary keys, not display strings.
 
 ### 7.10.2 `op: "detail-steps"` — generate concrete steps for one test
 
