@@ -1185,8 +1185,131 @@ share-file exports so they never travel between machines.
 **Out of scope for first cut:**
 - Per-tester sign-off / completion form on the exported catalog
   (parked; see memory `test-pilot-signoff-spec.md`).
+- Manual catalog editing (delete / add / rename / reorder rows and
+  sections) — addressed by Phase 13.
 - Custom user-authored modules (today's set is built-in only).
 - Multi-catalog concurrency in Test Pilot (one catalog at a time).
+
+---
+
+### Phase 13 — Test Pilot: catalog editing — Planned
+
+Phase 12 ships a Test Pilot catalog the user can mark Pass / Fail
+against but can't edit. In practice AI-generated catalogs (from both
+`op: "doc-parse"` and `op: "generate-doc"`) miss rows, mis-word
+expected behavior, or include scenarios that don't apply — and the
+user's only recourse today is "regenerate and hope". Phase 13 lets
+the user fix the spec in place from the side panel.
+
+**Scope:**
+
+- Delete section (and its child tests).
+- Delete test.
+- Add test to a section (appends an inline-editable blank row;
+  agent-style `USER-N` id auto-minted).
+- Add section at the catalog bottom.
+- Edit existing test's title + expected text in-place.
+- Rename section in-place.
+- Move test up / down within a section; move section up / down within
+  the catalog. (No cross-section moves in v1.)
+
+All affordances reuse the existing inline-edit pattern (`editingField`
+state, click-to-edit, Enter-commits) and the kebab menu shape already
+used by the per-row status chip.
+
+**Persistence model:** auto-write to disk. Every add / delete / edit /
+reorder PUTs the recomposed markdown to a new companion endpoint
+(`PUT /v1/test-docs/{docId}`), which rewrites
+`.pinta/test-docs/{docId}.md`. With the on-disk file as the source of
+truth and the agent's existing "preserve stable ids on regen" rule
+(SKILL.md §7.10.1b), user edits naturally survive regenerate — added
+rows stay, deleted rows stay deleted, edits stay edited. No new
+client-side bookkeeping (no `userAdded` flag, no `hiddenTestIds`
+set).
+
+**ID scheme:** reserve prefix `USER-` for user-added tests. The agent
+treats any `USER-*` id as permanent on regen — verbatim preservation,
+no edits to title / expected. Added as a one-paragraph reinforcement
+to SKILL.md §7.10.1b.
+
+**Wire-protocol additions:**
+
+| Direction | Addition |
+|---|---|
+| HTTP | `PUT /v1/test-docs/:docId` (replace the spec file's content) |
+| Skill | SKILL.md §7.10.1b — `USER-*` preservation rule |
+
+No new types, no new WS messages, no new storage keys.
+
+**Out of scope for v1:**
+
+- Cross-section moves (a test stays in its original section).
+- Drag-to-reorder (move-up / down arrows only).
+- Undo toast / multi-row select.
+- Per-test ID renaming (id is the stable join key — renaming would
+  break `test.detail` cache, status carry-over, and the agent's
+  preservation rule).
+
+**Full implementation plan:** see parked spec memory
+`test-pilot-catalog-editing.md`.
+
+### Phase 14 — Inquiry mode: contextual + global chat — Planned
+
+Adds *inquiry* as the third module mode alongside the existing
+*per-submit* (GitLab Issues) and *interactive* (Test Pilot). The
+inquiry surface is a **shared bottom-sheet chat** with three entry
+points, all reaching the same agent over `op: "chat"`:
+
+1. **Global chat** — header icon next to Settings. No surface context
+   captured beyond session basics (appMode, activeTab, pageUrl,
+   projectRoot, version). Quick FAQ-style asks ("how do I disable the
+   screenshot opt-in?"). Rolling thread persisted at
+   `chrome.storage.local["pinta-global-chat"]`, capped at 200
+   messages.
+2. **Annotate "Just Ask"** — checkbox in the submit footer. When
+   ticked, Submit re-labels to *Ask agent* and opens the chat with
+   `context.kind === "annotate-batch"` (annotations + screenshot path).
+   Agent answers without editing source files. "Apply to source"
+   pivots the thread back into a real submit. Threads keyed by
+   session id under `pinta-annotate-chats`.
+3. **Test Pilot FAB** — bottom-right of the Test Pilot tab. Opens with
+   `context.kind === "test-detail"` (when viewing a row) or
+   `"catalog-summary"` (catalog view). Per-row threads live inside
+   the existing catalog blob at `TestPilotTest.chat[]`.
+
+**Wire protocol** extends `module.query.submit` with a new
+`op: "chat"`. queryComment carries `{ op, prompt, context, history }`;
+agent returns `{ type: "chat", reply }` via `mark_session_done`. Same
+envelope as today's `doc-parse` / `detail-steps` ops — no new
+ClientMessage variant.
+
+**Why it matters:** today, every Pinta module is *action-shaped* —
+file an issue, edit source, mark a test. Inquiry is the missing third
+verb. Users repeatedly hit "I want to ask before I commit" moments
+and context-switch to a separate agent window. Folding inquiry into
+Pinta closes that loop and makes the agent feel like one assistant
+surfaced where it's needed, not a per-module bot.
+
+**Replaces** the Test Pilot per-row Notes textarea + `comment` field
+shipped in v0.3.2. Migration: existing `comment` strings get seeded
+as the first user-role message in the row's new `chat[]` array so
+typed notes survive the upgrade.
+
+**Module-mode taxonomy after this lands:**
+
+| mode | examples | what it does |
+|---|---|---|
+| `per-submit` | GitLab Issues | Runs after source edits land |
+| `interactive` | Test Pilot | Owns its own tab |
+| `inquiry` | Chat | Cross-cutting; surfaces on other views via FAB / checkbox / header icon |
+
+**Foundation plan** (Test Pilot tier only): see
+`~/.claude/plans/precious-waddling-treasure.md`. Generalizing to the
+three-tier module is the diff outlined in `chat-module-spec.md`.
+
+**Out of scope for first cut:** streaming responses, multi-user
+threads, chat history search, "agent proposes Pass/Fail" from reply
+analysis, page-level FAB on the user's app (side-panel only).
 
 ---
 

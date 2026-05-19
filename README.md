@@ -535,6 +535,17 @@ V1 covers the core loop. What's next, in priority order:
   side panel, undo last edit (rolls back via git), plan-then-execute
   toggle. (Per-project `.pinta.json` shipped alongside multi-project
   mode and is already wired up.)
+- **Phase 13 — Test Pilot catalog editing.** Delete / add / edit /
+  rename / reorder sections + tests from the side panel, with
+  on-disk `.pinta/test-docs/{docId}.md` kept in sync via a new
+  companion endpoint. Lets you patch AI-generated catalogs in place
+  instead of regenerating.
+- **Phase 14 — Inquiry mode (chat module).** Adds a third module verb
+  alongside *act*: a shared bottom-sheet chat with three entry points
+  — a global header icon for FAQ-style asks, a "Just Ask" checkbox
+  on Annotate (Submit becomes Ask), and a FAB on the Test Pilot tab
+  for per-row context. All three share one `op: "chat"` wire and
+  one sheet UI. Replaces the current Test Pilot per-row Notes.
 - **Beyond.** Conflict detection, multi-tab sessions, read-only sharing.
   See [`spec/SPEC.md` §9](spec/SPEC.md#9-open-questions) for the open
   design questions.
