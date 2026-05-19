@@ -10,13 +10,57 @@
   // Lives at `extension/src/sidepanel/TestPilotTab.svelte`. Rendered
   // from `App.svelte` whenever `tab === "test-pilot"` is active.
 
-  import { onMount } from "svelte";
-  import { app, type TestPilotTest, type TestPilotStatus } from "../lib/state.svelte.js";
+  import { onMount, tick } from "svelte";
+  import { app, type TestPilotTest, type TestPilotStatus, type TestPilotSection } from "../lib/state.svelte.js";
   import { parseStep } from "../lib/step-md.js";
   import { highlight } from "../lib/prism-setup.js";
 
   let fileInput = $state<HTMLInputElement | null>(null);
   let viewing = $state<{ testId: string } | null>(null);
+  // The currently "selected" test row in the catalog. Set when the user
+  // clicks a row body or opens its detail view; used to (a) tint the row
+  // as a bookmark cursor and (b) scroll-restore back to it when the user
+  // returns from the detail view via "Back to catalog".
+  let activeTestId = $state<string | null>(null);
+  // Section-level "Ask all" — keyed by section.title, true while the
+  // sequential bulk fetch is running OR queued. We fire one query,
+  // wait for its pendingDetails entry to clear (response, error, or
+  // timeout), then fire the next. Going parallel would blow the per-row
+  // 120s timer since the agent processes Claude sessions one-at-a-time
+  // anyway.
+  let bulkFetchingSections = $state<Record<string, boolean>>({});
+  // Cross-section serialization. If the user clicks "Ask all" on
+  // multiple sections, each one chains onto this promise so loops run
+  // back-to-back instead of fighting for the agent's queue (which would
+  // pin per-row 120s timers on rows still waiting their turn AND cause
+  // one section's error to cascade-cancel the others via the shared
+  // `app.testPilot.error` field). Non-reactive — plain Promise chain.
+  let bulkQueue: Promise<void> = Promise.resolve();
+  // Per-section completion ledger. Used by the auto-collapse $effect
+  // below to fire exactly on the <100% → 100% transition rather than
+  // every time `collapsedSections` is read while a section is already
+  // complete (which would re-collapse manual expand-to-review).
+  let prevSectionComplete = $state<Record<string, boolean>>({});
+
+  $effect(() => {
+    const catalog = app.testPilot.catalog;
+    if (!catalog) return;
+    for (const section of catalog.sections) {
+      const total = section.tests.length;
+      if (total === 0) continue;
+      let marked = 0;
+      for (const t of section.tests) {
+        if (t.status === "pass" || t.status === "fail") marked++;
+      }
+      const isComplete = marked === total;
+      const was = prevSectionComplete[section.title] === true;
+      // Fire on the transition only — leaves manual re-expand alone.
+      if (isComplete && !was) {
+        collapsedSections[section.title] = true;
+      }
+      prevSectionComplete[section.title] = isComplete;
+    }
+  });
   // Section-collapse state (id-keyed by section title).
   let collapsedSections = $state<Record<string, boolean>>({});
   // Status dropdown — when the user clicks a row's checkbox we open a
@@ -30,6 +74,10 @@
   // reflects the user's global preference by default. Toggling it
   // affects only the next Re-ask on this row, not the module setting.
   let detailedOverride = $state<boolean>(false);
+  // Tester comment draft for the open detail view. Bound to the
+  // textarea above the Pass / Fail buttons; committed via
+  // `app.setTestComment` on blur / Pass / Fail / close.
+  let commentDraft = $state<string>("");
   // Inline metadata edit state. `null` means nothing's being edited;
   // otherwise it's the field name and the in-flight draft value. We
   // commit on Enter/blur and revert on Escape.
@@ -149,25 +197,115 @@
     dropdownTestId = null;
   }
 
+  function setActive(testId: string) {
+    activeTestId = testId;
+  }
+
+  async function askAllInSection(section: TestPilotSection) {
+    if (bulkFetchingSections[section.title]) return; // already running/queued
+    bulkFetchingSections[section.title] = true;
+    // Auto-expand so the per-row spinners are actually visible while
+    // the queue chews through the section.
+    collapsedSections[section.title] = false;
+    // Chain onto the global queue — guarantees only one section's loop
+    // is actively firing requests at a time. The spinner shown while
+    // we await `prev` is "queued, your turn is coming."
+    const prev = bulkQueue;
+    bulkQueue = (async () => {
+      try {
+        await prev;
+      } catch {
+        // Defensive — `prev` shouldn't reject (the inner try/finally
+        // swallows everything), but if it ever does, don't take this
+        // section's loop down with it.
+      }
+      try {
+        for (const test of section.tests) {
+          if (test.detail) continue; // already answered
+          // If another caller has it in flight already (per-row Ask),
+          // just wait for that one to clear before moving on.
+          if (!app.testPilot.pendingDetails[test.id]) {
+            void app.fetchDetailSteps(test.id);
+          }
+          // Poll until this row's pending entry clears (success, error,
+          // or timeout — handleDetailSync / armDetailTimeout / cancel
+          // all delete the entry). Cheap polling beats wiring a per-row
+          // promise channel through state.svelte.ts for this UI
+          // affordance.
+          while (app.testPilot.pendingDetails[test.id]) {
+            await new Promise((r) => setTimeout(r, 250));
+          }
+          // Stop the queue if the last fetch errored or timed out — no
+          // sense piling more onto a wedged agent. The user can retry.
+          // The next queued section will still get a chance: its first
+          // `fetchDetailSteps` call clears `error` in state.svelte.ts.
+          if (app.testPilot.error) break;
+        }
+      } finally {
+        delete bulkFetchingSections[section.title];
+      }
+    })();
+    await bulkQueue;
+  }
+
   function openDetail(test: TestPilotTest) {
+    activeTestId = test.id;
     viewing = { testId: test.id };
     copiedBlock = null;
     // Seed the inline checkbox from the module's saved preference so
     // the default matches whatever the user picked globally in Settings.
     detailedOverride =
       app.modules["test-pilot"]?.settings?.detailed_steps === true;
+    // Hydrate the comment textarea with any previously-saved note for
+    // this row so the tester can pick up where they left off.
+    commentDraft = test.comment ?? "";
     if (!test.detail) {
       void app.fetchDetailSteps(test.id);
     }
   }
 
+  function commitComment() {
+    if (!viewing) return;
+    app.setTestComment(viewing.testId, commentDraft);
+  }
+
   function closeDetail() {
+    // Commit any unsaved comment text before tearing down. Without
+    // this, a tester who types a note and clicks "Back to catalog"
+    // (instead of Pass / Fail) would lose the draft.
+    commitComment();
     viewing = null;
     copiedBlock = null;
+    commentDraft = "";
+    // Scroll-restore so the tester doesn't lose their place. If the
+    // active row's section happens to be collapsed (e.g. the user
+    // collapsed it before opening detail), force-expand it so the row
+    // is actually in the DOM by the time we look it up.
+    if (activeTestId) {
+      const id = activeTestId;
+      const catalog = app.testPilot.catalog;
+      if (catalog) {
+        for (const section of catalog.sections) {
+          if (section.tests.some((t) => t.id === id)) {
+            collapsedSections[section.title] = false;
+            break;
+          }
+        }
+      }
+      void tick().then(() => {
+        const el = document.querySelector<HTMLElement>(
+          `[data-test-row="${CSS.escape(id)}"]`,
+        );
+        if (el) el.scrollIntoView({ block: "center", behavior: "smooth" });
+      });
+    }
   }
 
   function setStatusAndClose(status: TestPilotStatus) {
     if (!viewing) return;
+    // closeDetail() flushes the comment for us — no need to commit
+    // here too. Setting status first means the catalog tally reflects
+    // the new state before the view tears down.
     app.setTestStatus(viewing.testId, status);
     closeDetail();
   }
@@ -323,8 +461,25 @@
       Cancel
     </button>
   </section>
+{:else if !app.testPilot.catalog && app.appMode === "standalone"}
+  <!-- STANDALONE empty state — Test Pilot catalogs are scoped per
+       project, so there's nothing to show until the user picks one. -->
+  <section class="space-y-3 p-3">
+    <div class="flex items-center gap-2">
+      <span class="text-base">🛫</span>
+      <h2 class="text-sm font-semibold text-ink-900 dark:text-night-text">Test Pilot</h2>
+    </div>
+    <div class="rounded-md border border-ink-200 dark:border-night-line bg-ink-50 dark:bg-night-alt p-3 text-[12px] text-ink-700 dark:text-night-dim leading-snug space-y-2">
+      <p>Test Pilot catalogs are scoped per project. Connect to one above to view its catalog or start a new one.</p>
+      <p class="text-ink-500 dark:text-night-mute">
+        If you're a tester, ask the developer for their project's
+        <code class="font-mono text-[10px] bg-ink-100 dark:bg-night-alt px-1 rounded">pinta-companion</code>
+        command.
+      </p>
+    </div>
+  </section>
 {:else if !app.testPilot.catalog}
-  <!-- EMPTY state ---------------------------------------------------- -->
+  <!-- EMPTY state (connected) ---------------------------------------- -->
   <section class="space-y-3 p-3">
     <div class="flex items-center gap-2">
       <span class="text-base">🛫</span>
@@ -525,6 +680,31 @@
           No steps yet. Click Re-ask above.
         </p>
       {/if}
+
+      <!-- Tester comment — flushed on blur / Pass / Fail / close.
+           Empty strings collapse to undefined so the catalog JSON
+           doesn't fill up with empty comment fields. Embedded in the
+           markdown export under a "Notes" block per section. -->
+      <div class="pt-1 space-y-1">
+        <label
+          for="pinta-test-comment"
+          class="flex items-center gap-1.5 text-[10px] uppercase tracking-wider font-semibold text-ink-500 dark:text-night-mute"
+        >
+          <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+            <path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z" />
+          </svg>
+          Notes
+          <span class="ml-auto text-[10px] font-normal normal-case tracking-normal text-ink-400 dark:text-night-mute italic">optional</span>
+        </label>
+        <textarea
+          id="pinta-test-comment"
+          rows="2"
+          placeholder="Anything worth flagging? (e.g. flicker on first paint, browser-specific quirk, retry conditions)"
+          class="w-full text-[12px] text-ink-800 dark:text-night-text bg-white dark:bg-night-card border border-ink-200 dark:border-night-line rounded-md px-2 py-1.5 leading-snug resize-y focus:outline-none focus:ring-2 focus:ring-brand-pink/40 placeholder:text-ink-400 dark:placeholder:text-night-mute"
+          bind:value={commentDraft}
+          onblur={commitComment}
+        ></textarea>
+      </div>
 
       <!-- Pass (green filled) / Fail (ghost) -->
       <div class="flex items-center gap-2 pt-1">
@@ -740,12 +920,16 @@
         {@const secFail = section.tests.filter((t) => t.status === "fail").length}
         {@const secTotal = section.tests.length}
         {@const secPct = secTotal > 0 ? Math.round(((secPass + secFail) / secTotal) * 100) : 0}
+        {@const secUnloaded = section.tests.filter((t) => !t.detail).length}
+        {@const secBulkFetching = !!bulkFetchingSections[section.title]}
         <div class="rounded-lg border border-ink-200 dark:border-night-line bg-ink-50 dark:bg-night-alt overflow-hidden">
-          <button
-            type="button"
-            class="pinta-section-trigger w-full flex items-center justify-between gap-2 px-3 py-2.5 text-[12px] font-medium text-ink-900 dark:text-night-text hover:bg-ink-100 dark:hover:bg-night-line"
-            onclick={() => (collapsedSections[section.title] = !collapsed)}
-          >
+          <div class="pinta-section-trigger flex items-stretch text-[12px] font-medium text-ink-900 dark:text-night-text">
+            <button
+              type="button"
+              class="flex items-center gap-2 min-w-0 flex-1 px-3 py-2.5 text-left hover:bg-ink-100 dark:hover:bg-night-line"
+              onclick={() => (collapsedSections[section.title] = !collapsed)}
+              aria-expanded={!collapsed}
+            >
             <span class="flex items-center gap-2 min-w-0">
               <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" class="transition-transform shrink-0" class:rotate-90={!collapsed}><polyline points="9 18 15 12 9 6"/></svg>
               <!-- Flask icon — wiggles on section-trigger hover (see app.css).
@@ -773,39 +957,81 @@
               </span>
               <span class="truncate font-bold">{section.title}</span>
             </span>
-            <!-- Per-section tally: pass · fail · % complete. Pass and
-                 fail are color-coded; pct is dim. Separators are thin
-                 vertical bars so the trio reads as one badge. Falls
-                 back to a single count chip if nothing has been tested
-                 yet (zero pass + zero fail) to keep the header tidy. -->
-            <span class="inline-flex items-center gap-1.5 text-[11px] font-semibold shrink-0 tabular-nums bg-white/70 dark:bg-night-card/70 rounded px-2 py-0.5">
-              {#if secPass + secFail === 0}
-                <span class="text-ink-600 dark:text-night-dim">{secTotal}</span>
-              {:else}
-                <span
-                  class="text-emerald-600 dark:text-emerald-400"
-                  title="{secPass} passed of {secTotal}"
-                >{secPass}</span>
-                <span class="w-px h-3 bg-ink-300 dark:bg-night-line" aria-hidden="true"></span>
-                <span
-                  class="text-red-600 dark:text-red-400"
-                  title="{secFail} failed of {secTotal}"
-                >{secFail}</span>
-                <span class="w-px h-3 bg-ink-300 dark:bg-night-line" aria-hidden="true"></span>
-                <span
-                  class="text-ink-700 dark:text-night-dim"
-                  title="{secPass + secFail} of {secTotal} tests run"
-                >{secPct}%</span>
+            </button>
+            <!-- Right edge: tally chip + section-wide "Ask all" button.
+                 Separate from the collapse toggle so we can have two
+                 distinct click targets without nesting buttons. -->
+            <div class="flex items-center gap-1.5 shrink-0 pr-2">
+              <!-- Per-section tally: pass · fail · % complete. Pass and
+                   fail are color-coded; pct is dim. Separators are thin
+                   vertical bars so the trio reads as one badge. Falls
+                   back to a single count chip if nothing has been tested
+                   yet (zero pass + zero fail) to keep the header tidy. -->
+              <span class="inline-flex items-center gap-1.5 text-[11px] font-semibold tabular-nums bg-white/70 dark:bg-night-card/70 rounded px-2 py-0.5">
+                {#if secPass + secFail === 0}
+                  <span class="text-ink-600 dark:text-night-dim">{secTotal}</span>
+                {:else}
+                  <span
+                    class="text-emerald-600 dark:text-emerald-400"
+                    title="{secPass} passed of {secTotal}"
+                  >{secPass}</span>
+                  <span class="w-px h-3 bg-ink-300 dark:bg-night-line" aria-hidden="true"></span>
+                  <span
+                    class="text-red-600 dark:text-red-400"
+                    title="{secFail} failed of {secTotal}"
+                  >{secFail}</span>
+                  <span class="w-px h-3 bg-ink-300 dark:bg-night-line" aria-hidden="true"></span>
+                  <span
+                    class="text-ink-700 dark:text-night-dim"
+                    title="{secPass + secFail} of {secTotal} tests run"
+                  >{secPct}%</span>
+                {/if}
+              </span>
+              <!-- Section-wide Ask. Hidden once every test in the section
+                   has a cached detail (nothing left to ask). Disabled +
+                   spinning while the queue is chewing through the
+                   section. -->
+              {#if secUnloaded > 0}
+                <button
+                  type="button"
+                  class="shrink-0 w-8 h-9 inline-flex items-center justify-center rounded-full hover:bg-ink-100 dark:hover:bg-night-line disabled:opacity-60 disabled:cursor-not-allowed"
+                  class:text-brand-pink={secBulkFetching}
+                  class:dark:text-brand-pink-light={secBulkFetching}
+                  class:text-ink-500={!secBulkFetching}
+                  class:dark:text-night-dim={!secBulkFetching}
+                  class:hover:text-brand-pink={!secBulkFetching}
+                  class:dark:hover:text-brand-pink-light={!secBulkFetching}
+                  onclick={() => askAllInSection(section)}
+                  disabled={secBulkFetching}
+                  title={secBulkFetching
+                    ? `Asking the agent for steps on every test in this section…`
+                    : `Ask for steps on all ${secUnloaded} unanswered test${secUnloaded === 1 ? "" : "s"} in this section`}
+                  aria-label={`Ask for steps on every test in ${section.title}`}
+                >
+                  {#if secBulkFetching}
+                    <svg width="19" height="19" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="animate-spin" aria-hidden="true"><path d="M21 12a9 9 0 1 1-6.219-8.56"/></svg>
+                  {:else}
+                    <svg width="19" height="19" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="10"/><path d="M9.09 9a3 3 0 0 1 5.83 1c0 2-3 3-3 3"/><line x1="12" y1="17" x2="12.01" y2="17"/></svg>
+                  {/if}
+                </button>
               {/if}
-            </span>
-          </button>
+            </div>
+          </div>
           {#if !collapsed}
             <ul class="border-t border-ink-200 dark:border-night-line">
               {#each section.tests as test (test.id)}
                 {@const detailLoading = !!app.testPilot.pendingDetails[test.id]}
                 {@const detailLoaded = !!test.detail}
-                <li class="relative border-b border-ink-200 dark:border-night-line last:border-b-0">
-                  <div class="flex items-start gap-3 px-3 py-3 bg-white dark:bg-night-card">
+                {@const isActive = activeTestId === test.id}
+                <li
+                  class="relative border-b border-ink-200 dark:border-night-line last:border-b-0"
+                  data-test-row={test.id}
+                >
+                  <div
+                    class="flex items-start gap-3 px-3 py-3 transition-colors {isActive
+                      ? 'bg-ink-100 dark:bg-night-alt'
+                      : 'bg-white dark:bg-night-card'}"
+                  >
                     <!-- Status vertical bar — full row height, transparent for untested -->
                     <div
                       class="absolute left-0 top-0 bottom-0 w-0.5"
@@ -840,40 +1066,92 @@
                       {/if}
                     </button>
 
-                    <!-- ID + title + expected (stacked) -->
-                    <div class="flex-1 min-w-0">
+                    <!-- ID + title + expected (stacked). Clickable to
+                         mark the row as the active cursor — opens NO
+                         detail view, just sets selection so "Back to
+                         catalog" can scroll-restore here later. Detail
+                         view is still opened only via the speech-bubble
+                         / "?" icons on the right. -->
+                    <div
+                      role="button"
+                      tabindex="0"
+                      class="flex-1 min-w-0 cursor-pointer rounded -mx-0.5 px-0.5 focus:outline-none focus-visible:ring-1 focus-visible:ring-brand-pink/40"
+                      onclick={() => setActive(test.id)}
+                      onkeydown={(e) => {
+                        if (e.key === "Enter" || e.key === " ") {
+                          e.preventDefault();
+                          setActive(test.id);
+                        }
+                      }}
+                      aria-pressed={isActive}
+                      aria-label={`Select ${test.id}`}
+                    >
                       <div class="font-mono text-[10px] font-bold tracking-wide text-ink-500 dark:text-night-mute">{test.id}</div>
                       <div class="text-[12px] font-semibold text-ink-900 dark:text-night-text leading-snug mt-1">{test.test}</div>
                       <p class="text-[11px] text-ink-500 dark:text-night-mute leading-snug mt-1">{test.expected}</p>
                     </div>
 
-                    <!-- Ask icon — spinner while fetching, pink once
-                         the agent has answered, gray otherwise -->
-                    <button
-                      type="button"
-                      class="shrink-0 w-9 h-9 mt-0.5 inline-flex items-center justify-center rounded-full hover:bg-ink-50 dark:hover:bg-night-alt"
-                      class:text-brand-pink={detailLoaded || detailLoading}
-                      class:dark:text-brand-pink-light={detailLoaded || detailLoading}
-                      class:text-ink-400={!detailLoaded && !detailLoading}
-                      class:dark:text-night-mute={!detailLoaded && !detailLoading}
-                      class:hover:text-brand-pink={!detailLoading}
-                      class:dark:hover:text-brand-pink-light={!detailLoading}
-                      onclick={() => openDetail(test)}
-                      title={detailLoading
-                        ? "Fetching steps from the agent…"
-                        : detailLoaded
-                          ? "View loaded steps"
-                          : "Ask for step-by-step instructions"}
-                      aria-label={detailLoading
-                        ? `Fetching steps for ${test.id}`
-                        : `Ask for steps for ${test.id}`}
-                    >
-                      {#if detailLoading}
-                        <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="animate-spin text-brand-pink dark:text-brand-pink-light" aria-hidden="true"><path d="M21 12a9 9 0 1 1-6.219-8.56"/></svg>
-                      {:else}
-                        <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><path d="M9.09 9a3 3 0 0 1 5.83 1c0 2-3 3-3 3"/><line x1="12" y1="17" x2="12.01" y2="17"/></svg>
-                      {/if}
-                    </button>
+                    <!-- Row actions — comment indicator + ask-icon
+                         clustered tight (gap-0) so they read as one
+                         button group instead of inheriting the row's
+                         gap-3 between them. Hit targets stay 36px so
+                         tap accuracy is unchanged. -->
+                    <div class="flex items-start shrink-0 mt-0.5">
+                      <!-- Comment indicator — speech bubble that lights
+                           up brand-pink when the row has a tester note.
+                           Clicking opens the detail view (same as "?")
+                           where the textarea above Pass/Fail is the
+                           place to read / edit the note. -->
+                      <button
+                        type="button"
+                        class="shrink-0 w-8 h-9 inline-flex items-center justify-center rounded-full hover:bg-ink-50 dark:hover:bg-night-alt"
+                        class:text-brand-pink={!!test.comment}
+                        class:dark:text-brand-pink-light={!!test.comment}
+                        class:text-ink-400={!test.comment}
+                        class:dark:text-night-mute={!test.comment}
+                        class:hover:text-brand-pink={true}
+                        class:dark:hover:text-brand-pink-light={true}
+                        onclick={() => openDetail(test)}
+                        title={test.comment
+                          ? `Note: ${test.comment.slice(0, 140)}${test.comment.length > 140 ? "…" : ""}`
+                          : "Add a tester note"}
+                        aria-label={test.comment
+                          ? `View note for ${test.id}`
+                          : `Add note for ${test.id}`}
+                      >
+                        <svg width="17" height="17" viewBox="0 0 24 24" fill={test.comment ? "currentColor" : "none"} stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                          <path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z" />
+                        </svg>
+                      </button>
+
+                      <!-- Ask icon — spinner while fetching, pink once
+                           the agent has answered, gray otherwise -->
+                      <button
+                        type="button"
+                        class="shrink-0 w-8 h-9 inline-flex items-center justify-center rounded-full hover:bg-ink-50 dark:hover:bg-night-alt"
+                        class:text-brand-pink={detailLoaded || detailLoading}
+                        class:dark:text-brand-pink-light={detailLoaded || detailLoading}
+                        class:text-ink-400={!detailLoaded && !detailLoading}
+                        class:dark:text-night-mute={!detailLoaded && !detailLoading}
+                        class:hover:text-brand-pink={!detailLoading}
+                        class:dark:hover:text-brand-pink-light={!detailLoading}
+                        onclick={() => openDetail(test)}
+                        title={detailLoading
+                          ? "Fetching steps from the agent…"
+                          : detailLoaded
+                            ? "View loaded steps"
+                            : "Ask for step-by-step instructions"}
+                        aria-label={detailLoading
+                          ? `Fetching steps for ${test.id}`
+                          : `Ask for steps for ${test.id}`}
+                      >
+                        {#if detailLoading}
+                          <svg width="19" height="19" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="animate-spin text-brand-pink dark:text-brand-pink-light" aria-hidden="true"><path d="M21 12a9 9 0 1 1-6.219-8.56"/></svg>
+                        {:else}
+                          <svg width="19" height="19" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><path d="M9.09 9a3 3 0 0 1 5.83 1c0 2-3 3-3 3"/><line x1="12" y1="17" x2="12.01" y2="17"/></svg>
+                        {/if}
+                      </button>
+                    </div>
                   </div>
 
                   <!-- Status dropdown menu — anchored beside the checkbox -->

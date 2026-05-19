@@ -40,6 +40,21 @@
   // being enabled in Settings.
   let activeTab = $state<SidePanelTab>("annotate");
 
+  // Per-tab "busy" indicators. Drive the spinner that replaces the tab
+  // icon when work is happening — gives the user a peripheral signal of
+  // activity in the OTHER tab while they're focused on this one.
+  // Annotate: agent is processing a submitted session.
+  // Test Pilot: doc-parse / doc-generate in flight, or any per-row Ask
+  // (single or bulk) pending.
+  const annotateBusy = $derived(
+    app.session?.status === "submitted" ||
+      app.session?.status === "applying",
+  );
+  const testPilotBusy = $derived(
+    app.testPilot.pending !== null ||
+      Object.keys(app.testPilot.pendingDetails).length > 0,
+  );
+
   type Tool = "select" | "arrow" | "rect" | "circle" | "freehand" | "pin" | "image";
   type ActiveMode = "idle" | "select" | "draw" | "image";
 
@@ -1428,7 +1443,7 @@
     {/if}
 
     {#if !app.viewingSettings && !app.viewingImportedId && !showAssociatePrompt && app.moduleReady("test-pilot")}
-      <nav class="flex items-center gap-1 border-b border-ink-200 dark:border-night-line -mx-3 px-3 mb-1">
+      <nav class="sticky -top-4 z-20 bg-ink-50 dark:bg-night-bg flex items-center gap-1 border-b border-ink-200 dark:border-night-line -mx-4 px-4 pt-4 mb-1">
         <button
           type="button"
           class="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium border-b-2 -mb-px transition-colors"
@@ -1443,11 +1458,19 @@
             void chrome.storage?.local?.set({ "pinta-active-tab": "annotate" });
           }}
         >
-          <!-- Pencil/edit glyph — matches the "mark up the page" mode -->
-          <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
-            <path d="M12 20h9" />
-            <path d="M16.5 3.5a2.121 2.121 0 0 1 3 3L7 19l-4 1 1-4 12.5-12.5z" />
-          </svg>
+          {#if annotateBusy}
+            <!-- Spinner replaces the pencil while the agent is
+                 processing a submitted/applying session. -->
+            <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="animate-spin" aria-label="Working on submitted session">
+              <path d="M21 12a9 9 0 1 1-6.219-8.56" />
+            </svg>
+          {:else}
+            <!-- Pencil/edit glyph — matches the "mark up the page" mode -->
+            <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+              <path d="M12 20h9" />
+              <path d="M16.5 3.5a2.121 2.121 0 0 1 3 3L7 19l-4 1 1-4 12.5-12.5z" />
+            </svg>
+          {/if}
           Annotate
         </button>
         <button
@@ -1464,14 +1487,22 @@
             void chrome.storage?.local?.set({ "pinta-active-tab": "test-pilot" });
           }}
         >
-          <!-- Flask glyph — same visual identity as the Test Pilot
-               section headers, so the tab reads as "the chemistry-set
-               tab" at a glance. -->
-          <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
-            <path d="M9 3h6" />
-            <path d="M10 3v6.5L4.4 18.7A1.6 1.6 0 0 0 5.8 21h12.4a1.6 1.6 0 0 0 1.4-2.3L14 9.5V3" />
-            <path d="M7.5 14.5h9" opacity="0.55" />
-          </svg>
+          {#if testPilotBusy}
+            <!-- Spinner replaces the flask while a doc-parse,
+                 doc-generate, or per-row Ask is in flight. -->
+            <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="animate-spin" aria-label="Test Pilot working">
+              <path d="M21 12a9 9 0 1 1-6.219-8.56" />
+            </svg>
+          {:else}
+            <!-- Flask glyph — same visual identity as the Test Pilot
+                 section headers, so the tab reads as "the chemistry-set
+                 tab" at a glance. -->
+            <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+              <path d="M9 3h6" />
+              <path d="M10 3v6.5L4.4 18.7A1.6 1.6 0 0 0 5.8 21h12.4a1.6 1.6 0 0 0 1.4-2.3L14 9.5V3" />
+              <path d="M7.5 14.5h9" opacity="0.55" />
+            </svg>
+          {/if}
           Test Pilot
         </button>
       </nav>

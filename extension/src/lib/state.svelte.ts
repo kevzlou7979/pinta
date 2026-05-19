@@ -47,6 +47,15 @@ export type TestPilotTest = {
   status: TestPilotStatus;
   /** Per-row detail cache, populated when the user clicks "?". */
   detail?: { steps: string[]; askedAt: number };
+  /**
+   * Free-form tester note for this row — typed in the detail view's
+   * comment textarea above the Pass / Fail buttons. Persisted via
+   * `saveTestPilot()` and embedded in the markdown export so QA notes
+   * survive sign-off ("PIN field flashed red for 200ms before settling
+   * — minor flicker, not a blocker"). Local-only; never travels to the
+   * agent.
+   */
+  comment?: string;
 };
 
 /** A heading group within the catalog (e.g. "1.1 Authentication"). */
@@ -257,7 +266,9 @@ class ExtensionState {
     void this.loadModules();
     void this.loadPulseSettings();
     void this.loadStandaloneOrigins();
-    void this.loadTestPilot();
+    // Stage the legacy global catalog (if any) for the first companion
+    // to claim. The actual per-project load happens inside connectTo.
+    void this.readLegacyTestPilot();
     await this.rescan(activeTabUrl);
   }
 
@@ -367,18 +378,82 @@ class ExtensionState {
 
   // ─── Test Pilot (interactive module) ───────────────────────────────
 
-  private static readonly TEST_PILOT_KEY = "pinta-test-pilot:current";
+  /** Legacy global slot from v0.3.1 and earlier, before catalogs were
+   *  scoped per-project. Read once on startup; the first companion the
+   *  user connects to after upgrade inherits it (see loadTestPilot).
+   *  After migration the key is removed. */
+  private static readonly LEGACY_TEST_PILOT_KEY = "pinta-test-pilot:current";
 
-  async loadTestPilot(): Promise<void> {
+  /** Per-companion storage key. Uses `projectRoot` (stable absolute
+   *  path) rather than `port` (ephemeral, reassigned on restart). */
+  private static testPilotKeyFor(companion: Companion): string {
+    return `pinta-test-pilot:${companion.projectRoot}`;
+  }
+
+  /** Holds the legacy catalog between `readLegacyTestPilot` (called from
+   *  `start`) and the first `loadTestPilot(companion)` call that claims
+   *  it. Null afterwards. */
+  private legacyTestPilotCatalog: TestPilotCatalog | null = null;
+
+  /** Read the pre-v0.3.2 global catalog slot, if any. Doesn't write to
+   *  state.testPilot — just stages it for the first connectTo to claim. */
+  private async readLegacyTestPilot(): Promise<void> {
     try {
       const stored = await chrome.storage?.local?.get(
-        ExtensionState.TEST_PILOT_KEY,
+        ExtensionState.LEGACY_TEST_PILOT_KEY,
       );
-      const raw = stored?.[ExtensionState.TEST_PILOT_KEY] as
+      const raw = stored?.[ExtensionState.LEGACY_TEST_PILOT_KEY] as
         | TestPilotCatalog
         | undefined;
       if (raw && typeof raw === "object" && Array.isArray(raw.sections)) {
+        this.legacyTestPilotCatalog = raw;
+      }
+    } catch {
+      // storage missing (test env) — defaults are fine
+    }
+  }
+
+  /** Wipe in-memory Test Pilot state. Used when switching companions or
+   *  dropping into standalone — the previous project's catalog, pending
+   *  fetches, timers, and error all belong to that project, not this
+   *  one. Persisted catalog is untouched (lives in chrome.storage). */
+  private resetTestPilotState(): void {
+    for (const id of Object.keys(this.testPilot.pendingDetails)) {
+      this.clearDetailTimer(id);
+    }
+    this.clearTestPilotTimeout();
+    this.testPilot.catalog = null;
+    this.testPilot.pending = null;
+    this.testPilot.pendingDetails = {};
+    this.testPilot.error = null;
+  }
+
+  /** Hydrate Test Pilot state for the given companion. Pass null to
+   *  enter standalone (clears state, no load). Idempotent. */
+  async loadTestPilot(companion: Companion | null): Promise<void> {
+    this.resetTestPilotState();
+    if (!companion) return;
+    const key = ExtensionState.testPilotKeyFor(companion);
+    try {
+      const stored = await chrome.storage?.local?.get(key);
+      const raw = stored?.[key] as TestPilotCatalog | undefined;
+      if (raw && typeof raw === "object" && Array.isArray(raw.sections)) {
         this.testPilot.catalog = raw;
+        return;
+      }
+      // Legacy migration — the first companion picked after upgrade
+      // inherits the pre-v0.3.2 global catalog. After this runs the
+      // legacy key is gone and subsequent companion switches just see
+      // empty state until they import their own.
+      if (this.legacyTestPilotCatalog) {
+        this.testPilot.catalog = this.legacyTestPilotCatalog;
+        this.legacyTestPilotCatalog = null;
+        await chrome.storage?.local?.set({
+          [key]: $state.snapshot(this.testPilot.catalog),
+        });
+        await chrome.storage?.local?.remove(
+          ExtensionState.LEGACY_TEST_PILOT_KEY,
+        );
       }
     } catch {
       // storage missing (test env) — defaults are fine
@@ -386,15 +461,21 @@ class ExtensionState {
   }
 
   private async saveTestPilot(): Promise<void> {
+    const companion = this.selectedCompanion;
+    // Standalone has no project context to scope this catalog to.
+    // Mutations from the UI shouldn't reach here in standalone (the
+    // empty state hides the import/generate affordances), but if they
+    // do, drop the write silently rather than leaking back into the
+    // legacy global slot.
+    if (!companion) return;
+    const key = ExtensionState.testPilotKeyFor(companion);
     try {
       if (this.testPilot.catalog) {
         await chrome.storage?.local?.set({
-          [ExtensionState.TEST_PILOT_KEY]: $state.snapshot(
-            this.testPilot.catalog,
-          ),
+          [key]: $state.snapshot(this.testPilot.catalog),
         });
       } else {
-        await chrome.storage?.local?.remove(ExtensionState.TEST_PILOT_KEY);
+        await chrome.storage?.local?.remove(key);
       }
     } catch {
       // ignore
@@ -678,6 +759,27 @@ class ExtensionState {
     }
   }
 
+  /**
+   * Set / clear the tester comment on a test row. Empty / whitespace-
+   * only strings collapse to `undefined` so the field stays absent in
+   * the catalog JSON instead of saving `""` everywhere.
+   */
+  setTestComment(testId: string, comment: string): void {
+    const catalog = this.testPilot.catalog;
+    if (!catalog) return;
+    const normalized = comment.trim() === "" ? undefined : comment;
+    for (const section of catalog.sections) {
+      for (const t of section.tests) {
+        if (t.id === testId) {
+          if (normalized === undefined) delete t.comment;
+          else t.comment = normalized;
+          void this.saveTestPilot();
+          return;
+        }
+      }
+    }
+  }
+
   /** Render a markdown report from the current catalog. */
   exportResults(): string {
     const c = this.testPilot.catalog;
@@ -707,6 +809,7 @@ class ExtensionState {
       out += `## ${s.title}\n\n`;
       out += `| ID | Test | Expected | Result |\n`;
       out += `|----|------|----------|--------|\n`;
+      const notes: { id: string; comment: string }[] = [];
       for (const t of s.tests) {
         const result =
           t.status === "pass"
@@ -717,9 +820,29 @@ class ExtensionState {
         const id = t.id.replace(/\|/g, "\\|");
         const test = t.test.replace(/\|/g, "\\|").replace(/\n/g, " ");
         const expected = t.expected.replace(/\|/g, "\\|").replace(/\n/g, " ");
-        out += `| ${id} | ${test} | ${expected} | ${result} |\n`;
+        // Note marker — appends a `[note]` superscript next to the
+        // result so readers know to scroll to the notes block. Keeps
+        // the table itself one row per test (multi-line comments
+        // would break Markdown table rendering).
+        const resultCell = t.comment ? `${result} [note]` : result;
+        out += `| ${id} | ${test} | ${expected} | ${resultCell} |\n`;
+        if (t.comment) notes.push({ id: t.id, comment: t.comment });
       }
       out += `\n`;
+      if (notes.length > 0) {
+        out += `**Notes**\n\n`;
+        for (const n of notes) {
+          // Indent multi-line comments under the bullet so they hang
+          // correctly in rendered markdown. Single-line comments stay
+          // on one line.
+          const lines = n.comment.split(/\r?\n/);
+          out += `- \`${n.id}\` — ${lines[0]}\n`;
+          for (let i = 1; i < lines.length; i++) {
+            out += `  ${lines[i]}\n`;
+          }
+        }
+        out += `\n`;
+      }
     }
     return out;
   }
@@ -1267,6 +1390,10 @@ class ExtensionState {
     this.session = null;
     this.markCreatingSession(false);
     this.selectedCompanion = companion;
+    // Swap Test Pilot catalogs to match. Standalone clears state
+    // entirely (catalogs are scoped per project — there's nothing to
+    // show without one). loadTestPilot handles both branches.
+    void this.loadTestPilot(companion);
     if (!companion) {
       this.connectionStatus = "disconnected";
       return;
@@ -1735,6 +1862,11 @@ class ExtensionState {
                 expected: String(t?.expected ?? ""),
                 status: carriedOver?.status ?? ("untested" as TestPilotStatus),
                 detail: carriedOver?.detail,
+                // Preserve tester notes across re-imports of the same
+                // doc — same policy as status / detail. Without this,
+                // a Re-import wipes commentary the user wrote during
+                // the previous run.
+                comment: carriedOver?.comment,
               };
             })
           : [],
