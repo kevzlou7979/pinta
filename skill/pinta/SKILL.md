@@ -503,33 +503,47 @@ returned markdown reference across all issues:
 SCREENSHOT_MD=""
 if [ -n "$FULL_PAGE_SCREENSHOT_PATH" ]; then
   ABS_SCREENSHOT="$PROJECT_ROOT/$FULL_PAGE_SCREENSHOT_PATH"
-  if [ -f "$ABS_SCREENSHOT" ]; then
-    # `glab api projects/:id/uploads` returns JSON with a pre-rendered
-    # `markdown` field like `![screenshot](/uploads/abc/file.png)`.
-    # Use the user's project_id override if set; otherwise resolve the
-    # current repo's project id via `glab repo view`.
+  if [ ! -f "$ABS_SCREENSHOT" ]; then
+    echo "⚠ Screenshot expected at $ABS_SCREENSHOT but the file is missing — filing issues without image." >&2
+  else
+    # Resolve the project id. Settings override wins; otherwise pull
+    # it from the current repo's GitLab remote. Node parses the JSON
+    # (already a hard skill dep via find-companion.js) so Windows
+    # without `python` on PATH still works — that was the most common
+    # silent-failure mode in v0.3.x.
     if [ -n "$module_settings_project_id" ]; then
       UPLOAD_PROJECT_ID="$module_settings_project_id"
     else
       UPLOAD_PROJECT_ID=$(glab repo view --output json 2>/dev/null \
-        | python -c "import sys,json; print(json.load(sys.stdin).get('id',''))")
+        | node -e "let d='';process.stdin.on('data',c=>d+=c).on('end',()=>{try{process.stdout.write(String(JSON.parse(d).id||''))}catch(e){}})" 2>/dev/null)
     fi
-    if [ -n "$UPLOAD_PROJECT_ID" ]; then
+    if [ -z "$UPLOAD_PROJECT_ID" ]; then
+      echo "⚠ Couldn't resolve a GitLab project id (cwd isn't a GitLab repo, and no \`project_id\` setting). Filing issues without image. Either set the Project setting in Pinta's GitLab Issues card, or run from a directory whose remote is a GitLab project." >&2
+    else
       # URL-encode group/project paths (they contain `/`).
-      ENCODED_ID=$(python -c "import sys,urllib.parse; print(urllib.parse.quote(sys.argv[1], safe=''))" "$UPLOAD_PROJECT_ID")
-      UPLOAD_RESPONSE=$(glab api "projects/$ENCODED_ID/uploads" \
-        -F "file=@$ABS_SCREENSHOT" 2>/dev/null || true)
-      SCREENSHOT_MD=$(printf '%s' "$UPLOAD_RESPONSE" \
-        | python -c "import sys,json; print(json.load(sys.stdin).get('markdown',''))" 2>/dev/null || true)
+      ENCODED_ID=$(node -e "process.stdout.write(encodeURIComponent(process.argv[1]))" "$UPLOAD_PROJECT_ID")
+      # glab's built-in --jq filter extracts the markdown field
+      # directly, no python pipeline. Capture stderr so the failure
+      # mode is visible to the user instead of silently degrading.
+      UPLOAD_ERR=$(mktemp)
+      SCREENSHOT_MD=$(glab api "projects/$ENCODED_ID/uploads" \
+        -F "file=@$ABS_SCREENSHOT" --jq '.markdown' 2>"$UPLOAD_ERR" || true)
+      if [ -z "$SCREENSHOT_MD" ]; then
+        ERR=$(cat "$UPLOAD_ERR" 2>/dev/null)
+        echo "⚠ Screenshot upload to GitLab failed for project $UPLOAD_PROJECT_ID: ${ERR:-unknown error}. Filing issues without image. Common cause: \`glab auth login\` was granted read-only — re-run with \`--scopes api,write_repository\`." >&2
+      fi
+      rm -f "$UPLOAD_ERR"
     fi
   fi
 fi
 ```
 
 If the upload fails (auth scope missing, network blip, project not
-writable), `SCREENSHOT_MD` ends up empty — proceed and skip the
-screenshot embed; don't fail the whole submission. Issues still get
-filed without the image.
+writable, file missing on disk), `SCREENSHOT_MD` ends up empty —
+proceed and skip the screenshot embed; don't fail the whole
+submission. Issues still get filed without the image, and the `⚠`
+lines above land in the transcript so the user knows *why* the image
+didn't make it.
 
 **Per-issue body template** (one issue per annotation):
 - Title: first sentence of `annotation.comment`, capped at ~80 chars.
