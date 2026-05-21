@@ -74,10 +74,63 @@
   // reflects the user's global preference by default. Toggling it
   // affects only the next Re-ask on this row, not the module setting.
   let detailedOverride = $state<boolean>(false);
-  // Tester comment draft for the open detail view. Bound to the
-  // textarea above the Pass / Fail buttons; committed via
-  // `app.setTestComment` on blur / Pass / Fail / close.
-  let commentDraft = $state<string>("");
+  // Phase 14 — chat sheet for the open detail view. The static Notes
+  // textarea was replaced by an interactive per-row chat with the
+  // agent. `chatOpen` toggles the bottom-sheet panel; `chatDraft` is
+  // the typed-but-unsent message. Both are local to this component —
+  // persisted state (thread itself) lives on `TestPilotTest.chat[]`.
+  let chatOpen = $state(false);
+  let chatDraft = $state("");
+  // True when the chat module setting is on (default). Lets the user
+  // disable the FAB if they want pure pass/fail checklist mode.
+  const chatEnabled = $derived(
+    app.modules["test-pilot"]?.settings?.chat_enabled !== false,
+  );
+  // True while the currently-viewed row has a chat ask in flight.
+  // Drives the send-button spinner.
+  const chatPending = $derived(
+    viewing ? !!app.testPilot.pendingChats[viewing.testId] : false,
+  );
+  // Bound to the message-list div so we can keep the most recent
+  // bubble in view as the conversation grows.
+  let chatScrollEl = $state<HTMLDivElement | null>(null);
+
+  /** Send the typed prompt for the currently-viewed row. Optimistic
+   *  append + WS send happens inside `app.sendChatMessage`; we just
+   *  clear the textarea on submit so the next prompt starts fresh. */
+  function sendChat() {
+    if (!viewing) return;
+    const text = chatDraft.trim();
+    if (!text) return;
+    void app.sendChatMessage(viewing.testId, text);
+    chatDraft = "";
+  }
+
+  /** Cmd/Ctrl+Enter sends. Enter (plain) inserts a newline so testers
+   *  can ask multi-line questions without sending half a thought. */
+  function onChatKeyDown(e: KeyboardEvent) {
+    if (e.key === "Enter" && (e.metaKey || e.ctrlKey)) {
+      e.preventDefault();
+      sendChat();
+    }
+  }
+
+  // Auto-scroll the message list to the bottom whenever the
+  // currently-viewed row's chat length changes (new message landed)
+  // or while the pending spinner is showing (so it stays in view).
+  $effect(() => {
+    if (!chatScrollEl) return;
+    const test = viewing ? findViewingTest() : null;
+    // Touch the reactive deps so Svelte 5 re-runs this effect on
+    // chat-thread updates and on pending-state flips.
+    void test?.chat?.length;
+    void chatPending;
+    // Defer to next tick so the new bubble's height is laid out
+    // before we measure scrollHeight.
+    tick().then(() => {
+      if (chatScrollEl) chatScrollEl.scrollTop = chatScrollEl.scrollHeight;
+    });
+  });
   // Inline edit state. `null` means nothing's being edited; otherwise
   // it's a keyed field name + in-flight draft. We commit on Enter/blur
   // and revert on Escape. Supported keys:
@@ -410,27 +463,20 @@
     // the default matches whatever the user picked globally in Settings.
     detailedOverride =
       app.modules["test-pilot"]?.settings?.detailed_steps === true;
-    // Hydrate the comment textarea with any previously-saved note for
-    // this row so the tester can pick up where they left off.
-    commentDraft = test.comment ?? "";
+    // Reset chat draft + sheet on row open so the new context isn't
+    // pre-filled with whatever was typed for the previous row.
+    chatDraft = "";
+    chatOpen = false;
     if (!test.detail) {
       void app.fetchDetailSteps(test.id);
     }
   }
 
-  function commitComment() {
-    if (!viewing) return;
-    app.setTestComment(viewing.testId, commentDraft);
-  }
-
   function closeDetail() {
-    // Commit any unsaved comment text before tearing down. Without
-    // this, a tester who types a note and clicks "Back to catalog"
-    // (instead of Pass / Fail) would lose the draft.
-    commitComment();
     viewing = null;
     copiedBlock = null;
-    commentDraft = "";
+    chatOpen = false;
+    chatDraft = "";
     // Scroll-restore so the tester doesn't lose their place. If the
     // active row's section happens to be collapsed (e.g. the user
     // collapsed it before opening detail), force-expand it so the row
@@ -457,8 +503,7 @@
 
   function setStatusAndClose(status: TestPilotStatus) {
     if (!viewing) return;
-    // closeDetail() flushes the comment for us — no need to commit
-    // here too. Setting status first means the catalog tally reflects
+    // Setting status first means the catalog tally reflects
     // the new state before the view tears down.
     app.setTestStatus(viewing.testId, status);
     closeDetail();
@@ -835,31 +880,6 @@
         </p>
       {/if}
 
-      <!-- Tester comment — flushed on blur / Pass / Fail / close.
-           Empty strings collapse to undefined so the catalog JSON
-           doesn't fill up with empty comment fields. Embedded in the
-           markdown export under a "Notes" block per section. -->
-      <div class="pt-1 space-y-1">
-        <label
-          for="pinta-test-comment"
-          class="flex items-center gap-1.5 text-[10px] uppercase tracking-wider font-semibold text-ink-500 dark:text-night-mute"
-        >
-          <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
-            <path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z" />
-          </svg>
-          Notes
-          <span class="ml-auto text-[10px] font-normal normal-case tracking-normal text-ink-400 dark:text-night-mute italic">optional</span>
-        </label>
-        <textarea
-          id="pinta-test-comment"
-          rows="2"
-          placeholder="Anything worth flagging? (e.g. flicker on first paint, browser-specific quirk, retry conditions)"
-          class="w-full text-[12px] text-ink-800 dark:text-night-text bg-white dark:bg-night-card border border-ink-200 dark:border-night-line rounded-md px-2 py-1.5 leading-snug resize-y focus:outline-none focus:ring-2 focus:ring-brand-pink/40 placeholder:text-ink-400 dark:placeholder:text-night-mute"
-          bind:value={commentDraft}
-          onblur={commitComment}
-        ></textarea>
-      </div>
-
       <!-- Pass (green filled) / Fail (ghost) -->
       <div class="flex items-center gap-2 pt-1">
         <button
@@ -884,6 +904,193 @@
       </div>
     {/if}
   </section>
+
+  <!-- Phase 14 — Chat FAB (Test Pilot detail view only).
+       Bottom-right of the panel, fixed-positioned so it floats over
+       the scrolling content. Hidden when the chat sheet is already
+       open (the sheet's send button replaces it as the primary
+       affordance) or when the chat module setting is off. -->
+  {#if chatEnabled && !chatOpen && viewing}
+    {@const viewingTest = findViewingTest()}
+    {@const chatCount = viewingTest?.chat?.length ?? 0}
+    <button
+      type="button"
+      class="fixed bottom-4 right-4 z-30 w-12 h-12 rounded-full bg-brand-pink text-white shadow-lg hover:bg-brand-magenta dark:hover:bg-brand-pink-light inline-flex items-center justify-center transition-transform hover:scale-105 active:scale-95"
+      onclick={() => { chatOpen = true; }}
+      title={chatCount > 0
+        ? `Resume chat (${chatCount} message${chatCount === 1 ? "" : "s"})`
+        : "Ask the agent about this test"}
+      aria-label="Open chat with agent"
+    >
+      <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+        <path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z" />
+      </svg>
+      {#if chatCount > 0}
+        <span class="absolute -top-1 -right-1 min-w-[18px] h-[18px] px-1 rounded-full bg-white text-brand-pink text-[10px] font-bold inline-flex items-center justify-center border border-brand-pink leading-none">
+          {chatCount}
+        </span>
+      {/if}
+    </button>
+  {/if}
+
+  <!-- Phase 14 — Chat bottom sheet (Test Pilot detail view only).
+       Slides up from the bottom of the side panel with a backdrop
+       overlay. Renders the row's chat thread through the same
+       `parseStep` + Prism pipeline used for detail steps so inline
+       code, fenced blocks, and `> Note:` callouts work identically
+       in chat bubbles. -->
+  {#if chatOpen && viewing}
+    {@const viewingTest = findViewingTest()}
+    {@const viewingSection = findViewingSectionTitle()}
+    {@const messages = viewingTest?.chat ?? []}
+    <!-- Backdrop -->
+    <button
+      type="button"
+      class="fixed inset-0 z-40 bg-black/30 dark:bg-black/50"
+      onclick={() => { chatOpen = false; chatDraft = ""; }}
+      aria-label="Close chat"
+    ></button>
+    <!-- Sheet panel -->
+    <div
+      class="fixed left-0 right-0 bottom-0 z-50 bg-white dark:bg-night-card border-t border-ink-200 dark:border-night-line rounded-t-xl shadow-2xl flex flex-col"
+      style="height: 70vh; max-height: 600px; animation: pinta-sheet-slide-up 250ms ease-out;"
+      role="dialog"
+      aria-label="Chat with agent"
+    >
+      <!-- Sheet header: drag-handle visual + context chip + close X -->
+      <div class="shrink-0 border-b border-ink-200 dark:border-night-line">
+        <div class="pt-2 pb-1 flex justify-center">
+          <div class="w-8 h-1 rounded-full bg-ink-300 dark:bg-night-line"></div>
+        </div>
+        <div class="px-4 pb-3 flex items-start justify-between gap-2">
+          <div class="min-w-0 flex-1">
+            <div class="text-[10px] uppercase tracking-wider font-semibold text-ink-500 dark:text-night-mute">
+              Talking about
+            </div>
+            <div class="text-[12px] text-ink-800 dark:text-night-text leading-snug truncate">
+              <span class="font-mono font-bold">{viewingTest?.id ?? ""}</span>
+              <span class="text-ink-400 dark:text-night-mute"> · </span>
+              <span class="text-ink-600 dark:text-night-dim">{viewingSection ?? ""}</span>
+            </div>
+          </div>
+          <button
+            type="button"
+            class="shrink-0 w-7 h-7 inline-flex items-center justify-center rounded-full text-ink-500 dark:text-night-mute hover:text-ink-900 dark:hover:text-night-text hover:bg-ink-100 dark:hover:bg-night-alt"
+            onclick={() => { chatOpen = false; chatDraft = ""; }}
+            aria-label="Close chat"
+          >
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
+          </button>
+        </div>
+      </div>
+
+      <!-- Message list — auto-scrolls to bottom via $effect below.
+           Renders agent text through `parseStep` so code blocks and
+           callouts render the same way as detail steps. -->
+      <div class="flex-1 overflow-y-auto px-4 py-3 space-y-3" bind:this={chatScrollEl}>
+        {#if messages.length === 0}
+          <p class="text-[12px] text-ink-500 dark:text-night-mute italic leading-snug">
+            Ask anything about this test — why a step behaves a certain way, what the agent expects to see, how to reproduce an edge case. The row's context (ID, title, expected result, loaded steps) is auto-attached.
+          </p>
+        {:else}
+          {#each messages as msg (msg.id)}
+            {#if msg.role === "user"}
+              <div class="flex justify-end">
+                <div class="max-w-[85%] rounded-lg rounded-br-sm bg-brand-pink text-white text-[12.5px] leading-snug px-3 py-2 whitespace-pre-wrap break-words">
+                  {msg.text}
+                </div>
+              </div>
+            {:else}
+              {@const blocks = parseStep(msg.text)}
+              <div class="flex justify-start">
+                <div class="max-w-[90%] rounded-lg rounded-bl-sm bg-ink-100 dark:bg-night-alt text-ink-800 dark:text-night-text text-[12.5px] leading-snug px-3 py-2 space-y-2">
+                  {#each blocks as block, bi (bi)}
+                    {#if block.kind === "text"}
+                      <p class="leading-relaxed">
+                        {#each block.parts as part, pi (pi)}
+                          {#if part.kind === "code"}
+                            <code class="font-mono text-[11px] bg-white dark:bg-night-card text-brand-pink dark:text-brand-pink-light px-1.5 py-0.5 rounded">{part.value}</code>
+                          {:else}
+                            <span>{part.value}</span>
+                          {/if}
+                        {/each}
+                      </p>
+                    {:else if block.kind === "code"}
+                      <div class="rounded-md overflow-hidden border border-ink-200 dark:border-night-line bg-white dark:bg-night-card/60">
+                        <div class="px-2.5 py-1 text-[10px] uppercase tracking-wider font-semibold text-ink-500 dark:text-night-mute border-b border-ink-200 dark:border-night-line">
+                          {block.lang || "code"}
+                        </div>
+                        <div class="pinta-code px-2.5 py-1.5 text-[11px] leading-relaxed overflow-x-auto"><pre><code class="font-mono">{@html highlight(block.body, block.lang)}</code></pre></div>
+                      </div>
+                    {:else if block.kind === "note"}
+                      <div class="border-l-2 border-ink-300 dark:border-night-line pl-2.5 py-0.5 text-[11.5px] text-ink-600 dark:text-night-dim leading-relaxed">
+                        <span class="font-semibold text-ink-800 dark:text-night-text">Note:</span>
+                        {#each block.parts as part, pi (pi)}
+                          {#if part.kind === "code"}
+                            <code class="font-mono text-[11px] bg-white dark:bg-night-card text-brand-pink dark:text-brand-pink-light px-1.5 py-0.5 rounded">{part.value}</code>
+                          {:else}
+                            <span>{part.value}</span>
+                          {/if}
+                        {/each}
+                      </div>
+                    {/if}
+                  {/each}
+                </div>
+              </div>
+            {/if}
+          {/each}
+          {#if chatPending}
+            <div class="flex justify-start">
+              <div class="rounded-lg rounded-bl-sm bg-ink-100 dark:bg-night-alt text-ink-600 dark:text-night-mute text-[12px] px-3 py-2 inline-flex items-center gap-2">
+                <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="animate-spin"><path d="M21 12a9 9 0 1 1-6.219-8.56" /></svg>
+                Agent is thinking…
+              </div>
+            </div>
+          {/if}
+        {/if}
+        {#if app.testPilot.error}
+          <div class="rounded-md border border-red-300 bg-red-50 dark:border-red-800/50 dark:bg-red-950/30 p-2 text-[11.5px] text-red-700 dark:text-red-300 leading-snug">
+            {app.testPilot.error}
+          </div>
+        {/if}
+      </div>
+
+      <!-- Input bar — textarea + send. Cmd/Ctrl+Enter to send; Enter
+           is newline for multi-line questions. -->
+      <div class="shrink-0 border-t border-ink-200 dark:border-night-line p-3 bg-white dark:bg-night-card">
+        {#if app.connectionStatus !== "connected"}
+          <p class="text-[11px] text-red-600 dark:text-red-400 mb-2 leading-snug">
+            Companion disconnected. Reconnect to ask the agent.
+          </p>
+        {/if}
+        <div class="flex items-end gap-2">
+          <textarea
+            rows="2"
+            placeholder="Ask the agent about this test…"
+            class="flex-1 text-[12.5px] text-ink-800 dark:text-night-text bg-white dark:bg-night-card border border-ink-200 dark:border-night-line rounded-md px-2.5 py-1.5 leading-snug resize-none focus:outline-none focus:ring-2 focus:ring-brand-pink/40 placeholder:text-ink-400 dark:placeholder:text-night-mute"
+            bind:value={chatDraft}
+            onkeydown={onChatKeyDown}
+            disabled={chatPending}
+          ></textarea>
+          <button
+            type="button"
+            class="shrink-0 h-10 px-3 rounded-md bg-brand-pink text-white text-[12.5px] font-semibold hover:bg-brand-magenta dark:hover:bg-brand-pink-light disabled:opacity-50 inline-flex items-center justify-center gap-1.5"
+            onclick={sendChat}
+            disabled={chatPending || chatDraft.trim() === "" || app.connectionStatus !== "connected"}
+            title="Send (Cmd/Ctrl + Enter)"
+            aria-label="Send message"
+          >
+            {#if chatPending}
+              <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" class="animate-spin"><path d="M21 12a9 9 0 1 1-6.219-8.56" /></svg>
+            {:else}
+              <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><line x1="22" y1="2" x2="11" y2="13"/><polygon points="22 2 15 22 11 13 2 9 22 2"/></svg>
+              Send
+            {/if}
+          </button>
+        </div>
+      </div>
+    </div>
+  {/if}
 {:else}
   <!-- CATALOG state -------------------------------------------------- -->
   {@const t = tally()}
@@ -1384,38 +1591,42 @@
                       </div>
                     {/if}
 
-                    <!-- Row actions — comment indicator + ask-icon
+                    <!-- Row actions — chat indicator + ask-icon
                          clustered tight (gap-0) so they read as one
                          button group instead of inheriting the row's
                          gap-3 between them. Hit targets stay 36px so
                          tap accuracy is unchanged. -->
                     <div class="flex items-start shrink-0 mt-0.5">
-                      <!-- Comment indicator — speech bubble that lights
-                           up brand-pink when the row has a tester note.
-                           Clicking opens the detail view (same as "?")
-                           where the textarea above Pass/Fail is the
-                           place to read / edit the note. -->
-                      <button
-                        type="button"
-                        class="shrink-0 w-8 h-9 inline-flex items-center justify-center rounded-full hover:bg-ink-50 dark:hover:bg-night-alt"
-                        class:text-brand-pink={!!test.comment}
-                        class:dark:text-brand-pink-light={!!test.comment}
-                        class:text-ink-400={!test.comment}
-                        class:dark:text-night-mute={!test.comment}
-                        class:hover:text-brand-pink={true}
-                        class:dark:hover:text-brand-pink-light={true}
-                        onclick={() => openDetail(test)}
-                        title={test.comment
-                          ? `Note: ${test.comment.slice(0, 140)}${test.comment.length > 140 ? "…" : ""}`
-                          : "Add a tester note"}
-                        aria-label={test.comment
-                          ? `View note for ${test.id}`
-                          : `Add note for ${test.id}`}
-                      >
-                        <svg width="17" height="17" viewBox="0 0 24 24" fill={test.comment ? "currentColor" : "none"} stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
-                          <path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z" />
-                        </svg>
-                      </button>
+                      <!-- Chat indicator — speech bubble that lights
+                           up brand-pink when the row has chat history.
+                           Clicking opens the detail view and the chat
+                           sheet so the tester can resume the thread.
+                           Hidden when chat is disabled via module
+                           setting. -->
+                      {#if chatEnabled}
+                        {@const hasChat = (test.chat?.length ?? 0) > 0}
+                        <button
+                          type="button"
+                          class="shrink-0 w-8 h-9 inline-flex items-center justify-center rounded-full hover:bg-ink-50 dark:hover:bg-night-alt"
+                          class:text-brand-pink={hasChat}
+                          class:dark:text-brand-pink-light={hasChat}
+                          class:text-ink-400={!hasChat}
+                          class:dark:text-night-mute={!hasChat}
+                          class:hover:text-brand-pink={true}
+                          class:dark:hover:text-brand-pink-light={true}
+                          onclick={() => { openDetail(test); chatOpen = true; }}
+                          title={hasChat
+                            ? `${test.chat!.length} chat message${test.chat!.length === 1 ? "" : "s"} with the agent`
+                            : "Ask the agent a question about this row"}
+                          aria-label={hasChat
+                            ? `View chat for ${test.id}`
+                            : `Open chat for ${test.id}`}
+                        >
+                          <svg width="17" height="17" viewBox="0 0 24 24" fill={hasChat ? "currentColor" : "none"} stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                            <path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z" />
+                          </svg>
+                        </button>
+                      {/if}
 
                       <!-- Ask icon — spinner while fetching, pink once
                            the agent has answered, gray otherwise -->

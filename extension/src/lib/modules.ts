@@ -131,6 +131,13 @@ const TEST_PILOT: ModuleSpec = {
       hint: "Off (default) — short, tester-friendly steps. Uses fewer tokens. On — deeper steps with technical context (URLs, payloads, code blocks). Slower and more expensive.",
       default: false,
     },
+    {
+      key: "chat_enabled",
+      type: "boolean",
+      label: "Show chat (ask the agent in detail view)",
+      hint: "On (default) — a chat button appears in each row's detail view so testers can ask the agent ad-hoc questions (\"why does the URL flash before redirect?\") with the row's context auto-attached. Off — pure pass/fail checklist, no chat surface.",
+      default: true,
+    },
   ],
 };
 

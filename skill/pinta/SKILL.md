@@ -608,6 +608,13 @@ session's lifecycle is just `submitted → applying → done | error`.
 Always start by parsing the query annotation's `comment` as JSON. It
 will have an `op` field that picks the sub-handler.
 
+| `op` | Handler | What it returns |
+|---|---|---|
+| `"doc-parse"` | §7.10.1 | Catalog extracted from imported spec |
+| `"generate-doc"` | §7.10.1b | Catalog generated from project context |
+| `"detail-steps"` | §7.10.2 | Step-by-step instructions for one row |
+| `"chat"` | §7.10.3 | Conversational reply to a tester question (Phase 14) |
+
 ### 7.10.1 `op: "doc-parse"` — extract the test catalog
 
 The user just imported a markdown test spec. The companion has
@@ -920,6 +927,82 @@ comment:
 
 If the test isn't in the doc, `mark_session_error` with a clear
 message ("Test {testId} not found in {filename}.").
+
+### 7.10.3 `op: "chat"` — conversational reply to a tester question (Phase 14)
+
+The user clicked the chat FAB on a test row's detail view and typed
+a question. Phase 14 replaced the static Notes textarea with an
+interactive per-row dialogue surface — testers can ask the agent
+ad-hoc questions about the test they're running ("why does the URL
+flash before redirect?", "what's the SUT token?", "is this expected
+on Safari?") without leaving the side panel.
+
+The query comment shape:
+
+```json
+{
+  "op": "chat",
+  "docId": "abc-123",
+  "testId": "AUTH-01",
+  "prompt": "why does the URL flash before redirect?",
+  "context": {
+    "kind": "test-detail",
+    "title": "Open Claim List with an EXPIRED CFR",
+    "expected": "Expired CFR shown as EXPIRED, deep-link disabled",
+    "sectionTitle": "1.2 Claim Listing",
+    "status": "untested",
+    "steps": ["Sign in as…", "Open /claims…", "…"]
+  },
+  "history": [
+    { "role": "user",  "text": "earlier question" },
+    { "role": "agent", "text": "earlier reply" }
+  ]
+}
+```
+
+1. `mark_session_applying({id})`.
+2. Read `.pinta/test-docs/{docId}.md` for catalog context if useful.
+   The `context` payload already carries the row's title, expected
+   result, section, status, and any previously-loaded steps — you
+   usually have enough without re-reading the file.
+3. **Answer the question in markdown.** Same render pipeline as
+   detail-steps — inline `code`, fenced code blocks, `> Note:`
+   callouts all welcome. Match the depth of the question:
+   - Short ask → short answer (2–4 sentences).
+   - Debugging-shaped ask ("why is X happening?") → walk through
+     the likely causes, suggest a verification step.
+   - "How do I…" → numbered steps, terse, tester-friendly tone by
+     default.
+   - Reference earlier `history` turns when the user follows up
+     ("can you elaborate on step 2?") — treat the thread as one
+     conversation, not isolated asks.
+4. **Tone matches the user.** Default to tester-friendly prose (no
+   curl, no internal class names, no env vars). If the question
+   itself uses dev vocabulary — "what's the network panel showing
+   for /api/sessions?" — match it and go technical. The `context`
+   doesn't carry the `detailed_steps` setting; read the user's
+   register from the prompt.
+5. **No source edits, ever.** Same Test Pilot rule as the other
+   ops — don't touch any file outside `.pinta/test-docs/`. Chat is
+   inquiry, not action.
+6. Build the chat payload:
+
+```json
+{
+  "type": "test-pilot-chat",
+  "testId": "AUTH-01",
+  "reply": "The flash is the SPA router catching the route after the SSR shell renders. To verify: open DevTools → Network, paste the deep link, look for a 302 to `/login`. If you see only a 200, the shell rendered first and the router resolved client-side — that's expected.\n\n> Note: this differs from the Safari behavior tracked in CLAIM-04 — the iOS WebView shortcuts the redirect.\n\nHappy to walk through the network trace if you paste what you see."
+}
+```
+
+7. `mark_session_done({id, summary: JSON.stringify(payload)})`.
+
+If `testId` resolves to a row that no longer exists (user deleted
+it between asks), `mark_session_error` with
+`"Test {testId} not found — was the row deleted?"`. The extension
+won't surface this often — pendingChats is keyed by testId so the
+sheet for a deleted row should close on its own — but the guard
+prevents a confused agent response landing nowhere.
 
 ### `test-pilot` operating rules
 

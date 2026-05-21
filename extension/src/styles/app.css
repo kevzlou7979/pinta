@@ -29,6 +29,22 @@ body {
   color: theme("colors.night.text");
 }
 
+/* Phase 14 — chat bottom-sheet entrance.
+ * Slides the sheet up from beneath the viewport into place. Used by
+ * the Test Pilot chat panel; trigger via `animation: pinta-sheet-slide-up
+ * 250ms ease-out` on the sheet element when it mounts. Keeps Svelte's
+ * transition: directive out of the markup since the sheet is mounted
+ * via an {#if} block and we just want a one-shot enter animation
+ * without unmount tween. */
+@keyframes pinta-sheet-slide-up {
+  from {
+    transform: translateY(100%);
+  }
+  to {
+    transform: translateY(0);
+  }
+}
+
 /* ---------------------------------------------------------------------
  * Prism theme for Test Pilot code blocks.
  * Tuned to match the side-panel mockup: pink commands, cyan flags,

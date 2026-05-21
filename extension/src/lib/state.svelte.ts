@@ -42,6 +42,17 @@ export type ExtensionMode = "draw" | "select" | "review" | "idle";
 /** What the user has done with a test row in the current catalog. */
 export type TestPilotStatus = "untested" | "pass" | "fail";
 
+/** One turn in a per-row chat thread. Phase 14 replaces the static
+ *  Notes textarea with this interactive dialogue surface. */
+export type ChatMessage = {
+  id: string;
+  role: "user" | "agent";
+  /** Markdown allowed — renders through the same `parseStep` + Prism
+   *  pipeline as the detail steps. */
+  text: string;
+  at: number;
+};
+
 /** A single test row in the catalog. */
 export type TestPilotTest = {
   id: string;
@@ -52,14 +63,14 @@ export type TestPilotTest = {
   /** Per-row detail cache, populated when the user clicks "?". */
   detail?: { steps: string[]; askedAt: number };
   /**
-   * Free-form tester note for this row — typed in the detail view's
-   * comment textarea above the Pass / Fail buttons. Persisted via
-   * `saveTestPilot()` and embedded in the markdown export so QA notes
-   * survive sign-off ("PIN field flashed red for 200ms before settling
-   * — minor flicker, not a blocker"). Local-only; never travels to the
-   * agent.
+   * Per-row chat thread (Phase 14). Replaces the v0.3.x `comment` field
+   * — testers can now ask the agent questions about this specific test
+   * row in-context, and the agent's replies are stored alongside the
+   * questions. Persisted with the catalog via `saveTestPilot()` and
+   * exported as a per-section Conversation block. Empty / unset when
+   * the user hasn't asked anything yet.
    */
-  comment?: string;
+  chat?: ChatMessage[];
 };
 
 /** A heading group within the catalog (e.g. "1.1 Authentication"). */
@@ -187,6 +198,10 @@ class ExtensionState {
      *  user can click ? on AUTH-01, go back, click ? on AUTH-02, and
      *  both spinners run side-by-side until the agent answers each. */
     pendingDetails: Record<string, { askedAt: number }>;
+    /** Concurrent in-flight chat asks, keyed by testId. Mirrors
+     *  `pendingDetails` — multiple rows can have asks in flight at
+     *  once, each row's send button drives its own spinner. */
+    pendingChats: Record<string, { askedAt: number }>;
     error: string | null;
     /** True while the user has an inline edit (section rename, test
      *  title / expected, catalog meta) in flight. Set by the side
@@ -194,7 +209,7 @@ class ExtensionState {
      *  `applyCatalogResult` bails when this is true so a mid-edit
      *  Generate result doesn't clobber the user's in-progress text. */
     editingActive: boolean;
-  }>({ catalog: null, pending: null, pendingDetails: {}, error: null, editingActive: false });
+  }>({ catalog: null, pending: null, pendingDetails: {}, pendingChats: {}, error: null, editingActive: false });
 
   /** Timer that fires if a Test Pilot query never gets a response —
    *  prevents the "Asking the agent…" spinner from sticking forever
@@ -204,6 +219,10 @@ class ExtensionState {
    *  `testPilotTimer` but one-per-row so each ? can time out
    *  independently. */
   private detailTimers = new Map<string, ReturnType<typeof setTimeout>>();
+  /** Per-testId timers for concurrent chat sends. Mirrors
+   *  `detailTimers` — keyed by row id so each chat ask times out on
+   *  its own clock without stomping a parallel one. */
+  private chatTimers = new Map<string, ReturnType<typeof setTimeout>>();
   /** Hard ceiling for any single Test Pilot query (doc-parse or
    *  detail-steps). Generous — long markdown docs take a while — but
    *  bounded. After this we surface a recovery message. */
@@ -405,6 +424,37 @@ class ExtensionState {
    *  it. Null afterwards. */
   private legacyTestPilotCatalog: TestPilotCatalog | null = null;
 
+  /** Walk a catalog and convert pre-Phase 14 `comment` strings into
+   *  seeded chat threads with one user-role message each. Mutates in
+   *  place. Removes `comment` after migration so re-running this is a
+   *  no-op. Phase 14 dropped the static Notes field in favor of an
+   *  interactive per-row chat thread; this preserves notes typed
+   *  under the prior version. */
+  private static migrateCommentsToChat(catalog: TestPilotCatalog): void {
+    if (!Array.isArray(catalog.sections)) return;
+    for (const section of catalog.sections) {
+      if (!Array.isArray(section.tests)) continue;
+      for (const test of section.tests) {
+        // Legacy field — typed as the old TestPilotTest.comment; not
+        // declared on the new type, so reach for it via index access.
+        const legacy = (test as unknown as { comment?: string }).comment;
+        if (typeof legacy === "string" && legacy.trim() !== "") {
+          if (!Array.isArray(test.chat) || test.chat.length === 0) {
+            test.chat = [
+              {
+                id: crypto.randomUUID(),
+                role: "user",
+                text: legacy,
+                at: catalog.importedAt ?? Date.now(),
+              },
+            ];
+          }
+        }
+        delete (test as unknown as { comment?: string }).comment;
+      }
+    }
+  }
+
   /** Read the pre-v0.3.2 global catalog slot, if any. Doesn't write to
    *  state.testPilot — just stages it for the first connectTo to claim. */
   private async readLegacyTestPilot(): Promise<void> {
@@ -431,10 +481,14 @@ class ExtensionState {
     for (const id of Object.keys(this.testPilot.pendingDetails)) {
       this.clearDetailTimer(id);
     }
+    for (const id of Object.keys(this.testPilot.pendingChats)) {
+      this.clearChatTimer(id);
+    }
     this.clearTestPilotTimeout();
     this.testPilot.catalog = null;
     this.testPilot.pending = null;
     this.testPilot.pendingDetails = {};
+    this.testPilot.pendingChats = {};
     this.testPilot.error = null;
   }
 
@@ -448,6 +502,13 @@ class ExtensionState {
       const stored = await chrome.storage?.local?.get(key);
       const raw = stored?.[key] as TestPilotCatalog | undefined;
       if (raw && typeof raw === "object" && Array.isArray(raw.sections)) {
+        // One-shot migration: pre-Phase 14 catalogs persisted a static
+        // `comment` field per row. Seed the new `chat` thread with a
+        // single user-role message so the tester's notes aren't lost
+        // when the field disappears in this version. Idempotent —
+        // running again on a migrated catalog is a no-op because
+        // `comment` is gone after the first pass.
+        ExtensionState.migrateCommentsToChat(raw);
         this.testPilot.catalog = raw;
         return;
       }
@@ -769,24 +830,203 @@ class ExtensionState {
     }
   }
 
+  // ─── Phase 14 — chat (per-row interactive dialogue with the agent) ──
+  //
+  // Replaces the v0.3.x Notes textarea. Each test row carries an
+  // optional `chat: ChatMessage[]` thread; the tester sends a prompt,
+  // the agent answers in markdown (same `parseStep` + Prism render
+  // pipeline as detail-steps), and the exchange persists with the
+  // catalog. Concurrent across rows — multiple rows can have asks in
+  // flight at the same time, mirroring the `pendingDetails` pattern.
+
+  /** Hard ceiling on the history we ship back to the agent. Keeps the
+   *  payload bounded for long-running conversations. */
+  private static readonly CHAT_HISTORY_CAP = 12;
+
   /**
-   * Set / clear the tester comment on a test row. Empty / whitespace-
-   * only strings collapse to `undefined` so the field stays absent in
-   * the catalog JSON instead of saving `""` everywhere.
+   * Send a chat prompt for one test row. Optimistically appends the
+   * user message to `test.chat`, persists, and fires a
+   * `module.query.submit` with `op: "chat"` carrying the row context
+   * + recent history. The eventual `session.synced` is routed to
+   * `handleChatSync(session, testId)` via the queryOp branch in
+   * `onMessage`.
+   *
+   * No-op if the catalog or row is gone, the companion isn't
+   * connected, or another chat is already in flight for this testId
+   * (don't double-submit). The pending UI keys off
+   * `testPilot.pendingChats[testId]` for per-row spinner state.
    */
-  setTestComment(testId: string, comment: string): void {
+  async sendChatMessage(testId: string, prompt: string): Promise<void> {
+    const text = prompt.trim();
+    if (!text) return;
     const catalog = this.testPilot.catalog;
     if (!catalog) return;
-    const normalized = comment.trim() === "" ? undefined : comment;
+    if (this.testPilot.pendingChats[testId]) return;
+    if (!this.client || this.connectionStatus !== "connected") {
+      this.testPilot.error =
+        "No companion connected. Start `pinta-companion .` in your project to use chat.";
+      return;
+    }
+    let section: TestPilotSection | null = null;
+    let test: TestPilotTest | null = null;
+    for (const s of catalog.sections) {
+      for (const t of s.tests) {
+        if (t.id === testId) {
+          section = s;
+          test = t;
+          break;
+        }
+      }
+      if (test) break;
+    }
+    if (!section || !test) return;
+
+    // Optimistically append the user's message + persist. The send is
+    // fire-and-forget over WS; the agent's reply lands via
+    // session.synced and gets routed to handleChatSync.
+    const userMsg: ChatMessage = {
+      id: crypto.randomUUID(),
+      role: "user",
+      text,
+      at: Date.now(),
+    };
+    test.chat = [...(test.chat ?? []), userMsg];
+    this.testPilot.error = null;
+    void this.saveTestPilot();
+
+    // Cap history so payloads stay bounded for long threads. Last
+    // N messages including the just-appended user prompt.
+    const history = (test.chat ?? []).slice(-ExtensionState.CHAT_HISTORY_CAP);
+    const url = this.lastUrl ?? "";
+    const queryComment = JSON.stringify({
+      op: "chat",
+      docId: catalog.docId,
+      testId,
+      prompt: text,
+      context: {
+        kind: "test-detail",
+        title: test.test,
+        expected: test.expected,
+        sectionTitle: section.title,
+        status: test.status,
+        steps: test.detail?.steps,
+      },
+      history: history.map((m) => ({ role: m.role, text: m.text })),
+    });
+    const settings = this.modules["test-pilot"]?.settings ?? {};
+    this.testPilot.pendingChats[testId] = { askedAt: Date.now() };
+    this.armChatTimeout(testId);
+    this.send({
+      type: "module.query.submit",
+      url,
+      moduleId: "test-pilot",
+      moduleSettings: settings,
+      queryComment,
+    });
+  }
+
+  /** Cancel an in-flight chat send (rarely needed in UI — single
+   *  message at a time per row — but mirrors `cancelDetailFetch` for
+   *  symmetry and stuck-spinner recovery). */
+  cancelChatSend(testId: string): void {
+    if (!this.testPilot.pendingChats[testId]) return;
+    this.clearChatTimer(testId);
+    delete this.testPilot.pendingChats[testId];
+  }
+
+  /** Wipe a row's chat thread. Persists. */
+  clearChat(testId: string): void {
+    const catalog = this.testPilot.catalog;
+    if (!catalog) return;
     for (const section of catalog.sections) {
       for (const t of section.tests) {
         if (t.id === testId) {
-          if (normalized === undefined) delete t.comment;
-          else t.comment = normalized;
+          if (t.chat && t.chat.length > 0) {
+            delete t.chat;
+            void this.saveTestPilot();
+          }
+          return;
+        }
+      }
+    }
+  }
+
+  private armChatTimeout(testId: string): void {
+    this.clearChatTimer(testId);
+    const t = setTimeout(() => {
+      if (!this.testPilot.pendingChats[testId]) return;
+      delete this.testPilot.pendingChats[testId];
+      this.chatTimers.delete(testId);
+      this.testPilot.error =
+        `Timed out waiting for the agent to answer for ${testId}. ` +
+        `Make sure \`/pinta\` is running in a Claude Code terminal for this project, then try again.`;
+    }, ExtensionState.TEST_PILOT_TIMEOUT_MS);
+    this.chatTimers.set(testId, t);
+  }
+
+  private clearChatTimer(testId: string): void {
+    const t = this.chatTimers.get(testId);
+    if (t) {
+      clearTimeout(t);
+      this.chatTimers.delete(testId);
+    }
+  }
+
+  /** Apply a `test-pilot-chat` payload from the agent. Appends the
+   *  reply as an agent-role message on the matching row's thread. */
+  private applyChatResult(payload: { [k: string]: unknown }): void {
+    const testId = typeof payload.testId === "string" ? payload.testId : null;
+    const reply = typeof payload.reply === "string" ? payload.reply : "";
+    if (!testId || !reply) return;
+    const catalog = this.testPilot.catalog;
+    if (!catalog) return;
+    for (const section of catalog.sections) {
+      for (const t of section.tests) {
+        if (t.id === testId) {
+          const agentMsg: ChatMessage = {
+            id: crypto.randomUUID(),
+            role: "agent",
+            text: reply,
+            at: Date.now(),
+          };
+          t.chat = [...(t.chat ?? []), agentMsg];
+          this.testPilot.error = null;
           void this.saveTestPilot();
           return;
         }
       }
+    }
+  }
+
+  /** Routed from `onMessage` when a `session.synced` with `op: "chat"`
+   *  arrives. Same shape as `handleDetailSync` — looks up the pending
+   *  entry by testId, drops it if the user already cancelled. */
+  private handleChatSync(session: Session, testId: string): void {
+    const entry = this.testPilot.pendingChats[testId];
+    if (!entry) return;
+    if (session.status === "done") {
+      this.clearChatTimer(testId);
+      const summary = session.appliedSummary ?? "";
+      try {
+        const payload = JSON.parse(summary) as {
+          type?: string;
+          [k: string]: unknown;
+        };
+        if (payload.type === "test-pilot-chat") {
+          this.applyChatResult(payload);
+        } else {
+          this.testPilot.error =
+            "Agent returned an unrecognized response. Check the skill version.";
+        }
+      } catch (err) {
+        this.testPilot.error = `Couldn't parse agent response: ${(err as Error).message}`;
+      }
+      delete this.testPilot.pendingChats[testId];
+    } else if (session.status === "error") {
+      this.clearChatTimer(testId);
+      this.testPilot.error =
+        session.errorMessage ?? `Chat query failed for ${testId}.`;
+      delete this.testPilot.pendingChats[testId];
     }
   }
 
@@ -1058,7 +1298,7 @@ class ExtensionState {
       out += `## ${s.title}\n\n`;
       out += `| ID | Test | Expected | Result |\n`;
       out += `|----|------|----------|--------|\n`;
-      const notes: { id: string; comment: string }[] = [];
+      const conversations: { id: string; chat: ChatMessage[] }[] = [];
       for (const t of s.tests) {
         const result =
           t.status === "pass"
@@ -1069,28 +1309,35 @@ class ExtensionState {
         const id = t.id.replace(/\|/g, "\\|");
         const test = t.test.replace(/\|/g, "\\|").replace(/\n/g, " ");
         const expected = t.expected.replace(/\|/g, "\\|").replace(/\n/g, " ");
-        // Note marker — appends a `[note]` superscript next to the
-        // result so readers know to scroll to the notes block. Keeps
-        // the table itself one row per test (multi-line comments
-        // would break Markdown table rendering).
-        const resultCell = t.comment ? `${result} [note]` : result;
+        // Mark rows that have a chat thread with a `[chat]` superscript
+        // so readers know to scroll to the per-section Conversations
+        // block. Table itself stays one row per test (multi-line
+        // markdown would break the table render).
+        const hasChat = Array.isArray(t.chat) && t.chat.length > 0;
+        const resultCell = hasChat ? `${result} [chat]` : result;
         out += `| ${id} | ${test} | ${expected} | ${resultCell} |\n`;
-        if (t.comment) notes.push({ id: t.id, comment: t.comment });
+        if (hasChat) conversations.push({ id: t.id, chat: t.chat! });
       }
       out += `\n`;
-      if (notes.length > 0) {
-        out += `**Notes**\n\n`;
-        for (const n of notes) {
-          // Indent multi-line comments under the bullet so they hang
-          // correctly in rendered markdown. Single-line comments stay
-          // on one line.
-          const lines = n.comment.split(/\r?\n/);
-          out += `- \`${n.id}\` — ${lines[0]}\n`;
-          for (let i = 1; i < lines.length; i++) {
-            out += `  ${lines[i]}\n`;
+      if (conversations.length > 0) {
+        // Per-section block lists each row's Q&A as a blockquote with
+        // **tester:** / **agent:** prefixes — readable in any markdown
+        // renderer, preserves multi-line replies, and survives the
+        // pandoc → PDF path that QA reviewers use.
+        out += `**Conversations**\n\n`;
+        for (const c of conversations) {
+          out += `**Conversation — ${c.id}**\n\n`;
+          for (const m of c.chat) {
+            const lines = m.text.split(/\r?\n/);
+            const prefix = m.role === "user" ? "**tester:**" : "**agent:**";
+            out += `> ${prefix} ${lines[0]}\n`;
+            for (let i = 1; i < lines.length; i++) {
+              out += `> ${lines[i]}\n`;
+            }
+            out += `>\n`;
           }
+          out += `\n`;
         }
-        out += `\n`;
       }
     }
     return out;
@@ -1903,7 +2150,8 @@ class ExtensionState {
           msg.moduleId === "test-pilot" &&
           this.testPilot.pending &&
           !this.testPilot.pending.sessionId &&
-          ExtensionState.queryOp(msg.session) !== "detail-steps"
+          ExtensionState.queryOp(msg.session) !== "detail-steps" &&
+          ExtensionState.queryOp(msg.session) !== "chat"
         ) {
           this.testPilot.pending.sessionId = msg.session.id;
         }
@@ -1932,6 +2180,14 @@ class ExtensionState {
           if (op === "detail-steps") {
             const testId = ExtensionState.queryField(msg.session, "testId");
             if (testId) this.handleDetailSync(msg.session, testId);
+            return;
+          }
+          // Per-row chat sends are also concurrent, routed by testId
+          // via pendingChats. Same shape as detail-steps — bypass the
+          // singleton `pending` slot entirely.
+          if (op === "chat") {
+            const testId = ExtensionState.queryField(msg.session, "testId");
+            if (testId) this.handleChatSync(msg.session, testId);
             return;
           }
         }
@@ -2122,11 +2378,12 @@ class ExtensionState {
                 expected: String(t?.expected ?? ""),
                 status: carriedOver?.status ?? ("untested" as TestPilotStatus),
                 detail: carriedOver?.detail,
-                // Preserve tester notes across re-imports of the same
-                // doc — same policy as status / detail. Without this,
-                // a Re-import wipes commentary the user wrote during
-                // the previous run.
-                comment: carriedOver?.comment,
+                // Preserve the tester's chat thread across re-imports
+                // of the same doc — same policy as status / detail.
+                // Without this, a Re-import wipes the per-row Q&A
+                // history the tester accumulated during the previous
+                // run.
+                chat: carriedOver?.chat,
               };
             })
           : [],
