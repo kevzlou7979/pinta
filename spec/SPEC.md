@@ -1256,9 +1256,10 @@ No new types, no new WS messages, no new storage keys.
 ### Phase 14 — Inquiry mode: contextual + global chat — Planned
 
 Adds *inquiry* as the third module mode alongside the existing
-*per-submit* (GitLab Issues) and *interactive* (Test Pilot). The
-inquiry surface is a **shared bottom-sheet chat** with three entry
-points, all reaching the same agent over `op: "chat"`:
+*per-submit* (GitLab Issues) and *interactive* (Test Pilot). Ships
+as a **single module** (id: `chat`) with **one Settings toggle** —
+when enabled, the same shared bottom-sheet chat surface lights up in
+**three places**, all reaching the same agent over `op: "chat"`:
 
 1. **Global chat** — header icon next to Settings. No surface context
    captured beyond session basics (appMode, activeTab, pageUrl,
@@ -1276,6 +1277,17 @@ points, all reaching the same agent over `op: "chat"`:
    `context.kind === "test-detail"` (when viewing a row) or
    `"catalog-summary"` (catalog view). Per-row threads live inside
    the existing catalog blob at `TestPilotTest.chat[]`.
+
+**Module gating.** All three surfaces are off by default. Flipping
+the **Chat** module's toggle in Settings lights up:
+- the header chat icon (global tier)
+- the "Just Ask" checkbox in Annotate's submit footer
+- the FAB on the Test Pilot tab
+
+Disabling it hides all three; threads persist in storage but stop
+rendering. Future setting can split this into per-surface toggles
+("Enable global chat / on Annotate / on Test Pilot") — v1 ships as a
+single switch to keep the Settings panel uncluttered.
 
 **Wire protocol** extends `module.query.submit` with a new
 `op: "chat"`. queryComment carries `{ op, prompt, context, history }`;
