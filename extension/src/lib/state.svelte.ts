@@ -211,6 +211,46 @@ class ExtensionState {
     editingActive: boolean;
   }>({ catalog: null, pending: null, pendingDetails: {}, pendingChats: {}, error: null, editingActive: false });
 
+  /**
+   * Phase 14 — cross-cutting chat state for the two non-Test-Pilot
+   * surfaces. Test Pilot per-row threads live inside `testPilot.catalog`
+   * already (`tests[].chat[]`); this slot covers the other two:
+   *
+   * - `global` — one rolling thread for the header chat icon (FAQ-style
+   *   asks with no surface context). Capped at CHAT_HISTORY_CAP * 4 (~80
+   *   messages) so payload + render stay bounded for long sessions;
+   *   `sendGlobalChatMessage` trims the head on overflow.
+   * - `annotateBatch` — per-draft-session thread, keyed by sessionId.
+   *   When the user ticks "Just Ask" on Annotate's submit footer, the
+   *   thread is scoped to the current annotation draft so asking
+   *   questions about a batch doesn't leak into other sessions.
+   *
+   * Pending maps drive per-surface spinners. Errors share the top-level
+   * `testPilot.error` slot for now since all chat ops route through the
+   * same module.query.submit envelope.
+   */
+  chat = $state<{
+    global: ChatMessage[];
+    pendingGlobal: boolean;
+    annotateBatch: Record<string, ChatMessage[]>;
+    pendingAnnotateBatch: Record<string, boolean>;
+    error: string | null;
+  }>({
+    global: [],
+    pendingGlobal: false,
+    annotateBatch: {},
+    pendingAnnotateBatch: {},
+    error: null,
+  });
+
+  /** Storage keys for the cross-cutting chat slots. Test Pilot threads
+   *  ride inside `pinta-test-pilot:current:<companion>` already. */
+  private static readonly GLOBAL_CHAT_KEY = "pinta-global-chat";
+  private static readonly ANNOTATE_CHATS_KEY = "pinta-annotate-chats";
+  /** Soft cap on the global thread length so localStorage + agent
+   *  payload don't grow unbounded across long sessions. */
+  private static readonly GLOBAL_CHAT_MAX = 200;
+
   /** Timer that fires if a Test Pilot query never gets a response —
    *  prevents the "Asking the agent…" spinner from sticking forever
    *  when no `/pinta` skill is listening, or the agent crashed mid-run. */
@@ -295,6 +335,8 @@ class ExtensionState {
     void this.loadModules();
     void this.loadPulseSettings();
     void this.loadStandaloneOrigins();
+    void this.loadGlobalChat();
+    void this.loadAnnotateChats();
     // Stage the legacy global catalog (if any) for the first companion
     // to claim. The actual per-project load happens inside connectTo.
     void this.readLegacyTestPilot();
@@ -1029,6 +1071,285 @@ class ExtensionState {
       delete this.testPilot.pendingChats[testId];
     }
   }
+
+  // ─── Phase 14 — global + annotate chat surfaces ────────────────────
+  //
+  // The Test Pilot tier above stores threads on `TestPilotTest.chat[]`
+  // inside the catalog blob. The two cross-cutting surfaces (global
+  // header icon, Annotate "Just Ask" checkbox) store their threads
+  // separately on the top-level `chat` slot. All three reach the same
+  // agent over `module.query.submit` with `op: "chat"`; only the
+  // `context.kind` differs (`test-detail`, `annotate-batch`, `global`).
+
+  /** Track pending global/annotate chats so we can route the eventual
+   *  session.synced back to the right slot. Keyed by sessionId of the
+   *  module.query.submit so multiple in-flight asks don't collide. */
+  private pendingChatSessions: Map<
+    string,
+    { kind: "global" } | { kind: "annotate-batch"; batchId: string }
+  > = new Map();
+
+  /** Soft-trim helper to keep the global thread bounded. */
+  private trimGlobalChat(): void {
+    if (this.chat.global.length > ExtensionState.GLOBAL_CHAT_MAX) {
+      this.chat.global = this.chat.global.slice(
+        -ExtensionState.GLOBAL_CHAT_MAX,
+      );
+    }
+  }
+
+  async loadGlobalChat(): Promise<void> {
+    try {
+      const stored = await chrome.storage?.local?.get(
+        ExtensionState.GLOBAL_CHAT_KEY,
+      );
+      const raw = stored?.[ExtensionState.GLOBAL_CHAT_KEY] as
+        | ChatMessage[]
+        | undefined;
+      if (Array.isArray(raw)) {
+        this.chat.global = raw.filter(
+          (m) =>
+            m &&
+            typeof m === "object" &&
+            typeof m.id === "string" &&
+            (m.role === "user" || m.role === "agent") &&
+            typeof m.text === "string",
+        ) as ChatMessage[];
+      }
+    } catch {
+      // storage missing — empty thread is fine
+    }
+  }
+
+  private async saveGlobalChat(): Promise<void> {
+    try {
+      await chrome.storage?.local?.set({
+        [ExtensionState.GLOBAL_CHAT_KEY]: $state.snapshot(this.chat.global),
+      });
+    } catch {
+      // ignore — in-memory state still drives current session
+    }
+  }
+
+  async loadAnnotateChats(): Promise<void> {
+    try {
+      const stored = await chrome.storage?.local?.get(
+        ExtensionState.ANNOTATE_CHATS_KEY,
+      );
+      const raw = stored?.[ExtensionState.ANNOTATE_CHATS_KEY] as
+        | Record<string, ChatMessage[]>
+        | undefined;
+      if (raw && typeof raw === "object") {
+        const cleaned: Record<string, ChatMessage[]> = {};
+        for (const [sid, msgs] of Object.entries(raw)) {
+          if (Array.isArray(msgs)) cleaned[sid] = msgs;
+        }
+        this.chat.annotateBatch = cleaned;
+      }
+    } catch {
+      // storage missing — empty map is fine
+    }
+  }
+
+  private async saveAnnotateChats(): Promise<void> {
+    try {
+      await chrome.storage?.local?.set({
+        [ExtensionState.ANNOTATE_CHATS_KEY]: $state.snapshot(
+          this.chat.annotateBatch,
+        ),
+      });
+    } catch {
+      // ignore
+    }
+  }
+
+  /** Send a message on the global chat thread. No surface context —
+   *  agent only sees session basics (appMode, activeTab, pageUrl). */
+  async sendGlobalChatMessage(prompt: string): Promise<void> {
+    const text = prompt.trim();
+    if (!text) return;
+    if (this.chat.pendingGlobal) return;
+    if (!this.client || this.connectionStatus !== "connected") {
+      this.chat.error =
+        "No companion connected. Start `pinta-companion .` in your project to use chat.";
+      return;
+    }
+    const userMsg: ChatMessage = {
+      id: crypto.randomUUID(),
+      role: "user",
+      text,
+      at: Date.now(),
+    };
+    this.chat.global = [...this.chat.global, userMsg];
+    this.trimGlobalChat();
+    this.chat.error = null;
+    void this.saveGlobalChat();
+
+    const history = this.chat.global.slice(
+      -ExtensionState.CHAT_HISTORY_CAP,
+    );
+    const url = this.lastUrl ?? "";
+    const queryComment = JSON.stringify({
+      op: "chat",
+      prompt: text,
+      context: {
+        kind: "global",
+        appMode: this.appMode,
+        pageUrl: url,
+        projectRoot: this.selectedCompanion?.projectRoot ?? null,
+      },
+      history: history.map((m) => ({ role: m.role, text: m.text })),
+    });
+    this.chat.pendingGlobal = true;
+    // Track the queued session by a synthesized id; the actual session
+    // id arrives in `module.query.created` and gets recorded then.
+    this.send({
+      type: "module.query.submit",
+      url,
+      moduleId: "chat",
+      moduleSettings: {},
+      queryComment,
+    });
+  }
+
+  /** Send a message on the Annotate "Just Ask" chat for a specific
+   *  draft session. The session's annotations + screenshot path are
+   *  attached as context so the agent can reason about the batch
+   *  without editing source files. */
+  async sendAnnotateChatMessage(
+    batchId: string,
+    prompt: string,
+  ): Promise<void> {
+    const text = prompt.trim();
+    if (!text) return;
+    if (this.chat.pendingAnnotateBatch[batchId]) return;
+    if (!this.client || this.connectionStatus !== "connected") {
+      this.chat.error =
+        "No companion connected. Start `pinta-companion .` in your project to use chat.";
+      return;
+    }
+    const userMsg: ChatMessage = {
+      id: crypto.randomUUID(),
+      role: "user",
+      text,
+      at: Date.now(),
+    };
+    const existing = this.chat.annotateBatch[batchId] ?? [];
+    this.chat.annotateBatch[batchId] = [...existing, userMsg];
+    this.chat.error = null;
+    void this.saveAnnotateChats();
+
+    const history = this.chat.annotateBatch[batchId].slice(
+      -ExtensionState.CHAT_HISTORY_CAP,
+    );
+    const session = this.session;
+    const url = this.lastUrl ?? "";
+    const queryComment = JSON.stringify({
+      op: "chat",
+      batchId,
+      prompt: text,
+      context: {
+        kind: "annotate-batch",
+        annotationCount: session?.annotations.length ?? 0,
+        pageUrl: url,
+        annotations: session?.annotations.map((a) => ({
+          id: a.id,
+          kind: a.kind,
+          comment: a.comment,
+          selector: a.target?.selector ?? a.targets?.[0]?.selector,
+          url: a.url,
+        })),
+      },
+      history: history.map((m) => ({ role: m.role, text: m.text })),
+    });
+    this.chat.pendingAnnotateBatch[batchId] = true;
+    this.send({
+      type: "module.query.submit",
+      url,
+      moduleId: "chat",
+      moduleSettings: {},
+      queryComment,
+    });
+  }
+
+  /** Routed from `onMessage` when `module.query.created` arrives for
+   *  a `moduleId: "chat"` ephemeral session — record the actual
+   *  session id so the eventual `session.synced` can be dispatched
+   *  back to the right slot. */
+  rememberChatSession(
+    sessionId: string,
+    binding: { kind: "global" } | { kind: "annotate-batch"; batchId: string },
+  ): void {
+    this.pendingChatSessions.set(sessionId, binding);
+  }
+
+  /** Apply an agent reply for the global or annotate-batch chat
+   *  surfaces. Looks up the pending binding by sessionId, appends the
+   *  reply as an agent-role message, clears the pending flag. */
+  private handleNonTestPilotChatSync(session: Session): boolean {
+    const binding = this.pendingChatSessions.get(session.id);
+    if (!binding) return false;
+    if (session.status === "done") {
+      const summary = session.appliedSummary ?? "";
+      let payload: { type?: string; reply?: string } | null = null;
+      try {
+        payload = JSON.parse(summary) as typeof payload;
+      } catch {
+        this.chat.error = "Couldn't parse agent response.";
+        this.pendingChatSessions.delete(session.id);
+        if (binding.kind === "global") this.chat.pendingGlobal = false;
+        else delete this.chat.pendingAnnotateBatch[binding.batchId];
+        return true;
+      }
+      const reply = typeof payload?.reply === "string" ? payload.reply : "";
+      if (reply) {
+        const agentMsg: ChatMessage = {
+          id: crypto.randomUUID(),
+          role: "agent",
+          text: reply,
+          at: Date.now(),
+        };
+        if (binding.kind === "global") {
+          this.chat.global = [...this.chat.global, agentMsg];
+          this.trimGlobalChat();
+          void this.saveGlobalChat();
+        } else {
+          const existing = this.chat.annotateBatch[binding.batchId] ?? [];
+          this.chat.annotateBatch[binding.batchId] = [...existing, agentMsg];
+          void this.saveAnnotateChats();
+        }
+        this.chat.error = null;
+      }
+      this.pendingChatSessions.delete(session.id);
+      if (binding.kind === "global") this.chat.pendingGlobal = false;
+      else delete this.chat.pendingAnnotateBatch[binding.batchId];
+      return true;
+    }
+    if (session.status === "error") {
+      this.chat.error = session.errorMessage ?? "Chat query failed.";
+      this.pendingChatSessions.delete(session.id);
+      if (binding.kind === "global") this.chat.pendingGlobal = false;
+      else delete this.chat.pendingAnnotateBatch[binding.batchId];
+      return true;
+    }
+    return false;
+  }
+
+  /** Wipe the global chat thread. */
+  clearGlobalChat(): void {
+    this.chat.global = [];
+    this.chat.error = null;
+    void this.saveGlobalChat();
+  }
+
+  /** Wipe an annotate-batch chat thread. Called by the side panel when
+   *  the user discards a draft session or submits it. */
+  clearAnnotateChat(batchId: string): void {
+    delete this.chat.annotateBatch[batchId];
+    void this.saveAnnotateChats();
+  }
+
+  // ─── /Phase 14 cross-cutting ───────────────────────────────────────
 
   // ─── Phase 13 — manual catalog editing ─────────────────────────────
   //
@@ -2155,6 +2476,23 @@ class ExtensionState {
         ) {
           this.testPilot.pending.sessionId = msg.session.id;
         }
+        // Phase 14 — pin the chat module's ephemeral session so the
+        // eventual session.synced can be routed back to the right
+        // surface slot (global or annotate-batch).
+        if (msg.moduleId === "chat") {
+          const kind = ExtensionState.queryField(msg.session, "context.kind");
+          if (kind === "global") {
+            this.rememberChatSession(msg.session.id, { kind: "global" });
+          } else if (kind === "annotate-batch") {
+            const batchId = ExtensionState.queryField(msg.session, "batchId");
+            if (batchId) {
+              this.rememberChatSession(msg.session.id, {
+                kind: "annotate-batch",
+                batchId,
+              });
+            }
+          }
+        }
         break;
       }
       case "session.created":
@@ -2170,6 +2508,16 @@ class ExtensionState {
         // flips true, and the page-edge processing pulse never stops
         // because handleTestPilotSync (run on the eventual done event)
         // doesn't touch this.session.status.
+        // Phase 14 — chat-module sessions (global + annotate) route
+        // through the dedicated handler keyed by sessionId. Done /
+        // error get applied; pending stays a no-op. Has to come
+        // before the Test Pilot branch because chat sessions have
+        // `modules: [{id: "chat"}]`, not "test-pilot".
+        const isChatSession =
+          msg.session.modules?.some((m) => m.id === "chat") ?? false;
+        if (isChatSession && this.handleNonTestPilotChatSync(msg.session)) {
+          return;
+        }
         const isInteractiveModuleSession =
           msg.session.modules?.some((m) => m.id === "test-pilot") ?? false;
         if (isInteractiveModuleSession) {
@@ -2239,8 +2587,18 @@ class ExtensionState {
     if (!annot?.comment) return null;
     try {
       const parsed = JSON.parse(annot.comment) as Record<string, unknown>;
-      const v = parsed[field];
-      return typeof v === "string" ? v : null;
+      // Support dot paths (e.g. "context.kind") so callers can read
+      // nested values from the queryComment without re-parsing.
+      const parts = field.split(".");
+      let cursor: unknown = parsed;
+      for (const part of parts) {
+        if (cursor && typeof cursor === "object") {
+          cursor = (cursor as Record<string, unknown>)[part];
+        } else {
+          return null;
+        }
+      }
+      return typeof cursor === "string" ? cursor : null;
     } catch {
       return null;
     }

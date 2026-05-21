@@ -992,14 +992,24 @@ comment:
 If the test isn't in the doc, `mark_session_error` with a clear
 message ("Test {testId} not found in {filename}.").
 
-### 7.10.3 `op: "chat"` — conversational reply to a tester question (Phase 14)
+### 7.10.3 `op: "chat"` — conversational reply (Phase 14)
 
-The user clicked the chat FAB on a test row's detail view and typed
-a question. Phase 14 replaced the static Notes textarea with an
-interactive per-row dialogue surface — testers can ask the agent
-ad-hoc questions about the test they're running ("why does the URL
-flash before redirect?", "what's the SUT token?", "is this expected
-on Safari?") without leaving the side panel.
+The Chat module surfaces three places, all reaching this handler over
+the same `op: "chat"` envelope. Branch on `context.kind`:
+
+| `context.kind` | Surface | Module id |
+|---|---|---|
+| `"test-detail"` | Test Pilot row detail-view FAB | `test-pilot` |
+| `"annotate-batch"` | Annotate "Just Ask" checkbox | `chat` |
+| `"global"` | Header chat icon (FAQ-style asks) | `chat` |
+
+All three carry `prompt` (user's message) + `history` (last N turns,
+capped at 12). The differences are in `context`:
+
+#### 7.10.3a — `context.kind === "test-detail"`
+
+The user clicked the chat FAB on a test row's detail view. Test
+Pilot module owns the session; `session.modules[0].id === "test-pilot"`.
 
 The query comment shape:
 
@@ -1024,12 +1034,91 @@ The query comment shape:
 }
 ```
 
+Return shape (note the `test-pilot-chat` type — Test Pilot tier
+predates the unified shape below and the extension still routes on
+it):
+
+```json
+{
+  "type": "test-pilot-chat",
+  "testId": "AUTH-01",
+  "reply": "<markdown>"
+}
+```
+
+If `testId` resolves to a row that no longer exists (user deleted
+it between asks), `mark_session_error` with
+`"Test {testId} not found — was the row deleted?"`.
+
+#### 7.10.3b — `context.kind === "annotate-batch"`
+
+The user ticked "Just Ask" on Annotate's submit footer and asked
+about their in-progress annotation batch. Chat module owns the
+session; `session.modules[0].id === "chat"`. **The agent must NOT
+edit any source files** in this branch — Just Ask is explicitly the
+"discuss before you commit" verb. The user pivots to a real source
+edit by unticking the checkbox and clicking Send to agent.
+
+```json
+{
+  "op": "chat",
+  "batchId": "<draft-session-uuid>",
+  "prompt": "is there a better selector for the submit button?",
+  "context": {
+    "kind": "annotate-batch",
+    "annotationCount": 3,
+    "pageUrl": "http://localhost:5173/claims",
+    "annotations": [
+      { "id": "...", "kind": "select", "comment": "make this tonal",
+        "selector": "button.submit-btn", "url": "..." },
+      ...
+    ]
+  },
+  "history": [...]
+}
+```
+
+Return shape (unified — extension routes by `session.id` ↔ binding
+map, not by `testId`):
+
+```json
+{
+  "type": "chat",
+  "reply": "<markdown>"
+}
+```
+
+#### 7.10.3c — `context.kind === "global"`
+
+The user clicked the header chat icon. No surface context — just
+session basics. Chat module owns the session. Useful for FAQ-style
+asks: *"how do I change the select-mode shortcut?"*, *"what does
+Detailed help steps do?"*, *"why isn't HMR working on my Vite app?"*
+
+```json
+{
+  "op": "chat",
+  "prompt": "how do I disable the screenshot opt-in?",
+  "context": {
+    "kind": "global",
+    "appMode": "connected" | "standalone",
+    "pageUrl": "http://localhost:5173/...",
+    "projectRoot": "/abs/path" | null
+  },
+  "history": [...]
+}
+```
+
+Return shape: same as `annotate-batch`:
+
+```json
+{ "type": "chat", "reply": "<markdown>" }
+```
+
+#### Common rules (all three kinds)
+
 1. `mark_session_applying({id})`.
-2. Read `.pinta/test-docs/{docId}.md` for catalog context if useful.
-   The `context` payload already carries the row's title, expected
-   result, section, status, and any previously-loaded steps — you
-   usually have enough without re-reading the file.
-3. **Answer the question in markdown.** Same render pipeline as
+2. **Answer the question in markdown.** Same render pipeline as
    detail-steps — inline `code`, fenced code blocks, `> Note:`
    callouts all welcome. Match the depth of the question:
    - Short ask → short answer (2–4 sentences).
@@ -1040,33 +1129,18 @@ The query comment shape:
    - Reference earlier `history` turns when the user follows up
      ("can you elaborate on step 2?") — treat the thread as one
      conversation, not isolated asks.
-4. **Tone matches the user.** Default to tester-friendly prose (no
-   curl, no internal class names, no env vars). If the question
-   itself uses dev vocabulary — "what's the network panel showing
-   for /api/sessions?" — match it and go technical. The `context`
-   doesn't carry the `detailed_steps` setting; read the user's
+3. **Tone matches the user.** Default to tester-friendly prose. If
+   the question uses dev vocabulary, match it and go technical. None
+   of the three context kinds carry a `detailed_steps` setting; read
    register from the prompt.
-5. **No source edits, ever.** Same Test Pilot rule as the other
-   ops — don't touch any file outside `.pinta/test-docs/`. Chat is
-   inquiry, not action.
-6. Build the chat payload:
-
-```json
-{
-  "type": "test-pilot-chat",
-  "testId": "AUTH-01",
-  "reply": "The flash is the SPA router catching the route after the SSR shell renders. To verify: open DevTools → Network, paste the deep link, look for a 302 to `/login`. If you see only a 200, the shell rendered first and the router resolved client-side — that's expected.\n\n> Note: this differs from the Safari behavior tracked in CLAIM-04 — the iOS WebView shortcuts the redirect.\n\nHappy to walk through the network trace if you paste what you see."
-}
-```
-
-7. `mark_session_done({id, summary: JSON.stringify(payload)})`.
-
-If `testId` resolves to a row that no longer exists (user deleted
-it between asks), `mark_session_error` with
-`"Test {testId} not found — was the row deleted?"`. The extension
-won't surface this often — pendingChats is keyed by testId so the
-sheet for a deleted row should close on its own — but the guard
-prevents a confused agent response landing nowhere.
+4. **No source edits, ever.** Chat is inquiry, not action. For
+   Test Pilot: don't touch any file outside `.pinta/test-docs/`. For
+   Annotate Just Ask: don't touch any source file at all — the user
+   pivots back to a real submit if they want edits. For Global: the
+   only files you should read are Pinta config (`~/.pinta/`,
+   `.pinta/`) if it helps you answer; never write.
+5. `mark_session_done({id, summary: JSON.stringify(payload)})` with
+   the surface-appropriate return shape above.
 
 ### `test-pilot` operating rules
 

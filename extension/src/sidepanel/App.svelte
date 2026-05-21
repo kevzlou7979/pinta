@@ -31,7 +31,19 @@
   import SessionHistory from "./SessionHistory.svelte";
   import SettingsPanel from "./SettingsPanel.svelte";
   import TestPilotTab from "./TestPilotTab.svelte";
+  import ChatSheet from "./ChatSheet.svelte";
   import { BUILTIN_MODULES } from "../lib/modules.js";
+
+  // Phase 14 chat surfaces owned by App.svelte (Test Pilot tier owns
+  // its own sheet inside TestPilotTab.svelte):
+  // - globalChatOpen — header chat icon → ChatSheet with context.kind = "global"
+  // - annotateJustAsk — Annotate submit footer checkbox; when ticked,
+  //   Submit re-labels to "Ask agent" and opens the chat with
+  //   context.kind = "annotate-batch" instead of submitting source edits.
+  // - annotateChatOpen — sheet open-state for the Annotate surface.
+  let globalChatOpen = $state(false);
+  let annotateJustAsk = $state(false);
+  let annotateChatOpen = $state(false);
 
   type SidePanelTab = "annotate" | "test-pilot";
   // Active tab in the main panel area. Persists across side-panel
@@ -1317,6 +1329,21 @@
       <!-- History + Settings live in the header so every module
            (Annotate, Test Pilot, …) shares the same access point. -->
       <SessionHistory />
+      {#if app.moduleReady("chat")}
+        <!-- Phase 14 — Global chat trigger. Opens the shared ChatSheet
+             with no surface context (just session basics) so the user
+             can ask Pinta-shaped questions from anywhere. Only shown
+             when the Chat module is enabled in Settings. -->
+        <button
+          type="button"
+          class="w-7 h-7 inline-flex items-center justify-center rounded-full border border-ink-200 bg-white text-ink-600 hover:text-brand-pink hover:border-ink-400 dark:border-night-line dark:bg-night-alt dark:text-night-dim dark:hover:text-brand-pink-light dark:hover:border-night-line2 transition-colors"
+          onclick={() => (globalChatOpen = true)}
+          aria-label="Open global chat"
+          title="Ask Pinta anything"
+        >
+          <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg>
+        </button>
+      {/if}
       <button
         type="button"
         class="w-7 h-7 inline-flex items-center justify-center rounded-full border border-ink-200 bg-white text-ink-600 hover:text-brand-pink hover:border-ink-400 dark:border-night-line dark:bg-night-alt dark:text-night-dim dark:hover:text-brand-pink-light dark:hover:border-night-line2 transition-colors"
@@ -1843,6 +1870,45 @@
       </div>
     {/if}
 
+    <!-- Phase 14 — Global chat sheet. Single thread, no surface
+         context; agent answers FAQ-style asks about Pinta itself. -->
+    {#if app.moduleReady("chat")}
+      <ChatSheet
+        open={globalChatOpen}
+        contextHeader="Quick ask"
+        contextLabel="Pinta"
+        contextSubLabel={app.selectedCompanion ? app.selectedCompanion.projectRoot.split(/[\\/]/).filter(Boolean).pop() ?? "" : "standalone"}
+        messages={app.chat.global}
+        pending={app.chat.pendingGlobal}
+        error={app.chat.error}
+        placeholder="Ask Pinta anything…"
+        emptyHint='Quick ask — no surface context attached. The agent sees session basics (your active tab, current page URL, project root) but not your annotations or test rows. Try: "how do I change the select-mode shortcut?" or "what does Detailed help steps do?"'
+        onClose={() => (globalChatOpen = false)}
+        onSend={(prompt) => void app.sendGlobalChatMessage(prompt)}
+      />
+    {/if}
+
+    <!-- Phase 14 — Annotate "Just Ask" chat sheet. Per-draft-session
+         thread keyed by the current session id. Surface context
+         carries the annotation list + screenshot path so the agent
+         can reason about the batch without editing source files. -->
+    {#if app.moduleReady("chat") && app.session?.id}
+      {@const batchId = app.session.id}
+      <ChatSheet
+        open={annotateChatOpen}
+        contextHeader="Talking about"
+        contextLabel="{app.session.annotations.length} annotation{app.session.annotations.length === 1 ? '' : 's'}"
+        contextSubLabel={pageUrl ? new URL(pageUrl).pathname : ""}
+        messages={app.chat.annotateBatch[batchId] ?? []}
+        pending={!!app.chat.pendingAnnotateBatch[batchId]}
+        error={app.chat.error}
+        placeholder="Ask the agent about this batch…"
+        emptyHint="Discuss this batch before committing — the agent sees your annotations + screenshot but won't touch source files until you submit. Useful for: 'is this change safe?', 'is there a better selector?', 'what files would this touch?'"
+        onClose={() => (annotateChatOpen = false)}
+        onSend={(prompt) => void app.sendAnnotateChatMessage(batchId, prompt)}
+      />
+    {/if}
+
   </main>
 
   <footer
@@ -2073,6 +2139,33 @@
           </span>
         </span>
       </label>
+      {#if app.moduleReady("chat")}
+        <!-- Phase 14 — "Just Ask" footer checkbox. When ticked, the
+             Submit button re-labels to "Ask agent" and opens the
+             chat sheet with this batch as context instead of
+             submitting source edits. User can pivot back to a real
+             submit at any time by unticking. -->
+        <label class="flex items-start gap-2 text-[12px] text-ink-700 dark:text-night-dim cursor-pointer select-none">
+          <input
+            type="checkbox"
+            class="mt-0.5 accent-brand-pink"
+            bind:checked={annotateJustAsk}
+          />
+          <span class="flex-1 leading-snug">
+            <span class="inline-flex items-center gap-1.5 flex-wrap">
+              💬 Just Ask
+              {#if annotateJustAsk}
+                <span class="inline-flex items-center text-[10px] uppercase tracking-wide font-semibold text-brand-pink dark:text-brand-pink-light bg-brand-pink/10 dark:bg-brand-pink-light/10 border border-brand-pink/40 dark:border-brand-pink-light/40 rounded-full px-1.5 py-0.5">
+                  Chat only
+                </span>
+              {/if}
+            </span>
+            <span class="block text-[11px] text-ink-500 dark:text-night-mute">
+              Don't touch source files — discuss this batch with the agent first. Submit re-labels to "Ask agent" and opens the chat. Untick to go back to the normal source-edit flow.
+            </span>
+          </span>
+        </label>
+      {/if}
       {#each BUILTIN_MODULES.filter((m) => m.mode === "per-submit") as moduleSpec (moduleSpec.id)}
         {@const moduleReady = app.moduleReady(moduleSpec.id)}
         {@const ticked = !!app.tickedModules[moduleSpec.id]}
@@ -2243,10 +2336,12 @@
           type="button"
           class="flex-1 rounded-md bg-brand-pink text-white text-sm font-medium py-2 hover:bg-brand-magenta dark:hover:bg-brand-pink-light disabled:opacity-50"
           disabled={!canSubmit || capturing}
-          onclick={submit}
+          onclick={annotateJustAsk ? () => (annotateChatOpen = true) : submit}
         >
           {#if capturing}
             Capturing screenshot…
+          {:else if annotateJustAsk}
+            💬 Ask agent
           {:else if fileOnlyMode}
             File issues
           {:else}
