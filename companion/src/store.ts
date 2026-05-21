@@ -122,6 +122,24 @@ export class SessionStore {
   }
 
   /**
+   * Replace the contents of `.pinta/test-docs/{docId}.md` with `content`
+   * verbatim. Called from `PUT /v1/test-docs/:docId` whenever the side
+   * panel edits the catalog (add / delete / rename / reorder) — the
+   * on-disk file is the source of truth so the agent's `?` (detail-
+   * steps) flow works against newly-added rows and edits survive
+   * regen.
+   *
+   * Idempotent: re-creates the directory if it was wiped by Clear
+   * Catalog between sessions. UTF-8 to match `extractTestDocContent`'s
+   * original write.
+   */
+  async writeTestDoc(docId: string, content: string): Promise<void> {
+    await mkdir(this.testDocsDir, { recursive: true });
+    const filePath = join(this.testDocsDir, `${docId}.md`);
+    await writeFile(filePath, content, "utf8");
+  }
+
+  /**
    * Remove every file in `.pinta/test-docs/` that doesn't belong to
    * `keepDocId`. Tolerates a missing directory.
    */

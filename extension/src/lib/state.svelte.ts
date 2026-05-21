@@ -184,7 +184,13 @@ class ExtensionState {
      *  both spinners run side-by-side until the agent answers each. */
     pendingDetails: Record<string, { askedAt: number }>;
     error: string | null;
-  }>({ catalog: null, pending: null, pendingDetails: {}, error: null });
+    /** True while the user has an inline edit (section rename, test
+     *  title / expected, catalog meta) in flight. Set by the side
+     *  panel on `startEditing`, cleared on `commitEdit` / `cancelEdit`.
+     *  `applyCatalogResult` bails when this is true so a mid-edit
+     *  Generate result doesn't clobber the user's in-progress text. */
+    editingActive: boolean;
+  }>({ catalog: null, pending: null, pendingDetails: {}, error: null, editingActive: false });
 
   /** Timer that fires if a Test Pilot query never gets a response —
    *  prevents the "Asking the agent…" spinner from sticking forever
@@ -779,6 +785,266 @@ class ExtensionState {
       }
     }
   }
+
+  // ─── Phase 13 — manual catalog editing ─────────────────────────────
+  //
+  // The companion's `.pinta/test-docs/{docId}.md` is the source of truth
+  // for which rows exist + their wording. Every mutator below mutates
+  // the in-memory `testPilot.catalog` (Svelte 5 picks up the $state
+  // reactivity), persists to `chrome.storage.local` via
+  // `saveTestPilot()`, then PUTs the composed-back markdown to the
+  // companion so the agent's `?` (detail-steps) flow works against
+  // user-added rows and edits survive regen.
+
+  /**
+   * Single in-flight PUT promise — concurrent edits chain via `.then()`
+   * so the file on disk is always written in the order the user made
+   * the changes. Without this, rapid-fire add-delete-add could race
+   * and leave the on-disk spec in a state that doesn't match the UI.
+   */
+  private testDocPushChain: Promise<void> = Promise.resolve();
+
+  /**
+   * Compose the current catalog back to markdown for round-tripping to
+   * the companion. Mirrors the shape the agent emits on `doc-parse` /
+   * `generate-doc` so the next `applyCatalogResult` over the same file
+   * is a no-op (idempotent).
+   */
+  private composeTestDocMarkdown(): string {
+    const c = this.testPilot.catalog;
+    if (!c) return "";
+    const heading = c.title?.trim() || c.filename;
+    let out = `# ${heading}\n\n`;
+    if (c.author?.trim()) out += `_By ${c.author.trim()}_\n\n`;
+    if (c.description?.trim()) out += `${c.description.trim()}\n\n`;
+    for (const s of c.sections) {
+      out += `## ${s.title}\n\n`;
+      out += `| ID | Test | Expected Result |\n`;
+      out += `|----|------|-----------------|\n`;
+      for (const t of s.tests) {
+        const id = t.id.replace(/\|/g, "\\|");
+        const test = t.test.replace(/\|/g, "\\|").replace(/\n/g, " ");
+        const expected = t.expected
+          .replace(/\|/g, "\\|")
+          .replace(/\n/g, " ");
+        out += `| ${id} | ${test} | ${expected} |\n`;
+      }
+      out += `\n`;
+    }
+    return out;
+  }
+
+  /**
+   * Push the composed catalog to the companion. Fire-and-forget but
+   * serialized via `testDocPushChain` so writes never race. On
+   * companion failure, surfaces `testPilot.error`; the browser-side
+   * edit still stands and the next successful edit re-PUTs the full
+   * file (each PUT is a full replacement, no reconciliation needed).
+   */
+  private pushTestDocToCompanion(): void {
+    const c = this.testPilot.catalog;
+    if (!c) return;
+    const docId = c.docId;
+    const base = this.httpBase();
+    if (!base) return; // standalone mode — no disk sync, just in-memory + chrome.storage.
+    const content = this.composeTestDocMarkdown();
+    this.testDocPushChain = this.testDocPushChain
+      .catch(() => {
+        // swallow prior errors so a single failure doesn't poison the
+        // whole chain — each PUT is independent.
+      })
+      .then(async () => {
+        try {
+          const res = await ExtensionState.fetchWithTimeout(
+            `${base}/v1/test-docs/${encodeURIComponent(docId)}`,
+            {
+              method: "PUT",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({ content }),
+              timeoutMs: 8_000,
+            },
+          );
+          if (!res.ok) {
+            const text = await res.text().catch(() => "");
+            throw new Error(
+              `HTTP ${res.status}${text ? `: ${text.slice(0, 200)}` : ""}`,
+            );
+          }
+          // Clear any stale sync error from a prior failure now that
+          // we know the companion is reachable again.
+          if (this.testPilot.error?.startsWith("Couldn't sync spec")) {
+            this.testPilot.error = null;
+          }
+        } catch (err) {
+          this.testPilot.error = `Couldn't sync spec to disk: ${(err as Error).message}`;
+        }
+      });
+  }
+
+  /**
+   * Compute the next free `USER-N` id across the entire catalog.
+   * Walks every section's tests, parses any existing `USER-<digits>`
+   * id, and returns one above the max. Returns `USER-1` for a fresh
+   * catalog. Collisions are impossible by construction — `N` is
+   * monotonically increasing within a session.
+   */
+  private nextUserTestId(): string {
+    const c = this.testPilot.catalog;
+    if (!c) return "USER-1";
+    let max = 0;
+    for (const s of c.sections) {
+      for (const t of s.tests) {
+        const m = /^USER-(\d+)$/.exec(t.id);
+        if (m) {
+          const n = parseInt(m[1]!, 10);
+          if (n > max) max = n;
+        }
+      }
+    }
+    return `USER-${max + 1}`;
+  }
+
+  /**
+   * Find a section by title. Returns the index too so callers can do
+   * reorder math without re-scanning. Returns null if not found.
+   */
+  private findSection(
+    title: string,
+  ): { idx: number; section: TestPilotSection } | null {
+    const c = this.testPilot.catalog;
+    if (!c) return null;
+    const idx = c.sections.findIndex((s) => s.title === title);
+    if (idx === -1) return null;
+    return { idx, section: c.sections[idx]! };
+  }
+
+  /**
+   * Find a test by id across all sections. Returns the indexes too so
+   * callers can do reorder math without re-scanning.
+   */
+  private findTest(
+    testId: string,
+  ): { sIdx: number; tIdx: number; section: TestPilotSection; test: TestPilotTest } | null {
+    const c = this.testPilot.catalog;
+    if (!c) return null;
+    for (let i = 0; i < c.sections.length; i++) {
+      const section = c.sections[i]!;
+      const tIdx = section.tests.findIndex((t) => t.id === testId);
+      if (tIdx !== -1) {
+        return { sIdx: i, tIdx, section, test: section.tests[tIdx]! };
+      }
+    }
+    return null;
+  }
+
+  /** After any catalog mutation, fan-out to local persistence + disk
+   *  sync. Single call site means we never forget either step. */
+  private commitCatalogEdit(): void {
+    void this.saveTestPilot();
+    this.pushTestDocToCompanion();
+  }
+
+  /** Append a new section to the catalog. Title may be empty — the
+   *  UI sets `editingField = "section:"` immediately after to focus
+   *  the inline input for typing. */
+  addTestPilotSection(title: string): void {
+    const c = this.testPilot.catalog;
+    if (!c) return;
+    c.sections.push({ title, tests: [] });
+    this.commitCatalogEdit();
+  }
+
+  /** Rename a section by current title. No-op on collision (two
+   *  sections sharing a title would break the title-keyed lookup). */
+  renameTestPilotSection(oldTitle: string, newTitle: string): void {
+    if (oldTitle === newTitle) return;
+    const found = this.findSection(oldTitle);
+    if (!found) return;
+    const c = this.testPilot.catalog!;
+    if (c.sections.some((s, i) => i !== found.idx && s.title === newTitle)) {
+      this.testPilot.error = `A section named "${newTitle}" already exists.`;
+      return;
+    }
+    found.section.title = newTitle;
+    this.commitCatalogEdit();
+  }
+
+  /** Remove a section and every test inside it. */
+  removeTestPilotSection(title: string): void {
+    const found = this.findSection(title);
+    if (!found) return;
+    this.testPilot.catalog!.sections.splice(found.idx, 1);
+    this.commitCatalogEdit();
+  }
+
+  /** Move a section up or down within the catalog. No-op at
+   *  boundaries (no wraparound). */
+  moveTestPilotSection(title: string, direction: "up" | "down"): void {
+    const found = this.findSection(title);
+    if (!found) return;
+    const sections = this.testPilot.catalog!.sections;
+    const newIdx = direction === "up" ? found.idx - 1 : found.idx + 1;
+    if (newIdx < 0 || newIdx >= sections.length) return;
+    const [moved] = sections.splice(found.idx, 1);
+    sections.splice(newIdx, 0, moved!);
+    this.commitCatalogEdit();
+  }
+
+  /** Append a test to the named section. Auto-mints a `USER-N` id if
+   *  the caller didn't supply one. `test`/`expected` default to empty
+   *  strings so the UI can drop the user into inline-edit mode. */
+  addTestPilotTest(
+    sectionTitle: string,
+    input: { id?: string; test?: string; expected?: string },
+  ): string | null {
+    const found = this.findSection(sectionTitle);
+    if (!found) return null;
+    const id = input.id ?? this.nextUserTestId();
+    found.section.tests.push({
+      id,
+      test: input.test ?? "",
+      expected: input.expected ?? "",
+      status: "untested",
+    });
+    this.commitCatalogEdit();
+    return id;
+  }
+
+  /** Patch a test's `test` (title) or `expected` fields. Ignores
+   *  empty/undefined patch values — pass empty string explicitly to
+   *  clear a field. */
+  updateTestPilotTest(
+    testId: string,
+    patch: { test?: string; expected?: string },
+  ): void {
+    const found = this.findTest(testId);
+    if (!found) return;
+    if (patch.test !== undefined) found.test.test = patch.test;
+    if (patch.expected !== undefined) found.test.expected = patch.expected;
+    this.commitCatalogEdit();
+  }
+
+  /** Remove a test from its containing section. */
+  removeTestPilotTest(testId: string): void {
+    const found = this.findTest(testId);
+    if (!found) return;
+    found.section.tests.splice(found.tIdx, 1);
+    this.commitCatalogEdit();
+  }
+
+  /** Move a test up or down within its section. No-op at boundaries.
+   *  Cross-section moves are explicitly out of scope for v1. */
+  moveTestPilotTest(testId: string, direction: "up" | "down"): void {
+    const found = this.findTest(testId);
+    if (!found) return;
+    const newIdx = direction === "up" ? found.tIdx - 1 : found.tIdx + 1;
+    if (newIdx < 0 || newIdx >= found.section.tests.length) return;
+    const [moved] = found.section.tests.splice(found.tIdx, 1);
+    found.section.tests.splice(newIdx, 0, moved!);
+    this.commitCatalogEdit();
+  }
+
+  // ─── /Phase 13 ──────────────────────────────────────────────────────
 
   /** Render a markdown report from the current catalog. */
   exportResults(): string {
@@ -1813,6 +2079,17 @@ class ExtensionState {
   }
 
   private applyCatalogResult(payload: { [k: string]: unknown }): void {
+    // Phase 13 — bail if the user is mid-edit. An incoming catalog
+    // payload would otherwise clobber the in-progress text they just
+    // typed (inline title / expected / section rename). The pending
+    // payload is dropped; the user is asked to commit or cancel and
+    // re-trigger Generate.
+    if (this.testPilot.editingActive) {
+      this.testPilot.error =
+        "A catalog update arrived while you were editing. Commit or cancel your edit, then click Generate / Re-import again.";
+      this.testPilot.pending = null;
+      return;
+    }
     const sections = Array.isArray(payload.sections) ? payload.sections : [];
     const newDocId =
       typeof payload.docId === "string" ? payload.docId : crypto.randomUUID();

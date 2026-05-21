@@ -233,6 +233,29 @@ async function handle(
     return sendJson(res, 200, { ok: true });
   }
 
+  // Replace one test-doc file in place. The side panel writes the
+  // entire catalog back whenever the user edits it (add / delete /
+  // rename / reorder section or test) so the on-disk spec stays the
+  // source of truth — the agent's `?` (detail-steps) flow keys off
+  // the file, and edits survive regen.
+  const putTestDocMatch = path.match(/^\/v1\/test-docs\/([^/]+)$/);
+  if (method === "PUT" && putTestDocMatch) {
+    const docId = putTestDocMatch[1]!;
+    // Reject anything that could escape the test-docs directory or
+    // collide with the on-disk extension scheme. Doc ids should be
+    // UUIDs in practice; accept a permissive but safe alphabet.
+    if (!/^[A-Za-z0-9_-]{1,128}$/.test(docId)) {
+      return sendJson(res, 400, { error: "invalid docId" });
+    }
+    const body = await readJson<{ content: string }>(req);
+    if (typeof body.content !== "string") {
+      return sendJson(res, 400, { error: "missing content" });
+    }
+    await store.writeTestDoc(docId, body.content);
+    log(`test-doc ${docId} written (${body.content.length}B)`);
+    return sendJson(res, 200, { ok: true });
+  }
+
   if (method === "DELETE" && path === "/v1/sessions") {
     // Wipe every persisted session + screenshot. Drafting session (if
     // any) is preserved by the store. Called from the side panel's
