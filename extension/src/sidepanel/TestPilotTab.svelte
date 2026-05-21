@@ -81,11 +81,11 @@
   // persisted state (thread itself) lives on `TestPilotTest.chat[]`.
   let chatOpen = $state(false);
   let chatDraft = $state("");
-  // True when the chat module setting is on (default). Lets the user
-  // disable the FAB if they want pure pass/fail checklist mode.
-  const chatEnabled = $derived(
-    app.modules["test-pilot"]?.settings?.chat_enabled !== false,
-  );
+  // True when the Chat module is enabled in Settings. Phase 14 made
+  // chat its own module ("id: chat") with one master toggle that gates
+  // all three chat surfaces (Test Pilot FAB, Annotate Just Ask, global
+  // header icon). Off by default — users opt in.
+  const chatEnabled = $derived(app.moduleReady("chat"));
   // True while the currently-viewed row has a chat ask in flight.
   // Drives the send-button spinner.
   const chatPending = $derived(

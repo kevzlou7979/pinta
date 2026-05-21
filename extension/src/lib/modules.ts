@@ -32,8 +32,13 @@ export type ModuleSettingSpec = {
  *   doesn't ride on annotation submits; the user drives it directly
  *   from within the tab (e.g. Test Pilot imports a doc and runs
  *   queries against the agent without touching source files).
+ * - "inquiry" — module is cross-cutting; one Settings toggle lights up
+ *   multiple chat / Q&A surfaces across the side panel (header global
+ *   icon, Annotate "Just Ask" checkbox, Test Pilot FAB). Doesn't own a
+ *   tab and doesn't ride on submits — it's the "ask before you commit"
+ *   verb (e.g. Chat).
  */
-export type ModuleMode = "per-submit" | "interactive";
+export type ModuleMode = "per-submit" | "interactive" | "inquiry";
 
 export type ModuleSpec = {
   id: string;
@@ -131,17 +136,38 @@ const TEST_PILOT: ModuleSpec = {
       hint: "Off (default) — short, tester-friendly steps. Uses fewer tokens. On — deeper steps with technical context (URLs, payloads, code blocks). Slower and more expensive.",
       default: false,
     },
-    {
-      key: "chat_enabled",
-      type: "boolean",
-      label: "Show chat (ask the agent in detail view)",
-      hint: "On (default) — a chat button appears in each row's detail view so testers can ask the agent ad-hoc questions (\"why does the URL flash before redirect?\") with the row's context auto-attached. Off — pure pass/fail checklist, no chat surface.",
-      default: true,
-    },
   ],
 };
 
-export const BUILTIN_MODULES: ModuleSpec[] = [GITLAB_ISSUES, TEST_PILOT];
+/**
+ * Chat — inquiry-mode module (Phase 14). One Settings toggle lights up
+ * three chat surfaces at once: a global FAB / header icon, a "Just Ask"
+ * checkbox on Annotate's submit footer, and a chat button on Test
+ * Pilot's row detail view. All three reach the same agent over
+ * `op: "chat"` and render via the same bottom-sheet component.
+ *
+ * Off by default. v1 ships as a single switch; future settings can
+ * split it into per-surface toggles ("Enable global / on Annotate / on
+ * Test Pilot") if users ask for that granularity.
+ *
+ * Why a module rather than a permanent capability: makes the surface
+ * consistent with how the agent reasons about session.modules
+ * (`{ id: "chat" }` rides on `module.query.submit` so the skill's
+ * `op: "chat"` handler is gated identically to the other ops); also
+ * lets advanced users hide the FAB if they don't want chat clutter.
+ */
+const CHAT: ModuleSpec = {
+  id: "chat",
+  name: "Chat",
+  description:
+    "Ask the agent about anything — a global chat in the header, a \"Just Ask\" option on Annotate (skip the source edit, just discuss), and a chat button on Test Pilot test rows for in-context questions. One switch lights up all three.",
+  mode: "inquiry",
+  sessionCheckboxLabel: "",
+  sessionCheckboxHint: "",
+  settings: [],
+};
+
+export const BUILTIN_MODULES: ModuleSpec[] = [GITLAB_ISSUES, TEST_PILOT, CHAT];
 
 export function getModuleSpec(id: string): ModuleSpec | null {
   return BUILTIN_MODULES.find((m) => m.id === id) ?? null;
