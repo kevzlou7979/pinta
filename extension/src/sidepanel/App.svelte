@@ -580,6 +580,19 @@
   const screenshotLocked = $derived(
     hasDrawingAnnotation || screenshotRequiredByModule,
   );
+  // File-only mode: user ticked a per-submit module (currently
+  // gitlab-issues) but did NOT tick Auto-apply. Read as "just file the
+  // ticket, don't touch my code without permission." The agent's
+  // SKILL.md §5 third branch keys on `session.modules` + autoApply to
+  // skip source edits entirely in this case; the button label
+  // mirrors that intent client-side so the user isn't surprised at
+  // click time.
+  const gitlabIssuesTickedAndReady = $derived(
+    app.moduleReady("gitlab-issues") && !!app.tickedModules["gitlab-issues"],
+  );
+  const fileOnlyMode = $derived(
+    gitlabIssuesTickedAndReady && !autoApplyEnabled,
+  );
   $effect(() => {
     if (screenshotLocked && !includeScreenshot) {
       includeScreenshot = true;
@@ -2234,6 +2247,8 @@
         >
           {#if capturing}
             Capturing screenshot…
+          {:else if fileOnlyMode}
+            File issues
           {:else}
             Send to agent
           {/if}
@@ -2255,6 +2270,10 @@
     {#if app.appMode === "standalone" && annotations.length === 0}
       <p class="text-[11px] text-ink-500 dark:text-night-mute text-center">
         Add annotations with the tools above. Hit Copy to share them anywhere.
+      </p>
+    {:else if fileOnlyMode && app.session?.status === "drafting" && annotations.length > 0}
+      <p class="text-[11px] text-ink-500 dark:text-night-mute text-center leading-snug">
+        Issues only — source code stays untouched. Tick <strong>Auto-apply</strong> to also patch the code.
       </p>
     {:else if app.session?.status === "submitted"}
       <p class="text-[11px] text-ink-500 dark:text-night-mute text-center">

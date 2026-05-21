@@ -225,6 +225,31 @@ side panel), proceed straight to step 6 without waiting — this is opt-in
 fast-iteration mode. Still show the plan first so they see what's
 happening, but don't ask "reply go to apply."
 
+**If `session.modules` includes a per-submit module (e.g.
+`gitlab-issues`) AND `session.autoApply` is false** — this is
+**file-only mode**. The user wants a ticket, not a code edit. Read
+the side panel's "File issues" button literally: skip every source
+edit. Concretely:
+
+- **Skip §6 and §7 entirely.** Do not mark per-annotation `applying`
+  for source edits, do not run Edit on any file, do not lint or test.
+- **Build the plan as a list of issue titles instead of file edits**
+  (one bullet per annotation: "1. *short title from the comment* —
+  selector / nearby text"). Show it so the user sees what's about to
+  be filed; proceed without waiting for `go`.
+- **Mark the session `applying` once**, then **jump straight to §7.9**
+  to file the issues. The per-annotation `applying → done` lifecycle
+  still applies during issue creation (mark `applying` right before
+  `glab issue create`, mark `done` right after — `done` here means
+  "addressed via ticket", not "source edited").
+- **Then §8** as usual. The session-level `appliedSummary` should be
+  "Filed N issues: !123, !124, …" so the side panel surfaces the
+  list. Do not say "edited" — nothing was.
+
+This combo is intentional UX: the user opted into the module but
+withheld auto-apply, signalling "don't touch my code without
+permission, just file the ticket." Honoring it builds trust.
+
 **Otherwise (default)**: wait for explicit confirmation ("go", "yes",
 "apply") before editing anything.
 
@@ -413,10 +438,12 @@ glab auth status >/dev/null 2>&1 || {
 - `labels` — comma-separated string. Apply to every issue.
 
 **Ask the user for batch metadata — once per session, before filing.**
-After source edits land but before invoking `glab issue create`, prompt
-the user in chat for three things that apply to the entire batch
-(same values used on every issue). Stay concise — one message, three
-fields, fixed format. **Do not file anything until they reply.**
+Before invoking `glab issue create` (in standard mode this runs *after*
+source edits land; in file-only mode this is the first agent action
+after the plan-preview), prompt the user in chat for three things that
+apply to the entire batch (same values used on every issue). Stay
+concise — one message, three fields, fixed format. **Do not file
+anything until they reply.**
 
 ```
 Before I file these GitLab issues:
@@ -432,12 +459,17 @@ anything on this submit.
 
 **`later` short-circuit.** If the user's reply is `later` (case-insensitive,
 trimmed) or some clear intent variant ("not now", "defer", "hold off"),
-**do not run `glab issue create` at all** for this submit. The source
-edits already applied — that's not rolled back. Tell the user briefly:
+**do not run `glab issue create` at all** for this submit. Tell the user
+briefly:
 
-> Skipped GitLab filing for this batch. Source edits are still in place
-> — re-submit anytime with `Create GitLab issues` re-ticked when you're
-> ready to file.
+- **Standard mode** (source edits already applied — not rolled back):
+  > Skipped GitLab filing for this batch. Source edits are still in
+  > place — re-submit anytime with `Create GitLab issues` re-ticked
+  > when you're ready to file.
+
+- **File-only mode** (no source edits happened):
+  > Skipped GitLab filing for this batch. Nothing was applied to your
+  > code either — re-submit when you're ready.
 
 Then proceed to §8 / §9. Do **not** mark the session as `error` — this
 is a normal exit, not a failure.
