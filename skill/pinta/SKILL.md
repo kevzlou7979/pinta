@@ -786,6 +786,16 @@ your job on regenerate is to **update it in place**, not start over.
   (e.g. AUTH-01 → AUTH-02 just because the section was reordered),
   the browser-side merge can't match it up and the mark drops. Treat
   ids like primary keys, not display strings.
+- **`USER-*` ids are user-owned. Preserve them verbatim.** Any test
+  whose id starts with `USER-` (e.g. `USER-1`, `USER-12`) was added
+  manually by the tester from Phase 13's catalog-edit affordances —
+  side panel kebab → "Add test below". They live in the same on-disk
+  spec file you read on regen. Treat them as **permanent**: keep them
+  in the same section, in the same position relative to the
+  surrounding rows, with **no edits to title or expected text**. The
+  user owns their content; touching it silently destroys their work.
+  If you add a new section during regen, do not insert `USER-*` rows
+  into it — they stay where the user put them.
 
 ### 7.10.2 `op: "detail-steps"` — generate concrete steps for one test
 

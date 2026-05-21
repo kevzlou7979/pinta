@@ -30,6 +30,10 @@ import {
 } from "./local-store.js";
 import { decodePintaFile, decodePintaMarkdown } from "./pinta-file.js";
 import { uid } from "./id.js";
+import {
+  composeTestDocMarkdown as composeTestDocMarkdownPure,
+  nextUserTestId as nextUserTestIdPure,
+} from "./test-pilot-doc.js";
 
 const SELECTED_KEY = "pinta-selected-companion";
 
@@ -806,32 +810,16 @@ class ExtensionState {
 
   /**
    * Compose the current catalog back to markdown for round-tripping to
-   * the companion. Mirrors the shape the agent emits on `doc-parse` /
-   * `generate-doc` so the next `applyCatalogResult` over the same file
-   * is a no-op (idempotent).
+   * the companion. Delegates to a pure helper in `test-pilot-doc.ts`
+   * so the logic is unit-testable without booting the state class /
+   * chrome.* surface. No-op when no catalog is loaded.
    */
   private composeTestDocMarkdown(): string {
     const c = this.testPilot.catalog;
     if (!c) return "";
-    const heading = c.title?.trim() || c.filename;
-    let out = `# ${heading}\n\n`;
-    if (c.author?.trim()) out += `_By ${c.author.trim()}_\n\n`;
-    if (c.description?.trim()) out += `${c.description.trim()}\n\n`;
-    for (const s of c.sections) {
-      out += `## ${s.title}\n\n`;
-      out += `| ID | Test | Expected Result |\n`;
-      out += `|----|------|-----------------|\n`;
-      for (const t of s.tests) {
-        const id = t.id.replace(/\|/g, "\\|");
-        const test = t.test.replace(/\|/g, "\\|").replace(/\n/g, " ");
-        const expected = t.expected
-          .replace(/\|/g, "\\|")
-          .replace(/\n/g, " ");
-        out += `| ${id} | ${test} | ${expected} |\n`;
-      }
-      out += `\n`;
-    }
-    return out;
+    // Strip the Svelte 5 reactive proxy before passing — the pure
+    // helper only needs the raw shape.
+    return composeTestDocMarkdownPure($state.snapshot(c) as TestPilotCatalog);
   }
 
   /**
@@ -882,26 +870,14 @@ class ExtensionState {
   }
 
   /**
-   * Compute the next free `USER-N` id across the entire catalog.
-   * Walks every section's tests, parses any existing `USER-<digits>`
-   * id, and returns one above the max. Returns `USER-1` for a fresh
-   * catalog. Collisions are impossible by construction — `N` is
-   * monotonically increasing within a session.
+   * Compute the next free `USER-N` id. Delegates to `test-pilot-doc.ts`
+   * so the logic is unit-tested in isolation. Returns `USER-1` for an
+   * empty catalog (used when this is called before any catalog exists).
    */
   private nextUserTestId(): string {
     const c = this.testPilot.catalog;
     if (!c) return "USER-1";
-    let max = 0;
-    for (const s of c.sections) {
-      for (const t of s.tests) {
-        const m = /^USER-(\d+)$/.exec(t.id);
-        if (m) {
-          const n = parseInt(m[1]!, 10);
-          if (n > max) max = n;
-        }
-      }
-    }
-    return `USER-${max + 1}`;
+    return nextUserTestIdPure($state.snapshot(c) as TestPilotCatalog);
   }
 
   /**
@@ -1042,6 +1018,13 @@ class ExtensionState {
     const [moved] = found.section.tests.splice(found.tIdx, 1);
     found.section.tests.splice(newIdx, 0, moved!);
     this.commitCatalogEdit();
+  }
+
+  /** UI signals an inline edit is in flight so an incoming catalog
+   *  payload (e.g. user re-runs Generate mid-edit) doesn't clobber it.
+   *  Side panel calls this on startEditing/commitEdit/cancelEdit. */
+  setTestPilotEditingActive(active: boolean): void {
+    this.testPilot.editingActive = active;
   }
 
   // ─── /Phase 13 ──────────────────────────────────────────────────────

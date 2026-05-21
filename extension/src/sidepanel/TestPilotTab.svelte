@@ -78,30 +78,97 @@
   // textarea above the Pass / Fail buttons; committed via
   // `app.setTestComment` on blur / Pass / Fail / close.
   let commentDraft = $state<string>("");
-  // Inline metadata edit state. `null` means nothing's being edited;
-  // otherwise it's the field name and the in-flight draft value. We
-  // commit on Enter/blur and revert on Escape.
-  let editingField = $state<"title" | "author" | "description" | null>(null);
+  // Inline edit state. `null` means nothing's being edited; otherwise
+  // it's a keyed field name + in-flight draft. We commit on Enter/blur
+  // and revert on Escape. Supported keys:
+  //   "title" / "author" / "description"     — catalog metadata
+  //   "section:OLD_TITLE"                    — section rename
+  //   "test-title:ID"                        — test row title
+  //   "test-expected:ID"                     — test row expected text
+  let editingField = $state<string | null>(null);
   let editingDraft = $state("");
+  // Kebab menus — keyed by section title (sections) or test id (rows).
+  // Outside-click handler nulls them. Mutually exclusive — opening any
+  // kebab closes the others.
+  let sectionKebabOpen = $state<string | null>(null);
+  let testKebabOpen = $state<string | null>(null);
 
-  function startEditing(field: "title" | "author" | "description") {
+  function startEditing(field: string) {
     const c = app.testPilot.catalog;
     if (!c) return;
     editingField = field;
-    editingDraft =
-      field === "title"
-        ? (c.title ?? "")
-        : field === "author"
-          ? (c.author ?? "")
-          : (c.description ?? "");
+    // Hydrate the draft from whatever source the key points at.
+    if (field === "title") editingDraft = c.title ?? "";
+    else if (field === "author") editingDraft = c.author ?? "";
+    else if (field === "description") editingDraft = c.description ?? "";
+    else if (field.startsWith("section:")) {
+      editingDraft = field.slice("section:".length);
+    } else if (field.startsWith("test-title:")) {
+      const id = field.slice("test-title:".length);
+      editingDraft = findTestById(id)?.test ?? "";
+    } else if (field.startsWith("test-expected:")) {
+      const id = field.slice("test-expected:".length);
+      editingDraft = findTestById(id)?.expected ?? "";
+    }
+    // Lock the catalog-rehydration path so a mid-edit Generate result
+    // doesn't clobber the in-progress draft.
+    app.setTestPilotEditingActive(true);
   }
   function commitEdit() {
     if (!editingField) return;
-    app.setTestPilotMeta({ [editingField]: editingDraft });
+    const field = editingField;
+    const draft = editingDraft;
     editingField = null;
+    app.setTestPilotEditingActive(false);
+    if (
+      field === "title" ||
+      field === "author" ||
+      field === "description"
+    ) {
+      app.setTestPilotMeta({ [field]: draft });
+    } else if (field.startsWith("section:")) {
+      const oldTitle = field.slice("section:".length);
+      if (oldTitle === "") {
+        // Adding a new section with empty title — replace its title.
+        // We added a "" placeholder during addTestPilotSection; rename
+        // the LAST section (the one just appended) to the typed value.
+        const c = app.testPilot.catalog;
+        if (c && c.sections.length > 0 && draft.trim() !== "") {
+          const last = c.sections[c.sections.length - 1]!;
+          app.renameTestPilotSection(last.title, draft);
+        } else if (c && c.sections.length > 0 && draft.trim() === "") {
+          // User left it blank — drop the placeholder.
+          const last = c.sections[c.sections.length - 1]!;
+          if (last.title === "" && last.tests.length === 0) {
+            app.removeTestPilotSection("");
+          }
+        }
+      } else {
+        app.renameTestPilotSection(oldTitle, draft);
+      }
+    } else if (field.startsWith("test-title:")) {
+      const id = field.slice("test-title:".length);
+      app.updateTestPilotTest(id, { test: draft });
+    } else if (field.startsWith("test-expected:")) {
+      const id = field.slice("test-expected:".length);
+      app.updateTestPilotTest(id, { expected: draft });
+    }
   }
   function cancelEdit() {
+    // If the user just clicked "+ Add section" then immediately
+    // pressed Escape, drop the empty placeholder so the catalog
+    // doesn't accumulate blank section headers.
+    if (editingField === "section:") {
+      const c = app.testPilot.catalog;
+      if (c && c.sections.length > 0) {
+        const last = c.sections[c.sections.length - 1]!;
+        if (last.title === "" && last.tests.length === 0) {
+          app.removeTestPilotSection("");
+        }
+      }
+    }
     editingField = null;
+    app.setTestPilotEditingActive(false);
   }
   function onEditKey(e: KeyboardEvent) {
     if (e.key === "Escape") {
@@ -109,12 +176,91 @@
       cancelEdit();
     } else if (
       e.key === "Enter" &&
-      // Allow newlines in description with Shift+Enter; bare Enter commits.
-      !(editingField === "description" && e.shiftKey)
+      // Allow newlines in multi-line fields with Shift+Enter; bare
+      // Enter commits.
+      !(
+        (editingField === "description" ||
+          editingField?.startsWith("test-expected:")) &&
+        e.shiftKey
+      )
     ) {
       e.preventDefault();
       commitEdit();
     }
+  }
+
+  function findTestById(id: string): TestPilotTest | null {
+    const c = app.testPilot.catalog;
+    if (!c) return null;
+    for (const s of c.sections) {
+      for (const t of s.tests) {
+        if (t.id === id) return t;
+      }
+    }
+    return null;
+  }
+
+  // Kebab actions — section
+  function onSectionRename(title: string) {
+    sectionKebabOpen = null;
+    startEditing(`section:${title}`);
+  }
+  function onSectionDelete(title: string) {
+    sectionKebabOpen = null;
+    if (
+      !confirm(
+        `Delete section "${title}" and all its tests? This can't be undone.`,
+      )
+    )
+      return;
+    app.removeTestPilotSection(title);
+  }
+  function onSectionMove(title: string, direction: "up" | "down") {
+    sectionKebabOpen = null;
+    app.moveTestPilotSection(title, direction);
+  }
+  function onSectionAddTest(title: string) {
+    sectionKebabOpen = null;
+    const newId = app.addTestPilotTest(title, { test: "", expected: "" });
+    if (newId) {
+      // Drop the user into inline-edit on the new row's title.
+      startEditing(`test-title:${newId}`);
+      // Make sure the section is expanded so the user can see the
+      // input they're about to type into.
+      collapsedSections[title] = false;
+    }
+  }
+  function onAddSection() {
+    // Append empty section + immediately focus the inline input.
+    app.addTestPilotSection("");
+    startEditing("section:");
+  }
+
+  // Kebab actions — test row
+  function onTestEdit(id: string) {
+    testKebabOpen = null;
+    startEditing(`test-title:${id}`);
+  }
+  function onTestEditExpected(id: string) {
+    testKebabOpen = null;
+    startEditing(`test-expected:${id}`);
+  }
+  function onTestDelete(id: string) {
+    testKebabOpen = null;
+    app.removeTestPilotTest(id);
+  }
+  function onTestMove(id: string, direction: "up" | "down") {
+    testKebabOpen = null;
+    app.moveTestPilotTest(id, direction);
+  }
+
+  function toggleSectionKebab(title: string) {
+    sectionKebabOpen = sectionKebabOpen === title ? null : title;
+    testKebabOpen = null;
+  }
+  function toggleTestKebab(id: string) {
+    testKebabOpen = testKebabOpen === id ? null : id;
+    sectionKebabOpen = null;
   }
 
   function formatImportedDate(ms: number): string {
@@ -137,15 +283,23 @@
     }
   }
 
-  // Close the dropdown on any outside click. Bound once per mount.
+  // Close the dropdown + kebab menus on any outside click. Bound once
+  // per mount.
   onMount(() => {
     function onDocClick(e: MouseEvent) {
       const target = e.target as HTMLElement | null;
       if (!target) return;
-      if (target.closest("[data-pinta-status-trigger]") || target.closest("[data-pinta-status-menu]")) {
-        return;
+      const inStatus =
+        target.closest("[data-pinta-status-trigger]") ||
+        target.closest("[data-pinta-status-menu]");
+      const inKebab =
+        target.closest("[data-pinta-kebab-trigger]") ||
+        target.closest("[data-pinta-kebab-menu]");
+      if (!inStatus) dropdownTestId = null;
+      if (!inKebab) {
+        sectionKebabOpen = null;
+        testKebabOpen = null;
       }
-      dropdownTestId = null;
     }
     document.addEventListener("click", onDocClick, true);
     return () => document.removeEventListener("click", onDocClick, true);
@@ -922,46 +1076,73 @@
         {@const secPct = secTotal > 0 ? Math.round(((secPass + secFail) / secTotal) * 100) : 0}
         {@const secUnloaded = section.tests.filter((t) => !t.detail).length}
         {@const secBulkFetching = !!bulkFetchingSections[section.title]}
+        {@const editingThisSection =
+          editingField === `section:${section.title}` ||
+          (editingField === "section:" && section.title === "")}
         <div class="rounded-lg border border-ink-200 dark:border-night-line bg-ink-50 dark:bg-night-alt overflow-hidden">
           <div class="pinta-section-trigger flex items-stretch text-[12px] font-medium text-ink-900 dark:text-night-text">
-            <button
-              type="button"
-              class="flex items-center gap-2 min-w-0 flex-1 px-3 py-2.5 text-left hover:bg-ink-100 dark:hover:bg-night-line"
-              onclick={() => (collapsedSections[section.title] = !collapsed)}
-              aria-expanded={!collapsed}
-            >
-            <span class="flex items-center gap-2 min-w-0">
-              <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" class="transition-transform shrink-0" class:rotate-90={!collapsed}><polyline points="9 18 15 12 9 6"/></svg>
-              <!-- Flask icon — wiggles on section-trigger hover (see app.css).
-                   Subtle "chemistry / UAT lab" cue. The bubble dot above the
-                   spout drifts up on hover too. -->
-              <span class="relative inline-flex shrink-0 text-brand-pink dark:text-brand-pink-light" aria-hidden="true">
-                <svg
-                  class="pinta-flask-icon"
-                  width="14"
-                  height="14"
-                  viewBox="0 0 24 24"
-                  fill="none"
-                  stroke="currentColor"
-                  stroke-width="1.8"
-                  stroke-linecap="round"
-                  stroke-linejoin="round"
-                >
-                  <path d="M9 3h6" />
-                  <path d="M10 3v6.5L4.4 18.7A1.6 1.6 0 0 0 5.8 21h12.4a1.6 1.6 0 0 0 1.4-2.3L14 9.5V3" />
-                  <path d="M7.5 14.5h9" opacity="0.55" />
-                </svg>
-                <span
-                  class="pinta-flask-bubble absolute left-1/2 -translate-x-1/2 -top-0.5 w-1 h-1 rounded-full bg-brand-pink dark:bg-brand-pink-light opacity-0"
-                ></span>
+            {#if editingThisSection}
+              <!-- Inline-edit: the entire left side becomes an input.
+                   Collapse toggle is hidden while editing (the user is
+                   typing the title, not browsing). -->
+              <div class="flex items-center gap-2 min-w-0 flex-1 px-3 py-2">
+                <span class="relative inline-flex shrink-0 text-brand-pink dark:text-brand-pink-light" aria-hidden="true">
+                  <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+                    <path d="M9 3h6" />
+                    <path d="M10 3v6.5L4.4 18.7A1.6 1.6 0 0 0 5.8 21h12.4a1.6 1.6 0 0 0 1.4-2.3L14 9.5V3" />
+                    <path d="M7.5 14.5h9" opacity="0.55" />
+                  </svg>
+                </span>
+                <input
+                  type="text"
+                  class="flex-1 min-w-0 text-[12px] font-bold text-ink-900 dark:text-night-text bg-white dark:bg-night-card border border-brand-pink dark:border-brand-pink-light rounded outline-none px-1.5 py-0.5"
+                  bind:value={editingDraft}
+                  onkeydown={onEditKey}
+                  onblur={commitEdit}
+                  placeholder="Section title (e.g. 1.1 Authentication)"
+                  autofocus
+                />
+              </div>
+            {:else}
+              <button
+                type="button"
+                class="flex items-center gap-2 min-w-0 flex-1 px-3 py-2.5 text-left hover:bg-ink-100 dark:hover:bg-night-line"
+                onclick={() => (collapsedSections[section.title] = !collapsed)}
+                aria-expanded={!collapsed}
+              >
+              <span class="flex items-center gap-2 min-w-0">
+                <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" class="transition-transform shrink-0" class:rotate-90={!collapsed}><polyline points="9 18 15 12 9 6"/></svg>
+                <!-- Flask icon — wiggles on section-trigger hover (see app.css).
+                     Subtle "chemistry / UAT lab" cue. The bubble dot above the
+                     spout drifts up on hover too. -->
+                <span class="relative inline-flex shrink-0 text-brand-pink dark:text-brand-pink-light" aria-hidden="true">
+                  <svg
+                    class="pinta-flask-icon"
+                    width="14"
+                    height="14"
+                    viewBox="0 0 24 24"
+                    fill="none"
+                    stroke="currentColor"
+                    stroke-width="1.8"
+                    stroke-linecap="round"
+                    stroke-linejoin="round"
+                  >
+                    <path d="M9 3h6" />
+                    <path d="M10 3v6.5L4.4 18.7A1.6 1.6 0 0 0 5.8 21h12.4a1.6 1.6 0 0 0 1.4-2.3L14 9.5V3" />
+                    <path d="M7.5 14.5h9" opacity="0.55" />
+                  </svg>
+                  <span
+                    class="pinta-flask-bubble absolute left-1/2 -translate-x-1/2 -top-0.5 w-1 h-1 rounded-full bg-brand-pink dark:bg-brand-pink-light opacity-0"
+                  ></span>
+                </span>
+                <span class="truncate font-bold">{section.title || "Untitled section"}</span>
               </span>
-              <span class="truncate font-bold">{section.title}</span>
-            </span>
-            </button>
-            <!-- Right edge: tally chip + section-wide "Ask all" button.
-                 Separate from the collapse toggle so we can have two
-                 distinct click targets without nesting buttons. -->
-            <div class="flex items-center gap-1.5 shrink-0 pr-2">
+              </button>
+            {/if}
+            <!-- Right edge: tally chip + section-wide "Ask all" button +
+                 kebab menu. Separate from the collapse toggle so we can
+                 have multiple click targets without nesting buttons. -->
+            <div class="relative flex items-center gap-1.5 shrink-0 pr-2">
               <!-- Per-section tally: pass · fail · % complete. Pass and
                    fail are color-coded; pct is dim. Separators are thin
                    vertical bars so the trio reads as one badge. Falls
@@ -1015,6 +1196,88 @@
                   {/if}
                 </button>
               {/if}
+
+              <!-- Kebab — section actions (rename / delete / move /
+                   add test below). Hidden while inline-editing this
+                   section's title. -->
+              {#if !editingThisSection}
+                {@const sIdx = app.testPilot.catalog.sections.findIndex((s) => s.title === section.title)}
+                {@const isFirstSection = sIdx === 0}
+                {@const isLastSection = sIdx === app.testPilot.catalog.sections.length - 1}
+                <button
+                  type="button"
+                  data-pinta-kebab-trigger
+                  class="shrink-0 w-7 h-7 inline-flex items-center justify-center rounded-full text-ink-500 dark:text-night-dim hover:text-ink-900 dark:hover:text-night-text hover:bg-ink-100 dark:hover:bg-night-line"
+                  onclick={() => toggleSectionKebab(section.title)}
+                  aria-haspopup="menu"
+                  aria-expanded={sectionKebabOpen === section.title}
+                  aria-label="Section actions"
+                  title="Section actions"
+                >
+                  <svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
+                    <circle cx="12" cy="5" r="1.6" />
+                    <circle cx="12" cy="12" r="1.6" />
+                    <circle cx="12" cy="19" r="1.6" />
+                  </svg>
+                </button>
+                {#if sectionKebabOpen === section.title}
+                  <div
+                    data-pinta-kebab-menu
+                    class="absolute z-30 right-2 top-9 bg-white dark:bg-night-card border border-ink-200 dark:border-night-line rounded-md shadow-lg py-1 min-w-[160px]"
+                    role="menu"
+                  >
+                    <button
+                      type="button"
+                      class="w-full flex items-center gap-2 px-3 py-1.5 text-[12px] text-ink-700 dark:text-night-dim hover:bg-ink-50 dark:hover:bg-night-alt hover:text-ink-900 dark:hover:text-night-text"
+                      onclick={() => onSectionRename(section.title)}
+                      role="menuitem"
+                    >
+                      <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 20h9"/><path d="M16.5 3.5a2.121 2.121 0 0 1 3 3L7 19l-4 1 1-4 12.5-12.5z"/></svg>
+                      Rename
+                    </button>
+                    <button
+                      type="button"
+                      class="w-full flex items-center gap-2 px-3 py-1.5 text-[12px] text-ink-700 dark:text-night-dim hover:bg-ink-50 dark:hover:bg-night-alt hover:text-ink-900 dark:hover:text-night-text"
+                      onclick={() => onSectionAddTest(section.title)}
+                      role="menuitem"
+                    >
+                      <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>
+                      Add test below
+                    </button>
+                    <div class="my-1 border-t border-ink-100 dark:border-night-line"></div>
+                    <button
+                      type="button"
+                      class="w-full flex items-center gap-2 px-3 py-1.5 text-[12px] text-ink-700 dark:text-night-dim hover:bg-ink-50 dark:hover:bg-night-alt hover:text-ink-900 dark:hover:text-night-text disabled:opacity-40 disabled:cursor-not-allowed disabled:hover:bg-transparent disabled:hover:text-ink-700 dark:disabled:hover:text-night-dim"
+                      onclick={() => onSectionMove(section.title, "up")}
+                      disabled={isFirstSection}
+                      role="menuitem"
+                    >
+                      <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="18 15 12 9 6 15"/></svg>
+                      Move up
+                    </button>
+                    <button
+                      type="button"
+                      class="w-full flex items-center gap-2 px-3 py-1.5 text-[12px] text-ink-700 dark:text-night-dim hover:bg-ink-50 dark:hover:bg-night-alt hover:text-ink-900 dark:hover:text-night-text disabled:opacity-40 disabled:cursor-not-allowed disabled:hover:bg-transparent disabled:hover:text-ink-700 dark:disabled:hover:text-night-dim"
+                      onclick={() => onSectionMove(section.title, "down")}
+                      disabled={isLastSection}
+                      role="menuitem"
+                    >
+                      <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="6 9 12 15 18 9"/></svg>
+                      Move down
+                    </button>
+                    <div class="my-1 border-t border-ink-100 dark:border-night-line"></div>
+                    <button
+                      type="button"
+                      class="w-full flex items-center gap-2 px-3 py-1.5 text-[12px] text-red-600 dark:text-red-400 hover:bg-red-50 dark:hover:bg-red-950/30"
+                      onclick={() => onSectionDelete(section.title)}
+                      role="menuitem"
+                    >
+                      <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="3 6 5 6 21 6"/><path d="M19 6l-1.5 14a2 2 0 0 1-2 1.5h-7a2 2 0 0 1-2-1.5L5 6"/><line x1="10" y1="11" x2="10" y2="17"/><line x1="14" y1="11" x2="14" y2="17"/><path d="M9 6V4a2 2 0 0 1 2-2h2a2 2 0 0 1 2 2v2"/></svg>
+                      Delete section
+                    </button>
+                  </div>
+                {/if}
+              {/if}
             </div>
           </div>
           {#if !collapsed}
@@ -1023,6 +1286,8 @@
                 {@const detailLoading = !!app.testPilot.pendingDetails[test.id]}
                 {@const detailLoaded = !!test.detail}
                 {@const isActive = activeTestId === test.id}
+                {@const editingTitle = editingField === `test-title:${test.id}`}
+                {@const editingExpected = editingField === `test-expected:${test.id}`}
                 <li
                   class="relative border-b border-ink-200 dark:border-night-line last:border-b-0"
                   data-test-row={test.id}
@@ -1066,30 +1331,58 @@
                       {/if}
                     </button>
 
-                    <!-- ID + title + expected (stacked). Clickable to
-                         mark the row as the active cursor — opens NO
-                         detail view, just sets selection so "Back to
-                         catalog" can scroll-restore here later. Detail
-                         view is still opened only via the speech-bubble
-                         / "?" icons on the right. -->
-                    <div
-                      role="button"
-                      tabindex="0"
-                      class="flex-1 min-w-0 cursor-pointer rounded -mx-0.5 px-0.5 focus:outline-none focus-visible:ring-1 focus-visible:ring-brand-pink/40"
-                      onclick={() => setActive(test.id)}
-                      onkeydown={(e) => {
-                        if (e.key === "Enter" || e.key === " ") {
-                          e.preventDefault();
-                          setActive(test.id);
-                        }
-                      }}
-                      aria-pressed={isActive}
-                      aria-label={`Select ${test.id}`}
-                    >
-                      <div class="font-mono text-[10px] font-bold tracking-wide text-ink-500 dark:text-night-mute">{test.id}</div>
-                      <div class="text-[12px] font-semibold text-ink-900 dark:text-night-text leading-snug mt-1">{test.test}</div>
-                      <p class="text-[11px] text-ink-500 dark:text-night-mute leading-snug mt-1">{test.expected}</p>
-                    </div>
+                    <!-- ID + title + expected (stacked). Inline-editable
+                         when the user picks Edit from the row kebab —
+                         title and expected each become their own input
+                         keyed by `test-title:ID` / `test-expected:ID`
+                         (consts hoisted up to the {#each} block). -->
+                    {#if editingTitle || editingExpected}
+                      <div class="flex-1 min-w-0 space-y-1">
+                        <div class="font-mono text-[10px] font-bold tracking-wide text-ink-500 dark:text-night-mute">{test.id}</div>
+                        {#if editingTitle}
+                          <input
+                            type="text"
+                            class="w-full text-[12px] font-semibold text-ink-900 dark:text-night-text bg-white dark:bg-night-card border border-brand-pink dark:border-brand-pink-light rounded outline-none px-1.5 py-0.5 leading-snug"
+                            bind:value={editingDraft}
+                            onkeydown={onEditKey}
+                            onblur={commitEdit}
+                            placeholder="What does this test verify?"
+                            autofocus
+                          />
+                          <p class="text-[11px] text-ink-500 dark:text-night-mute leading-snug">{test.expected}</p>
+                        {:else}
+                          <div class="text-[12px] font-semibold text-ink-900 dark:text-night-text leading-snug">{test.test || "(no title)"}</div>
+                          <textarea
+                            rows="2"
+                            class="w-full text-[11px] text-ink-700 dark:text-night-dim bg-white dark:bg-night-card border border-brand-pink/60 dark:border-brand-pink-light/60 rounded outline-none px-1.5 py-0.5 leading-snug resize-y"
+                            bind:value={editingDraft}
+                            onkeydown={onEditKey}
+                            onblur={commitEdit}
+                            placeholder="Expected result (Shift+Enter for newline)"
+                            autofocus
+                          ></textarea>
+                        {/if}
+                      </div>
+                    {:else}
+                      <div
+                        role="button"
+                        tabindex="0"
+                        class="flex-1 min-w-0 cursor-pointer rounded -mx-0.5 px-0.5 focus:outline-none focus-visible:ring-1 focus-visible:ring-brand-pink/40"
+                        onclick={() => setActive(test.id)}
+                        onkeydown={(e) => {
+                          if (e.key === "Enter" || e.key === " ") {
+                            e.preventDefault();
+                            setActive(test.id);
+                          }
+                        }}
+                        aria-pressed={isActive}
+                        aria-label={`Select ${test.id}`}
+                      >
+                        <div class="font-mono text-[10px] font-bold tracking-wide text-ink-500 dark:text-night-mute">{test.id}</div>
+                        <div class="text-[12px] font-semibold text-ink-900 dark:text-night-text leading-snug mt-1">{test.test || "(no title — click the kebab menu to add one)"}</div>
+                        <p class="text-[11px] text-ink-500 dark:text-night-mute leading-snug mt-1">{test.expected || "(no expected result yet)"}</p>
+                      </div>
+                    {/if}
 
                     <!-- Row actions — comment indicator + ask-icon
                          clustered tight (gap-0) so they read as one
@@ -1151,6 +1444,89 @@
                           <svg width="19" height="19" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><path d="M9.09 9a3 3 0 0 1 5.83 1c0 2-3 3-3 3"/><line x1="12" y1="17" x2="12.01" y2="17"/></svg>
                         {/if}
                       </button>
+
+                      <!-- Row kebab — edit / delete / move. Hidden
+                           while inline-editing to keep the focused
+                           input the only target. -->
+                      {#if !editingTitle && !editingExpected}
+                        {@const sIdx2 = app.testPilot.catalog.sections.findIndex((s) => s.title === section.title)}
+                        {@const tIdx = sIdx2 >= 0 ? app.testPilot.catalog.sections[sIdx2].tests.findIndex((t) => t.id === test.id) : -1}
+                        {@const isFirstTest = tIdx === 0}
+                        {@const isLastTest = sIdx2 >= 0 && tIdx === app.testPilot.catalog.sections[sIdx2].tests.length - 1}
+                        <button
+                          type="button"
+                          data-pinta-kebab-trigger
+                          class="shrink-0 w-7 h-9 inline-flex items-center justify-center rounded-full text-ink-400 dark:text-night-mute hover:text-ink-900 dark:hover:text-night-text hover:bg-ink-50 dark:hover:bg-night-alt"
+                          onclick={() => toggleTestKebab(test.id)}
+                          aria-haspopup="menu"
+                          aria-expanded={testKebabOpen === test.id}
+                          aria-label="Row actions for {test.id}"
+                          title="Row actions"
+                        >
+                          <svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
+                            <circle cx="12" cy="5" r="1.5" />
+                            <circle cx="12" cy="12" r="1.5" />
+                            <circle cx="12" cy="19" r="1.5" />
+                          </svg>
+                        </button>
+                        {#if testKebabOpen === test.id}
+                          <div
+                            data-pinta-kebab-menu
+                            class="absolute z-30 right-2 top-10 bg-white dark:bg-night-card border border-ink-200 dark:border-night-line rounded-md shadow-lg py-1 min-w-[170px]"
+                            role="menu"
+                          >
+                            <button
+                              type="button"
+                              class="w-full flex items-center gap-2 px-3 py-1.5 text-[12px] text-ink-700 dark:text-night-dim hover:bg-ink-50 dark:hover:bg-night-alt hover:text-ink-900 dark:hover:text-night-text"
+                              onclick={() => onTestEdit(test.id)}
+                              role="menuitem"
+                            >
+                              <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 20h9"/><path d="M16.5 3.5a2.121 2.121 0 0 1 3 3L7 19l-4 1 1-4 12.5-12.5z"/></svg>
+                              Edit title
+                            </button>
+                            <button
+                              type="button"
+                              class="w-full flex items-center gap-2 px-3 py-1.5 text-[12px] text-ink-700 dark:text-night-dim hover:bg-ink-50 dark:hover:bg-night-alt hover:text-ink-900 dark:hover:text-night-text"
+                              onclick={() => onTestEditExpected(test.id)}
+                              role="menuitem"
+                            >
+                              <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="9 11 12 14 22 4"/><path d="M21 12v7a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11"/></svg>
+                              Edit expected
+                            </button>
+                            <div class="my-1 border-t border-ink-100 dark:border-night-line"></div>
+                            <button
+                              type="button"
+                              class="w-full flex items-center gap-2 px-3 py-1.5 text-[12px] text-ink-700 dark:text-night-dim hover:bg-ink-50 dark:hover:bg-night-alt hover:text-ink-900 dark:hover:text-night-text disabled:opacity-40 disabled:cursor-not-allowed disabled:hover:bg-transparent disabled:hover:text-ink-700 dark:disabled:hover:text-night-dim"
+                              onclick={() => onTestMove(test.id, "up")}
+                              disabled={isFirstTest}
+                              role="menuitem"
+                            >
+                              <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="18 15 12 9 6 15"/></svg>
+                              Move up
+                            </button>
+                            <button
+                              type="button"
+                              class="w-full flex items-center gap-2 px-3 py-1.5 text-[12px] text-ink-700 dark:text-night-dim hover:bg-ink-50 dark:hover:bg-night-alt hover:text-ink-900 dark:hover:text-night-text disabled:opacity-40 disabled:cursor-not-allowed disabled:hover:bg-transparent disabled:hover:text-ink-700 dark:disabled:hover:text-night-dim"
+                              onclick={() => onTestMove(test.id, "down")}
+                              disabled={isLastTest}
+                              role="menuitem"
+                            >
+                              <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="6 9 12 15 18 9"/></svg>
+                              Move down
+                            </button>
+                            <div class="my-1 border-t border-ink-100 dark:border-night-line"></div>
+                            <button
+                              type="button"
+                              class="w-full flex items-center gap-2 px-3 py-1.5 text-[12px] text-red-600 dark:text-red-400 hover:bg-red-50 dark:hover:bg-red-950/30"
+                              onclick={() => onTestDelete(test.id)}
+                              role="menuitem"
+                            >
+                              <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="3 6 5 6 21 6"/><path d="M19 6l-1.5 14a2 2 0 0 1-2 1.5h-7a2 2 0 0 1-2-1.5L5 6"/><line x1="10" y1="11" x2="10" y2="17"/><line x1="14" y1="11" x2="14" y2="17"/></svg>
+                              Delete
+                            </button>
+                          </div>
+                        {/if}
+                      {/if}
                     </div>
                   </div>
 
@@ -1196,6 +1572,21 @@
           {/if}
         </div>
       {/each}
+
+      <!-- Add-section affordance — appends an empty section + drops
+           the user into inline-edit on its title. Mirrors the
+           "+ Add author / + Add description" pattern in the header. -->
+      <button
+        type="button"
+        class="w-full inline-flex items-center justify-center gap-1.5 rounded-lg border border-dashed border-ink-300 dark:border-night-line bg-transparent text-[12px] font-medium text-ink-500 dark:text-night-mute hover:text-brand-pink dark:hover:text-brand-pink-light hover:border-brand-pink dark:hover:border-brand-pink-light py-2.5 transition-colors"
+        onclick={onAddSection}
+      >
+        <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+          <line x1="12" y1="5" x2="12" y2="19"/>
+          <line x1="5" y1="12" x2="19" y2="12"/>
+        </svg>
+        Add section
+      </button>
     </div>
 
     <button
