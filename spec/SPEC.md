@@ -1311,6 +1311,89 @@ three-tier module is the diff outlined in `chat-module-spec.md`.
 threads, chat history search, "agent proposes Pass/Fail" from reply
 analysis, page-level FAB on the user's app (side-panel only).
 
+### Phase 15 — AuditFlow module — Planned
+
+A Lighthouse-style audit surface as a Pinta module. Module id:
+`audit-flow`, mode: `interactive` (own side-panel tab). What makes
+this Pinta-shaped rather than yet-another-Lighthouse: every finding
+is one click from being **actionable** because the annotation → agent
+edit pipeline is already there. The audit becomes the *source* of
+work; existing modules become *sinks*.
+
+**Four built-in categories** ship by default:
+
+| Category | What it checks |
+|---|---|
+| Security | XSS, CSRF, secret leakage, `eval` / `{@html}` misuse, dep advisories |
+| Performance | Bundle size, runtime hotspots, lazy-load opportunities, network waterfall |
+| Accessibility | axe-core via headless Chrome + LLM semantic checks (ARIA, contrast, focus) |
+| Mobile | Viewport diffs @ 375/768/1280, modal overlap, touch-target sizing |
+
+**Framework-specific audits are user-defined.** Sidesteps the "which
+version of Svelte do we hard-code for" problem. User pastes guidance,
+uploads a `.md`, or supplies a URL (e.g. `svelte.dev/llms.txt`); the
+agent reads the source and generates a structured `AuditRule[]` for
+user review + edit before save. Stored in
+`chrome.storage.local["pinta-custom-audits"]`. Each saved custom audit
+appears as a checkbox alongside the four built-ins; ships with a
+"Svelte 5" seed users install in one click.
+
+**Lighthouse-style UI**: big circular **overall score** card at the
+top, **per-category cards** with their own ring score + finding tally,
+expand to show check rows. Card view default; table view toggle for
+bulk action. Each check is one of `pass | warn | fail | info` — passing
+checks are first-class (reads better in stakeholder reports than
+"5 issues found"). Deterministic scoring:
+`(pass*1 + warn*0.5 + fail*0) / (pass + warn + fail) × 100`. Overall
+is the average across categories. Ring color: 90-100 green, 50-89
+amber, 0-49 red.
+
+**Per-check action menu**:
+- 🪄 **Fix with agent** — composes a Pinta annotation pre-filled
+  with the check's label / value / where / fixHint; opens the
+  Annotate tab with the draft so the user reviews before Submit
+  (opt-in setting unlocks direct-apply). Default sink — most fixes
+  land this way.
+- 💬 **Discuss** — routes the check to Phase 14 chat with
+  `context.kind === "audit-check"`. For "explain why" / "show an
+  alternative".
+- 📋 **File issue** — composes a GitLab issue body via the existing
+  GitLab Issues module. Per-check or one rollup per category.
+- ··· menu — Won't fix / Ignore / Snooze 30d (persisted across runs).
+
+Table view supports multi-select + **Fix all with agent** for bulk
+handoff.
+
+**Cross-run continuity by fingerprint.** Every check has a stable
+`sha1(category::label::where.file::where.line)` id; per-fingerprint
+disposition (won't-fix reason, snooze deadline, in-flight fix's
+sessionId) persists across runs. Run 4 vs. run 3 → "we've fixed 8,
+ignored 2, 12 new findings introduced." Trend chart in 15d.
+
+**Wire protocol** extends `module.query.submit` with `op: "audit"` —
+no new ClientMessage variant. Agent returns `{type: "audit-flow-run",
+runId, overall, categories: [{id, name, score, checks}]}` via
+`mark_session_done`. New companion endpoint `POST /v1/audit/run-tool`
+shells out to `axe-core` / `lighthouse` / `npx @sveltejs/mcp` etc.
+when a category opts in.
+
+**Phasing** (~3.5 weeks total; 15a alone ~4 days ships standalone):
+- **15a** — Security only + card view + Fix-with-agent → Annotate
+- **15b** — Add Perf / A11y / Mobile + table view + bulk Fix
+- **15c** — Custom audits (paste / upload / URL → rules → save)
+- **15d** — Cross-run fingerprint persistence + Won't fix / snooze
+- **15e** — File-as-issue (GitLab module composition) + Discuss
+  handoff (after Phase 14 chat lands)
+
+**Full design** (locked decisions, per-category thresholds, sample
+payloads, file-touch estimate, custom-audit safety rules): see parked
+spec memory `auditflow-module-spec.md`.
+
+**Out of scope for first cut:** Linear / Jira / Slack issue sinks
+(GitLab-only until those modules exist); auto-apply fixes without
+preview (opt-in setting); concurrent audit runs (single in-flight);
+"agent proposes its own audit rules" meta-feature (deferred to 15d+).
+
 ---
 
 ## 9. Open questions

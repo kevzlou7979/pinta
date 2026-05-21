@@ -546,6 +546,15 @@ V1 covers the core loop. What's next, in priority order:
   on Annotate (Submit becomes Ask), and a FAB on the Test Pilot tab
   for per-row context. All three share one `op: "chat"` wire and
   one sheet UI. Replaces the current Test Pilot per-row Notes.
+- **Phase 15 — AuditFlow module.** Lighthouse-style audit surface as
+  a Pinta module. Four built-in categories (security / perf / a11y /
+  mobile) plus user-defined custom audits — paste guidance or upload
+  a `.md` and the agent generates the rules for you. Per-check
+  **Fix with agent** composes a Pinta annotation and routes through
+  the standard source-edit loop; Discuss routes to the Phase 14
+  chat; File issue routes through GitLab Issues. Card + table
+  views, deterministic scoring, cross-run continuity. The audit
+  becomes a source of work the existing modules consume.
 - **Beyond.** Conflict detection, multi-tab sessions, read-only sharing.
   See [`spec/SPEC.md` §9](spec/SPEC.md#9-open-questions) for the open
   design questions.

@@ -545,7 +545,37 @@ submission. Issues still get filed without the image, and the `⚠`
 lines above land in the transcript so the user knows *why* the image
 didn't make it.
 
-**Per-issue body template** (one issue per annotation):
+**Per-issue body — hard constraints (read first).**
+
+You're allowed to enhance the issue body when the annotation comment
+gives you enough material to do it well (root-cause analysis, code
+snippets, Steps to Reproduce / Expected / Actual sections, etc.). A
+richer issue is a better issue. But two slots are **non-negotiable**
+regardless of how you structure the rest:
+
+1. **Screenshot embed (if `$SCREENSHOT_MD` is non-empty)** — the user
+   ticked **Include full-page screenshot** specifically so the image
+   shows up on the ticket. The embed must appear in the body on a
+   line by itself, between the description content and the Pinta
+   footer. If you drop it, the user opens the ticket, sees no image,
+   and assumes the feature is broken. This has happened in the wild;
+   don't repeat it. **Verify before invoking `glab issue create`**
+   that `"$SCREENSHOT_MD"` appears in your composed `$BODY`. If it
+   doesn't, append it before the footer.
+2. **Traceability footer** — the literal line
+   `*Filed by Pinta · session \`{session.id}\` · annotation \`{annotation.id}\`*`
+   must be the last line of the body. This is how the user traces a
+   filed ticket back to the originating Pinta session when triaging
+   later. Re-naming or restructuring it breaks the trace.
+
+The selector / source file / page metadata are also valuable but
+*not* hard constraints — if you fold them into a richer "Environment"
+section or substitute equivalent fields (e.g. `Affected file:` in
+place of `Source file:`), that's fine.
+
+**Per-issue body template** (use as-is when you don't have enough
+material to enhance):
+
 - Title: first sentence of `annotation.comment`, capped at ~80 chars.
   If the comment is empty, fall back to `annotation.target.selector` or
   the annotation kind.
@@ -579,6 +609,26 @@ BODY=$(mktemp); trap 'rm -f "$BODY"' EXIT
   printf '\n*Filed by Pinta · session `%s` · annotation `%s`*\n' \
     "$SESSION_ID" "$ANNOTATION_ID"
 } > "$BODY"
+
+# Defensive guard: if the user opted into Include Screenshot AND the
+# upload succeeded ($SCREENSHOT_MD non-empty), the embed MUST be in
+# the body. When you composed a richer custom body above (e.g. with
+# Summary / Description / Steps to Reproduce / Expected / Actual
+# sections), it's easy to forget the screenshot slot. Catch that
+# here so the user doesn't open the ticket and find no image.
+if [ -n "$SCREENSHOT_MD" ] && ! grep -qF "$SCREENSHOT_MD" "$BODY"; then
+  echo "⚠ Screenshot embed dropped from issue body — appending before footer." >&2
+  # Strip the existing footer (if present), append the embed, re-append the footer.
+  TMP=$(mktemp)
+  grep -v '^\*Filed by Pinta · session' "$BODY" > "$TMP" || true
+  {
+    cat "$TMP"
+    printf '\n%s\n' "$SCREENSHOT_MD"
+    printf '\n*Filed by Pinta · session `%s` · annotation `%s`*\n' \
+      "$SESSION_ID" "$ANNOTATION_ID"
+  } > "$BODY"
+  rm -f "$TMP"
+fi
 
 # Optional --repo only when the user explicitly overrode project_id.
 # FINAL_LABELS is the comma-joined result from the chat prompt step
