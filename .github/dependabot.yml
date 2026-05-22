@@ -1,0 +1,118 @@
+# Pinta dependency-update policy.
+#
+# Catches supply-chain compromises (a legit package shipping a malicious
+# version) within days of disclosure. Free, GitHub-native — no extra
+# infrastructure. Each entry opens a separate PR per minor/patch bump
+# so a poisoned dep is easy to revert in isolation.
+#
+# Update cadence is weekly to keep PR noise bounded; security updates
+# fire immediately regardless of schedule (Dependabot promotes them).
+#
+# Grouping rules keep typescript / eslint / tooling deps from
+# fragmenting the PR queue. Production deps stay ungrouped — each
+# critical bump deserves its own review.
+
+version: 2
+updates:
+  # Root workspace (release tooling, scripts).
+  - package-ecosystem: "npm"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+    open-pull-requests-limit: 5
+    labels:
+      - "deps"
+    groups:
+      tooling:
+        patterns:
+          - "@types/*"
+          - "typescript"
+          - "vitest"
+          - "tsx"
+
+  # Chrome extension — bundled into the user's browser. Highest blast
+  # radius for a supply-chain compromise (a malicious dep here ships
+  # straight to users via Chrome Web Store).
+  - package-ecosystem: "npm"
+    directory: "/extension"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+    open-pull-requests-limit: 5
+    labels:
+      - "deps"
+      - "extension"
+    groups:
+      svelte:
+        patterns:
+          - "svelte"
+          - "@sveltejs/*"
+          - "svelte-check"
+      tailwind:
+        patterns:
+          - "tailwindcss"
+          - "autoprefixer"
+          - "postcss"
+      build-tools:
+        patterns:
+          - "vite"
+          - "@crxjs/*"
+          - "@tsconfig/*"
+          - "@types/*"
+          - "typescript"
+          - "vitest"
+
+  # Companion server — runs as `npx pinta-companion` on developer
+  # machines. Less blast radius than the extension (single user,
+  # localhost only) but still a foothold on a dev box.
+  - package-ecosystem: "npm"
+    directory: "/companion"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+    open-pull-requests-limit: 5
+    labels:
+      - "deps"
+      - "companion"
+    groups:
+      tooling:
+        patterns:
+          - "@types/*"
+          - "typescript"
+          - "vitest"
+          - "esbuild"
+
+  # Shared types — minimal deps, but worth scanning.
+  - package-ecosystem: "npm"
+    directory: "/shared"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+    open-pull-requests-limit: 3
+    labels:
+      - "deps"
+      - "shared"
+
+  # Vite plugin — runs in users' dev servers when they install
+  # `vite-plugin-pinta`. Supply-chain reach is whoever opts in.
+  - package-ecosystem: "npm"
+    directory: "/vite-plugin"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+    open-pull-requests-limit: 3
+    labels:
+      - "deps"
+      - "vite-plugin"
+
+  # GitHub Actions — currently none, but having this entry ready means
+  # any future workflow files get scanned the day they land.
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+    open-pull-requests-limit: 5
+    labels:
+      - "ci"

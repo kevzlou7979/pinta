@@ -155,7 +155,36 @@ If the autofixer can't be invoked at all (npm unreachable, package
 moved, etc.), report it as "Svelte audit: skipped — <reason>" and
 continue. Don't abort the staging run for a tooling gap.
 
-## 4. Run `/spec`
+## 4. Supply-chain check — `npm audit`
+
+Run the workspace-wide dependency audit before /spec. The goal is to
+catch known-CVE packages — `npm audit` reads the GitHub Advisory
+Database and reports any installed version that matches a published
+vulnerability. Catches the most common supply-chain attack pattern
+(legitimate package shipping a malicious version, or a transitive dep
+with a recently-disclosed RCE / prototype-pollution / etc.).
+
+```bash
+npm audit --audit-level=high --workspaces --include-workspace-root --json 2>/dev/null \
+  | node -e "let d='';process.stdin.on('data',c=>d+=c).on('end',()=>{try{const j=JSON.parse(d);const m=j.metadata?.vulnerabilities||{};const hi=(m.high||0)+(m.critical||0);console.log(JSON.stringify({high:m.high||0,critical:m.critical||0,total:hi,advisories:Object.keys(j.advisories||{}).slice(0,10)}))}catch(e){console.log('{\"error\":\"'+e.message+'\"}')}})"
+```
+
+Interpret the output:
+
+- `{"total": 0, ...}` — clean. Move on to /spec.
+- `{"high": N, "critical": M, ...}` — log the count and advisory ids;
+  roll up under 🔴 (any critical) or 🟠 (high only). Surface the
+  specific advisory ids so the user can decide per-package whether to
+  bump, override, or accept the risk.
+- `{"error": "..."}` — `npm audit` itself failed (offline, registry
+  outage, malformed manifest). Note as "audit: skipped — <reason>"
+  and continue. Don't fail the staging gate on tooling outage.
+
+Don't pass `--fix` from /staging — auto-fix can pull breaking major
+versions. The user decides per-advisory whether to bump, override
+via `overrides` in package.json, or accept and document.
+
+## 5. Run `/spec`
 
 Independent of audit — invoke unconditionally (you want to know about
 spec drift even if the audit already caught the same code path from a
@@ -167,9 +196,9 @@ Skill(skill="spec")
 
 Capture verbatim.
 
-## 5. Roll up
+## 6. Roll up
 
-Merge findings from steps 2, 3, and 4 into a single severity-grouped
+Merge findings from steps 2, 3, 4, and 5 into a single severity-grouped
 table. Drop duplicates (audit and spec both flagging the same issue
 gets listed once, with attributions in parens):
 
@@ -177,12 +206,14 @@ gets listed once, with attributions in parens):
 🔴 CRITICAL — must fix before deploy
   • [audit]  <finding>
   • [svelte] <finding from svelte-autofixer>
+  • [supply-chain] <critical CVE in dep>
   • [spec]   <finding>
   • [audit + spec] <finding flagged by both>
 
 🟠 IMPORTANT — should fix or knowingly accept
   • [audit]  <finding>
   • [svelte] <finding>
+  • [supply-chain] <high CVE in dep>
   • [spec]   <finding>
 
 🟡 NICE TO FIX — defer if pressed for time
@@ -192,7 +223,7 @@ gets listed once, with attributions in parens):
 Then a separate **Tests** line stating the pass count from step 1
 (e.g. `✅ Tests: 6 + 14 passing across companion + extension`).
 
-## 6. Final verdict
+## 7. Final verdict
 
 Pick exactly one based on the merged severity:
 
@@ -207,7 +238,7 @@ Pick exactly one based on the merged severity:
 The verdict line is the most important sentence in the report — make
 it the last line and put it in bold.
 
-## 7. After the report
+## 8. After the report
 
 Don't auto-fix anything. `/staging` is a decision tool, not an action
 tool. Two follow-ups the user might invoke:

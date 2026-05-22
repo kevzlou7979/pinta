@@ -1,4 +1,4 @@
-import type { Server as HttpServer } from "node:http";
+import type { Server as HttpServer, IncomingMessage } from "node:http";
 import { randomUUID } from "node:crypto";
 import { WebSocketServer, WebSocket } from "ws";
 import type {
@@ -15,11 +15,54 @@ export type AttachOptions = {
   log?: (msg: string) => void;
 };
 
+// Cap incoming WebSocket frame size. Same rationale as the HTTP body
+// cap in server.ts: bound peak memory so a malicious local connection
+// can't OOM the companion by streaming arbitrary frames. 50 MB is
+// large enough for any legitimate ClientMessage payload (the biggest
+// is `annotation.add` with inline reference images; full-page
+// screenshots ride on the HTTP submit path, not WS) and small enough
+// to refuse abuse.
+const MAX_WS_PAYLOAD = 50 * 1024 * 1024;
+
+/**
+ * Reject WebSocket upgrade requests from cross-origin browser tabs.
+ * Mirrors the HTTP-side Origin check in server.ts: localhost binding
+ * doesn't help when the attacker is already a tab in the same browser,
+ * so we explicitly accept only:
+ *
+ *  - chrome-extension:// (our own side panel)
+ *  - no Origin header (Node CLI, agent tooling, raw curl)
+ *
+ * Anything else is some webpage trying to drive our state — refuse.
+ * Without this, a malicious page could open ws://127.0.0.1:7878/ and
+ * fire `session.create` / `annotation.add` / `session.submit` to
+ * exfiltrate annotations or coerce the agent into running a session.
+ */
+function isAllowedWsOrigin(req: IncomingMessage): boolean {
+  const origin = (req.headers.origin ?? "").toString();
+  if (!origin) return true;
+  return origin.startsWith("chrome-extension://");
+}
+
 export function attachWebSocket(opts: AttachOptions): WebSocketServer {
   const { server, store } = opts;
   const log = opts.log ?? (() => {});
 
-  const wss = new WebSocketServer({ server, path: "/" });
+  const wss = new WebSocketServer({
+    server,
+    path: "/",
+    maxPayload: MAX_WS_PAYLOAD,
+    verifyClient: (info, cb) => {
+      if (isAllowedWsOrigin(info.req)) {
+        cb(true);
+        return;
+      }
+      log(
+        `ws upgrade rejected from origin ${info.req.headers.origin ?? "(none)"}`,
+      );
+      cb(false, 403, "forbidden origin");
+    },
+  });
 
   // Push every store mutation to all connected clients so the side panel
   // sees agent-driven state changes (e.g. mark_session_applying via HTTP)

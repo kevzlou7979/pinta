@@ -36,6 +36,15 @@ export type ServerOptions = {
 const POLL_TIMEOUT_MS = 25_000;
 const DEFAULT_PORT_RANGE_END = 7898;
 
+// Cap incoming HTTP request bodies. The largest legitimate payload is
+// a session.submit carrying a full-page PNG screenshot base64-encoded
+// in `session.fullPageScreenshot` — at 1920×3000 DPR 2 that's ~12 MB
+// raw, ~16 MB base64. 50 MB gives 3× headroom for unusually tall
+// pages without leaving the companion exposed to OOM via a malicious
+// local process POSTing an unbounded body. Without this, `readJson`
+// would buffer the entire chunk stream into memory.
+const MAX_HTTP_BODY_BYTES = 50 * 1024 * 1024;
+
 const okStatuses: SessionStatus[] = [
   "drafting",
   "submitted",
@@ -452,8 +461,25 @@ function sendJson(res: ServerResponse, status: number, body: unknown): void {
 }
 
 async function readJson<T>(req: IncomingMessage): Promise<T> {
+  // Bound the buffered body so a malicious local process can't OOM the
+  // companion with an unbounded POST. We accumulate sizes during the
+  // chunk stream and bail early once we cross MAX_HTTP_BODY_BYTES —
+  // doing the check at end-of-stream wouldn't help (we'd already have
+  // buffered the over-limit bytes).
   const chunks: Buffer[] = [];
-  for await (const chunk of req) chunks.push(chunk as Buffer);
+  let total = 0;
+  for await (const chunk of req) {
+    const buf = chunk as Buffer;
+    total += buf.length;
+    if (total > MAX_HTTP_BODY_BYTES) {
+      // Drain the rest of the stream so the connection closes cleanly.
+      req.destroy();
+      throw new Error(
+        `request body too large (>${MAX_HTTP_BODY_BYTES} bytes)`,
+      );
+    }
+    chunks.push(buf);
+  }
   const raw = Buffer.concat(chunks).toString("utf8");
   if (!raw) throw new Error("empty body");
   return JSON.parse(raw) as T;
