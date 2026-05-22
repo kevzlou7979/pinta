@@ -8,9 +8,16 @@
 // /v1/registry endpoint) lets the extension discover every companion
 // without scanning ports itself.
 
-import { mkdir, readFile, rename, writeFile, unlink } from "node:fs/promises";
+import {
+  chmod,
+  mkdir,
+  readFile,
+  rename,
+  writeFile,
+  unlink,
+} from "node:fs/promises";
 import { dirname, join, resolve } from "node:path";
-import { homedir } from "node:os";
+import { homedir, platform } from "node:os";
 import { randomUUID } from "node:crypto";
 
 export type RegistryEntry = {
@@ -131,7 +138,24 @@ async function atomicWrite(snap: RegistrySnapshot): Promise<void> {
     dirname(REGISTRY_FILE),
     `.registry-${process.pid}-${randomUUID()}.tmp`,
   );
-  await writeFile(tmp, JSON.stringify(snap, null, 2), "utf8");
+  // On POSIX, write with mode 0600 (owner read/write only). The
+  // registry includes absolute projectRoot paths and per-process pids
+  // — not catastrophic if another user on a shared workstation reads
+  // them, but it's gratuitous info-leak surface that costs nothing to
+  // close. `writeFile` with the `mode` option sets the file's perms
+  // at creation time so there's no race where the file briefly exists
+  // world-readable. Skipped on Windows (uses ACLs, not Unix bits;
+  // ACL hardening would need icacls and isn't worth the complexity).
+  const writeOpts: Parameters<typeof writeFile>[2] =
+    platform() === "win32"
+      ? { encoding: "utf8" }
+      : { encoding: "utf8", mode: 0o600 };
+  await writeFile(tmp, JSON.stringify(snap, null, 2), writeOpts);
+  // Defensive re-chmod in case the file already existed at $tmp from a
+  // crashed prior run with broader perms. Cheap; only fires on POSIX.
+  if (platform() !== "win32") {
+    await chmod(tmp, 0o600).catch(() => {});
+  }
   // Windows briefly locks files during concurrent reads (e.g. another
   // companion running readFile while we rename), throwing EPERM. Retry
   // a handful of times with backoff before giving up — this is the
