@@ -949,7 +949,9 @@
       aria-label="Open chat with agent"
     >
       <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
-        <path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z" />
+        <path d="M17 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h10a2 2 0 0 1 2 2z" />
+        <path d="M20.5 1.5L21.1 3.4L23 4L21.1 4.6L20.5 6.5L19.9 4.6L18 4L19.9 3.4Z" fill="currentColor" stroke="none" />
+        <path d="M22 8.4L22.15 8.85L22.6 9L22.15 9.15L22 9.6L21.85 9.15L21.4 9L21.85 8.85Z" fill="currentColor" stroke="none" />
       </svg>
       {#if chatCount > 0}
         <span class="absolute -top-1 -right-1 min-w-[18px] h-[18px] px-1 rounded-full bg-white text-brand-pink text-[10px] font-bold inline-flex items-center justify-center border border-brand-pink leading-none">
@@ -1506,7 +1508,9 @@
                             </svg>
                           {:else}
                             <svg width="17" height="17" viewBox="0 0 24 24" fill={hasChat ? "currentColor" : "none"} stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
-                              <path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z" />
+                              <path d="M17 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h10a2 2 0 0 1 2 2z" />
+                              <path d="M20.5 1.5L21.1 3.4L23 4L21.1 4.6L20.5 6.5L19.9 4.6L18 4L19.9 3.4Z" fill="currentColor" stroke="none" />
+                              <path d="M22 8.4L22.15 8.85L22.6 9L22.15 9.15L22 9.6L21.85 9.15L21.4 9L21.85 8.85Z" fill="currentColor" stroke="none" />
                             </svg>
                           {/if}
                         </button>
@@ -1701,6 +1705,8 @@
 {#if chatTestId}
   {@const chatTest = findChatTest()}
   {@const chatSection = findChatSectionTitle()}
+  {@const author = app.testPilot.catalog?.author?.trim()}
+  {@const firstName = author ? author.split(/\s+/)[0] : ""}
   <ChatSheet
     open={chatOpen && !!chatTest}
     contextHeader="Talking about"
@@ -1710,7 +1716,12 @@
     pending={chatPending}
     error={app.testPilot.error}
     placeholder="Ask the agent about this test…"
-    emptyHint="Ask anything about this test — why a step behaves a certain way, what the agent expects to see, how to reproduce an edge case. The row's context (ID, title, expected result, loaded steps) is auto-attached."
+    greeting={`Hi${firstName ? ` ${firstName}` : ""} — I can help you review ${chatTest?.id ?? "this test"}. What would you like to check?`}
+    quickPrompts={[
+      { label: "Summarize this test", prompt: `Summarize ${chatTest?.id ?? "this test"} in 2-3 sentences — what it's checking, why it matters, and what the tester should look for.` },
+      { label: "Explain a field", prompt: `Walk me through the fields / UI elements involved in ${chatTest?.id ?? "this test"}. What does each one do?` },
+      { label: "Check for issues", prompt: `Are there any common failure modes or edge cases I should watch for when running ${chatTest?.id ?? "this test"}?` },
+    ]}
     onClear={() => {
       if (chatTestId) app.clearChat(chatTestId);
     }}

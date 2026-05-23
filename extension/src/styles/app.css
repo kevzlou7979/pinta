@@ -45,6 +45,26 @@ body {
   }
 }
 
+/* Phase 14.1 — chat "Thinking…" dots.
+ * Three pulsing dots that bounce between dim and full opacity, each
+ * staggered by 150ms via inline `animation-delay` on the elements.
+ * Replaces the spinner in the agent-pending bubble for a more chat-
+ * native feel — matches the v0.4 redesign mock. */
+@keyframes pinta-chat-dot {
+  0%, 60%, 100% {
+    opacity: 0.25;
+    transform: translateY(0);
+  }
+  30% {
+    opacity: 1;
+    transform: translateY(-2px);
+  }
+}
+.pinta-chat-dot {
+  display: inline-block;
+  animation: pinta-chat-dot 1.1s ease-in-out infinite;
+}
+
 /* ---------------------------------------------------------------------
  * Prism theme for Test Pilot code blocks.
  * Tuned to match the side-panel mockup: pink commands, cyan flags,
