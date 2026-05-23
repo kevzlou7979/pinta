@@ -1,22 +1,46 @@
-// Tiny markdown subset for Test Pilot step text. Supports:
-//  - inline `code` → <span class="inline-code">…</span>
+// Tiny markdown subset for Test Pilot step text and chat replies.
+// Supports:
+//  - inline `code` → { kind: "code" }
+//  - inline **bold** / __bold__ → { kind: "bold" }
 //  - fenced ```lang code blocks → { kind: "code", lang, body }
 //  - `> Note: …` block-quote callouts → { kind: "note", body }
-//  - plain text with inline code interleaved → { kind: "text", parts }
+//  - `- item` / `* item` bullet lists, `1. item` numbered lists →
+//    { kind: "list", ordered, items } — each item is parsed for inline
+//    code + bold, so agent replies that pour out a long checklist
+//    actually render as a checklist instead of a wall of text.
+//  - `#` / `##` / `###` ... ATX-style headings → { kind: "heading",
+//    level, parts } — without this, agent replies with structured
+//    sections render the literal `###` as text instead of a title.
+//  - plain text with inline code/bold interleaved → { kind: "text", parts }
 //
 // Output is a flat array of blocks rather than nested AST — the Svelte
 // component iterates and renders each block kind directly.
 
 export type InlinePart =
   | { kind: "text"; value: string }
-  | { kind: "code"; value: string };
+  | { kind: "code"; value: string }
+  | { kind: "bold"; value: string };
 
 export type StepBlock =
   | { kind: "text"; parts: InlinePart[] }
   | { kind: "code"; lang: string; body: string }
-  | { kind: "note"; parts: InlinePart[] };
+  | { kind: "note"; parts: InlinePart[] }
+  | { kind: "list"; ordered: boolean; items: InlinePart[][] }
+  | { kind: "heading"; level: number; parts: InlinePart[] };
 
 const FENCE_RE = /^```(\w*)\s*$/;
+// Bullet list: `- foo` or `* foo`. The leading whitespace is allowed so
+// nested bullets at least don't break the regex (we still render them
+// flat — no indented sub-lists in v1).
+const BULLET_RE = /^\s*[-*]\s+(.+)$/;
+// Numbered list: `1. foo`, `42. foo`. Captures the body, not the index
+// — we let the renderer pick the numbering scheme.
+const NUMBERED_RE = /^\s*\d+\.\s+(.+)$/;
+// ATX heading: 1-6 `#`s, a space, then the body. CommonMark also
+// allows a trailing `#`s sequence; we strip those too so the rendered
+// title doesn't show stray hashes. Captures the level (length of $1)
+// and the body ($2).
+const HEADING_RE = /^(#{1,6})\s+(.+?)\s*#*\s*$/;
 
 export function parseStep(raw: string): StepBlock[] {
   const lines = raw.split(/\r?\n/);
@@ -41,6 +65,25 @@ export function parseStep(raw: string): StepBlock[] {
       continue;
     }
 
+    // ATX heading. Must come before the paragraph branch so a line
+    // starting with `###` doesn't get glued into the surrounding
+    // text. Inline marks inside the heading text (code, bold) are
+    // parsed too so `### **Important:** more` renders correctly.
+    const heading = HEADING_RE.exec(line);
+    if (heading) {
+      const level = heading[1].length;
+      blocks.push({
+        kind: "heading",
+        level,
+        parts: parseInline(heading[2]),
+      });
+      i++;
+      // Skip a single trailing blank so the heading doesn't visually
+      // crowd the next paragraph.
+      if (i < lines.length && lines[i].trim() === "") i++;
+      continue;
+    }
+
     // Block-quote note callout — one or more consecutive `> ` lines.
     if (line.startsWith(">")) {
       const noteLines: string[] = [];
@@ -52,13 +95,41 @@ export function parseStep(raw: string): StepBlock[] {
       continue;
     }
 
-    // Plain paragraph — accumulate until blank line or a special line.
+    // List block — one or more consecutive bullet OR numbered lines.
+    // A list breaks on the first non-list, non-empty line. Mixed bullet
+    // / numbered runs collapse to one list using the first item's
+    // ordering (rare in practice).
+    const firstBullet = BULLET_RE.exec(line);
+    const firstNumbered = NUMBERED_RE.exec(line);
+    if (firstBullet || firstNumbered) {
+      const ordered = !firstBullet && !!firstNumbered;
+      const items: InlinePart[][] = [];
+      while (i < lines.length) {
+        const cur = lines[i];
+        const b = BULLET_RE.exec(cur);
+        const n = NUMBERED_RE.exec(cur);
+        if (!b && !n) break;
+        items.push(parseInline((b?.[1] ?? n?.[1] ?? "").trim()));
+        i++;
+      }
+      blocks.push({ kind: "list", ordered, items });
+      // Skip a single trailing blank so the following paragraph isn't
+      // glued onto the list visually.
+      if (i < lines.length && lines[i].trim() === "") i++;
+      continue;
+    }
+
+    // Plain paragraph — accumulate until blank line or a special line
+    // (fence, blockquote, list, heading).
     const paraLines: string[] = [];
     while (
       i < lines.length &&
       lines[i].trim() !== "" &&
       !FENCE_RE.test(lines[i]) &&
-      !lines[i].startsWith(">")
+      !lines[i].startsWith(">") &&
+      !BULLET_RE.test(lines[i]) &&
+      !NUMBERED_RE.test(lines[i]) &&
+      !HEADING_RE.test(lines[i])
     ) {
       paraLines.push(lines[i]);
       i++;
@@ -73,16 +144,23 @@ export function parseStep(raw: string): StepBlock[] {
   return blocks;
 }
 
+// Inline grammar: backtick code, **bold**, __bold__ — interleaved with
+// plain text. The combined regex is alternation-based so the leftmost
+// match wins; nested marks (code inside bold, etc.) are intentionally
+// NOT supported — agents almost never produce them and the simpler
+// regex keeps parseInline allocation-free.
 function parseInline(s: string): InlinePart[] {
   const parts: InlinePart[] = [];
-  const re = /`([^`]+)`/g;
+  const re = /`([^`]+)`|\*\*([^*\n]+)\*\*|__([^_\n]+)__/g;
   let last = 0;
   let m: RegExpExecArray | null;
   while ((m = re.exec(s)) !== null) {
     if (m.index > last) {
       parts.push({ kind: "text", value: s.slice(last, m.index) });
     }
-    parts.push({ kind: "code", value: m[1] });
+    if (m[1] !== undefined) parts.push({ kind: "code", value: m[1] });
+    else if (m[2] !== undefined) parts.push({ kind: "bold", value: m[2] });
+    else if (m[3] !== undefined) parts.push({ kind: "bold", value: m[3] });
     last = m.index + m[0].length;
   }
   if (last < s.length) {

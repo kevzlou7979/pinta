@@ -857,6 +857,8 @@
                       {#each block.parts as part, pi (pi)}
                         {#if part.kind === "code"}
                           <code class="font-mono text-[11px] bg-ink-100 dark:bg-night-alt text-brand-pink dark:text-brand-pink-light px-1.5 py-0.5 rounded">{part.value}</code>
+                        {:else if part.kind === "bold"}
+                          <strong class="font-semibold text-ink-900 dark:text-night-text">{part.value}</strong>
                         {:else}
                           <span>{part.value}</span>
                         {/if}
@@ -889,11 +891,51 @@
                       {#each block.parts as part, pi (pi)}
                         {#if part.kind === "code"}
                           <code class="font-mono text-[11px] bg-ink-100 dark:bg-night-alt text-brand-pink dark:text-brand-pink-light px-1.5 py-0.5 rounded">{part.value}</code>
+                        {:else if part.kind === "bold"}
+                          <strong class="font-semibold text-ink-800 dark:text-night-text">{part.value}</strong>
                         {:else}
                           <span>{part.value}</span>
                         {/if}
                       {/each}
                     </div>
+                  {:else if block.kind === "list"}
+                    <svelte:element
+                      this={block.ordered ? "ol" : "ul"}
+                      class="text-[12.5px] text-ink-800 dark:text-night-text pl-5 space-y-1.5 leading-relaxed {block.ordered ? 'list-decimal' : 'list-disc'} marker:text-ink-400 dark:marker:text-night-mute"
+                    >
+                      {#each block.items as item, ii (ii)}
+                        <li>
+                          {#each item as part, pi (pi)}
+                            {#if part.kind === "code"}
+                              <code class="font-mono text-[11px] bg-ink-100 dark:bg-night-alt text-brand-pink dark:text-brand-pink-light px-1.5 py-0.5 rounded">{part.value}</code>
+                            {:else if part.kind === "bold"}
+                              <strong class="font-semibold text-ink-900 dark:text-night-text">{part.value}</strong>
+                            {:else}
+                              <span>{part.value}</span>
+                            {/if}
+                          {/each}
+                        </li>
+                      {/each}
+                    </svelte:element>
+                  {:else if block.kind === "heading"}
+                    <!-- ATX heading rendered as a bold sized title.
+                         Matches the chat sheet's heading treatment so
+                         agent replies with `### Section` style look
+                         the same in detail-steps as they do in chat. -->
+                    <svelte:element
+                      this={`h${Math.min(block.level + 2, 6)}`}
+                      class="font-bold text-ink-900 dark:text-night-text mt-1 leading-tight {block.level === 1 ? 'text-[14px]' : block.level === 2 ? 'text-[13.5px]' : 'text-[13px]'}"
+                    >
+                      {#each block.parts as part, pi (pi)}
+                        {#if part.kind === "code"}
+                          <code class="font-mono text-[11px] bg-ink-100 dark:bg-night-alt text-brand-pink dark:text-brand-pink-light px-1.5 py-0.5 rounded">{part.value}</code>
+                        {:else if part.kind === "bold"}
+                          <strong class="font-bold">{part.value}</strong>
+                        {:else}
+                          <span>{part.value}</span>
+                        {/if}
+                      {/each}
+                    </svelte:element>
                   {/if}
                 {/each}
               </div>
@@ -949,9 +991,10 @@
       aria-label="Open chat with agent"
     >
       <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
-        <path d="M17 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h10a2 2 0 0 1 2 2z" />
-        <path d="M20.5 1.5L21.1 3.4L23 4L21.1 4.6L20.5 6.5L19.9 4.6L18 4L19.9 3.4Z" fill="currentColor" stroke="none" />
-        <path d="M22 8.4L22.15 8.85L22.6 9L22.15 9.15L22 9.6L21.85 9.15L21.4 9L21.85 8.85Z" fill="currentColor" stroke="none" />
+        <path d="M7.9 20A9 9 0 1 0 4 16.1L2 22Z" />
+        <path d="M8 12h.01" />
+        <path d="M12 12h.01" />
+        <path d="M16 12h.01" />
       </svg>
       {#if chatCount > 0}
         <span class="absolute -top-1 -right-1 min-w-[18px] h-[18px] px-1 rounded-full bg-white text-brand-pink text-[10px] font-bold inline-flex items-center justify-center border border-brand-pink leading-none">
@@ -1507,10 +1550,11 @@
                               <path d="M21 12a9 9 0 1 1-6.219-8.56" />
                             </svg>
                           {:else}
-                            <svg width="17" height="17" viewBox="0 0 24 24" fill={hasChat ? "currentColor" : "none"} stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
-                              <path d="M17 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h10a2 2 0 0 1 2 2z" />
-                              <path d="M20.5 1.5L21.1 3.4L23 4L21.1 4.6L20.5 6.5L19.9 4.6L18 4L19.9 3.4Z" fill="currentColor" stroke="none" />
-                              <path d="M22 8.4L22.15 8.85L22.6 9L22.15 9.15L22 9.6L21.85 9.15L21.4 9L21.85 8.85Z" fill="currentColor" stroke="none" />
+                            <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                              <path d="M7.9 20A9 9 0 1 0 4 16.1L2 22Z" fill={hasChat ? "currentColor" : "none"} />
+                              <path d="M8 12h.01" stroke={hasChat ? "white" : "currentColor"} />
+                              <path d="M12 12h.01" stroke={hasChat ? "white" : "currentColor"} />
+                              <path d="M16 12h.01" stroke={hasChat ? "white" : "currentColor"} />
                             </svg>
                           {/if}
                         </button>

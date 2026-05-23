@@ -480,6 +480,8 @@
                       {#each block.parts as part, pi (pi)}
                         {#if part.kind === "code"}
                           <code class="font-mono text-[11px] bg-white dark:bg-night-card text-brand-pink dark:text-brand-pink-light px-1.5 py-0.5 rounded">{part.value}</code>
+                        {:else if part.kind === "bold"}
+                          <strong class="font-semibold text-ink-900 dark:text-night-text">{part.value}</strong>
                         {:else}
                           <span>{part.value}</span>
                         {/if}
@@ -498,11 +500,53 @@
                       {#each block.parts as part, pi (pi)}
                         {#if part.kind === "code"}
                           <code class="font-mono text-[11px] bg-white dark:bg-night-card text-brand-pink dark:text-brand-pink-light px-1.5 py-0.5 rounded">{part.value}</code>
+                        {:else if part.kind === "bold"}
+                          <strong class="font-semibold text-ink-800 dark:text-night-text">{part.value}</strong>
                         {:else}
                           <span>{part.value}</span>
                         {/if}
                       {/each}
                     </div>
+                  {:else if block.kind === "list"}
+                    <svelte:element
+                      this={block.ordered ? "ol" : "ul"}
+                      class="pl-5 space-y-1.5 leading-relaxed {block.ordered ? 'list-decimal' : 'list-disc'} marker:text-ink-400 dark:marker:text-night-mute"
+                    >
+                      {#each block.items as item, ii (ii)}
+                        <li>
+                          {#each item as part, pi (pi)}
+                            {#if part.kind === "code"}
+                              <code class="font-mono text-[11px] bg-white dark:bg-night-card text-brand-pink dark:text-brand-pink-light px-1.5 py-0.5 rounded">{part.value}</code>
+                            {:else if part.kind === "bold"}
+                              <strong class="font-semibold text-ink-900 dark:text-night-text">{part.value}</strong>
+                            {:else}
+                              <span>{part.value}</span>
+                            {/if}
+                          {/each}
+                        </li>
+                      {/each}
+                    </svelte:element>
+                  {:else if block.kind === "heading"}
+                    <!-- ATX heading. Size scales with level so `###` is
+                         a tight section title (matches what agents
+                         emit most), `##` a bigger header, `#` the
+                         largest. Extra top-margin from `mt-1` so
+                         headings visually separate from the preceding
+                         block instead of butting up against it. -->
+                    <svelte:element
+                      this={`h${Math.min(block.level + 2, 6)}`}
+                      class="font-bold text-ink-900 dark:text-night-text mt-1 leading-tight {block.level === 1 ? 'text-[14px]' : block.level === 2 ? 'text-[13.5px]' : 'text-[13px]'}"
+                    >
+                      {#each block.parts as part, pi (pi)}
+                        {#if part.kind === "code"}
+                          <code class="font-mono text-[11px] bg-white dark:bg-night-card text-brand-pink dark:text-brand-pink-light px-1.5 py-0.5 rounded">{part.value}</code>
+                        {:else if part.kind === "bold"}
+                          <strong class="font-bold">{part.value}</strong>
+                        {:else}
+                          <span>{part.value}</span>
+                        {/if}
+                      {/each}
+                    </svelte:element>
                   {/if}
                 {/each}
               </div>
