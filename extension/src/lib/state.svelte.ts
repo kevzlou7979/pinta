@@ -593,6 +593,21 @@ class ExtensionState {
     }
   }
 
+  /**
+   * Returns true if a storage error is the chrome.storage.local quota
+   * being exceeded. Chrome throws an Error with `QuotaExceededError`
+   * in the message string; Firefox + the DOMException variant carry
+   * `name === "QuotaExceededError"`. Match either.
+   */
+  private static isQuotaExceeded(err: unknown): boolean {
+    if (!err) return false;
+    const e = err as { name?: string; message?: string };
+    if (e.name === "QuotaExceededError") return true;
+    return typeof e.message === "string"
+      ? /quota.*exceed|QUOTA_BYTES/i.test(e.message)
+      : false;
+  }
+
   private async saveTestPilot(): Promise<void> {
     const companion = this.selectedCompanion;
     // Standalone has no project context to scope this catalog to.
@@ -610,8 +625,19 @@ class ExtensionState {
       } else {
         await chrome.storage?.local?.remove(key);
       }
-    } catch {
-      // ignore
+    } catch (err) {
+      // Quota exceeded is the failure mode most likely to surprise
+      // users — silent loss of their Pass/Fail marks because chrome
+      // ran out of room. Surface it so they know what to clear.
+      // The on-disk markdown is the recovery path (Phase 13 disk
+      // sync writes status into the Result column on every change).
+      if (ExtensionState.isQuotaExceeded(err)) {
+        this.testPilot.error =
+          "Browser storage is full — Test Pilot couldn't save your latest change. " +
+          "Most likely cause: global chat with image attachments. " +
+          "Try clearing global chat (header icon → … or via DevTools: chrome.storage.local.remove('pinta-global-chat')). " +
+          "Your catalog structure + Pass/Fail marks are still safe on disk at .pinta/test-docs/.";
+      }
     }
   }
 
@@ -886,6 +912,11 @@ class ExtensionState {
         if (t.id === testId) {
           t.status = status;
           void this.saveTestPilot();
+          // Also push to disk so Pass/Fail marks survive a
+          // chrome.storage wipe — the on-disk markdown is the
+          // recovery path. composeTestDocMarkdown emits a Result
+          // column the agent reads back on re-import.
+          this.pushTestDocToCompanion();
           return;
         }
       }
@@ -960,6 +991,8 @@ class ExtensionState {
     // N messages including the just-appended user prompt.
     const history = (test.chat ?? []).slice(-ExtensionState.CHAT_HISTORY_CAP);
     const url = this.lastUrl ?? "";
+    const detailedResponses =
+      this.modules["chat"]?.settings?.detailed_responses === true;
     const queryComment = JSON.stringify({
       op: "chat",
       docId: catalog.docId,
@@ -972,6 +1005,7 @@ class ExtensionState {
         sectionTitle: section.title,
         status: test.status,
         steps: test.detail?.steps,
+        detailedResponses,
       },
       history: history.map((m) => ({ role: m.role, text: m.text })),
     });
@@ -1146,8 +1180,17 @@ class ExtensionState {
       await chrome.storage?.local?.set({
         [ExtensionState.GLOBAL_CHAT_KEY]: $state.snapshot(this.chat.global),
       });
-    } catch {
-      // ignore — in-memory state still drives current session
+    } catch (err) {
+      // Global chat is the most common culprit for quota exhaustion
+      // (image attachments balloon storage). Surface it so the user
+      // knows to clear something — silent failure would mean their
+      // latest exchange disappears on reload.
+      if (ExtensionState.isQuotaExceeded(err)) {
+        this.chat.error =
+          "Browser storage is full — couldn't save chat history. " +
+          "Try clearing the thread (Clear chat in the sheet) or removing image attachments from older messages. " +
+          "Your latest message is still in memory until you close the panel.";
+      }
     }
   }
 
@@ -1178,8 +1221,13 @@ class ExtensionState {
           this.chat.annotateBatch,
         ),
       });
-    } catch {
-      // ignore
+    } catch (err) {
+      if (ExtensionState.isQuotaExceeded(err)) {
+        this.chat.error =
+          "Browser storage is full — couldn't save chat history. " +
+          "Try clearing older Annotate chat threads (older session ids accumulate here). " +
+          "Your latest message stays in memory until you close the panel.";
+      }
     }
   }
 
@@ -1218,6 +1266,8 @@ class ExtensionState {
       -ExtensionState.CHAT_HISTORY_CAP,
     );
     const url = this.lastUrl ?? "";
+    const detailedResponses =
+      this.modules["chat"]?.settings?.detailed_responses === true;
     const queryComment = JSON.stringify({
       op: "chat",
       prompt: text,
@@ -1226,6 +1276,7 @@ class ExtensionState {
         appMode: this.appMode,
         pageUrl: url,
         projectRoot: this.selectedCompanion?.projectRoot ?? null,
+        detailedResponses,
       },
       // History strips images to keep payload size bounded — the agent
       // re-receives the latest images via the top-level `images` field
@@ -1281,6 +1332,8 @@ class ExtensionState {
     );
     const session = this.session;
     const url = this.lastUrl ?? "";
+    const detailedResponses =
+      this.modules["chat"]?.settings?.detailed_responses === true;
     const queryComment = JSON.stringify({
       op: "chat",
       batchId,
@@ -1296,6 +1349,7 @@ class ExtensionState {
           selector: a.target?.selector ?? a.targets?.[0]?.selector,
           url: a.url,
         })),
+        detailedResponses,
       },
       history: history.map((m) => ({ role: m.role, text: m.text })),
     });
@@ -2777,11 +2831,25 @@ class ExtensionState {
           ? s.tests.map((t: any) => {
               const id = String(t?.id ?? "??");
               const carriedOver = priorById.get(id);
+              // Status precedence:
+              //   1. Agent payload (the doc-parse handler reads the
+              //      Result column from disk — recovers Pass/Fail
+              //      across a chrome.storage wipe).
+              //   2. In-memory carryover (same docId regen — keeps
+              //      marks made since the last write).
+              //   3. Default "untested".
+              const payloadStatus =
+                t?.status === "pass" || t?.status === "fail"
+                  ? (t.status as TestPilotStatus)
+                  : null;
               return {
                 id,
                 test: String(t?.test ?? ""),
                 expected: String(t?.expected ?? ""),
-                status: carriedOver?.status ?? ("untested" as TestPilotStatus),
+                status:
+                  payloadStatus ??
+                  carriedOver?.status ??
+                  ("untested" as TestPilotStatus),
                 detail: carriedOver?.detail,
                 // Preserve the tester's chat thread across re-imports
                 // of the same doc — same policy as status / detail.
@@ -2816,6 +2884,10 @@ class ExtensionState {
       }
     }
     void this.saveTestPilot();
+    // Push to disk so the Result column in the on-disk MD clears too —
+    // otherwise the spec file still shows the old marks until the next
+    // structural edit re-syncs it.
+    this.pushTestDocToCompanion();
   }
 
   /** Update the user-authored metadata on the active catalog. Empty

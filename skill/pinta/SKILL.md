@@ -759,11 +759,26 @@ companion is:
 3. Parse the markdown. The conventional shape is:
    - **Sections** are H1/H2/H3 headings (e.g. `## 1.1 Authentication (Email -> DOB -> PIN)`).
    - **Tests** under each section are a markdown table with columns
-     like `ID | Test | Expected Result | P/F`. Tolerate variants —
+     like `ID | Test | Expected Result | Result`. Tolerate variants —
      more / fewer columns, different header text, numbered lists,
      `**ID:** ...` patterns, even Gherkin Given/When/Then.
    - Extract per test: `id` (e.g. `AUTH-01`), `test` (description),
      `expected` (expected outcome).
+   - **`status` (optional but important).** If the table has a
+     trailing column named `Result`, `P/F`, `Pass/Fail`, or similar,
+     read each row's value and emit it as `status: "pass" | "fail"`
+     in the payload. Mapping:
+       - `✓ Pass` / `Pass` / `P` / `PASS` → `"pass"`
+       - `✗ Fail` / `Fail` / `F` / `FAIL` → `"fail"`
+       - empty / `-` / `⚠ Untested` / `Untested` → omit the field
+         (the extension defaults to `untested`)
+     **Why this matters:** chrome.storage in the user's browser
+     could have been wiped (cleared site data, hit the quota,
+     reinstalled extension). The disk file is the recovery path —
+     it carries the Pass/Fail history written by Phase 13's
+     auto-disk-sync. Not reading the Result column means a re-import
+     resets every row to untested even though the file still has the
+     marks, and the tester loses all their progress.
 4. Build the catalog payload:
 
 ```json
@@ -778,13 +793,18 @@ companion is:
         {
           "id": "AUTH-01",
           "test": "Open a valid claim deep-link (SUT token in URL)",
-          "expected": "Redirects to the claim and lands on the email-entry step"
+          "expected": "Redirects to the claim and lands on the email-entry step",
+          "status": "pass"
         }
       ]
     }
   ]
 }
 ```
+
+(Include `status` per row only if the Result column had a Pass / Fail
+value. Omit the field for untested rows — the extension defaults to
+`untested` when absent.)
 
 5. `mark_session_done({id, summary: JSON.stringify(payload)})`.
 
@@ -1226,28 +1246,54 @@ Return shape: same as `annotate-batch`:
 #### Common rules (all three kinds)
 
 1. `mark_session_applying({id})`.
-2. **Answer the question in markdown.** Same render pipeline as
-   detail-steps — inline `code`, fenced code blocks, `> Note:`
-   callouts all welcome. Match the depth of the question:
-   - Short ask → short answer (2–4 sentences).
-   - Debugging-shaped ask ("why is X happening?") → walk through
-     the likely causes, suggest a verification step.
-   - "How do I…" → numbered steps, terse, tester-friendly tone by
-     default.
-   - Reference earlier `history` turns when the user follows up
-     ("can you elaborate on step 2?") — treat the thread as one
-     conversation, not isolated asks.
-3. **Tone matches the user.** Default to tester-friendly prose. If
-   the question uses dev vocabulary, match it and go technical. None
-   of the three context kinds carry a `detailed_steps` setting; read
-   register from the prompt.
-4. **No source edits, ever.** Chat is inquiry, not action. For
+2. **Determine the verbosity mode.** Every chat queryComment carries
+   `context.detailedResponses` (boolean). It rides on all three
+   surfaces — global / annotate-batch / test-detail — and reflects
+   the Chat module's "Detailed responses" toggle in Settings (default
+   `false`). Branch on it:
+
+   **`context.detailedResponses === false` (default — concise mode):**
+   - **2–4 sentences for direct questions.** Numbered list of 3–5
+     short bullets for "how do I…" asks.
+   - **Plain English.** No curl, no internal class names, no env
+     vars, no JSON payloads, no ARIA / DOM jargon. Treat the user as
+     someone exploring the product, not building it.
+   - **No fenced code blocks** unless the answer truly requires a
+     literal the user will paste (rare). Inline `` `code `` is fine
+     for short references — a URL path, field name, button label.
+   - **No `> Note:` callouts** in concise mode — keep the answer
+     scannable.
+   - **Tone matches the user.** If the question itself uses dev
+     vocabulary ("what's the network panel showing for /api/X?"),
+     match it and go technical without flipping the verbosity.
+
+   **`context.detailedResponses === true` (deep-help mode):**
+   Tester wants real technical depth — they're debugging, integrating,
+   or learning the underpinnings. Treat "this looks simple" as a sign
+   to *go deeper*, not as permission to dial back.
+   - **Minimum 6 substantive sentences or 6 numbered points.** If
+     you're under that in deep mode, you're failing the user.
+   - **At least one fenced code block per response** — a curl,
+     payload, DB query, console snippet, env export, *something* the
+     user could paste. If the question is purely conceptual, fence a
+     reference URL or a sample DOM/JSON fragment.
+   - **Name endpoints, headers, env vars, internal flag names** —
+     don't hide behind "the API endpoint" or "the auth header".
+   - **`> Note:` callouts** for at least one expert observation, edge
+     case, or "watch out for…" remark per response.
+   - **Verification step at the end** where applicable — "to confirm
+     X, open DevTools → Network and check…".
+
+   Either mode: reference earlier `history` turns on follow-ups
+   ("can you elaborate on step 2?") — the thread is one conversation,
+   not isolated asks.
+3. **No source edits, ever.** Chat is inquiry, not action. For
    Test Pilot: don't touch any file outside `.pinta/test-docs/`. For
    Annotate Just Ask: don't touch any source file at all — the user
    pivots back to a real submit if they want edits. For Global: the
    only files you should read are Pinta config (`~/.pinta/`,
    `.pinta/`) if it helps you answer; never write.
-5. `mark_session_done({id, summary: JSON.stringify(payload)})` with
+4. `mark_session_done({id, summary: JSON.stringify(payload)})` with
    the surface-appropriate return shape above.
 
 ### `test-pilot` operating rules

@@ -28,15 +28,28 @@ export function composeTestDocMarkdown(catalog: TestPilotCatalog): string {
   }
   for (const section of catalog.sections) {
     out += `## ${section.title}\n\n`;
-    out += `| ID | Test | Expected Result |\n`;
-    out += `|----|------|-----------------|\n`;
+    // Four columns: the Result column survives a chrome.storage wipe
+    // because the disk file IS the recovery path. On re-import, the
+    // agent's doc-parse handler (SKILL.md §7.10.1) reads the Result
+    // column and restores Pass/Fail marks alongside the structure.
+    out += `| ID | Test | Expected Result | Result |\n`;
+    out += `|----|------|-----------------|--------|\n`;
     for (const t of section.tests) {
       const id = t.id.replace(/\|/g, "\\|");
       const test = t.test.replace(/\|/g, "\\|").replace(/\n/g, " ");
       const expected = t.expected
         .replace(/\|/g, "\\|")
         .replace(/\n/g, " ");
-      out += `| ${id} | ${test} | ${expected} |\n`;
+      // Status glyphs match the in-app legend so the on-disk MD reads
+      // naturally as a sign-off artifact (the user can copy / paste
+      // / pandoc → PDF without further formatting).
+      const result =
+        t.status === "pass"
+          ? "✓ Pass"
+          : t.status === "fail"
+            ? "✗ Fail"
+            : "";
+      out += `| ${id} | ${test} | ${expected} | ${result} |\n`;
     }
     out += `\n`;
   }
