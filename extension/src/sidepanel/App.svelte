@@ -1881,10 +1881,11 @@
         messages={app.chat.global}
         pending={app.chat.pendingGlobal}
         error={app.chat.error}
-        placeholder="Ask Pinta anything…"
-        emptyHint='Quick ask — no surface context attached. The agent sees session basics (your active tab, current page URL, project root) but not your annotations or test rows. Try: "how do I change the select-mode shortcut?" or "what does Detailed help steps do?"'
+        placeholder="Ask Pinta anything… (paste an image to attach it)"
+        emptyHint='Quick ask — no surface context attached. The agent sees session basics (your active tab, current page URL, project root) but not your annotations or test rows. Paste a screenshot to ask about it. Try: "how do I change the select-mode shortcut?" or "what does Detailed help steps do?"'
+        imagesEnabled={true}
         onClose={() => (globalChatOpen = false)}
-        onSend={(prompt) => void app.sendGlobalChatMessage(prompt)}
+        onSend={(prompt, images) => void app.sendGlobalChatMessage(prompt, images)}
       />
     {/if}
 

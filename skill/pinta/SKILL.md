@@ -1169,9 +1169,53 @@ Detailed help steps do?"*, *"why isn't HMR working on my Vite app?"*
     "pageUrl": "http://localhost:5173/...",
     "projectRoot": "/abs/path" | null
   },
-  "history": [...]
+  "history": [...],
+  "images": [                     // OPTIONAL — see "Image attachments" below
+    { "dataUrl": "data:image/jpeg;base64,...", "mediaType": "image/jpeg", "name": "screenshot.png" }
+  ]
 }
 ```
+
+**Image attachments (global chat only, Phase 14.1).** The user can
+paste screenshots into the global chat input. When `images` is set
+on the top-level queryComment, treat each entry as the visual
+subject of the question:
+
+1. **Write each image to a tempfile so the Read tool can pick it up
+   as vision input.** dataUrls aren't directly readable; you need a
+   real file path. Use a per-session tempdir under the project root:
+
+   ```bash
+   mkdir -p .pinta/tmp/chat-$SESSION_ID
+   # For each `images[i]`:
+   echo "<base64 portion>" | base64 -d > .pinta/tmp/chat-$SESSION_ID/i.jpg
+   ```
+
+   (The extension downscales pastes to ≤1280px JPEG q=0.85, so
+   filenames can default to `.jpg`. Use `mediaType` to choose an
+   extension if you ever see anything else.)
+
+2. **Read each tempfile with the standard Read tool.** Claude Code
+   will surface the image as visual context in the same response.
+
+3. **Answer with the image's content in mind.** If the prompt is
+   *"what is this?"* and they pasted a UI screenshot, identify the
+   component / framework / pattern shown and explain it. If the
+   prompt is empty but an image is attached, treat the image as the
+   question itself ("describe this", "what would you change here?").
+
+4. **Cleanup is best-effort.** The tempdir survives the session;
+   periodic `rm -rf .pinta/tmp/chat-*` is fine to add to your
+   shutdown flow but not required (sub-MB files, gitignored).
+
+5. **Past-message images are summarized, not re-sent.** The history
+   only carries `text` (with a `[N image]` placeholder for past
+   bubbles that had attachments). If a follow-up question references
+   an earlier image, ask the user to re-paste — don't try to recover
+   the bitmap.
+
+Same `images` field convention may extend to the other chat kinds in
+future versions; right now only `kind: "global"` may carry it.
 
 Return shape: same as `annotate-batch`:
 

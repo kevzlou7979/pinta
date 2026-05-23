@@ -42,6 +42,22 @@ export type ExtensionMode = "draw" | "select" | "review" | "idle";
 /** What the user has done with a test row in the current catalog. */
 export type TestPilotStatus = "untested" | "pass" | "fail";
 
+/** A pasted / attached image on a chat message. Inline base64 payload
+ *  the agent writes to a tempfile and reads for vision context. Same
+ *  shape as `AnnotationImage` minus the placement coords — chat images
+ *  don't get placed on the page. */
+export type ChatImage = {
+  /** `data:image/...;base64,...`. The sender is expected to downscale
+   *  before producing this — see ChatSheet's onpaste handler for the
+   *  1280px JPEG q=0.85 policy. */
+  dataUrl: string;
+  /** MIME type. Practically always `image/jpeg` after the resizer. */
+  mediaType: string;
+  /** Original filename if pasted from a file picker. Optional — most
+   *  clipboard pastes are blob-only. */
+  name?: string;
+};
+
 /** One turn in a per-row chat thread. Phase 14 replaces the static
  *  Notes textarea with this interactive dialogue surface. */
 export type ChatMessage = {
@@ -51,6 +67,10 @@ export type ChatMessage = {
    *  pipeline as the detail steps. */
   text: string;
   at: number;
+  /** Optional images attached to a user-role message. Currently only
+   *  the global tier supports paste; other tiers don't populate this.
+   *  Renders as a thumbnail grid below the bubble text. */
+  images?: ChatImage[];
 };
 
 /** A single test row in the catalog. */
@@ -1164,10 +1184,18 @@ class ExtensionState {
   }
 
   /** Send a message on the global chat thread. No surface context —
-   *  agent only sees session basics (appMode, activeTab, pageUrl). */
-  async sendGlobalChatMessage(prompt: string): Promise<void> {
+   *  agent only sees session basics (appMode, activeTab, pageUrl).
+   *  Optionally accepts pasted images (downscaled client-side in
+   *  ChatSheet) which ride along on the queryComment payload for
+   *  vision-aware replies. */
+  async sendGlobalChatMessage(
+    prompt: string,
+    images: ChatImage[] = [],
+  ): Promise<void> {
     const text = prompt.trim();
-    if (!text) return;
+    // Allow image-only messages — pasted screenshot + send is a valid
+    // ask ("what's this?"). Bail only when both fields are empty.
+    if (!text && images.length === 0) return;
     if (this.chat.pendingGlobal) return;
     if (!this.client || this.connectionStatus !== "connected") {
       this.chat.error =
@@ -1179,6 +1207,7 @@ class ExtensionState {
       role: "user",
       text,
       at: Date.now(),
+      ...(images.length > 0 ? { images } : {}),
     };
     this.chat.global = [...this.chat.global, userMsg];
     this.trimGlobalChat();
@@ -1198,7 +1227,15 @@ class ExtensionState {
         pageUrl: url,
         projectRoot: this.selectedCompanion?.projectRoot ?? null,
       },
-      history: history.map((m) => ({ role: m.role, text: m.text })),
+      // History strips images to keep payload size bounded — the agent
+      // re-receives the latest images via the top-level `images` field
+      // below. Past images are summarized as "[image]" placeholders so
+      // the agent at least knows they existed in the thread.
+      history: history.map((m) => ({
+        role: m.role,
+        text: m.text + (m.images?.length ? ` [${m.images.length} image]` : ""),
+      })),
+      ...(images.length > 0 ? { images } : {}),
     });
     this.chat.pendingGlobal = true;
     // Track the queued session by a synthesized id; the actual session
@@ -2513,9 +2550,19 @@ class ExtensionState {
         // error get applied; pending stays a no-op. Has to come
         // before the Test Pilot branch because chat sessions have
         // `modules: [{id: "chat"}]`, not "test-pilot".
+        // Done / error get applied; intermediate statuses
+        // (submitted / applying) are no-ops on the chat slot but
+        // MUST still early-return — otherwise the chat session's
+        // `modules: [{id: "chat"}]` payload falls through to
+        // `this.session = msg.session` below and overwrites the
+        // user's annotation draft with the chat's query annotation
+        // (the "Agent is thinking…" spinner stuck + a stray query
+        // annotation polluting the annotation list, both seen when
+        // the binding hadn't pinned yet on the first session.synced).
         const isChatSession =
           msg.session.modules?.some((m) => m.id === "chat") ?? false;
-        if (isChatSession && this.handleNonTestPilotChatSync(msg.session)) {
+        if (isChatSession) {
+          this.handleNonTestPilotChatSync(msg.session);
           return;
         }
         const isInteractiveModuleSession =
