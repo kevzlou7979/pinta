@@ -1253,19 +1253,36 @@ Return shape: same as `annotate-batch`:
    `false`). Branch on it:
 
    **`context.detailedResponses === false` (default — concise mode):**
-   - **2–4 sentences for direct questions.** Numbered list of 3–5
-     short bullets for "how do I…" asks.
-   - **Plain English.** No curl, no internal class names, no env
-     vars, no JSON payloads, no ARIA / DOM jargon. Treat the user as
-     someone exploring the product, not building it.
-   - **No fenced code blocks** unless the answer truly requires a
-     literal the user will paste (rare). Inline `` `code `` is fine
-     for short references — a URL path, field name, button label.
-   - **No `> Note:` callouts** in concise mode — keep the answer
-     scannable.
-   - **Tone matches the user.** If the question itself uses dev
-     vocabulary ("what's the network panel showing for /api/X?"),
-     match it and go technical without flipping the verbosity.
+
+   **HARD CAP — non-negotiable.** A direct factual question
+   ("what is X?", "where is Y?", "is Z on?") gets **at most ONE
+   sentence**. A "how do I…" question gets **at most 5 short bullets
+   or 4 sentences**. If your draft exceeds those limits, you are
+   violating the user's explicit Settings toggle. Before you call
+   `mark_session_done`, **count your sentences** and cut. Adding
+   "for context" or "in case you wanted more" is a verbosity
+   violation — the user opted into concise; they did not ask for
+   context.
+
+   **Examples of correctly concise replies:**
+   - Q: *"What is this icon?"* → A: *"It's the Lucide lock-keyhole icon."* (Done. 1 sentence.)
+   - Q: *"Where is this defined?"* → A: *"In `+page.svelte` around line 540."* (Done. 1 sentence.)
+   - Q: *"How do I change the shortcut?"* → A: numbered 3–5 bullets, one short sentence each.
+
+   **What concise mode does NOT include (omit even if you know them):**
+   - File paths with line numbers in chained references
+     (`src/lib/foo/Bar.svelte:26 — src/lib/baz/Qux.svelte:109`)
+   - Multiple usage sites or "the same X is also used at…"
+   - Selectors / DOM details / ARIA names
+   - Tailwind class soup or framework internals
+   - `> Note:` callouts
+   - Fenced code blocks (one-line inline `` `code `` is fine)
+   - Sub-headings / multi-section structure
+
+   **Tone still matches the user.** If the question itself uses dev
+   vocabulary ("what's the network panel showing for /api/X?"),
+   match it and go technical *without* flipping the verbosity —
+   short and technical, not long and technical.
 
    **`context.detailedResponses === true` (deep-help mode):**
    Tester wants real technical depth — they're debugging, integrating,
@@ -1295,6 +1312,22 @@ Return shape: same as `annotate-batch`:
    `.pinta/`) if it helps you answer; never write.
 4. `mark_session_done({id, summary: JSON.stringify(payload)})` with
    the surface-appropriate return shape above.
+5. **Optional usage telemetry.** If you can report token usage for
+   this reply, include a `usage` object alongside `reply`:
+   ```json
+   {
+     "type": "chat",
+     "reply": "<markdown>",
+     "usage": { "totalTokens": 1840 }
+   }
+   ```
+   The extension surfaces this as a small `· 1.8k tok` footer under
+   the agent bubble next to the elapsed time. Field is optional —
+   omit if you don't have the count handy. Accepted shapes (any one
+   of these works): `usage.totalTokens`, `usage.total_tokens`, or
+   the pair `usage.inputTokens` + `usage.outputTokens`. The
+   extension also accepts a top-level `tokens` field for skills that
+   don't carry the full `usage` object.
 
 ### `test-pilot` operating rules
 
