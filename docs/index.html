@@ -11,7 +11,7 @@
   <meta property="og:url" content="https://kevzlou7979.github.io/pinta/" />
   <meta property="og:image" content="https://kevzlou7979.github.io/pinta/assets/icons/icon-512.png" />
   <meta name="theme-color" content="#fbf7f5" media="(prefers-color-scheme: light)" />
-  <meta name="theme-color" content="#0e0a18" media="(prefers-color-scheme: dark)" />
+  <meta name="theme-color" content="#0F0F12" media="(prefers-color-scheme: dark)" />
   <script>
     // Apply theme before paint to avoid a flash of the wrong palette,
     // and flag <html> as JS-enabled so reveal animations can opt in
@@ -1151,37 +1151,39 @@
 
     /* ---------- DARK MODE ---------- */
     [data-theme="dark"] {
-      /* Indigo / violet surfaces — pink stays the brand pop. */
-      --cream:        #0e0a18;
-      --cream-soft:   #161024;
-      --cream-deep:   #1d1530;
-      --paper:        #1a1430;
-      --line:         #2a2240;
-      --line-strong:  #3a3158;
+      /* Neutral charcoal surfaces — matches the Chrome extension's
+         night.* palette. Kept hue-free so the warm pink accent reads
+         as the single point of color against deep charcoal. */
+      --cream:        #0F0F12;
+      --cream-soft:   #15151A;
+      --cream-deep:   #1A1A20;
+      --paper:        #1A1A20;
+      --line:         #2A2A33;
+      --line-strong:  #3A3A45;
 
-      --ink:          #ece8f7;
-      --ink-dim:      #a8a0c4;
-      --ink-mute:     #7a7299;
+      --ink:          #ECECF0;
+      --ink-dim:      #A8A8B5;
+      --ink-mute:     #7A7A88;
 
-      --pink:         #ff5a85;
-      --pink-deep:    #ff3d6e;
+      --pink:         #FF5A85;
+      --pink-deep:    #FF3D6E;
 
-      --shadow-sm: 0 1px 2px rgba(0,0,0,0.45), 0 0 0 1px rgba(140,80,220,0.05);
-      --shadow-md: 0 12px 32px rgba(0,0,0,0.55), 0 2px 6px rgba(255,61,110,0.12);
-      --shadow-lg: 0 24px 60px rgba(0,0,0,0.65), 0 6px 16px rgba(255,61,110,0.18);
+      --shadow-sm: 0 1px 2px rgba(0,0,0,0.50), 0 0 0 1px rgba(255,61,110,0.05);
+      --shadow-md: 0 12px 32px rgba(0,0,0,0.60), 0 2px 6px rgba(255,61,110,0.12);
+      --shadow-lg: 0 24px 60px rgba(0,0,0,0.70), 0 6px 16px rgba(255,61,110,0.18);
     }
 
     /* Spots where --ink was used as a *background* in light mode need explicit
        overrides — in dark mode --ink becomes the text/foreground color. */
     [data-theme="dark"] pre {
-      background: #0a0815;
-      color: #ece8f7;
+      background: #0A0A0E;
+      color: #ECECF0;
       box-shadow: var(--shadow-md);
     }
     [data-theme="dark"] pre .term-bar {
-      background: #050410;
-      color: #7a7299;
-      border-bottom-color: #1a1430;
+      background: #08080B;
+      color: #7A7A88;
+      border-bottom-color: #1A1A20;
     }
     [data-theme="dark"] .arch-card-node {
       background: var(--paper);
@@ -1237,21 +1239,21 @@
     [data-theme="dark"] .btn-secondary { background: var(--paper); }
     [data-theme="dark"] .btn-secondary:hover { color: var(--pink); border-color: var(--pink); }
     [data-theme="dark"] .nav-cta {
-      background: #1c1632;
+      background: #1F1F26;
       color: #ffffff !important;
-      box-shadow: 0 1px 2px rgba(0,0,0,0.45);
+      box-shadow: 0 1px 2px rgba(0,0,0,0.50);
     }
     [data-theme="dark"] .nav-cta:hover {
-      background: #2a2240;
-      box-shadow: 0 6px 18px rgba(0,0,0,0.55);
+      background: #2A2A33;
+      box-shadow: 0 6px 18px rgba(0,0,0,0.60);
     }
     [data-theme="dark"] nav.top {
-      background: rgba(14,10,24,0.78);
+      background: rgba(15,15,18,0.78);
     }
     [data-theme="dark"] .hero-logo {
       box-shadow:
         0 24px 60px rgba(255,61,110,0.36),
-        0 6px 16px rgba(140,80,220,0.30),
+        0 6px 16px rgba(255,90,133,0.22),
         0 0 0 1px rgba(255,255,255,0.05);
     }
     [data-theme="dark"] .brand .mark {
@@ -1272,7 +1274,7 @@
       border-color: var(--line);
     }
     [data-theme="dark"] table.adapters th { background: var(--cream-soft); }
-    [data-theme="dark"] table.adapters tr:hover td { background: rgba(140,80,220,0.08); }
+    [data-theme="dark"] table.adapters tr:hover td { background: rgba(255,90,133,0.06); }
     [data-theme="dark"] .badge {
       background: rgba(90,209,123,0.10);
       color: #7fd49a;
@@ -1286,14 +1288,14 @@
     [data-theme="dark"] footer { background: var(--cream-soft); }
     [data-theme="dark"] .hero::before {
       background:
-        radial-gradient(800px 360px at 12% 10%, rgba(140,80,220,0.24), transparent 60%),
-        radial-gradient(700px 320px at 88% 5%,  rgba(255,61,110,0.26), transparent 60%),
-        radial-gradient(900px 420px at 50% 110%, rgba(199,45,180,0.20), transparent 60%);
+        radial-gradient(800px 360px at 12% 10%, rgba(255,136,85,0.18), transparent 60%),
+        radial-gradient(700px 320px at 88% 5%,  rgba(255,61,110,0.22), transparent 60%),
+        radial-gradient(900px 420px at 50% 110%, rgba(199,45,180,0.16), transparent 60%);
     }
     [data-theme="dark"] .arch-card {
       background:
-        radial-gradient(400px 200px at 20% 0%, rgba(140,80,220,0.14), transparent 70%),
-        radial-gradient(400px 200px at 100% 100%, rgba(255,61,110,0.14), transparent 70%),
+        radial-gradient(400px 200px at 20% 0%, rgba(255,136,85,0.10), transparent 70%),
+        radial-gradient(400px 200px at 100% 100%, rgba(255,61,110,0.12), transparent 70%),
         var(--paper);
     }
     [data-theme="dark"] .theme-toggle .icon-sun { display: block; }
