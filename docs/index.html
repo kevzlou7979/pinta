@@ -1052,37 +1052,137 @@
       margin: 0;
     }
 
-    /* ---------- ROADMAP ---------- */
-    .roadmap {
-      display: grid;
-      grid-template-columns: 1fr;
-      gap: 20px;
-      max-width: 540px;
+    /* ---------- ROADMAP TIMELINE ---------- */
+    .timeline {
+      position: relative;
+      max-width: 720px;
       margin: 0 auto;
+      padding-left: 76px;
     }
-    .road-card {
+    .timeline::before {
+      content: '';
+      position: absolute;
+      left: 28px;
+      top: 24px;
+      bottom: 24px;
+      width: 2px;
+      background:
+        linear-gradient(180deg,
+          var(--line-strong) 0%,
+          var(--line) 60%,
+          rgba(235,224,233,0.2) 100%);
+      border-radius: 2px;
+    }
+    .timeline-item {
+      position: relative;
+      margin-bottom: 24px;
+    }
+    .timeline-item:last-child { margin-bottom: 0; }
+    .timeline-node {
+      position: absolute;
+      left: -68px;
+      top: 18px;
+      width: 56px;
+      height: 56px;
+      border-radius: 50%;
+      background: var(--paper);
+      border: 2px solid var(--line-strong);
+      color: var(--magenta);
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      gap: 1px;
+      box-shadow: var(--shadow-sm);
+      z-index: 1;
+      transition: border-color .2s ease, transform .2s ease;
+    }
+    .timeline-node .node-label {
+      font-size: 8.5px;
+      font-weight: 600;
+      letter-spacing: 0.14em;
+      text-transform: uppercase;
+      color: var(--ink-mute);
+      line-height: 1;
+    }
+    .timeline-node .node-num {
+      font-size: 18px;
+      font-weight: 700;
+      line-height: 1;
+      letter-spacing: -0.01em;
+    }
+    .timeline-item:hover .timeline-node {
+      border-color: var(--magenta);
+      transform: scale(1.04);
+    }
+    .timeline-card {
       background: var(--paper);
       border: 1px solid var(--line);
       border-radius: 18px;
-      padding: 28px;
+      padding: 22px 26px;
       box-shadow: var(--shadow-sm);
+      transition: transform .15s ease, box-shadow .15s ease, border-color .15s ease;
     }
-    .road-card .tag {
-      display: inline-block;
-      padding: 4px 10px; border-radius: 999px;
-      font-size: 11.5px; font-weight: 600;
-      letter-spacing: 0.06em; text-transform: uppercase;
-      background: var(--cream-soft);
-      color: var(--magenta);
-      border: 1px solid var(--line-strong);
-      margin-bottom: 14px;
+    .timeline-card:hover {
+      transform: translateY(-1px);
+      border-color: var(--line-strong);
+      box-shadow: 0 6px 18px rgba(22,17,13,0.06), 0 0 0 1px rgba(199,45,125,0.08);
     }
-    .road-card h3 {
-      margin: 0 0 8px;
+    .timeline-card h3 {
+      margin: 0 0 6px;
       font-size: 20px;
       font-weight: 600;
+      letter-spacing: -0.005em;
     }
-    .road-card p { margin: 0; color: var(--ink-dim); font-size: 14.5px; }
+    .timeline-card p {
+      margin: 0;
+      color: var(--ink-dim);
+      font-size: 14.5px;
+      line-height: 1.55;
+    }
+    .timeline-status {
+      display: inline-block;
+      margin-top: 12px;
+      font-size: 10.5px;
+      font-weight: 600;
+      letter-spacing: 0.08em;
+      text-transform: uppercase;
+      padding: 3px 9px;
+      border-radius: 999px;
+      border: 1px solid var(--line-strong);
+      color: var(--ink-mute);
+      background: var(--cream-soft);
+    }
+    .timeline-status.is-locked { color: var(--magenta); }
+    .timeline-status.is-exploring { color: var(--ink-mute); }
+
+    /* Dark mode — magenta isn't tokenized for dark surfaces, so lean on
+       the brighter --pink for the node accents to keep them legible
+       against the charcoal page. */
+    [data-theme="dark"] .timeline-node { color: var(--pink); }
+    [data-theme="dark"] .timeline-item:hover .timeline-node { border-color: var(--pink); }
+    [data-theme="dark"] .timeline-status.is-locked { color: var(--pink); }
+
+    @media (max-width: 720px) {
+      .timeline {
+        padding-left: 56px;
+      }
+      .timeline::before {
+        left: 20px;
+      }
+      .timeline-node {
+        left: -52px;
+        top: 16px;
+        width: 44px;
+        height: 44px;
+      }
+      .timeline-node .node-label { font-size: 7.5px; letter-spacing: 0.12em; }
+      .timeline-node .node-num { font-size: 15px; }
+      .timeline-card {
+        padding: 18px 20px;
+      }
+      .timeline-card h3 { font-size: 18px; }
+    }
 
     /* ---------- FOOTER ---------- */
     footer {
@@ -2017,21 +2117,69 @@ npx pinta-companion .
         <h2>Roadmap</h2>
         <p class="sub">V1 covers the core loop end-to-end. Next milestones, in priority order.</p>
       </div>
-      <div class="roadmap">
-        <div class="road-card">
-          <span class="tag">Phase 7</span>
-          <h3>Polish</h3>
-          <p>Drag-to-reorder annotations, group by file in the side panel, undo via git, plan-then-execute toggle.</p>
+      <div class="timeline">
+        <div class="timeline-item">
+          <div class="timeline-node" aria-label="Phase 7">
+            <span class="node-label">Phase</span>
+            <span class="node-num">7</span>
+          </div>
+          <div class="timeline-card">
+            <h3>Polish</h3>
+            <p>Drag-to-reorder annotations, group by file in the side panel, undo via git, plan-then-execute toggle.</p>
+          </div>
         </div>
-        <div class="road-card">
-          <span class="tag">Phase 13</span>
-          <h3>Test Pilot catalog editing</h3>
-          <p>Delete, add, edit, rename, and reorder sections + tests from the side panel. The on-disk spec stays in sync so the agent's "?" works on rows you added yourself.</p>
+        <div class="timeline-item">
+          <div class="timeline-node" aria-label="Phase 13">
+            <span class="node-label">Phase</span>
+            <span class="node-num">13</span>
+          </div>
+          <div class="timeline-card">
+            <h3>Test Pilot catalog editing</h3>
+            <p>Delete, add, edit, rename, and reorder sections + tests from the side panel. The on-disk spec stays in sync so the agent's "?" works on rows you added yourself.</p>
+          </div>
         </div>
-        <div class="road-card">
-          <span class="tag">Phase 14</span>
-          <h3>Inquiry mode</h3>
-          <p>A shared chat sheet for asking the agent questions — global header icon, "Just Ask" on Annotate, and per-row chat on Test Pilot. One wire, one UI, three entry points.</p>
+        <div class="timeline-item">
+          <div class="timeline-node" aria-label="Phase 14">
+            <span class="node-label">Phase</span>
+            <span class="node-num">14</span>
+          </div>
+          <div class="timeline-card">
+            <h3>Inquiry mode</h3>
+            <p>A shared chat sheet for asking the agent questions — global header icon, "Just Ask" on Annotate, and per-row chat on Test Pilot. One wire, one UI, three entry points.</p>
+          </div>
+        </div>
+        <div class="timeline-item">
+          <div class="timeline-node" aria-label="Phase 15">
+            <span class="node-label">Phase</span>
+            <span class="node-num">15</span>
+          </div>
+          <div class="timeline-card">
+            <h3>AuditFlow</h3>
+            <p>Lighthouse-style audits inside Pinta — security, performance, accessibility, and mobile out of the box, plus user-defined custom audits. Every finding is one click from "Fix with agent."</p>
+            <span class="timeline-status is-locked">Spec locked</span>
+          </div>
+        </div>
+        <div class="timeline-item">
+          <div class="timeline-node" aria-label="Phase 16">
+            <span class="node-label">Phase</span>
+            <span class="node-num">16</span>
+          </div>
+          <div class="timeline-card">
+            <h3>Test Pilot sign-off</h3>
+            <p>Tester exports a self-describing Markdown sign-off — pre-filled tester info, per-row Pass/Fail, environment + notes. Developer hits "Import results" and reviews exactly what was tested. Round-trip via YAML frontmatter.</p>
+            <span class="timeline-status is-locked">Spec locked</span>
+          </div>
+        </div>
+        <div class="timeline-item">
+          <div class="timeline-node" aria-label="Phase 17">
+            <span class="node-label">Phase</span>
+            <span class="node-num">17</span>
+          </div>
+          <div class="timeline-card">
+            <h3>Claude Design</h3>
+            <p>Bring your design system into Pinta as an ambient module. Annotated edits conform to your component patterns automatically instead of free-styling — strict by default, configurable per project.</p>
+            <span class="timeline-status is-exploring">Exploring</span>
+          </div>
         </div>
       </div>
     </div>
@@ -2114,7 +2262,7 @@ npx pinta-companion .
         { sel: '.rules li',         stagger: 80  },
         { sel: '.adapters-wrap',    stagger: 0   },
         { sel: '.install-wrap',     stagger: 0   },
-        { sel: '.roadmap .road-card', stagger: 100 }
+        { sel: '.timeline .timeline-item', stagger: 100 }
       ];
       groups.forEach(function (g) {
         var nodes = document.querySelectorAll(g.sel);
