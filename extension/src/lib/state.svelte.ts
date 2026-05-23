@@ -1114,9 +1114,21 @@ class ExtensionState {
   }
 
   /** Apply a `test-pilot-chat` payload from the agent. Appends the
-   *  reply as an agent-role message on the matching row's thread. */
-  private applyChatResult(payload: { [k: string]: unknown }): void {
-    const testId = typeof payload.testId === "string" ? payload.testId : null;
+   *  reply as an agent-role message on the matching row's thread.
+   *
+   *  `fallbackTestId` is the testId already pulled from the original
+   *  queryComment (passed in by `handleChatSync`). The agent's reply
+   *  SHOULD echo `testId` per SKILL.md §7.10.3a, but historically some
+   *  agent versions omit it. The fallback prevents a silently-dropped
+   *  reply when the agent's payload only carries `type` + `reply`.
+   */
+  private applyChatResult(
+    payload: { [k: string]: unknown },
+    fallbackTestId?: string,
+  ): void {
+    const payloadTestId =
+      typeof payload.testId === "string" ? payload.testId : null;
+    const testId = payloadTestId ?? fallbackTestId ?? null;
     const reply = typeof payload.reply === "string" ? payload.reply : "";
     if (!testId || !reply) return;
     const catalog = this.testPilot.catalog;
@@ -1166,7 +1178,10 @@ class ExtensionState {
           [k: string]: unknown;
         };
         if (payload.type === "test-pilot-chat") {
-          this.applyChatResult(payload);
+          // Pass the known testId as a fallback — agents that omit it
+          // from the reply payload (against §7.10.3a but seen in the
+          // wild) still get their reply landed.
+          this.applyChatResult(payload, testId);
         } else {
           this.testPilot.error =
             "Agent returned an unrecognized response. Check the skill version.";

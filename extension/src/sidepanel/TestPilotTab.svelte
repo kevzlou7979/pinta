@@ -82,15 +82,21 @@
   // persisted state (thread itself) lives on `TestPilotTest.chat[]`.
   let chatOpen = $state(false);
   let chatDraft = $state("");
+  // Which test row the chat sheet is bound to. Tracked separately from
+  // `viewing` so the catalog-row chat icon can open the sheet without
+  // entering the steps DETAIL view (and without firing a fetchDetailSteps
+  // round-trip the tester didn't ask for). In DETAIL view this mirrors
+  // `viewing.testId`; over the catalog it's set on its own.
+  let chatTestId = $state<string | null>(null);
   // True when the Chat module is enabled in Settings. Phase 14 made
   // chat its own module ("id: chat") with one master toggle that gates
   // all three chat surfaces (Test Pilot FAB, Annotate Just Ask, global
   // header icon). Off by default — users opt in.
   const chatEnabled = $derived(app.moduleReady("chat"));
-  // True while the currently-viewed row has a chat ask in flight.
+  // True while the chat-bound row has a chat ask in flight.
   // Drives the send-button spinner.
   const chatPending = $derived(
-    viewing ? !!app.testPilot.pendingChats[viewing.testId] : false,
+    chatTestId ? !!app.testPilot.pendingChats[chatTestId] : false,
   );
   // Bound to the message-list div so we can keep the most recent
   // bubble in view as the conversation grows.
@@ -468,6 +474,7 @@
     // pre-filled with whatever was typed for the previous row.
     chatDraft = "";
     chatOpen = false;
+    chatTestId = null;
     if (!test.detail) {
       void app.fetchDetailSteps(test.id);
     }
@@ -478,6 +485,7 @@
     copiedBlock = null;
     chatOpen = false;
     chatDraft = "";
+    chatTestId = null;
     // Scroll-restore so the tester doesn't lose their place. If the
     // active row's section happens to be collapsed (e.g. the user
     // collapsed it before opening detail), force-expand it so the row
@@ -591,6 +599,23 @@
     if (!catalog) return "";
     for (const section of catalog.sections) {
       if (section.tests.some((t) => t.id === viewing!.testId)) {
+        return section.title;
+      }
+    }
+    return "";
+  }
+
+  /** Test row currently bound to the chat sheet (independent of DETAIL). */
+  function findChatTest(): TestPilotTest | null {
+    return chatTestId ? findTestById(chatTestId) : null;
+  }
+
+  function findChatSectionTitle(): string {
+    if (!chatTestId) return "";
+    const catalog = app.testPilot.catalog;
+    if (!catalog) return "";
+    for (const section of catalog.sections) {
+      if (section.tests.some((t) => t.id === chatTestId)) {
         return section.title;
       }
     }
@@ -917,7 +942,7 @@
     <button
       type="button"
       class="fixed bottom-4 right-4 z-30 w-12 h-12 rounded-full bg-brand-pink text-white shadow-lg hover:bg-brand-magenta dark:hover:bg-brand-pink-light inline-flex items-center justify-center transition-transform hover:scale-105 active:scale-95"
-      onclick={() => { chatOpen = true; }}
+      onclick={() => { chatTestId = viewing!.testId; chatOpen = true; }}
       title={chatCount > 0
         ? `Resume chat (${chatCount} message${chatCount === 1 ? "" : "s"})`
         : "Ask the agent about this test"}
@@ -934,28 +959,6 @@
     </button>
   {/if}
 
-  <!-- Phase 14 — Chat bottom sheet (Test Pilot detail view only).
-       Now delegates to the shared <ChatSheet /> component used by the
-       global header chat icon + Annotate "Just Ask" surfaces too. -->
-  {#if viewing}
-    {@const viewingTest = findViewingTest()}
-    {@const viewingSection = findViewingSectionTitle()}
-    <ChatSheet
-      open={chatOpen && !!viewingTest}
-      contextHeader="Talking about"
-      contextLabel={viewingTest?.id ?? ""}
-      contextSubLabel={viewingSection}
-      messages={viewingTest?.chat ?? []}
-      pending={chatPending}
-      error={app.testPilot.error}
-      placeholder="Ask the agent about this test…"
-      emptyHint="Ask anything about this test — why a step behaves a certain way, what the agent expects to see, how to reproduce an edge case. The row's context (ID, title, expected result, loaded steps) is auto-attached."
-      onClose={() => { chatOpen = false; chatDraft = ""; }}
-      onSend={(prompt) => {
-        if (viewing) void app.sendChatMessage(viewing.testId, prompt);
-      }}
-    />
-  {/if}
 {:else}
   <!-- CATALOG state -------------------------------------------------- -->
   {@const t = tally()}
@@ -1357,6 +1360,7 @@
               {#each section.tests as test (test.id)}
                 {@const detailLoading = !!app.testPilot.pendingDetails[test.id]}
                 {@const detailLoaded = !!test.detail}
+                {@const chatLoading = !!app.testPilot.pendingChats[test.id]}
                 {@const isActive = activeTestId === test.id}
                 {@const editingTitle = editingField === `test-title:${test.id}`}
                 {@const editingExpected = editingField === `test-expected:${test.id}`}
@@ -1464,32 +1468,47 @@
                     <div class="flex items-start shrink-0 mt-0.5">
                       <!-- Chat indicator — speech bubble that lights
                            up brand-pink when the row has chat history.
-                           Clicking opens the detail view and the chat
-                           sheet so the tester can resume the thread.
-                           Hidden when chat is disabled via module
-                           setting. -->
+                           Clicking opens ONLY the chat sheet (not the
+                           steps detail view), so the tester can ask a
+                           quick question without forcing a fetchDetailSteps
+                           round-trip. Hidden when chat is disabled via
+                           module setting. -->
                       {#if chatEnabled}
                         {@const hasChat = (test.chat?.length ?? 0) > 0}
                         <button
                           type="button"
                           class="shrink-0 w-8 h-9 inline-flex items-center justify-center rounded-full hover:bg-ink-50 dark:hover:bg-night-alt"
-                          class:text-brand-pink={hasChat}
-                          class:dark:text-brand-pink-light={hasChat}
-                          class:text-ink-400={!hasChat}
-                          class:dark:text-night-mute={!hasChat}
-                          class:hover:text-brand-pink={true}
-                          class:dark:hover:text-brand-pink-light={true}
-                          onclick={() => { openDetail(test); chatOpen = true; }}
-                          title={hasChat
-                            ? `${test.chat!.length} chat message${test.chat!.length === 1 ? "" : "s"} with the agent`
-                            : "Ask the agent a question about this row"}
-                          aria-label={hasChat
-                            ? `View chat for ${test.id}`
-                            : `Open chat for ${test.id}`}
+                          class:text-brand-pink={hasChat || chatLoading}
+                          class:dark:text-brand-pink-light={hasChat || chatLoading}
+                          class:text-ink-400={!hasChat && !chatLoading}
+                          class:dark:text-night-mute={!hasChat && !chatLoading}
+                          class:hover:text-brand-pink={!chatLoading}
+                          class:dark:hover:text-brand-pink-light={!chatLoading}
+                          onclick={() => { chatTestId = test.id; chatOpen = true; chatDraft = ""; }}
+                          title={chatLoading
+                            ? "Agent is replying to your last question…"
+                            : hasChat
+                              ? `${test.chat!.length} chat message${test.chat!.length === 1 ? "" : "s"} with the agent`
+                              : "Ask the agent a question about this row"}
+                          aria-label={chatLoading
+                            ? `Chat reply pending for ${test.id}`
+                            : hasChat
+                              ? `View chat for ${test.id}`
+                              : `Open chat for ${test.id}`}
                         >
-                          <svg width="17" height="17" viewBox="0 0 24 24" fill={hasChat ? "currentColor" : "none"} stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
-                            <path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z" />
-                          </svg>
+                          {#if chatLoading}
+                            <!-- Replace the bubble with a spinner so the
+                                 user can ask another row while this one
+                                 is still computing, then come back —
+                                 same UX as the `?` (Help) icon. -->
+                            <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="animate-spin" aria-hidden="true">
+                              <path d="M21 12a9 9 0 1 1-6.219-8.56" />
+                            </svg>
+                          {:else}
+                            <svg width="17" height="17" viewBox="0 0 24 24" fill={hasChat ? "currentColor" : "none"} stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                              <path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z" />
+                            </svg>
+                          {/if}
                         </button>
                       {/if}
 
@@ -1673,4 +1692,31 @@
       Clear catalog
     </button>
   </section>
+{/if}
+
+<!-- Phase 14 — Chat bottom sheet. Rendered at top level so the catalog
+     row chat icon can pop the sheet WITHOUT forcing the steps DETAIL
+     view open. In DETAIL view the FAB sets `chatTestId` to the viewed
+     row; from the catalog the row's chat icon sets it directly. -->
+{#if chatTestId}
+  {@const chatTest = findChatTest()}
+  {@const chatSection = findChatSectionTitle()}
+  <ChatSheet
+    open={chatOpen && !!chatTest}
+    contextHeader="Talking about"
+    contextLabel={chatTest?.id ?? ""}
+    contextSubLabel={chatSection}
+    messages={chatTest?.chat ?? []}
+    pending={chatPending}
+    error={app.testPilot.error}
+    placeholder="Ask the agent about this test…"
+    emptyHint="Ask anything about this test — why a step behaves a certain way, what the agent expects to see, how to reproduce an edge case. The row's context (ID, title, expected result, loaded steps) is auto-attached."
+    onClear={() => {
+      if (chatTestId) app.clearChat(chatTestId);
+    }}
+    onClose={() => { chatOpen = false; chatDraft = ""; chatTestId = null; }}
+    onSend={(prompt) => {
+      if (chatTestId) void app.sendChatMessage(chatTestId, prompt);
+    }}
+  />
 {/if}
