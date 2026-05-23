@@ -140,6 +140,51 @@ export class SessionStore {
   }
 
   /**
+   * Per-author durable results file. Stores Pass/Fail marks + per-row
+   * chat threads + detail-step cache for ONE tester running ONE
+   * catalog. Survives chrome.storage wipes (the recovery path beyond
+   * the Result column in the .md spec).
+   *
+   * Filename shape:
+   *   - `{docId}.results.{authorSlug}.json` — when author is set
+   *   - `{docId}.results.json` — fallback when no author metadata
+   *
+   * Per-author files are isolated: two testers on the same catalog
+   * don't overwrite each other; they accumulate as separate files in
+   * the same directory. Listable for a future "see who's tested this"
+   * UI without changing the on-disk shape.
+   */
+  private resultsPathFor(docId: string, authorSlug: string): string {
+    const suffix = authorSlug ? `.results.${authorSlug}.json` : `.results.json`;
+    return join(this.testDocsDir, `${docId}${suffix}`);
+  }
+
+  async writeTestResults(
+    docId: string,
+    authorSlug: string,
+    content: string,
+  ): Promise<void> {
+    await mkdir(this.testDocsDir, { recursive: true });
+    await writeFile(this.resultsPathFor(docId, authorSlug), content, "utf8");
+  }
+
+  /** Returns the raw JSON string or null if the file doesn't exist.
+   *  Lets the extension distinguish "no results yet" from "results
+   *  exist but failed to parse" (the latter would throw). */
+  async readTestResults(
+    docId: string,
+    authorSlug: string,
+  ): Promise<string | null> {
+    try {
+      return await readFile(this.resultsPathFor(docId, authorSlug), "utf8");
+    } catch (err) {
+      const code = (err as NodeJS.ErrnoException).code;
+      if (code === "ENOENT") return null;
+      throw err;
+    }
+  }
+
+  /**
    * Remove every file in `.pinta/test-docs/` that doesn't belong to
    * `keepDocId`. Tolerates a missing directory.
    */

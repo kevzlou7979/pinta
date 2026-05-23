@@ -265,6 +265,48 @@ async function handle(
     return sendJson(res, 200, { ok: true });
   }
 
+  // Per-author results sidecar (Pass/Fail marks + chat threads + detail
+  // cache). Companion-side durable storage so a chrome.storage wipe
+  // doesn't lose tester progress. Path includes an optional author
+  // slug — empty when the catalog has no author metadata yet.
+  //
+  // Author slug rules: lowercase kebab-case, [a-z0-9-], 0-64 chars.
+  // Anything else is rejected to prevent path traversal or filename
+  // collisions with other on-disk schemes.
+  const resultsMatch = path.match(
+    /^\/v1\/test-docs\/([^/]+)\/results(?:\/([^/]*))?$/,
+  );
+  if (resultsMatch && (method === "PUT" || method === "GET")) {
+    const docId = resultsMatch[1]!;
+    const authorSlug = resultsMatch[2] ?? "";
+    if (!/^[A-Za-z0-9_-]{1,128}$/.test(docId)) {
+      return sendJson(res, 400, { error: "invalid docId" });
+    }
+    if (authorSlug !== "" && !/^[a-z0-9-]{1,64}$/.test(authorSlug)) {
+      return sendJson(res, 400, { error: "invalid author slug" });
+    }
+    if (method === "PUT") {
+      const body = await readJson<{ content: string }>(req);
+      if (typeof body.content !== "string") {
+        return sendJson(res, 400, { error: "missing content" });
+      }
+      await store.writeTestResults(docId, authorSlug, body.content);
+      log(
+        `test-results ${docId}${authorSlug ? `/${authorSlug}` : ""} written (${body.content.length}B)`,
+      );
+      return sendJson(res, 200, { ok: true });
+    }
+    // GET
+    const content = await store.readTestResults(docId, authorSlug);
+    if (content === null) {
+      return sendJson(res, 404, { error: "no results yet" });
+    }
+    res.statusCode = 200;
+    res.setHeader("Content-Type", "application/json");
+    res.end(content);
+    return;
+  }
+
   if (method === "DELETE" && path === "/v1/sessions") {
     // Wipe every persisted session + screenshot. Drafting session (if
     // any) is preserved by the store. Called from the side panel's

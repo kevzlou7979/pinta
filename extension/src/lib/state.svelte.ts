@@ -71,6 +71,15 @@ export type ChatMessage = {
    *  the global tier supports paste; other tiers don't populate this.
    *  Renders as a thumbnail grid below the bubble text. */
   images?: ChatImage[];
+  /** Round-trip time in ms, set on agent messages only. Computed as
+   *  `Date.now() - previousUserMessage.at` when the reply lands.
+   *  Surfaced under the bubble ("12s" / "1.4m"). */
+  elapsedMs?: number;
+  /** Total tokens reported by the agent for this reply, if available.
+   *  The agent may include `usage.totalTokens` in its mark_session_done
+   *  payload but the field is optional — older skills / agents without
+   *  usage telemetry just omit it and the field stays unset. */
+  tokens?: number;
 };
 
 /** A single test row in the catalog. */
@@ -130,6 +139,27 @@ export type TestPilotPending =
  *   deployed URLs who have no project on disk.
  */
 export type AppMode = "discovering" | "connected" | "standalone";
+
+/** Best-effort token-count extractor from an agent chat payload.
+ *  Accepts the structured `usage.totalTokens` shape (preferred) plus
+ *  a couple of common fallbacks (`tokens`, `usage.total_tokens`,
+ *  `usage.outputTokens` + `usage.inputTokens`). Returns undefined when
+ *  the agent didn't include any usage telemetry. */
+function extractTokens(payload: { [k: string]: unknown }): number | undefined {
+  if (typeof payload.tokens === "number" && payload.tokens > 0) {
+    return payload.tokens;
+  }
+  const usage = payload.usage;
+  if (usage && typeof usage === "object") {
+    const u = usage as Record<string, unknown>;
+    if (typeof u.totalTokens === "number" && u.totalTokens > 0) return u.totalTokens;
+    if (typeof u.total_tokens === "number" && u.total_tokens > 0) return u.total_tokens;
+    const inp = typeof u.inputTokens === "number" ? u.inputTokens : 0;
+    const out = typeof u.outputTokens === "number" ? u.outputTokens : 0;
+    if (inp + out > 0) return inp + out;
+  }
+  return undefined;
+}
 
 function newDraft(url: string): Session {
   return {
@@ -572,6 +602,13 @@ class ExtensionState {
         // `comment` is gone after the first pass.
         ExtensionState.migrateCommentsToChat(raw);
         this.testPilot.catalog = raw;
+        // Overlay the per-author results sidecar from disk. Disk wins
+        // on conflict — it's the durable source of truth. No-op when
+        // the file doesn't exist (fresh catalog, no marks yet) or
+        // when there's no companion (standalone). Fire-and-forget so
+        // the panel can render the cached catalog immediately and
+        // the overlay refines it once the network round-trip lands.
+        void this.loadResultsFromCompanion();
         return;
       }
       // Legacy migration — the first companion picked after upgrade
@@ -912,11 +949,15 @@ class ExtensionState {
         if (t.id === testId) {
           t.status = status;
           void this.saveTestPilot();
-          // Also push to disk so Pass/Fail marks survive a
-          // chrome.storage wipe — the on-disk markdown is the
-          // recovery path. composeTestDocMarkdown emits a Result
-          // column the agent reads back on re-import.
+          // Two disk writes per status change:
+          //  - .md gets the Result column updated so the spec stays a
+          //    human-readable sign-off artifact and re-imports recover
+          //    via the agent's doc-parse handler.
+          //  - .results.{author}.json is the per-author durable store
+          //    that survives chrome.storage loss AND keeps each
+          //    tester's marks isolated from others'.
           this.pushTestDocToCompanion();
+          this.pushResultsToCompanion();
           return;
         }
       }
@@ -986,6 +1027,10 @@ class ExtensionState {
     test.chat = [...(test.chat ?? []), userMsg];
     this.testPilot.error = null;
     void this.saveTestPilot();
+    // Persist optimistically to the per-author sidecar — if the user
+    // closes the panel before the agent replies, the question still
+    // survives a chrome.storage wipe.
+    this.pushResultsToCompanion();
 
     // Cap history so payloads stay bounded for long threads. Last
     // N messages including the just-appended user prompt.
@@ -1079,15 +1124,27 @@ class ExtensionState {
     for (const section of catalog.sections) {
       for (const t of section.tests) {
         if (t.id === testId) {
+          // Telemetry: round-trip time = Date.now() - most recent user
+          // message's `at`. Token count if the agent reported it.
+          const lastUser = [...(t.chat ?? [])]
+            .reverse()
+            .find((m) => m.role === "user");
+          const now = Date.now();
           const agentMsg: ChatMessage = {
             id: crypto.randomUUID(),
             role: "agent",
             text: reply,
-            at: Date.now(),
+            at: now,
+            elapsedMs: lastUser ? now - lastUser.at : undefined,
+            tokens: extractTokens(payload),
           };
           t.chat = [...(t.chat ?? []), agentMsg];
           this.testPilot.error = null;
           void this.saveTestPilot();
+          // Persist the agent reply to the per-author sidecar too —
+          // a chrome.storage wipe before the user has a chance to
+          // ack the reply would otherwise lose the whole thread.
+          this.pushResultsToCompanion();
           return;
         }
       }
@@ -1382,7 +1439,7 @@ class ExtensionState {
     if (!binding) return false;
     if (session.status === "done") {
       const summary = session.appliedSummary ?? "";
-      let payload: { type?: string; reply?: string } | null = null;
+      let payload: { type?: string; reply?: string; [k: string]: unknown } | null = null;
       try {
         payload = JSON.parse(summary) as typeof payload;
       } catch {
@@ -1394,11 +1451,21 @@ class ExtensionState {
       }
       const reply = typeof payload?.reply === "string" ? payload.reply : "";
       if (reply) {
+        // Telemetry: round-trip time = now - most recent user message's at.
+        // Token count if the agent reported it.
+        const thread =
+          binding.kind === "global"
+            ? this.chat.global
+            : (this.chat.annotateBatch[binding.batchId] ?? []);
+        const lastUser = [...thread].reverse().find((m) => m.role === "user");
+        const now = Date.now();
         const agentMsg: ChatMessage = {
           id: crypto.randomUUID(),
           role: "agent",
           text: reply,
-          at: Date.now(),
+          at: now,
+          elapsedMs: lastUser ? now - lastUser.at : undefined,
+          tokens: extractTokens(payload),
         };
         if (binding.kind === "global") {
           this.chat.global = [...this.chat.global, agentMsg];
@@ -1459,6 +1526,149 @@ class ExtensionState {
    * and leave the on-disk spec in a state that doesn't match the UI.
    */
   private testDocPushChain: Promise<void> = Promise.resolve();
+
+  /** Same serialization shape as `testDocPushChain` but for the
+   *  per-author `.results.{slug}.json` file. Independent chain so a
+   *  slow results PUT doesn't block a structural .md edit. */
+  private resultsPushChain: Promise<void> = Promise.resolve();
+
+  /** Slugify the catalog's author for use in the on-disk filename.
+   *  Lowercase kebab-case, strips diacritics, drops anything outside
+   *  [a-z0-9-]. Empty author or all-punctuation slugs become "" so
+   *  the file falls into the `{docId}.results.json` single-author
+   *  bucket — matches the companion's empty-slug fallback. */
+  private static slugifyAuthor(author: string | undefined): string {
+    if (!author) return "";
+    const normalized = author
+      .normalize("NFKD")
+      .replace(/[̀-ͯ]/g, "") // strip combining diacritics
+      .toLowerCase()
+      .replace(/[^a-z0-9]+/g, "-")
+      .replace(/^-+|-+$/g, "")
+      .slice(0, 64);
+    return normalized;
+  }
+
+  /**
+   * Push the current author's Pass/Fail marks + chat threads + detail
+   * cache to `.pinta/test-docs/{docId}.results{.slug}.json`. Survives
+   * chrome.storage wipes — the recovery path that the Result column
+   * in the .md can't fully cover (Result is one Pass/Fail per row;
+   * the sidecar holds the full per-row state including chat).
+   *
+   * Fire-and-forget through a serialized chain so concurrent edits
+   * land in order. Each PUT is a full file replacement — no partial
+   * sync state to reconcile.
+   */
+  private pushResultsToCompanion(): void {
+    const c = this.testPilot.catalog;
+    if (!c) return;
+    const base = this.httpBase();
+    if (!base) return; // standalone — no companion, nothing to push
+    const authorSlug = ExtensionState.slugifyAuthor(c.author);
+    const results: Record<
+      string,
+      { status?: TestPilotStatus; chat?: ChatMessage[]; detail?: { steps: string[]; askedAt: number } }
+    > = {};
+    for (const section of c.sections) {
+      for (const t of section.tests) {
+        const entry: {
+          status?: TestPilotStatus;
+          chat?: ChatMessage[];
+          detail?: { steps: string[]; askedAt: number };
+        } = {};
+        if (t.status && t.status !== "untested") entry.status = t.status;
+        if (t.chat && t.chat.length > 0) entry.chat = t.chat;
+        if (t.detail) entry.detail = t.detail;
+        if (Object.keys(entry).length > 0) results[t.id] = entry;
+      }
+    }
+    const payload = JSON.stringify({
+      $pinta_test_results: 1,
+      docId: c.docId,
+      author: c.author ?? "",
+      savedAt: Date.now(),
+      results,
+    });
+    const url = `${base}/v1/test-docs/${encodeURIComponent(c.docId)}/results${authorSlug ? `/${authorSlug}` : ""}`;
+    this.resultsPushChain = this.resultsPushChain
+      .catch(() => {})
+      .then(async () => {
+        try {
+          const res = await ExtensionState.fetchWithTimeout(url, {
+            method: "PUT",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ content: payload }),
+            timeoutMs: 8_000,
+          });
+          if (!res.ok) {
+            const text = await res.text().catch(() => "");
+            throw new Error(
+              `HTTP ${res.status}${text ? `: ${text.slice(0, 200)}` : ""}`,
+            );
+          }
+          if (this.testPilot.error?.startsWith("Couldn't sync results")) {
+            this.testPilot.error = null;
+          }
+        } catch (err) {
+          this.testPilot.error = `Couldn't sync results to disk: ${(err as Error).message}`;
+        }
+      });
+  }
+
+  /**
+   * Read the per-author results sidecar from disk and overlay it onto
+   * the in-memory catalog. Called from `loadTestPilot` after the
+   * chrome.storage hydrate so disk wins on conflict — disk is the
+   * durable source, chrome.storage is a fast cache. No-op when the
+   * file doesn't exist (404 — fresh catalog with no test results yet)
+   * or when there's no companion to talk to.
+   */
+  private async loadResultsFromCompanion(): Promise<void> {
+    const c = this.testPilot.catalog;
+    if (!c) return;
+    const base = this.httpBase();
+    if (!base) return;
+    const authorSlug = ExtensionState.slugifyAuthor(c.author);
+    const url = `${base}/v1/test-docs/${encodeURIComponent(c.docId)}/results${authorSlug ? `/${authorSlug}` : ""}`;
+    try {
+      const res = await ExtensionState.fetchWithTimeout(url, {
+        method: "GET",
+        timeoutMs: 8_000,
+      });
+      if (res.status === 404) return; // no results yet — nothing to overlay
+      if (!res.ok) return; // transient; non-fatal
+      const body = (await res.json()) as {
+        results?: Record<
+          string,
+          {
+            status?: TestPilotStatus;
+            chat?: ChatMessage[];
+            detail?: { steps: string[]; askedAt: number };
+          }
+        >;
+      };
+      const results = body.results ?? {};
+      for (const section of c.sections) {
+        for (const t of section.tests) {
+          const r = results[t.id];
+          if (!r) continue;
+          // Disk wins — overwrite the in-memory values. This is what
+          // makes the sidecar a true recovery path: even if
+          // chrome.storage had stale or no values for this test, the
+          // disk file restores it.
+          if (r.status) t.status = r.status;
+          if (r.chat) t.chat = r.chat;
+          if (r.detail) t.detail = r.detail;
+        }
+      }
+      // Persist the merged catalog back to chrome.storage so the next
+      // panel open sees the disk-overlaid values without re-fetching.
+      void this.saveTestPilot();
+    } catch {
+      // Network / parse failure — leave in-memory catalog as-is.
+    }
+  }
 
   /**
    * Compose the current catalog back to markdown for round-tripping to
@@ -2886,8 +3096,11 @@ class ExtensionState {
     void this.saveTestPilot();
     // Push to disk so the Result column in the on-disk MD clears too —
     // otherwise the spec file still shows the old marks until the next
-    // structural edit re-syncs it.
+    // structural edit re-syncs it. The per-author sidecar also clears
+    // so a chrome.storage wipe after this point doesn't resurrect the
+    // marks via the recovery path.
     this.pushTestDocToCompanion();
+    this.pushResultsToCompanion();
   }
 
   /** Update the user-authored metadata on the active catalog. Empty
@@ -2909,6 +3122,12 @@ class ExtensionState {
     if ("author" in patch) c.author = norm(patch.author);
     if ("description" in patch) c.description = norm(patch.description);
     void this.saveTestPilot();
+    // Title / author / description change the on-disk spec heading,
+    // and an author change picks a new sidecar slug. Push both so the
+    // disk view (sign-off artifact + durable per-author results)
+    // tracks the in-app metadata.
+    this.pushTestDocToCompanion();
+    if ("author" in patch) this.pushResultsToCompanion();
   }
 
   private applyDetailResult(payload: { [k: string]: unknown }): void {
@@ -2930,6 +3149,11 @@ class ExtensionState {
           t.detail = { steps, askedAt: Date.now() };
           this.testPilot.error = null;
           void this.saveTestPilot();
+          // Cache the agent's detail steps to disk too — they're
+          // pulled per-row on demand and re-fetching is slow + costs
+          // tokens. The per-author sidecar carries them across
+          // chrome.storage wipes.
+          this.pushResultsToCompanion();
           return;
         }
       }
