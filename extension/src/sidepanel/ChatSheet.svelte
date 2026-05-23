@@ -547,6 +547,54 @@
                         {/if}
                       {/each}
                     </svelte:element>
+                  {:else if block.kind === "table"}
+                    <!-- Pipe-table → proper HTML table. Horizontally
+                         scrollable inside the bubble so a wide table
+                         doesn't blow out the sheet width. Cells render
+                         inline marks (code, bold) just like the rest
+                         of the chat. Tight padding + 11px font so
+                         many-column tables (token / dark / light)
+                         still fit comfortably. -->
+                    <div class="rounded-md overflow-x-auto border border-ink-200 dark:border-night-line bg-white dark:bg-night-card/60 max-w-full">
+                      <table class="text-[11.5px] leading-snug w-full">
+                        <thead class="bg-ink-50 dark:bg-night-bg/60 border-b border-ink-200 dark:border-night-line">
+                          <tr>
+                            {#each block.headers as cell, ci (ci)}
+                              <th class="text-left font-semibold text-ink-700 dark:text-night-text px-2.5 py-1.5 whitespace-nowrap">
+                                {#each cell as part, pi (pi)}
+                                  {#if part.kind === "code"}
+                                    <code class="font-mono text-[11px] bg-white dark:bg-night-card text-brand-pink dark:text-brand-pink-light px-1.5 py-0.5 rounded">{part.value}</code>
+                                  {:else if part.kind === "bold"}
+                                    <strong class="font-bold">{part.value}</strong>
+                                  {:else}
+                                    <span>{part.value}</span>
+                                  {/if}
+                                {/each}
+                              </th>
+                            {/each}
+                          </tr>
+                        </thead>
+                        <tbody>
+                          {#each block.rows as row, ri (ri)}
+                            <tr class="border-t border-ink-100 dark:border-night-line/60">
+                              {#each row as cell, ci (ci)}
+                                <td class="px-2.5 py-1.5 text-ink-800 dark:text-night-text align-top">
+                                  {#each cell as part, pi (pi)}
+                                    {#if part.kind === "code"}
+                                      <code class="font-mono text-[11px] bg-white dark:bg-night-card text-brand-pink dark:text-brand-pink-light px-1.5 py-0.5 rounded">{part.value}</code>
+                                    {:else if part.kind === "bold"}
+                                      <strong class="font-semibold">{part.value}</strong>
+                                    {:else}
+                                      <span>{part.value}</span>
+                                    {/if}
+                                  {/each}
+                                </td>
+                              {/each}
+                            </tr>
+                          {/each}
+                        </tbody>
+                      </table>
+                    </div>
                   {/if}
                 {/each}
               </div>

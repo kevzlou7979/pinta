@@ -26,7 +26,16 @@ export type StepBlock =
   | { kind: "code"; lang: string; body: string }
   | { kind: "note"; parts: InlinePart[] }
   | { kind: "list"; ordered: boolean; items: InlinePart[][] }
-  | { kind: "heading"; level: number; parts: InlinePart[] };
+  | { kind: "heading"; level: number; parts: InlinePart[] }
+  | {
+      /** Pipe-table — agent replies that compare values across columns
+       *  ("Layer | Dark | Light" + token / hex rows) were rendering as
+       *  a wall of literal `|` chars. Each cell carries its own inline
+       *  parts so code refs + bold inside cells still render right. */
+      kind: "table";
+      headers: InlinePart[][];
+      rows: InlinePart[][][];
+    };
 
 const FENCE_RE = /^```(\w*)\s*$/;
 // Bullet list: `- foo` or `* foo`. The leading whitespace is allowed so
@@ -41,6 +50,44 @@ const NUMBERED_RE = /^\s*\d+\.\s+(.+)$/;
 // title doesn't show stray hashes. Captures the level (length of $1)
 // and the body ($2).
 const HEADING_RE = /^(#{1,6})\s+(.+?)\s*#*\s*$/;
+// Table row: starts and ends with `|`, has at least one `|` separator
+// inside. The leading/trailing pipes are optional per CommonMark but
+// agents almost always include them; require them here for cheaper
+// disambiguation against bullet lists that use `|` in body text.
+const TABLE_ROW_RE = /^\s*\|.+\|\s*$/;
+// Table separator row: `|---|---|...|` with optional `:` for alignment
+// (left/right/center). We don't honor alignment in v1 — every column
+// renders left-aligned — but tolerate the syntax so the row parses.
+const TABLE_SEP_RE = /^\s*\|(\s*:?-+:?\s*\|)+\s*$/;
+
+/** Split a `|`-delimited table row into cells. Strips the outer
+ *  pipes, then splits on un-escaped pipes. Trims each cell.
+ *  Unescapes `\|` back to `|` inside cells. */
+function splitTableRow(line: string): string[] {
+  // Drop leading/trailing pipe + surrounding whitespace.
+  const inner = line.trim().replace(/^\||\|$/g, "");
+  // Split on un-escaped pipes. Backslash-escaped \| stays in-cell.
+  // Simple manual scan — regex with lookbehind is fussy across older
+  // engines and we don't need fancy escape handling.
+  const cells: string[] = [];
+  let buf = "";
+  for (let j = 0; j < inner.length; j++) {
+    const ch = inner[j];
+    if (ch === "\\" && inner[j + 1] === "|") {
+      buf += "|";
+      j++;
+      continue;
+    }
+    if (ch === "|") {
+      cells.push(buf.trim());
+      buf = "";
+      continue;
+    }
+    buf += ch;
+  }
+  cells.push(buf.trim());
+  return cells;
+}
 
 export function parseStep(raw: string): StepBlock[] {
   const lines = raw.split(/\r?\n/);
@@ -62,6 +109,29 @@ export function parseStep(raw: string): StepBlock[] {
       }
       if (i < lines.length) i++; // skip closing fence
       blocks.push({ kind: "code", lang, body: bodyLines.join("\n") });
+      continue;
+    }
+
+    // Pipe-table. Two-line minimum: header row + separator row.
+    // We peek one line ahead to confirm the separator before
+    // committing — keeps a line like `| this is | not a table |`
+    // (no separator following) from being misclassified.
+    if (
+      TABLE_ROW_RE.test(line) &&
+      i + 1 < lines.length &&
+      TABLE_SEP_RE.test(lines[i + 1])
+    ) {
+      const headers = splitTableRow(line).map((c) => parseInline(c));
+      i += 2; // skip header + separator
+      const rows: InlinePart[][][] = [];
+      while (i < lines.length && TABLE_ROW_RE.test(lines[i])) {
+        rows.push(splitTableRow(lines[i]).map((c) => parseInline(c)));
+        i++;
+      }
+      blocks.push({ kind: "table", headers, rows });
+      // Skip trailing blank so the next paragraph isn't glued to the
+      // table's bottom edge.
+      if (i < lines.length && lines[i].trim() === "") i++;
       continue;
     }
 
@@ -120,7 +190,7 @@ export function parseStep(raw: string): StepBlock[] {
     }
 
     // Plain paragraph — accumulate until blank line or a special line
-    // (fence, blockquote, list, heading).
+    // (fence, blockquote, list, heading, table).
     const paraLines: string[] = [];
     while (
       i < lines.length &&
@@ -129,7 +199,8 @@ export function parseStep(raw: string): StepBlock[] {
       !lines[i].startsWith(">") &&
       !BULLET_RE.test(lines[i]) &&
       !NUMBERED_RE.test(lines[i]) &&
-      !HEADING_RE.test(lines[i])
+      !HEADING_RE.test(lines[i]) &&
+      !(TABLE_ROW_RE.test(lines[i]) && i + 1 < lines.length && TABLE_SEP_RE.test(lines[i + 1]))
     ) {
       paraLines.push(lines[i]);
       i++;
