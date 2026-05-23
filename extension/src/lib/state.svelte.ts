@@ -1164,11 +1164,13 @@ class ExtensionState {
   }
 
   /** Routed from `onMessage` when a `session.synced` with `op: "chat"`
-   *  arrives. Same shape as `handleDetailSync` — looks up the pending
-   *  entry by testId, drops it if the user already cancelled. */
+   *  arrives. The reply lands as a new agent-role message on the row's
+   *  chat thread; absence of a pendingChats entry does NOT block this
+   *  (e.g. timer fired early, panel re-mounted, race on rapid sends).
+   *  We always try to apply the reply if it's well-formed — better to
+   *  surface a late agent answer than silently lose it. */
   private handleChatSync(session: Session, testId: string): void {
-    const entry = this.testPilot.pendingChats[testId];
-    if (!entry) return;
+    const hadPending = !!this.testPilot.pendingChats[testId];
     if (session.status === "done") {
       this.clearChatTimer(testId);
       const summary = session.appliedSummary ?? "";
@@ -1177,24 +1179,37 @@ class ExtensionState {
           type?: string;
           [k: string]: unknown;
         };
-        if (payload.type === "test-pilot-chat") {
-          // Pass the known testId as a fallback — agents that omit it
-          // from the reply payload (against §7.10.3a but seen in the
-          // wild) still get their reply landed.
+        // Accept both `test-pilot-chat` (per SKILL.md §7.10.3a) and
+        // the plain `chat` shape used by the global / annotate-batch
+        // surfaces — some agents collapse to a single reply type for
+        // all chat surfaces. testId fallback covers agents that omit
+        // it from the payload (the routing layer already knows it
+        // from the queryComment).
+        if (payload.type === "test-pilot-chat" || payload.type === "chat") {
           this.applyChatResult(payload, testId);
         } else {
+          console.warn(
+            `[pinta] chat reply for ${testId} had unrecognized type=${String(payload.type)}; payload:`,
+            payload,
+          );
           this.testPilot.error =
             "Agent returned an unrecognized response. Check the skill version.";
         }
       } catch (err) {
+        console.warn(
+          `[pinta] couldn't parse chat reply for ${testId}:`,
+          err,
+          "summary:",
+          summary.slice(0, 200),
+        );
         this.testPilot.error = `Couldn't parse agent response: ${(err as Error).message}`;
       }
-      delete this.testPilot.pendingChats[testId];
+      if (hadPending) delete this.testPilot.pendingChats[testId];
     } else if (session.status === "error") {
       this.clearChatTimer(testId);
       this.testPilot.error =
         session.errorMessage ?? `Chat query failed for ${testId}.`;
-      delete this.testPilot.pendingChats[testId];
+      if (hadPending) delete this.testPilot.pendingChats[testId];
     }
   }
 
