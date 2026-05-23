@@ -1601,6 +1601,25 @@ class ExtensionState {
             body: JSON.stringify({ content: payload }),
             timeoutMs: 8_000,
           });
+          if (res.status === 404) {
+            // Companion is on an older build that doesn't have the
+            // /v1/test-docs/:docId/results/:author route yet (the body
+            // text typically reads "no route for PUT ..."). Distinguish
+            // this from a real failure: chrome.storage still has every
+            // mark, so the user hasn't lost data — they just need to
+            // restart their companion to get the durable sidecar.
+            // Warn once per panel-load via the flag below; don't keep
+            // spamming the banner on every Pass click.
+            if (!this.resultsEndpointWarned) {
+              this.resultsEndpointWarned = true;
+              console.warn(
+                "[pinta] /v1/test-docs/:docId/results/:author endpoint missing on this companion. " +
+                "Restart `pinta-companion` to enable the per-author durable results sidecar. " +
+                "Marks are still being saved to chrome.storage in the meantime.",
+              );
+            }
+            return;
+          }
           if (!res.ok) {
             const text = await res.text().catch(() => "");
             throw new Error(
@@ -1615,6 +1634,12 @@ class ExtensionState {
         }
       });
   }
+
+  /** One-shot guard so a companion-without-the-endpoint warning fires
+   *  once per panel load (in the console) instead of red-banner-ing
+   *  the user on every Pass/Fail click. Reset on connectTo so a
+   *  companion restart re-arms the check. */
+  private resultsEndpointWarned = false;
 
   /**
    * Read the per-author results sidecar from disk and overlay it onto
@@ -2508,6 +2533,10 @@ class ExtensionState {
     this.session = null;
     this.markCreatingSession(false);
     this.selectedCompanion = companion;
+    // Re-arm the "missing endpoint" warning so a companion restart on
+    // a new build re-probes for the per-author results route instead
+    // of staying silent forever after the first 404.
+    this.resultsEndpointWarned = false;
     // Swap Test Pilot catalogs to match. Standalone clears state
     // entirely (catalogs are scoped per project — there's nothing to
     // show without one). loadTestPilot handles both branches.
