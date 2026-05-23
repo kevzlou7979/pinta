@@ -73,8 +73,16 @@ export function attachWebSocket(opts: AttachOptions): WebSocketServer {
   // (another tab's draft, an old completed session).
   store.subscribe((session) => {
     const isActive = session.id === store.getActive()?.id;
+    // Allow-list of module ids whose ephemeral sessions still need to
+    // reach the extension over WS. Test Pilot is the original
+    // interactive module; chat (Phase 14) added a second class of
+    // ephemeral session — global / annotate-batch threads ride
+    // `modules: [{ id: "chat" }]`, and the extension needs the status
+    // transitions to clear its pending spinner + apply the agent's
+    // reply. Without this id in the list, chat sessions would silently
+    // hang in "Agent is thinking…" forever.
     const isInteractiveModule = session.modules?.some(
-      (m) => m.id === "test-pilot",
+      (m) => m.id === "test-pilot" || m.id === "chat",
     );
     if (!isActive && !isInteractiveModule) return;
     const payload = JSON.stringify({
