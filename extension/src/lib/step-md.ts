@@ -215,6 +215,44 @@ export function parseStep(raw: string): StepBlock[] {
   return blocks;
 }
 
+/**
+ * Detect "test suggestion" lines inside an agent's chat reply so the
+ * extension can offer a one-click "Add to spec" button on Test Pilot
+ * per-row chat (Phase 14.3).
+ *
+ * Pattern: a numbered list line where the first segment is **bold**
+ * (the test title) followed by a separator (—, –, -, or :) and prose
+ * describing the expected outcome. Matches the format the agent is
+ * instructed to emit in SKILL.md §7.10.3a. Tolerates either em-dash,
+ * en-dash, hyphen, or colon as the separator since codepage-mangled
+ * em-dashes still happen on Windows (the � replacement char is
+ * also tolerated so the test text isn't lost when the dash itself
+ * corrupted — see the parked encoding-bug ticket).
+ *
+ * Returns one `{ test, expected }` per match. Empty array if the text
+ * doesn't look like a suggestion list — the caller hides the button.
+ */
+export function parseTestSuggestions(
+  raw: string,
+): { test: string; expected: string }[] {
+  if (!raw) return [];
+  // Multi-line scan. Each match must:
+  //   - start a line (after optional indent)
+  //   - lead with `N.` or `N)` numbering
+  //   - have a bolded title segment
+  //   - have a separator + non-empty outcome prose
+  const re =
+    /^\s*\d+[.)]\s+\*\*([^*\n]+?)\*\*\s*[—–\-:�]\s*(.+?)\s*$/gm;
+  const out: { test: string; expected: string }[] = [];
+  let m: RegExpExecArray | null;
+  while ((m = re.exec(raw)) !== null) {
+    const test = m[1].trim();
+    const expected = m[2].trim();
+    if (test && expected) out.push({ test, expected });
+  }
+  return out;
+}
+
 // Inline grammar: backtick code, **bold**, __bold__ — interleaved with
 // plain text. The combined regex is alternation-based so the leftmost
 // match wins; nested marks (code inside bold, etc.) are intentionally
