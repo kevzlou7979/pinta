@@ -12,7 +12,7 @@
   // anything.
 
   import { app, type ChatImage, type ChatMessage } from "../lib/state.svelte.js";
-  import { parseStep } from "../lib/step-md.js";
+  import { parseStep, parseTestSuggestions } from "../lib/step-md.js";
   import { highlight } from "../lib/prism-setup.js";
 
   type Props = {
@@ -42,6 +42,19 @@
      *  the storage path (global → clearGlobalChat, annotate → clearAnnotateChat,
      *  Test Pilot → clearChat) and whether to confirm. */
     onClear?: () => void;
+    /** Optional thread-export hook. When provided AND messages.length > 0,
+     *  a download button appears in the header (between trash and close).
+     *  Parent owns the markdown rendering + Blob download dance — this
+     *  prop just signals intent. Lets testers preserve a thread to a
+     *  .md file before clearing, or hand off to a reviewer offline. */
+    onExport?: () => void;
+    /** Phase 14.5 (chat hardening) — when set, render a small "🛡 N
+     *  items redacted" badge above the input. Tells the user the
+     *  agent received scrubbed context. Currently populated by the
+     *  Annotate "Just Ask" tier; other surfaces leave it undefined
+     *  (global chat doesn't capture page content; Test Pilot per-row
+     *  chats reason over user-authored spec text). */
+    redactionSummary?: { counts: Record<string, number>; injection: string[] };
     /** Optional synthetic greeting shown as the first agent bubble when
      *  the thread is empty. Replaces the bare `emptyHint` text with a
      *  proper avatar+bubble layout. Client-side only — does NOT cost a
@@ -53,6 +66,32 @@
      *  if the user had typed and submitted it. Render only when
      *  `greeting` is also set and the thread is empty. */
     quickPrompts?: { label: string; prompt: string }[];
+    /** Label of the section new test suggestions land under (e.g.
+     *  "1.4 Documents Step"). When set together with onAddSuggestions,
+     *  agent replies that match the test-suggestion pattern (numbered
+     *  list of `**Title** — Outcome`) get a one-click "Add N to
+     *  {section}" button below the bubble. Test Pilot per-row chat
+     *  opts in; other tiers leave it unset → button hidden. */
+    addToSectionLabel?: string;
+    /** Batch handler for the Add-to-spec button. Receives the parsed
+     *  suggestions (already trimmed, non-empty). Parent forwards to
+     *  app.addTestPilotTests so the new rows mint USER-N ids + sync
+     *  to disk atomically. */
+    onAddSuggestions?: (
+      items: { test: string; expected: string }[],
+    ) => void;
+    /** Optional second handler — when set together with
+     *  onAddSuggestions, a "+ New section…" button renders next to
+     *  the primary "Add N to {section}". ChatSheet handles the
+     *  prompt-for-section-title locally (via window.prompt) so the
+     *  cancel path keeps the button clickable. Parent receives the
+     *  confirmed title + items and routes to
+     *  app.addTestPilotSectionWithTests. When absent, only the
+     *  primary button shows. */
+    onAddSuggestionsToNewSection?: (
+      sectionTitle: string,
+      items: { test: string; expected: string }[],
+    ) => void;
     onClose: () => void;
     onSend: (prompt: string, images?: ChatImage[]) => void;
   };
@@ -69,11 +108,57 @@
     emptyHint = "",
     imagesEnabled = false,
     onClear,
+    onExport,
+    redactionSummary,
     greeting = "",
     quickPrompts = [],
+    addToSectionLabel,
+    onAddSuggestions,
+    onAddSuggestionsToNewSection,
     onClose,
     onSend,
   }: Props = $props();
+
+  // Track per-bubble "added" state so the Add buttons visibly confirm
+  // and disable after click — without this, the user might tap twice
+  // and accidentally duplicate rows. Keyed by message id.
+  // Records BOTH count and target so the confirmation text can say
+  // "Added 5 to {section}" vs "Added 5 to new section".
+  let suggestionsAdded = $state<
+    Record<string, { count: number; target: string }>
+  >({});
+
+  function handleAddSuggestions(
+    msgId: string,
+    items: { test: string; expected: string }[],
+    target: string,
+  ) {
+    if (!onAddSuggestions || items.length === 0) return;
+    onAddSuggestions(items);
+    suggestionsAdded[msgId] = { count: items.length, target };
+  }
+
+  function handleAddToNewSection(
+    msgId: string,
+    items: { test: string; expected: string }[],
+  ) {
+    if (!onAddSuggestionsToNewSection || items.length === 0) return;
+    // window.prompt is consistent with the existing Test Pilot
+    // section-delete confirm flow (matches the user's mental model
+    // around section actions). Default value gives them a sensible
+    // starting point — they can backspace if they want something
+    // different. Cancel (null) or empty (after trim) bails without
+    // touching the catalog, and the button stays clickable so they
+    // can retry.
+    const raw = window.prompt(
+      "Name for the new section?",
+      "Suggested tests",
+    );
+    const title = raw?.trim() ?? "";
+    if (!title) return;
+    onAddSuggestionsToNewSection(title, items);
+    suggestionsAdded[msgId] = { count: items.length, target: title };
+  }
 
   // Bound the per-message payload so a careless "paste every screenshot
   // in my clipboard buffer" doesn't blow chrome.storage or push the
@@ -95,6 +180,31 @@
   let attachedImages = $state<ChatImage[]>([]);
   let pasteHint = $state<string | null>(null);
   let scrollEl = $state<HTMLDivElement | null>(null);
+  // Textarea ref used by the auto-grow $effect below. Bound via
+  // bind:this on the <textarea> so we can read scrollHeight after the
+  // browser lays out the new content.
+  let textareaEl = $state<HTMLTextAreaElement | null>(null);
+
+  // Auto-grow the textarea to match its content height, capped at the
+  // CSS `max-height` (set on the element itself). Re-runs whenever the
+  // draft changes — typing, paste, programmatic reset on send. Without
+  // this the textarea stays 1 row tall forever and longer messages get
+  // clipped behind the send button, which was the original complaint.
+  //
+  // Wrapped in requestAnimationFrame so the reset-then-measure pair
+  // happens once per frame instead of synchronously on every keystroke
+  // — the prior version forced two reflows per stroke and added up
+  // under a held key. rAF coalesces and keeps cost off the hot path.
+  $effect(() => {
+    if (!textareaEl) return;
+    void draft;
+    const el = textareaEl;
+    const handle = requestAnimationFrame(() => {
+      el.style.height = "auto";
+      el.style.height = `${el.scrollHeight}px`;
+    });
+    return () => cancelAnimationFrame(handle);
+  });
 
   /** Compact wall-clock formatter for the bubble footer.
    *  Same-day → "HH:MM", older → "MMM D, HH:MM". Uses the browser's
@@ -342,6 +452,21 @@
           </div>
         </div>
         <div class="shrink-0 flex items-center gap-1">
+          {#if onExport && messages.length > 0}
+            <button
+              type="button"
+              class="w-7 h-7 inline-flex items-center justify-center rounded-full text-ink-500 dark:text-night-mute hover:text-brand-pink dark:hover:text-brand-pink-light hover:bg-ink-100 dark:hover:bg-night-alt"
+              onclick={() => onExport?.()}
+              aria-label="Download chat thread as markdown"
+              title="Download this chat thread (.md)"
+            >
+              <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/>
+                <polyline points="7 10 12 15 17 10"/>
+                <line x1="12" y1="15" x2="12" y2="3"/>
+              </svg>
+            </button>
+          {/if}
           {#if onClear && messages.length > 0}
             <button
               type="button"
@@ -425,12 +550,26 @@
           </p>
         {/if}
       {:else}
-        {#each messages as msg (msg.id)}
+        {#each messages as msg, mi (msg.id)}
+          {@const nextMsg = mi + 1 < messages.length ? messages[mi + 1] : null}
+          {@const isLastInGroup = !nextMsg || nextMsg.role !== msg.role}
           {#if msg.role === "user"}
             <div class="flex flex-col items-end space-y-0.5">
-              <div class="max-w-[85%] rounded-lg rounded-br-sm bg-brand-pink text-white text-[12.5px] leading-snug px-3 py-2 whitespace-pre-wrap break-words space-y-2">
+              <div class="max-w-[85%] rounded-xl rounded-br-sm bg-brand-pink text-white text-[12.5px] leading-snug px-3 py-2 whitespace-pre-wrap break-words space-y-1.5">
+                {#if msg.targetSelector}
+                  <!-- Annotation-target chip. Crosshair icon + selector
+                       text in a translucent strip above the question so
+                       each per-annotation bubble visually points at the
+                       element it's about. Selector text is monospaced +
+                       slightly smaller; the question below stays the
+                       prominent focal point of the bubble. -->
+                  <div class="inline-flex items-center gap-1.5 text-[10px] font-mono text-white/75 break-all">
+                    <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" class="shrink-0"><circle cx="12" cy="12" r="10"/><line x1="22" y1="12" x2="18" y2="12"/><line x1="6" y1="12" x2="2" y2="12"/><line x1="12" y1="6" x2="12" y2="2"/><line x1="12" y1="22" x2="12" y2="18"/></svg>
+                    <span>{msg.targetSelector}</span>
+                  </div>
+                {/if}
                 {#if msg.text}
-                  <div>{msg.text}</div>
+                  <div class:font-semibold={!!msg.targetSelector} class:text-[13.5px]={!!msg.targetSelector}>{msg.text}</div>
                 {/if}
                 {#if msg.images && msg.images.length > 0}
                   <!-- Thumbnail grid below the text. Sized to fit
@@ -455,9 +594,11 @@
                   </div>
                 {/if}
               </div>
-              <div class="text-[10px] text-ink-400 dark:text-night-mute px-1 tabular-nums" title={new Date(msg.at).toLocaleString()}>
-                {formatClock(msg.at)}
-              </div>
+              {#if isLastInGroup}
+                <div class="text-[10px] text-ink-400 dark:text-night-mute px-1 tabular-nums" title={new Date(msg.at).toLocaleString()}>
+                  {formatClock(msg.at)}
+                </div>
+              {/if}
             </div>
           {:else}
             {@const blocks = parseStep(msg.text)}
@@ -598,6 +739,59 @@
                   {/if}
                 {/each}
               </div>
+              {#if addToSectionLabel && onAddSuggestions}
+                {@const suggestions = parseTestSuggestions(msg.text)}
+                {#if suggestions.length > 0}
+                  {@const added = suggestionsAdded[msg.id]}
+                  <!-- Phase 14.3 — Add-to-spec affordance. Detected
+                       when the agent's reply contains a numbered
+                       list of `**Title** — Outcome` items (the
+                       format SKILL.md §7.10.3a tells the agent to
+                       use when suggesting tests). Two routes:
+                       - Primary: add all under the row's current
+                         section. One click.
+                       - Secondary (when onAddSuggestionsToNewSection
+                         is wired): prompt for a new section title,
+                         create the section, drop the tests inside.
+                       After either click the buttons confirm + disable
+                       so the user can't accidentally duplicate by
+                       tapping twice. -->
+                  <div class="mt-0.5 flex flex-wrap gap-1.5">
+                    <button
+                      type="button"
+                      class="inline-flex items-center gap-1.5 rounded-md border border-brand-pink/40 bg-brand-pink/10 hover:bg-brand-pink/20 dark:bg-brand-pink/15 dark:hover:bg-brand-pink/25 text-brand-pink dark:text-brand-pink-light text-[11px] font-semibold px-2.5 py-1 transition-colors disabled:opacity-60 disabled:cursor-default"
+                      onclick={() => handleAddSuggestions(msg.id, suggestions, addToSectionLabel)}
+                      disabled={added != null}
+                      title={added != null
+                        ? `Already added ${added.count} to ${added.target}`
+                        : `Add ${suggestions.length} suggested ${suggestions.length === 1 ? "test" : "tests"} to ${addToSectionLabel}`}
+                    >
+                      {#if added != null}
+                        <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"/></svg>
+                        Added {added.count} to {added.target}
+                      {:else}
+                        <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>
+                        Add {suggestions.length} to {addToSectionLabel}
+                      {/if}
+                    </button>
+                    {#if onAddSuggestionsToNewSection && added == null}
+                      <!-- Secondary route: drop the same suggestions
+                           into a fresh section the user names. Hidden
+                           after the primary fired so confirmation text
+                           reads cleanly. -->
+                      <button
+                        type="button"
+                        class="inline-flex items-center gap-1.5 rounded-md border border-ink-300 dark:border-night-line bg-white dark:bg-night-card hover:bg-ink-50 dark:hover:bg-night-alt text-ink-700 dark:text-night-dim text-[11px] font-medium px-2.5 py-1 transition-colors"
+                        onclick={() => handleAddToNewSection(msg.id, suggestions)}
+                        title={`Create a new section and add the ${suggestions.length} suggested ${suggestions.length === 1 ? "test" : "tests"} there`}
+                      >
+                        <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>
+                        New section…
+                      </button>
+                    {/if}
+                  </div>
+                {/if}
+              {/if}
               <div class="text-[10px] text-ink-400 dark:text-night-mute px-1 tabular-nums inline-flex items-center gap-1.5" title={new Date(msg.at).toLocaleString()}>
                 <span>{formatClock(msg.at)}</span>
                 {#if msg.elapsedMs != null}
@@ -649,6 +843,33 @@
           Companion disconnected. Reconnect to ask the agent.
         </p>
       {/if}
+      {#if redactionSummary && (Object.keys(redactionSummary.counts).length > 0 || redactionSummary.injection.length > 0)}
+        <!-- Phase 14.5 — chat-hardening badge. Shows the user that the
+             agent received scrubbed context (emails / tokens / etc.
+             replaced with [REDACTED:*] placeholders). Counts accumulate
+             across the sequential per-annotation flow so a 4-annotation
+             batch shows the total, not just the last ask. -->
+        {@const totalRedactions = Object.values(redactionSummary.counts).reduce((a, b) => a + b, 0)}
+        {@const kindSummary = Object.entries(redactionSummary.counts)
+          .map(([k, v]) => `${v} ${k}`)
+          .join(", ")}
+        <div class="mb-2 flex items-start gap-1.5 text-[11px] leading-snug text-emerald-700 dark:text-emerald-400">
+          <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="shrink-0 mt-px" aria-hidden="true">
+            <path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/>
+          </svg>
+          <div class="min-w-0 flex-1">
+            {#if totalRedactions > 0}
+              Scrubbed before send: {totalRedactions} {totalRedactions === 1 ? "item" : "items"} <span class="text-ink-500 dark:text-night-mute">({kindSummary})</span>
+            {/if}
+            {#if redactionSummary.injection.length > 0}
+              <div class="text-amber-700 dark:text-amber-400 mt-0.5">
+                <span class="font-semibold">⚠ Page contained suspicious framing:</span>
+                {redactionSummary.injection.join(", ")} — agent has been told to treat captured content as data.
+              </div>
+            {/if}
+          </div>
+        </div>
+      {/if}
       {#if imagesEnabled && attachedImages.length > 0}
         <!-- Pasted-image preview row. Each chip is a thumbnail with a
              remove × that detaches before send. Sits above the textarea
@@ -679,15 +900,18 @@
           {pasteHint}
         </p>
       {/if}
-      <!-- Pill-shaped input wrapper. Textarea sits inside; send button
-           overlays the right edge and slides in only when there's
-           content to send. Matches the v0.4 mock where no chrome
-           competes with the placeholder text in the empty state. -->
-      <div class="relative flex items-stretch">
+      <!-- Rounded-rectangle input wrapper. Textarea grows vertically
+           with content (capped via max-height + scroll), send button
+           anchored to the bottom-right corner so it never overlaps the
+           caret no matter how many lines the user types. Wrapper carries
+           the focus ring so the visible focus state is the same height
+           as the (now multi-line) textarea. -->
+      <div class="relative rounded-2xl bg-ink-100 dark:bg-night-bg border border-transparent focus-within:ring-2 focus-within:ring-brand-pink/30 transition-shadow">
         <textarea
+          bind:this={textareaEl}
           rows="1"
           {placeholder}
-          class="flex-1 text-[13px] text-ink-800 dark:text-night-text bg-ink-100 dark:bg-night-bg border border-transparent rounded-full pl-4 pr-12 py-2.5 leading-snug resize-none focus:outline-none focus:ring-2 focus:ring-brand-pink/30 placeholder:text-ink-500 dark:placeholder:text-night-mute"
+          class="block w-full text-[13px] text-ink-800 dark:text-night-text bg-transparent border-0 rounded-2xl pl-4 pr-14 py-2.5 leading-relaxed resize-none focus:outline-none focus:ring-0 placeholder:text-ink-500 dark:placeholder:text-night-mute max-h-40 overflow-y-auto"
           bind:value={draft}
           onkeydown={onKeyDown}
           onpaste={handlePaste}
@@ -696,7 +920,7 @@
         {#if draft.trim() !== "" || attachedImages.length > 0 || pending}
           <button
             type="button"
-            class="absolute right-1.5 top-1/2 -translate-y-1/2 w-9 h-9 rounded-full bg-brand-pink text-white hover:bg-brand-magenta dark:hover:bg-brand-pink-light disabled:opacity-50 inline-flex items-center justify-center transition-opacity"
+            class="absolute right-1.5 bottom-1.5 w-9 h-9 rounded-full bg-brand-pink text-white hover:bg-brand-magenta dark:hover:bg-brand-pink-light disabled:opacity-50 inline-flex items-center justify-center transition-opacity shadow-sm"
             onclick={handleSend}
             disabled={pending || (draft.trim() === "" && attachedImages.length === 0) || app.connectionStatus !== "connected"}
             title="Send (Cmd/Ctrl + Enter)"
@@ -710,6 +934,14 @@
           </button>
         {/if}
       </div>
+      <!-- Hint row — keyboard shortcut + line-count when multi-line.
+           Visible only when there's something typed so the empty state
+           stays clean. -->
+      {#if draft.length > 0}
+        <p class="mt-1.5 px-3 text-[10px] text-ink-400 dark:text-night-mute leading-snug">
+          <kbd class="font-mono">⌘/Ctrl + Enter</kbd> to send · <kbd class="font-mono">Enter</kbd> for a new line
+        </p>
+      {/if}
     </div>
   </div>
 {/if}

@@ -31,6 +31,7 @@
   import SessionHistory from "./SessionHistory.svelte";
   import SettingsPanel from "./SettingsPanel.svelte";
   import TestPilotTab from "./TestPilotTab.svelte";
+  import AuditFlowTab from "./AuditFlowTab.svelte";
   import ChatSheet from "./ChatSheet.svelte";
   import { BUILTIN_MODULES } from "../lib/modules.js";
 
@@ -55,34 +56,86 @@
    * agent has the full structural picture; this prompt is the
    * user-visible first message in the thread.
    */
-  function askAgentWithBatch() {
+  /** Trigger a browser download for a chat-thread markdown export.
+   *  Shared by the global + Annotate chat sheets so they hand off the
+   *  rendered MD without re-implementing the anchor-click dance.
+   *  Test Pilot per-row chats use TestPilotTab's own copy of this. */
+  function downloadChatBlob(md: string, filename: string): void {
+    const blob = new Blob([md], { type: "text/markdown" });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = filename;
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    URL.revokeObjectURL(url);
+  }
+
+  async function askAgentWithBatch() {
     if (!app.session?.id) return;
     const batchId = app.session.id;
     const annotations = app.session.annotations;
     if (annotations.length === 0) return;
 
-    const comments = annotations
-      .map((a) => a.comment?.trim())
-      .filter((c): c is string => !!c);
+    annotateChatOpen = true;
 
-    let prompt: string;
-    if (comments.length === 0) {
-      prompt = `I have ${annotations.length} annotation${annotations.length === 1 ? "" : "s"} on this page. What can you tell me about ${annotations.length === 1 ? "it" : "them"}?`;
-    } else if (comments.length === 1) {
-      prompt = comments[0];
-    } else {
-      prompt = comments.map((c, i) => `${i + 1}. ${c}`).join("\n");
+    // Truncate long selectors so the chat bubble's chip stays readable.
+    // Full selector + outerHTML still ride in the per-annotation context.
+    const shortSelector = (sel: string | undefined): string => {
+      if (!sel) return "drawing";
+      return sel.length > 48 ? `${sel.slice(0, 45)}…` : sel;
+    };
+    const labelled = annotations
+      .map((a) => {
+        const comment = a.comment?.trim();
+        if (!comment) return null;
+        const sel = shortSelector(
+          a.targets?.[0]?.selector ?? a.target?.selector,
+        );
+        return { annotation: a, comment, sel };
+      })
+      .filter((x): x is { annotation: typeof annotations[number]; comment: string; sel: string } => !!x);
+
+    // No commented annotations — fall back to a single generic ask
+    // about the batch as a whole.
+    if (labelled.length === 0) {
+      const prompt = `I have ${annotations.length} annotation${annotations.length === 1 ? "" : "s"} on this page. What can you tell me about ${annotations.length === 1 ? "it" : "them"}?`;
+      void app.sendAnnotateChatMessage(batchId, prompt);
+      return;
     }
 
-    annotateChatOpen = true;
-    void app.sendAnnotateChatMessage(batchId, prompt);
+    // Sequential per-annotation flow: one user bubble at a time, each
+    // followed by its own focused agent reply. We await each ask and
+    // poll until its pending flag clears (handleNonTestPilotChatSync
+    // resets it when the reply lands or errors) before moving on. That
+    // ordering is what makes the chat read as "lazy-loaded" — bubbles
+    // and answers materialise one pair at a time, in selector order.
+    for (const { annotation, comment, sel } of labelled) {
+      if (app.connectionStatus !== "connected") break;
+      // Stop the chain on the first error so the user isn't bombarded
+      // with retries against a wedged agent.
+      if (app.chat.error) break;
+      await app.sendAnnotateChatMessageForAnnotation(
+        batchId,
+        annotation,
+        comment,
+        sel,
+      );
+      // 50ms cadence — see TestPilotTab `askAllInSection` for the same
+      // rationale. Cheap reactive read; cuts the per-annotation idle
+      // wait that adds up across a 5+ row batch.
+      while (app.chat.pendingAnnotateBatch[batchId]) {
+        await new Promise((r) => setTimeout(r, 50));
+      }
+    }
   }
 
-  type SidePanelTab = "annotate" | "test-pilot";
+  type SidePanelTab = "annotate" | "test-pilot" | "audit-flow";
   // Active tab in the main panel area. Persists across side-panel
-  // re-opens via chrome.storage.local (`pinta-active-tab`). Only the
-  // "test-pilot" tab is conditionally rendered — gated on the module
-  // being enabled in Settings.
+  // re-opens via chrome.storage.local (`pinta-active-tab`). The
+  // "test-pilot" and "audit-flow" tabs are conditionally rendered —
+  // gated on the module being enabled in Settings.
   let activeTab = $state<SidePanelTab>("annotate");
 
   // Per-tab "busy" indicators. Drive the spinner that replaces the tab
@@ -99,6 +152,9 @@
     app.testPilot.pending !== null ||
       Object.keys(app.testPilot.pendingDetails).length > 0,
   );
+  // AuditFlow tab busy state — spinner replaces the shield icon while
+  // a run is in flight. Single-flight per session for v1.
+  const auditFlowBusy = $derived(app.audit.pending !== null);
 
   type Tool = "select" | "arrow" | "rect" | "circle" | "freehand" | "pin" | "image";
   type ActiveMode = "idle" | "select" | "draw" | "image";
@@ -159,6 +215,54 @@
   let reloadingAt = $state<number | null>(null);
   let lastHandledSessionId = $state<string | null>(null);
   let lastOverlaySessionId = $state<string | null>(null);
+
+  // Collapsible submit-options block. The auto-apply / screenshot /
+  // Just Ask / per-submit module checkboxes can fill 4-5 lines of
+  // panel real estate even when the user has set them once and
+  // doesn't want to revisit. Toggle hides the cluster and shows a
+  // compact summary chip row instead. State persists to
+  // chrome.storage so the preference sticks across panel reopens.
+  const FOOTER_COLLAPSED_KEY = "pinta-footer-options-collapsed";
+  let footerOptionsCollapsed = $state(false);
+
+  async function loadFooterCollapsedPref() {
+    try {
+      const stored = await chrome.storage?.local?.get(FOOTER_COLLAPSED_KEY);
+      const raw = stored?.[FOOTER_COLLAPSED_KEY];
+      if (raw === true) footerOptionsCollapsed = true;
+    } catch {
+      // storage unavailable — defaults are fine
+    }
+  }
+
+  function toggleFooterOptions() {
+    footerOptionsCollapsed = !footerOptionsCollapsed;
+    try {
+      void chrome.storage?.local?.set({
+        [FOOTER_COLLAPSED_KEY]: footerOptionsCollapsed,
+      });
+    } catch {
+      // ignore — in-memory state still wins this session
+    }
+  }
+
+  // Summary chip labels for the collapsed state — only show options
+  // the user has actually opted into. Empty list = empty header
+  // (header still shows so the toggle is reachable; the summary just
+  // reads as "no options set").
+  const footerActiveSummary = $derived.by(() => {
+    const parts: string[] = [];
+    if (autoApplyEnabled) parts.push("Auto-apply");
+    if (includeScreenshot) parts.push("Screenshot");
+    if (annotateJustAsk) parts.push("Just Ask");
+    for (const m of BUILTIN_MODULES) {
+      if (m.mode !== "per-submit") continue;
+      if (app.moduleReady(m.id) && app.tickedModules[m.id]) {
+        parts.push(m.name);
+      }
+    }
+    return parts;
+  });
 
   type IncomingMsg = {
     type?: string;
@@ -423,12 +527,14 @@
     chrome.runtime.onMessage.addListener(runtimeMessageHandler);
 
     void loadSharePrefs();
-    // Restore the last-used tab. If Test Pilot was active but the
-    // module has since been disabled, fall back to Annotate.
+    void loadFooterCollapsedPref();
+    // Restore the last-used tab. If Test Pilot / AuditFlow was active
+    // but the module has since been disabled, fall back to Annotate
+    // (the conditional render below handles the gate).
     try {
       const stored = await chrome.storage?.local?.get("pinta-active-tab");
       const raw = stored?.["pinta-active-tab"];
-      if (raw === "test-pilot" || raw === "annotate") {
+      if (raw === "test-pilot" || raw === "annotate" || raw === "audit-flow") {
         activeTab = raw;
       }
     } catch {
@@ -1361,12 +1467,7 @@
     <div class="flex items-center gap-1.5 shrink-0">
       <!-- History + Settings live in the header so every module
            (Annotate, Test Pilot, …) shares the same access point. -->
-      <SessionHistory />
-      {#if app.moduleReady("chat")}
-        <!-- Phase 14 — Global chat trigger. Opens the shared ChatSheet
-             with no surface context (just session basics) so the user
-             can ask Pinta-shaped questions from anywhere. Only shown
-             when the Chat module is enabled in Settings. -->
+      {#if app.moduleReady("chat") && !globalChatOpen}
         <button
           type="button"
           class="w-7 h-7 inline-flex items-center justify-center rounded-full border border-ink-200 bg-white text-ink-600 hover:text-brand-pink hover:border-ink-400 dark:border-night-line dark:bg-night-alt dark:text-night-dim dark:hover:text-brand-pink-light dark:hover:border-night-line2 transition-colors"
@@ -1374,9 +1475,10 @@
           aria-label="Open global chat"
           title="Ask Pinta anything"
         >
-          <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M17 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h10a2 2 0 0 1 2 2z"/><path d="M20.5 1.5L21.1 3.4L23 4L21.1 4.6L20.5 6.5L19.9 4.6L18 4L19.9 3.4Z" fill="currentColor" stroke="none"/><path d="M22 8.4L22.15 8.85L22.6 9L22.15 9.15L22 9.6L21.85 9.15L21.4 9L21.85 8.85Z" fill="currentColor" stroke="none"/></svg>
+          <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M7.9 20A9 9 0 1 0 4 16.1L2 22Z"/><path d="M8 12h.01"/><path d="M12 12h.01"/><path d="M16 12h.01"/></svg>
         </button>
       {/if}
+      <SessionHistory />
       <button
         type="button"
         class="w-7 h-7 inline-flex items-center justify-center rounded-full border border-ink-200 bg-white text-ink-600 hover:text-brand-pink hover:border-ink-400 dark:border-night-line dark:bg-night-alt dark:text-night-dim dark:hover:text-brand-pink-light dark:hover:border-night-line2 transition-colors"
@@ -1586,6 +1688,38 @@
           {/if}
           Test Pilot
         </button>
+        {#if app.moduleReady("audit-flow")}
+          <button
+            type="button"
+            class="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium border-b-2 -mb-px transition-colors"
+            class:border-brand-pink={activeTab === "audit-flow"}
+            class:text-brand-pink={activeTab === "audit-flow"}
+            class:dark:text-brand-pink-light={activeTab === "audit-flow"}
+            class:border-transparent={activeTab !== "audit-flow"}
+            class:text-ink-500={activeTab !== "audit-flow"}
+            class:dark:text-night-mute={activeTab !== "audit-flow"}
+            onclick={() => {
+              activeTab = "audit-flow";
+              void chrome.storage?.local?.set({ "pinta-active-tab": "audit-flow" });
+            }}
+          >
+            {#if auditFlowBusy}
+              <!-- Spinner while an audit run is in flight. -->
+              <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="animate-spin" aria-label="AuditFlow running">
+                <path d="M21 12a9 9 0 1 1-6.219-8.56" />
+              </svg>
+            {:else}
+              <!-- Shield-check glyph — reads as "audit / security check"
+                   at a glance. Matches the icon style used elsewhere in
+                   the tab nav (single-stroke, currentColor, 13×13). -->
+              <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                <path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/>
+                <polyline points="9 12 11 14 15 10"/>
+              </svg>
+            {/if}
+            AuditFlow
+          </button>
+        {/if}
       </nav>
     {/if}
 
@@ -1593,6 +1727,13 @@
       <SettingsPanel />
     {:else if !app.viewingImportedId && !showAssociatePrompt && activeTab === "test-pilot" && app.moduleReady("test-pilot")}
       <TestPilotTab />
+    {:else if !app.viewingImportedId && !showAssociatePrompt && activeTab === "audit-flow" && app.moduleReady("audit-flow")}
+      <AuditFlowTab
+        onSwitchToAnnotate={() => {
+          activeTab = "annotate";
+          void chrome.storage?.local?.set({ "pinta-active-tab": "annotate" });
+        }}
+      />
     {:else if app.viewingImportedId}
       {@const imp = app.importedSessions.find((s) => s.id === app.viewingImportedId)}
       {#if imp}
@@ -2092,6 +2233,32 @@
     {/if}
     {#if !app.viewingImportedId}
     {#if app.appMode === "connected" && !allDone && app.session?.status === "drafting"}
+      <!-- Collapsible "Submit options" header. Toggle button rotates a
+           chevron and (when collapsed) renders summary chips for the
+           options that are currently set. State persists to
+           chrome.storage so the user's "I'm done configuring these"
+           preference sticks across panel reopens. -->
+      <button
+        type="button"
+        class="w-full flex items-center gap-2 text-[11px] uppercase tracking-wider font-semibold text-ink-500 dark:text-night-mute hover:text-ink-900 dark:hover:text-night-text transition-colors px-0.5 py-1"
+        onclick={toggleFooterOptions}
+        aria-expanded={!footerOptionsCollapsed}
+      >
+        <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" class="transition-transform shrink-0" class:rotate-90={!footerOptionsCollapsed} aria-hidden="true"><polyline points="9 18 15 12 9 6"/></svg>
+        <span class="shrink-0">Submit options</span>
+        {#if footerOptionsCollapsed && footerActiveSummary.length > 0}
+          <span class="flex items-center gap-1 flex-wrap normal-case tracking-normal font-normal text-[10px] text-ink-600 dark:text-night-dim">
+            {#each footerActiveSummary as part, i (i)}
+              <span class="inline-flex items-center px-1.5 py-0.5 rounded-full bg-brand-pink/10 dark:bg-brand-pink/20 text-brand-pink dark:text-brand-pink-light border border-brand-pink/30">
+                {part}
+              </span>
+            {/each}
+          </span>
+        {:else if footerOptionsCollapsed}
+          <span class="normal-case tracking-normal font-normal text-[10px] text-ink-400 dark:text-night-mute italic">none set</span>
+        {/if}
+      </button>
+      {#if !footerOptionsCollapsed}
       <label
         class="flex items-start gap-2 text-[12px] text-ink-700 dark:text-night-dim cursor-pointer select-none"
       >
@@ -2201,6 +2368,7 @@
           </label>
         {/if}
       {/each}
+      {/if}
     {/if}
 
     {#snippet downloadDropdown()}
@@ -2423,6 +2591,10 @@
         ]}
         imagesEnabled={true}
         onClear={() => app.clearGlobalChat()}
+        onExport={() => downloadChatBlob(
+          app.exportGlobalChatMarkdown(),
+          `pinta-global-chat-${new Date().toISOString().slice(0, 10)}.md`,
+        )}
         onClose={() => (globalChatOpen = false)}
         onSend={(prompt, images) => void app.sendGlobalChatMessage(prompt, images)}
       />
@@ -2451,6 +2623,11 @@
           { label: "What files would this touch?", prompt: "Based on the selectors + nearby text in these annotations, list every source file you'd need to edit to apply the batch. Group by file." },
         ]}
         onClear={() => app.clearAnnotateChat(batchId)}
+        onExport={() => downloadChatBlob(
+          app.exportAnnotateChatMarkdown(batchId),
+          `pinta-annotate-chat-${batchId.slice(0, 8)}-${new Date().toISOString().slice(0, 10)}.md`,
+        )}
+        redactionSummary={app.chat.annotateRedactions[batchId]}
         onClose={() => (annotateChatOpen = false)}
         onSend={(prompt) => void app.sendAnnotateChatMessage(batchId, prompt)}
       />

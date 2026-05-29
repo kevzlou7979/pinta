@@ -37,6 +37,25 @@ matching source files for you.
 
 Recent additions on top of the original V1 pipeline:
 
+- **Chat module — global + Just Ask + per-row** *(post-v0.3.1)*. Single
+  Settings toggle lights up an "ask the agent" surface in three
+  places: a global FAB at the bottom-right corner of the side panel,
+  an Annotate **Just Ask** checkbox in the submit footer (each
+  annotation gets its own bubble + focused reply, in sequence), and a
+  chat icon on every Test Pilot catalog row. Threads persist per
+  surface; the global bubble accepts pasted images. New module mode:
+  `inquiry` (cross-cutting; sits alongside `per-submit` and
+  `interactive`). See `spec/SPEC.md` §8 Phase 14.
+
+- **Tester sheet export (.md + .docx) with offline import** *(post-v0.3.1)*.
+  Test Pilot **Export** is now a 3-item menu: results MD (sign-off
+  artifact with marks + per-row chat threads), tester sheet MD (steps
+  embedded per row, Result blank), or tester sheet **.docx** (opens
+  directly in Word — no `pandoc` step). Standalone testers (no
+  companion / no agent) can import the .md file via the empty-state
+  picker and walk through it offline; their results export back to MD
+  for the developer to re-import. See `spec/SPEC.md` §8 Phase 13b.
+
 - **Test Pilot — interactive UAT module in its own side-panel tab** *(post-v0.3.1)*.
   Import a hand-written markdown test spec (or let the agent generate
   one from project context), get a tested catalog of sections + rows
@@ -191,6 +210,8 @@ See [`spec/SPEC.md` §7–9](spec/SPEC.md) for the full status of each.
 | Per-page annotations across navigation — per-annotation URL, side-panel filter, halo replay | shipped |
 | Built-in modules — GitLab Issues via `glab` CLI (no tokens stored), screenshot embed, chat-based metadata prompt | shipped |
 | Test Pilot — interactive UAT module (import / agent-generate spec, Pass/Fail catalog, per-step copy, markdown export) | shipped |
+| Test Pilot — tester sheet export (.md + .docx with embedded steps); standalone offline import | shipped |
+| Chat module — global FAB + Annotate Just Ask + Test Pilot per-row chat (new `inquiry` mode) | shipped |
 | `pinta-companion` published to npm — `npx pinta-companion .` | shipped |
 | `vite-plugin-pinta` for instant source mapping | planned (Phase 6) |
 | Drag-reorder annotations, group by file, undo last edit via git | planned (Phase 7) |
@@ -555,6 +576,13 @@ V1 covers the core loop. What's next, in priority order:
   chat; File issue routes through GitLab Issues. Card + table
   views, deterministic scoring, cross-run continuity. The audit
   becomes a source of work the existing modules consume.
+- **Phase 18 — Agent role routing.** `/pinta --annotate` /
+  `--test-pilot` / `--audit` / `--chat` flags let multi-terminal
+  users dedicate each Claude Code window to a workload. Agents
+  silently skip sessions outside their role so a long audit run
+  doesn't block the next annotation. Skill-only change — no wire
+  changes, no companion changes. Roles stack; no-flag = current
+  "claim everything" behavior.
 - **Beyond.** Conflict detection, multi-tab sessions, read-only sharing.
   See [`spec/SPEC.md` §9](spec/SPEC.md#9-open-questions) for the open
   design questions.

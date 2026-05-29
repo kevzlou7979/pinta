@@ -1155,6 +1155,11 @@
     }
     .timeline-status.is-locked { color: var(--magenta); }
     .timeline-status.is-exploring { color: var(--ink-mute); }
+    .timeline-status.is-shipped {
+      color: #1f8754;
+      border-color: #b8e0c8;
+      background: #ecf8f0;
+    }
 
     /* Dark mode — magenta isn't tokenized for dark surfaces, so lean on
        the brighter --pink for the node accents to keep them legible
@@ -1162,6 +1167,11 @@
     [data-theme="dark"] .timeline-node { color: var(--pink); }
     [data-theme="dark"] .timeline-item:hover .timeline-node { border-color: var(--pink); }
     [data-theme="dark"] .timeline-status.is-locked { color: var(--pink); }
+    [data-theme="dark"] .timeline-status.is-shipped {
+      color: #6dd49a;
+      border-color: #2a4a37;
+      background: #1a2820;
+    }
 
     @media (max-width: 720px) {
       .timeline {
@@ -1605,6 +1615,7 @@
         <a href="#features">Features</a>
         <a href="#modules">Modules</a>
         <a href="#install">Install</a>
+        <a href="docs.html">Docs</a>
         <a href="privacy.html">Privacy</a>
         <button id="theme-toggle" class="theme-toggle" type="button" aria-label="Toggle dark mode" title="Toggle dark mode">
           <svg class="icon-moon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"/></svg>
@@ -2179,6 +2190,17 @@ npx pinta-companion .
             <h3>Claude Design</h3>
             <p>Bring your design system into Pinta as an ambient module. Annotated edits conform to your component patterns automatically instead of free-styling — strict by default, configurable per project.</p>
             <span class="timeline-status is-exploring">Exploring</span>
+          </div>
+        </div>
+        <div class="timeline-item">
+          <div class="timeline-node" aria-label="Phase 18">
+            <span class="node-label">Phase</span>
+            <span class="node-num">18</span>
+          </div>
+          <div class="timeline-card">
+            <h3>Agent role routing</h3>
+            <p>Open four <code>/pinta</code> terminals, give each one a job. <code>--annotate</code>, <code>--test-pilot</code>, <code>--audit</code>, <code>--chat</code> flags dedicate each Claude Code window to its own workload so a long audit run doesn't block your next annotation. Companion-enforced via 403 on cross-role claims — agents can't cross lanes even if they try.</p>
+            <span class="timeline-status is-shipped">Shipped</span>
           </div>
         </div>
       </div>

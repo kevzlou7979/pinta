@@ -423,7 +423,7 @@ async function handle(
   // and silently skip back to streaming.
   const claimMatch = path.match(/^\/v1\/sessions\/([^/]+)\/claim$/);
   if (method === "POST" && claimMatch) {
-    const body = await readJson<{ claimerId?: string }>(req);
+    const body = await readJson<{ claimerId?: string; role?: string }>(req);
     const claimerId =
       body.claimerId && typeof body.claimerId === "string"
         ? body.claimerId
@@ -431,13 +431,34 @@ async function handle(
     if (!claimerId) {
       return sendJson(res, 400, { error: "missing claimerId" });
     }
+    // Phase 18b — role-enforced routing. The skill sends a role when
+    // the terminal was started with a role flag; we reject mismatches
+    // with 403 so the agent can't process work outside its lane even
+    // when no other terminal has claimed it yet. Generalists (no flag)
+    // omit `role` and fall through to first-wins.
+    const role =
+      body.role === "annotate" ||
+      body.role === "test-pilot" ||
+      body.role === "audit" ||
+      body.role === "chat"
+        ? body.role
+        : null;
     let result;
     try {
-      result = await store.tryClaim(claimMatch[1]!, claimerId);
+      result = await store.tryClaim(claimMatch[1]!, claimerId, role);
     } catch (err) {
       return sendJson(res, 404, { error: (err as Error).message });
     }
     if (!result.ok) {
+      if (result.reason === "role-mismatch") {
+        log(
+          `claim ${claimMatch[1]} REJECTED for ${claimerId} (role ${role} != expected ${result.expectedRole})`,
+        );
+        return sendJson(res, 403, {
+          error: "role mismatch",
+          expectedRole: result.expectedRole,
+        });
+      }
       log(
         `claim ${claimMatch[1]} REJECTED for ${claimerId} (already held by ${result.claimedBy})`,
       );
@@ -447,7 +468,9 @@ async function handle(
         claimedAt: result.claimedAt,
       });
     }
-    log(`claim ${claimMatch[1]} GRANTED to ${claimerId}`);
+    log(
+      `claim ${claimMatch[1]} GRANTED to ${claimerId}${role ? ` (role: ${role})` : ""}`,
+    );
     return sendJson(res, 200, result.session);
   }
 

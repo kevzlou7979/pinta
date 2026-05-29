@@ -82,7 +82,10 @@ export function attachWebSocket(opts: AttachOptions): WebSocketServer {
     // reply. Without this id in the list, chat sessions would silently
     // hang in "Agent is thinking…" forever.
     const isInteractiveModule = session.modules?.some(
-      (m) => m.id === "test-pilot" || m.id === "chat",
+      (m) =>
+        m.id === "test-pilot" ||
+        m.id === "chat" ||
+        m.id === "audit-flow",
     );
     if (!isActive && !isInteractiveModule) return;
     const payload = JSON.stringify({

@@ -1,0 +1,885 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Pinta — Documentation</title>
+  <meta name="description" content="Pinta documentation — mental model, modules, /pinta skill commands, multi-terminal role flags, troubleshooting." />
+  <meta name="theme-color" content="#fbf7f5" media="(prefers-color-scheme: light)" />
+  <meta name="theme-color" content="#0F0F12" media="(prefers-color-scheme: dark)" />
+  <script>
+    // Apply theme before paint to match index.html behavior.
+    (function () {
+      try {
+        var stored = localStorage.getItem('pinta-theme');
+        var prefers = window.matchMedia('(prefers-color-scheme: dark)').matches;
+        var theme = stored || (prefers ? 'dark' : 'light');
+        if (theme === 'dark') document.documentElement.setAttribute('data-theme', 'dark');
+      } catch (e) { /* localStorage unavailable */ }
+    })();
+  </script>
+  <link rel="icon" type="image/png" sizes="32x32" href="assets/icons/icon-32.png" />
+  <link rel="icon" type="image/png" sizes="16x16" href="assets/icons/icon-16.png" />
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Poppins:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet" />
+  <style>
+    /* ============================================================
+       Pinta docs — palette + layout. Self-contained, no external CSS.
+       Mirrors privacy.html / index.html brand language so the docs
+       feel like part of the same site, not a separate microsite.
+       ============================================================ */
+    :root {
+      --cream:        #fbf7f5;
+      --cream-soft:   #f5eef4;
+      --cream-deep:   #ece1ed;
+      --paper:        #ffffff;
+      --line:         #ebe0e9;
+      --line-strong:  #ddccdc;
+      --ink:          #16110d;
+      --ink-dim:      #5a4f44;
+      --ink-mute:     #9a8e7a;
+      --pink:         #ff3d6e;
+      --pink-deep:    #ff1f58;
+      --magenta:      #c72d7d;
+      --code-bg:      #f5eef4;
+      --code-bg-strong: #ece1ed;
+      --shadow-sm: 0 1px 2px rgba(22,17,13,0.06);
+      --max: 1120px;
+    }
+    [data-theme="dark"] {
+      --cream:        #0F0F12;
+      --cream-soft:   #15151A;
+      --cream-deep:   #1A1A20;
+      --paper:        #1A1A20;
+      --line:         #2A2A33;
+      --line-strong:  #3A3A45;
+      --ink:          #ECECF0;
+      --ink-dim:      #A8A8B5;
+      --ink-mute:     #7A7A88;
+      --code-bg:      #15151A;
+      --code-bg-strong: #1A1A20;
+      --shadow-sm: 0 1px 2px rgba(0,0,0,0.4);
+    }
+    * { box-sizing: border-box; }
+    html, body { margin: 0; padding: 0; }
+    html { scroll-behavior: smooth; scroll-padding-top: 96px; }
+    body {
+      font-family: "Poppins", system-ui, -apple-system, sans-serif;
+      background: var(--cream);
+      color: var(--ink);
+      line-height: 1.65;
+      -webkit-font-smoothing: antialiased;
+    }
+    a { color: var(--pink); text-decoration: none; transition: color .15s ease; }
+    a:hover { color: var(--pink-deep); text-decoration: underline; text-underline-offset: 4px; }
+    code, pre {
+      font-family: "JetBrains Mono", ui-monospace, SFMono-Regular, Menlo, monospace;
+      font-size: 0.92em;
+    }
+    code {
+      background: var(--code-bg);
+      padding: 0.12em 0.4em;
+      border-radius: 5px;
+      border: 1px solid var(--line);
+      color: var(--magenta);
+      font-weight: 500;
+    }
+    pre {
+      background: var(--code-bg);
+      border: 1px solid var(--line);
+      border-radius: 10px;
+      padding: 16px 18px;
+      overflow-x: auto;
+      line-height: 1.55;
+      box-shadow: var(--shadow-sm);
+      margin: 16px 0;
+    }
+    pre code {
+      background: transparent;
+      padding: 0;
+      border: none;
+      color: var(--ink);
+    }
+    h1, h2, h3, h4 { color: var(--ink); font-weight: 700; line-height: 1.25; }
+    h1 { font-size: 36px; margin: 0 0 8px; }
+    h2 { font-size: 26px; margin: 48px 0 12px; padding-top: 8px; }
+    h3 { font-size: 19px; margin: 28px 0 8px; }
+    h4 { font-size: 15px; margin: 20px 0 6px; color: var(--ink-dim); }
+    p { margin: 0 0 12px; color: var(--ink-dim); }
+    ul, ol { color: var(--ink-dim); margin: 0 0 12px; padding-left: 22px; }
+    li { margin-bottom: 6px; }
+    strong { color: var(--ink); font-weight: 600; }
+    hr { border: none; border-top: 1px solid var(--line); margin: 32px 0; }
+    table {
+      width: 100%;
+      border-collapse: collapse;
+      margin: 16px 0;
+      font-size: 14px;
+    }
+    th, td {
+      text-align: left;
+      padding: 10px 12px;
+      border-bottom: 1px solid var(--line);
+      vertical-align: top;
+    }
+    th {
+      background: var(--cream-soft);
+      font-weight: 600;
+      color: var(--ink);
+      font-size: 12px;
+      text-transform: uppercase;
+      letter-spacing: 0.04em;
+    }
+    td { color: var(--ink-dim); }
+
+    /* ============================================================
+       Top nav (matches index.html, simplified — only one section so
+       no anchor menu in the bar; the in-page sidebar handles that).
+       ============================================================ */
+    nav.top {
+      position: sticky;
+      top: 0;
+      z-index: 50;
+      background: rgba(251,247,245,0.92);
+      backdrop-filter: saturate(160%) blur(8px);
+      -webkit-backdrop-filter: saturate(160%) blur(8px);
+      border-bottom: 1px solid var(--line);
+    }
+    [data-theme="dark"] nav.top { background: rgba(15,15,18,0.85); }
+    nav.top .row {
+      max-width: var(--max);
+      margin: 0 auto;
+      padding: 14px 24px;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 16px;
+    }
+    nav.top .brand {
+      display: inline-flex;
+      align-items: center;
+      gap: 10px;
+      font-weight: 700;
+      color: var(--ink);
+      font-size: 16px;
+    }
+    nav.top .brand:hover { text-decoration: none; color: var(--pink); }
+    nav.top .brand img { width: 24px; height: 24px; }
+    nav.top .nav-links {
+      display: inline-flex;
+      align-items: center;
+      gap: 22px;
+      font-size: 14px;
+      flex-wrap: wrap;
+    }
+    nav.top .nav-links a { color: var(--ink-dim); }
+    nav.top .nav-links a:hover { color: var(--pink); text-decoration: none; }
+    .theme-toggle {
+      background: transparent;
+      border: 1px solid var(--line);
+      width: 32px;
+      height: 32px;
+      border-radius: 50%;
+      cursor: pointer;
+      color: var(--ink-dim);
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      transition: color .15s, border-color .15s;
+    }
+    .theme-toggle:hover { color: var(--pink); border-color: var(--line-strong); }
+    .theme-toggle svg { width: 14px; height: 14px; }
+    .theme-toggle .icon-sun { display: none; }
+    [data-theme="dark"] .theme-toggle .icon-moon { display: none; }
+    [data-theme="dark"] .theme-toggle .icon-sun { display: inline; }
+
+    /* ============================================================
+       Layout: sidebar TOC + main column. On mobile the sidebar
+       collapses above the content (becomes a top-of-page index).
+       ============================================================ */
+    .layout {
+      max-width: var(--max);
+      margin: 0 auto;
+      padding: 36px 24px 96px;
+      display: grid;
+      grid-template-columns: 220px 1fr;
+      gap: 56px;
+    }
+    aside.toc {
+      position: sticky;
+      top: 80px;
+      align-self: start;
+      max-height: calc(100vh - 100px);
+      overflow-y: auto;
+      font-size: 13.5px;
+      padding-right: 8px;
+    }
+    aside.toc h4 {
+      font-size: 11px;
+      letter-spacing: 0.1em;
+      text-transform: uppercase;
+      color: var(--ink-mute);
+      margin: 0 0 10px;
+      font-weight: 700;
+    }
+    aside.toc ul { list-style: none; padding: 0; margin: 0 0 22px; }
+    aside.toc li { margin: 0; }
+    aside.toc a {
+      display: block;
+      color: var(--ink-dim);
+      padding: 5px 8px;
+      border-radius: 6px;
+      border-left: 2px solid transparent;
+      margin-left: -10px;
+      line-height: 1.4;
+    }
+    aside.toc a:hover {
+      color: var(--pink);
+      background: var(--cream-soft);
+      text-decoration: none;
+    }
+    main {
+      max-width: 720px;
+      min-width: 0;
+    }
+    main p:first-of-type {
+      font-size: 17px;
+      line-height: 1.6;
+      color: var(--ink-dim);
+    }
+    .lead {
+      font-size: 17px;
+      color: var(--ink-dim);
+      margin-bottom: 28px;
+    }
+    @media (max-width: 880px) {
+      .layout { grid-template-columns: 1fr; gap: 32px; }
+      aside.toc { position: static; max-height: none; padding-right: 0; }
+    }
+
+    /* ============================================================
+       Callout boxes — used for tips, warnings, "advanced topic"
+       notes that should stand apart from prose.
+       ============================================================ */
+    .callout {
+      border-left: 3px solid var(--pink);
+      background: var(--cream-soft);
+      padding: 12px 16px;
+      border-radius: 0 8px 8px 0;
+      margin: 16px 0;
+      font-size: 14.5px;
+    }
+    .callout strong { color: var(--ink); }
+    .callout.tip { border-left-color: var(--pink); }
+    .callout.warn { border-left-color: #ff8855; background: #fff4ec; }
+    [data-theme="dark"] .callout.warn { background: #2a1f15; }
+    .callout.info { border-left-color: #8866ff; background: #f0eaff; }
+    [data-theme="dark"] .callout.info { background: #1a1530; }
+
+    /* ============================================================
+       Status chips — for "shipped" / "planned" / "experimental".
+       ============================================================ */
+    .chip {
+      display: inline-block;
+      padding: 1px 8px;
+      border-radius: 999px;
+      font-size: 11px;
+      font-weight: 600;
+      letter-spacing: 0.02em;
+      border: 1px solid var(--line);
+    }
+    .chip.shipped { background: #ffe8ee; color: var(--magenta); border-color: #ffc4d4; }
+    [data-theme="dark"] .chip.shipped { background: #2a1520; color: #ff8eb0; border-color: #4a2535; }
+    .chip.planned { background: var(--cream-soft); color: var(--ink-dim); }
+
+    /* ============================================================
+       Footer.
+       ============================================================ */
+    footer {
+      border-top: 1px solid var(--line);
+      margin-top: 64px;
+      padding: 28px 24px;
+      max-width: var(--max);
+      margin-left: auto;
+      margin-right: auto;
+      color: var(--ink-mute);
+      font-size: 13px;
+      display: flex;
+      justify-content: space-between;
+      gap: 16px;
+      flex-wrap: wrap;
+    }
+    footer a { color: var(--ink-dim); }
+  </style>
+</head>
+<body>
+
+  <nav class="top">
+    <div class="row">
+      <a class="brand" href="index.html">
+        <img src="assets/icons/icon-128.png" alt="" aria-hidden="true" />
+        Pinta
+      </a>
+      <div class="nav-links">
+        <a href="index.html#how">How it works</a>
+        <a href="index.html#features">Features</a>
+        <a href="index.html#modules">Modules</a>
+        <a href="docs.html" aria-current="page" style="color: var(--pink); font-weight: 600;">Docs</a>
+        <a href="https://github.com/kevzlou7979/pinta">GitHub</a>
+        <button id="theme-toggle" class="theme-toggle" type="button" aria-label="Toggle dark mode" title="Toggle dark mode">
+          <svg class="icon-moon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"/></svg>
+          <svg class="icon-sun" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="4"/><path d="M12 2v2"/><path d="M12 20v2"/><path d="m4.93 4.93 1.41 1.41"/><path d="m17.66 17.66 1.41 1.41"/><path d="M2 12h2"/><path d="M20 12h2"/><path d="m6.34 17.66-1.41 1.41"/><path d="m19.07 4.93-1.41 1.41"/></svg>
+        </button>
+      </div>
+    </div>
+  </nav>
+
+  <div class="layout">
+
+    <!-- TOC sidebar -->
+    <aside class="toc" aria-label="Table of contents">
+      <h4>Getting started</h4>
+      <ul>
+        <li><a href="#what-is-pinta">What is Pinta</a></li>
+        <li><a href="#mental-model">The mental model</a></li>
+        <li><a href="#install">Install &amp; first run</a></li>
+        <li><a href="#first-annotation">Your first annotation</a></li>
+      </ul>
+      <h4>Modules</h4>
+      <ul>
+        <li><a href="#annotate">Annotate</a></li>
+        <li><a href="#gitlab-issues">GitLab Issues</a></li>
+        <li><a href="#test-pilot">Test Pilot</a></li>
+        <li><a href="#chat">Chat</a></li>
+        <li><a href="#auditflow">AuditFlow</a></li>
+      </ul>
+      <h4>Multi-agent</h4>
+      <ul>
+        <li><a href="#role-flags">Role flags</a></li>
+        <li><a href="#multi-project">Multi-project setup</a></li>
+      </ul>
+      <h4>Reference</h4>
+      <ul>
+        <li><a href="#settings">Settings</a></li>
+        <li><a href="#standalone-mode">Standalone mode</a></li>
+        <li><a href="#share-files">Share files (.pinta)</a></li>
+        <li><a href="#troubleshooting">Troubleshooting</a></li>
+        <li><a href="#privacy">Privacy</a></li>
+      </ul>
+    </aside>
+
+    <!-- Main content -->
+    <main>
+      <h1>Pinta Documentation</h1>
+      <p class="lead">
+        Pinta is a Chrome extension and companion server that hands visual UI
+        annotations to a coding agent — Claude Code, Cursor, Aider, or any
+        MCP-compatible tool — which edits your source files. This guide covers
+        the mental model, every module, the multi-agent workflow, and a
+        troubleshooting reference.
+      </p>
+
+      <hr />
+
+      <!-- ============================================================
+           GETTING STARTED
+           ============================================================ -->
+      <h2 id="what-is-pinta">What is Pinta</h2>
+      <p>
+        Pinta closes the loop between <em>"I see what's wrong on this page"</em>
+        and <em>"the agent edits the right file."</em> You annotate the running
+        app — pick an element, draw on a screenshot, drop a pin, type a comment
+        — and hit Submit. The agent reads your annotation, finds the source
+        file, makes the change, and reports back. No screenshots pasted into
+        chat, no manually grepping for selectors, no copy-paste round trips.
+      </p>
+      <p>
+        Three pieces work together:
+      </p>
+      <table>
+        <thead>
+          <tr><th style="width: 130px;">Component</th><th>Role</th></tr>
+        </thead>
+        <tbody>
+          <tr><td><strong>Extension</strong></td><td>Chrome side panel + on-page overlay. Where you draw and submit.</td></tr>
+          <tr><td><strong>Companion</strong></td><td>Node server on <code>127.0.0.1:7878+</code>. Receives your submission, persists the session.</td></tr>
+          <tr><td><strong>Agent</strong></td><td>Claude Code (or compatible) running the <code>/pinta</code> skill. Reads the session, edits source files.</td></tr>
+        </tbody>
+      </table>
+
+      <h2 id="mental-model">The mental model</h2>
+      <p>
+        Pinta is opinionated about the <strong>verbs</strong> you use to talk
+        to your codebase. Today there are three:
+      </p>
+      <ul>
+        <li><strong>Act</strong> — Annotate, optionally with GitLab Issues. You're asking the agent to <em>do something</em> to your source. This is the original Pinta loop.</li>
+        <li><strong>Test</strong> — Test Pilot. You're driving an interactive QA spec with the agent's help.</li>
+        <li><strong>Inquire</strong> — Chat. You're <em>asking before you commit</em> — explanations, what-if questions, "what does this do?"</li>
+        <li><strong>Audit</strong> — AuditFlow. You're asking the agent to <em>look across the project</em> and surface findings, then route the ones you care about back into <em>Act</em>.</li>
+      </ul>
+      <p>
+        Each verb is a Pinta <strong>module</strong>. Enable the ones you want
+        in Settings; ignore the rest. The extension's UI is just the surface;
+        the wire protocol and agent skill stay narrow.
+      </p>
+
+      <div class="callout info">
+        <strong>Why does this matter?</strong> Every module reuses the same
+        session lifecycle — discover companion, claim, edit / answer, done.
+        Once you understand one, you understand them all. The differences
+        live in the agent's instructions per module, not in new infrastructure.
+      </div>
+
+      <h2 id="install">Install &amp; first run</h2>
+
+      <h3>1. Install the Chrome extension</h3>
+      <p>
+        Get it from the
+        <a href="https://chromewebstore.google.com/" target="_blank" rel="noopener">Chrome Web Store</a>
+        (search for "Pinta"), or load it unpacked from the
+        <a href="https://github.com/kevzlou7979/pinta" target="_blank" rel="noopener">GitHub repo</a>
+        if you want the unreleased build.
+      </p>
+
+      <h3>2. Start the companion in your project</h3>
+      <pre><code># Once a versioned npm release exists:
+npx pinta-companion .
+
+# While on the unreleased build (from a Pinta clone):
+node ~/.claude/skills/pinta/start-companion.js .</code></pre>
+      <p>
+        The companion binds the first free port in <code>7878-7898</code> and
+        registers itself in <code>~/.pinta/registry.json</code> so the
+        extension + agent skill can find it.
+      </p>
+
+      <h3>3. Run <code>/pinta</code> in Claude Code</h3>
+      <p>
+        Open a Claude Code terminal in your project root and type
+        <code>/pinta</code>. The skill discovers the companion via the
+        registry, opens a long-lived SSE stream, and waits for sessions.
+        It will say something like:
+      </p>
+      <pre><code>"Companion is up on port 7878 for /path/to/your/project.
+Open the Pinta Chrome extension, annotate the page you want
+changed, and hit Submit. I'll wait."</code></pre>
+
+      <h3>4. Open the side panel</h3>
+      <p>
+        Click the Pinta icon in your Chrome toolbar (or pin it first). The
+        side panel opens on the right; the project picker at the top should
+        say <strong>Connected · your-project</strong>.
+      </p>
+
+      <h2 id="first-annotation">Your first annotation</h2>
+      <ol>
+        <li>Open the page you want to change in any tab.</li>
+        <li>In the side panel, click <strong>Select</strong> (the cursor icon) and click any element on the page. A pink halo appears; the element gets a pin badge.</li>
+        <li>Type a comment in the popup: <em>"make this button match the brand color"</em>.</li>
+        <li>Hit <strong>Submit</strong> in the panel.</li>
+        <li>Your <code>/pinta</code> terminal lights up: the agent reads the annotation, finds the source file, shows you the plan, and waits for confirmation.</li>
+        <li>Reply <strong>"go"</strong> (or just confirm) and the edit happens. Refresh the page to see it — or rely on HMR / auto-reload if your dev server supports it.</li>
+      </ol>
+
+      <div class="callout tip">
+        <strong>Tip:</strong> If you tick <strong>Auto-apply (no agent
+        confirmation)</strong> in the submit footer, the agent skips the
+        wait-for-go step and applies directly. The plan is still shown
+        briefly so you can see what's happening.
+      </div>
+
+      <hr />
+
+      <!-- ============================================================
+           MODULES
+           ============================================================ -->
+      <h2 id="annotate">Annotate <span class="chip shipped">always on</span></h2>
+      <p>
+        The core verb. Three annotation shapes:
+      </p>
+      <ul>
+        <li><strong>Select</strong> — pick a DOM element. The agent gets the selector, outer HTML, computed styles, and surrounding text.</li>
+        <li><strong>Draw</strong> — arrow, rectangle, circle, freehand, pin. No DOM target — the agent reads the composited screenshot.</li>
+        <li><strong>Image</strong> — drop a reference image at a specific spot. The agent sees both the screenshot and your reference.</li>
+      </ul>
+      <h4>Inline editor</h4>
+      <p>
+        On select mode, the popup has tabs for <strong>Content</strong>
+        (edit text in place), <strong>Font / Sizing / Spacing</strong>
+        (CSS pickers populated from <code>getComputedStyle</code>), and
+        <strong>CSS</strong> (free-form). Edits apply to the DOM live so
+        you see the result before submitting. The diff is captured and
+        shipped to the agent verbatim.
+      </p>
+      <h4>Hotkeys</h4>
+      <ul>
+        <li><code>Alt+S</code> — toggle Select mode</li>
+        <li><code>Alt+P</code> — toggle Draw mode (Pen)</li>
+        <li><code>Alt+X</code> — exit to idle</li>
+        <li><code>Esc</code> — cancel an in-progress annotation</li>
+      </ul>
+
+      <h2 id="gitlab-issues">GitLab Issues <span class="chip shipped">module</span></h2>
+      <p>
+        Tick <strong>Create GitLab issues</strong> in the submit footer and
+        the agent files one issue per annotation after the source edits land.
+        Auth is delegated to your <code>glab</code> CLI (run
+        <code>glab auth login --scopes api,write_repository</code> once);
+        Pinta never sees the token.
+      </p>
+      <p>
+        Each issue carries the annotation's selector, source-file pointer,
+        page URL, the full-page screenshot (uploaded to your project's
+        <code>uploads</code> endpoint), and a footer linking back to the
+        Pinta session. Before filing, the agent prompts in chat for batch
+        metadata (domain label, extra tags, assignees, or <code>later</code>
+        to defer entirely).
+      </p>
+      <div class="callout warn">
+        <strong>If you only tick GitLab Issues without Auto-apply</strong>
+        (<em>file-only mode</em>): no source edits happen. The agent
+        just files the tickets. Useful when you want a backlog item but
+        don't want code touched yet.
+      </div>
+
+      <h2 id="test-pilot">Test Pilot <span class="chip shipped">module</span></h2>
+      <p>
+        Interactive UAT module in its own side-panel tab. Two ways to start:
+      </p>
+      <ol>
+        <li><strong>Import</strong> a hand-written markdown test spec.</li>
+        <li><strong>Generate</strong> a UAT spec from project context — the agent scans your routes / components / auth flow and writes one.</li>
+      </ol>
+      <p>
+        Either way you get a <strong>catalog</strong> — sections of test rows.
+        Mark each row <strong>Pass</strong>, <strong>Fail</strong>, or leave
+        it untested. Click the <strong>?</strong> on any row to ask the agent
+        for step-by-step instructions (toggle <strong>Detailed help steps</strong>
+        in Settings for deeper technical context).
+      </p>
+      <h4>Editing the catalog (Phase 13)</h4>
+      <p>
+        Right-click the kebab on any section or row for delete / add /
+        rename / move-up / move-down / "add test below". Drag-and-drop
+        also works — grab a row's grip handle on the leading edge. Edits
+        sync to <code>.pinta/test-docs/{docId}.md</code> on disk so the
+        agent's <strong>?</strong> flow works against rows you added
+        yourself.
+      </p>
+      <h4>Auto-save status to disk</h4>
+      <p>
+        Pass / Fail marks land in a <strong>Result</strong> column in the
+        on-disk markdown — so if browser storage gets wiped, re-importing
+        the same spec restores your marks. Catalog structure is the source
+        of truth.
+      </p>
+
+      <h2 id="chat">Chat <span class="chip shipped">module</span></h2>
+      <p>
+        Inquiry-mode module — one Settings toggle lights up three chat
+        surfaces:
+      </p>
+      <ul>
+        <li><strong>Global chat</strong> — speech-bubble icon in the side-panel header. Ask Pinta-shaped questions ("how do I disable screenshot opt-in?"). Supports pasting images.</li>
+        <li><strong>Annotate "Just Ask"</strong> — checkbox in the submit footer. When ticked, Submit re-labels to "Ask agent" — the agent answers without editing source. Pivot to a real submit by unticking.</li>
+        <li><strong>Test Pilot per-row chat</strong> — chat button on each test row. Context auto-attaches (test ID, expected result, current steps).</li>
+      </ul>
+      <p>
+        Replies render with light markdown (inline <code>code</code>, fenced
+        blocks with syntax highlighting, <code>&gt; Note:</code> callouts).
+        The Test Pilot tier has a special affordance: when the agent
+        suggests test scenarios in its reply, a one-click
+        <strong>Add N to spec</strong> button appears below the bubble —
+        adds the suggestions to the current section (or creates a new
+        section).
+      </p>
+      <h4>Detailed responses toggle</h4>
+      <p>
+        Settings → Chat → <strong>Detailed responses</strong>. Off (default)
+        = short, tester-friendly. On = deeper technical detail (curl,
+        payloads, env vars, ARIA names). Affects all three chat surfaces.
+      </p>
+
+      <h2 id="auditflow">AuditFlow <span class="chip shipped">module</span> <span class="chip planned">15a + 15b</span></h2>
+      <p>
+        Lighthouse-style audit surface in its own side-panel tab. Pick
+        categories, run audit, get back per-category scores with actionable
+        findings.
+      </p>
+      <h4>Categories (Phase 15b)</h4>
+      <ul>
+        <li><strong>Security</strong> — XSS, CSRF, <code>eval</code> / <code>{@html}</code> misuse, secret leakage in source, CSRF guards on destructive endpoints, <code>npm audit</code> for dependency CVEs.</li>
+        <li><strong>Performance</strong> — bundle entry count, production deps count, heavy known offenders (lodash full, moment), sync fetches in render, missing lazy routes, build target sanity, missing <code>loading="lazy"</code>.</li>
+        <li><strong>Accessibility</strong> — alt text, labeled inputs, ARIA misuse, heading hierarchy, click handlers on non-interactive elements, focus-visible, missing <code>lang</code>.</li>
+        <li><strong>Mobile</strong> — viewport meta, fixed-px containers, touch-target sizing, hover-only interactions, horizontal-overflow risks, mouse-only drag listeners.</li>
+        <li><strong>Cross-Browser</strong> <span class="chip planned">soon</span> — caniuse-resolved support matrix per finding.</li>
+      </ul>
+      <h4>Fix with agent</h4>
+      <p>
+        Every finding has a <strong>Fix with agent</strong> button that
+        composes a Pinta annotation pre-filled with the check details and
+        switches you to the Annotate tab for review. The audit becomes a
+        <em>source of work</em>; the existing Annotate loop is the
+        <em>sink</em>.
+      </p>
+      <h4>Scoring</h4>
+      <p>
+        Deterministic:
+        <code>(pass × 1 + warn × 0.5 + fail × 0) / (pass + warn + fail) × 100</code>.
+        Info checks excluded from the denominator. Rating: 90+ Excellent,
+        70+ Good, 50+ Needs work, else Poor.
+      </p>
+
+      <hr />
+
+      <!-- ============================================================
+           MULTI-AGENT
+           ============================================================ -->
+      <h2 id="role-flags">Role flags (Phase 18a) <span class="chip shipped">multi-terminal</span></h2>
+      <p>
+        Run multiple <code>/pinta</code> Claude Code terminals against the
+        same project and dedicate each to a workload. Each terminal declares
+        which session kinds it claims; mismatches silently skip to other
+        terminals.
+      </p>
+      <table>
+        <thead>
+          <tr><th>Flag</th><th>Claims sessions where…</th></tr>
+        </thead>
+        <tbody>
+          <tr><td><code>--annotate</code></td><td><code>modules[]</code> does NOT contain <code>test-pilot</code>, <code>audit-flow</code>, or <code>chat</code></td></tr>
+          <tr><td><code>--test-pilot</code></td><td><code>modules[].id</code> contains <code>test-pilot</code></td></tr>
+          <tr><td><code>--audit</code></td><td><code>modules[].id</code> contains <code>audit-flow</code></td></tr>
+          <tr><td><code>--chat</code></td><td><code>modules[].id</code> contains <code>chat</code></td></tr>
+          <tr><td><em>(no flag)</em></td><td>Claim everything — default, current behavior</td></tr>
+        </tbody>
+      </table>
+      <p>
+        Flags stack: <code>/pinta --test-pilot --audit</code> claims both
+        kinds. Typical 4-terminal setup:
+      </p>
+      <pre><code>Terminal 1: /pinta --annotate     # source-edit work
+Terminal 2: /pinta --test-pilot   # UAT runs + per-row chat
+Terminal 3: /pinta --audit        # audit runs, low traffic
+Terminal 4: /pinta --chat         # Just-Ask + global chat</code></pre>
+      <div class="callout warn">
+        <strong>Coverage matters.</strong> At least one terminal in the
+        project must accept each kind in use. If you start all 4
+        specialized terminals but submit a regular annotation, the
+        session sits unclaimed — the side panel will warn you after 10s:
+        <em>"No <code>/pinta</code> terminal is claiming annotation
+        sessions. Run <code>/pinta</code> in your project's Claude Code
+        terminal (or <code>/pinta --annotate</code>)."</em>
+      </div>
+
+      <h2 id="multi-project">Multi-project setup</h2>
+      <p>
+        One companion runs per project. The extension's project picker (top
+        of side panel) shows every running companion. When you switch tabs,
+        Pinta auto-routes to the companion whose URL patterns match —
+        annotations made on <code>localhost:5173</code> go to one project,
+        annotations on <code>localhost:3000</code> go to another, all without
+        you re-picking.
+      </p>
+      <p>
+        Add URL patterns by clicking the project name in the picker, or by
+        editing <code>.pinta.json</code> in your project root:
+      </p>
+      <pre><code>{
+  "urlPatterns": [
+    "http://localhost:5173/**",
+    "https://staging.example.com/**"
+  ]
+}</code></pre>
+
+      <hr />
+
+      <!-- ============================================================
+           REFERENCE
+           ============================================================ -->
+      <h2 id="settings">Settings</h2>
+      <p>
+        Click the gear icon in the side-panel header. Modules are listed; tick
+        to enable. Each enabled module exposes its own settings:
+      </p>
+      <ul>
+        <li><strong>GitLab Issues</strong> — optional <code>project_id</code> override + default labels.</li>
+        <li><strong>Test Pilot</strong> — Detailed help steps (default off).</li>
+        <li><strong>Chat</strong> — Detailed responses (default off) + Redact PII (default on — strips emails / phones / IDs from page content sent to the agent).</li>
+        <li><strong>AuditFlow</strong> — no settings in 15a/b; browser-target picker arrives with Cross-Browser.</li>
+      </ul>
+      <h4>Visual feedback</h4>
+      <p>
+        Settings → Visual feedback → <strong>Processing pulse</strong>
+        enables a pulsing colored glow around the page edges while the
+        agent is applying changes. Off by default; cosmetic only.
+      </p>
+
+      <h2 id="standalone-mode">Standalone mode</h2>
+      <p>
+        Pinta works without a companion. Useful for testers hitting deployed
+        URLs who don't have the project on disk: the side panel falls into
+        <strong>Standalone</strong> mode, sessions live in browser
+        IndexedDB, and you can <strong>Copy</strong> (markdown to clipboard)
+        or <strong>Download</strong> instead of Submit.
+      </p>
+      <p>
+        Standalone is also useful for trying Pinta before you've installed
+        the companion — the annotation UX works fully; only the
+        agent-edit loop is gated on having a companion + <code>/pinta</code>
+        running.
+      </p>
+
+      <h2 id="share-files">Share files (.pinta)</h2>
+      <p>
+        Click the download icon in the panel header to export a session as
+        a <strong>.pinta</strong> file: a self-contained JSON document
+        with the annotations, screenshots inline, and your manifest
+        (title, author, accent color, description). Send it to a teammate;
+        they open Pinta and pick <strong>Import .pinta</strong>.
+      </p>
+      <p>
+        Imported sessions are <strong>read-only</strong> in the viewer.
+        Two follow-up paths:
+      </p>
+      <ul>
+        <li><strong>Send to agent</strong> (connected mode) — files the imported annotations as a brand-new submission against your project. Agent picks up like any other.</li>
+        <li><strong>Fork to local</strong> (standalone mode) — clones into an editable draft you can extend.</li>
+      </ul>
+      <p>
+        Module settings (e.g. GitLab tokens) are stripped from share files.
+        Each recipient uses their own configured modules.
+      </p>
+
+      <h2 id="troubleshooting">Troubleshooting</h2>
+
+      <h3>Side panel says "No companion is running"</h3>
+      <p>
+        Start the companion in your project root:
+      </p>
+      <pre><code>npx pinta-companion .</code></pre>
+      <p>
+        If it complains about another companion already on the port,
+        check <code>~/.pinta/registry.json</code> — stale entries from
+        crashed companions can linger.
+      </p>
+
+      <h3>Companion is running but the agent doesn't pick up sessions</h3>
+      <p>
+        Most likely: <code>/pinta</code> isn't running in a Claude Code
+        terminal for this project. Start one. If you're using role flags,
+        make sure at least one terminal covers the kind you're submitting
+        (see <a href="#role-flags">Role flags</a> for the matrix).
+      </p>
+
+      <h3>Agent edited the wrong file</h3>
+      <p>
+        Pinta uses a 3-tier locate strategy: <code>data-source-file</code>
+        attributes (Phase 6 Vite plugin), then a project-wide grep for
+        nearby text, then a route-scoped fallback. The Vite plugin gives
+        the highest accuracy (~95%); without it, you're at grep-accuracy
+        (~80%). If you keep hitting wrong files, install the plugin or
+        give the agent more nearby text by typing a verbose comment.
+      </p>
+
+      <h3>Auto-apply edited a file but I wanted to discuss first</h3>
+      <p>
+        Auto-apply is off by default. If it's on and you want a discussion
+        instead, untick it AND tick <strong>Just Ask</strong> — the
+        submit button re-labels to "Ask agent" and routes to the chat
+        sheet instead of editing source.
+      </p>
+
+      <h3>GitLab Issues filed but no screenshot embedded</h3>
+      <p>
+        Your <code>glab</code> token likely lacks <code>api</code> /
+        <code>write_repository</code> scope. Re-auth:
+      </p>
+      <pre><code>glab auth logout
+glab auth login --scopes api,write_repository</code></pre>
+
+      <h3>Chat says "Agent returned an empty response"</h3>
+      <p>
+        Usually means the agent had no answer for an image-context prompt
+        and submitted blank. Try rephrasing with more context (paste a
+        screenshot into the chat, mention the file path), or restart
+        <code>/pinta</code> if the agent seems stuck.
+      </p>
+
+      <h3>Sessions sitting in "Submitted" forever</h3>
+      <p>
+        After 10 seconds, the side panel surfaces a claim-warning telling
+        you what's likely wrong (no <code>/pinta</code> running, or no
+        terminal accepting the session's kind under your role flags).
+        Most fixes: start a <code>/pinta</code>, or unblock a stuck agent
+        terminal.
+      </p>
+
+      <h2 id="privacy">Privacy</h2>
+      <p>
+        Pinta sends annotation contents (selectors, comments, optional
+        screenshots) to <strong>the agent you've configured</strong> — the
+        same Claude Code / Cursor / etc. you'd use anyway. Pinta itself
+        doesn't host servers, store sessions remotely, or send telemetry.
+        The companion binds <code>127.0.0.1</code> only.
+      </p>
+      <p>
+        See the full <a href="privacy.html">Privacy Policy</a> for the
+        per-field breakdown.
+      </p>
+
+      <hr />
+
+      <h2>What's next</h2>
+      <p>
+        See the <a href="index.html#roadmap">Roadmap</a> on the landing
+        page for what's planned. Quick highlights:
+      </p>
+      <ul>
+        <li>Phase 15c — user-defined custom audits (paste docs → agent generates rules)</li>
+        <li>Phase 16 — Test Pilot sign-off (tester exports MD with Pass/Fail; dev imports + reviews)</li>
+        <li>Phase 17 — Claude Design (ambient design-system module)</li>
+        <li>Phase 18b — companion-enforced role routing (currently trust-model)</li>
+      </ul>
+    </main>
+  </div>
+
+  <footer>
+    <span>
+      Pinta — visual annotation for the agent era.
+    </span>
+    <span>
+      <a href="https://github.com/kevzlou7979/pinta">GitHub</a>
+      &nbsp;·&nbsp;
+      <a href="https://github.com/kevzlou7979/pinta/blob/main/spec/SPEC.md">Spec</a>
+      &nbsp;·&nbsp;
+      <a href="https://github.com/kevzlou7979/pinta/issues">Issues</a>
+      &nbsp;·&nbsp;
+      <a href="privacy.html">Privacy</a>
+    </span>
+  </footer>
+
+  <script>
+    // Theme toggle — mirrors the header on index.html so the user's
+    // light/dark choice persists across pages.
+    (function () {
+      var btn = document.getElementById('theme-toggle');
+      if (!btn) return;
+      btn.addEventListener('click', function () {
+        var html = document.documentElement;
+        var isDark = html.getAttribute('data-theme') === 'dark';
+        if (isDark) {
+          html.removeAttribute('data-theme');
+          try { localStorage.setItem('pinta-theme', 'light'); } catch (e) {}
+        } else {
+          html.setAttribute('data-theme', 'dark');
+          try { localStorage.setItem('pinta-theme', 'dark'); } catch (e) {}
+        }
+      });
+    })();
+  </script>
+
+</body>
+</html>

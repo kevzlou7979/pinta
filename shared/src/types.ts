@@ -221,6 +221,30 @@ export type SessionModule = {
 };
 
 /**
+ * Phase 18 — terminal role for multi-agent routing. A `/pinta` terminal
+ * declares its role via CLI flags (`--annotate` / `--test-pilot` / `--audit`
+ * / `--chat`); the companion uses it on the claim endpoint to reject
+ * cross-role claims (18b enforcement). Generalists (no flag) omit `role`
+ * entirely and fall through to first-wins.
+ */
+export type SessionRole = "annotate" | "test-pilot" | "audit" | "chat";
+
+/**
+ * Derive the role a session "belongs to" from its modules[]. The chat,
+ * audit-flow, and test-pilot modules are mutually exclusive on a given
+ * submit (each is created by its own state.svelte.ts code path), so
+ * precedence below only matters as a defensive fallback. A session with
+ * no specialized module is annotate work (the base flow + GitLab Issues).
+ */
+export function expectedSessionRole(session: Session): SessionRole {
+  const ids = session.modules?.map((m) => m.id) ?? [];
+  if (ids.includes("chat")) return "chat";
+  if (ids.includes("audit-flow")) return "audit";
+  if (ids.includes("test-pilot")) return "test-pilot";
+  return "annotate";
+}
+
+/**
  * Wraps a Session for the share-file (`.pinta`) format. The author /
  * title / accentColor live here rather than on Session itself so the
  * wire contract between extension and companion stays untouched —
@@ -305,6 +329,86 @@ export type ClientMessage =
       moduleSettings: Record<string, string | boolean>;
       queryComment: string;
     };
+
+/**
+ * AuditFlow (Phase 15) — module that runs Lighthouse-style audits on
+ * the user's project and routes each finding to actionable handoffs
+ * (Fix-with-agent via Annotate, future Discuss via Chat, File issue
+ * via GitLab module). Wire shape is documented here so the agent
+ * payload validator and the extension UI agree on field names.
+ *
+ * v1 ships with the Security category only (Phase 15a); Performance /
+ * Accessibility / Mobile / Cross Browser land in 15b. Custom audits
+ * land in 15c.
+ */
+export type AuditCheckStatus = "pass" | "warn" | "fail" | "info";
+
+export type AuditCategoryId =
+  | "security"
+  | "performance"
+  | "accessibility"
+  | "mobile"
+  | "cross-browser"
+  /** User-defined audit. The id includes a uuid suffix so multiple
+   *  custom audits don't collide: e.g. `audit-flow-custom:abc-123`. */
+  | `audit-flow-custom:${string}`;
+
+/** One finding in an audit run. Status is the primary signal; value
+ *  is for measurable observations ("1.2 MB across 64 requests"); fix
+ *  hint is what the agent suggests doing about it. */
+export type AuditCheck = {
+  /** Stable per-finding id — typically a sha1 of category+label+where
+   *  so the same finding across runs has the same id (needed by 15d's
+   *  cross-run disposition map). v1 trusts the agent to generate it. */
+  id: string;
+  category: AuditCategoryId;
+  status: AuditCheckStatus;
+  /** Short human-readable summary, ≤80 chars. Reads as a sentence in
+   *  the card view ("eval() in user-input path", "innerHTML on
+   *  untrusted string"). */
+  label: string;
+  /** Optional measured value displayed next to the label
+   *  ("3 occurrences", "1.2 MB"). */
+  value?: string;
+  /** Longer explainer shown when the check row is expanded. Markdown
+   *  allowed — renders via the same parseStep pipeline as Test Pilot
+   *  detail steps. */
+  description?: string;
+  /** Pointer to the offending code / page when known. */
+  where?: { file?: string; line?: number; url?: string };
+  /** What the agent thinks should change. Becomes the prefilled
+   *  comment when the user clicks Fix-with-agent. */
+  fixHint?: string;
+  /** Pre-composed annotation the side panel can drop directly into
+   *  the Annotate draft. Lets the agent control the exact shape of
+   *  the handoff payload (selector / sourceFile / comment) instead of
+   *  the extension synthesizing it from where + fixHint. Optional —
+   *  when absent the extension composes a fallback. */
+  suggestedAnnotation?: Annotation;
+};
+
+export type AuditCategoryResult = {
+  id: AuditCategoryId;
+  name: string;
+  /** 0-100. Computed deterministically:
+   *  (pass*1 + warn*0.5 + fail*0) / (pass + warn + fail) × 100.
+   *  Info checks are excluded from the denominator. */
+  score: number;
+  checks: AuditCheck[];
+};
+
+export type AuditRun = {
+  runId: string;
+  startedAt: number;
+  completedAt?: number;
+  categories: AuditCategoryResult[];
+  /** Average of category scores, 0-100. */
+  overall: number;
+  /** Derived rating string ("Excellent" / "Good" / "Needs work" /
+   *  "Poor"). Computed by the agent from `overall` so the UI doesn't
+   *  have to duplicate the threshold logic. */
+  rating: string;
+};
 
 export type ServerMessage =
   | { type: "session.created"; session: Session }

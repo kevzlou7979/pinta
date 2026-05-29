@@ -18,6 +18,10 @@
 
   let fileInput = $state<HTMLInputElement | null>(null);
   let viewing = $state<{ testId: string } | null>(null);
+  // Export dropdown — three options (results MD, tester MD, tester DOCX)
+  // surfaced as a small menu off the Export button. Closes on outside
+  // click via the existing onDocClick handler below.
+  let exportMenuOpen = $state(false);
   // The currently "selected" test row in the catalog. Set when the user
   // clicks a row body or opens its detail view; used to (a) tint the row
   // as a bookmark cursor and (b) scroll-restore back to it when the user
@@ -37,11 +41,13 @@
   // one section's error to cascade-cancel the others via the shared
   // `app.testPilot.error` field). Non-reactive — plain Promise chain.
   let bulkQueue: Promise<void> = Promise.resolve();
-  // Per-section completion ledger. Used by the auto-collapse $effect
-  // below to fire exactly on the <100% → 100% transition rather than
-  // every time `collapsedSections` is read while a section is already
-  // complete (which would re-collapse manual expand-to-review).
-  let prevSectionComplete = $state<Record<string, boolean>>({});
+  // Per-section completion ledger. Plain Map (NOT `$state`) so the
+  // auto-collapse $effect can read+write it without forming a tracked
+  // read-write loop on its own dependency graph. The effect reads
+  // catalog (reactive), writes `collapsedSections` (reactive, user-
+  // visible), and uses this Map as a non-reactive transition gate to
+  // fire exactly once on the <100% → 100% boundary.
+  const prevSectionComplete = new Map<string, boolean>();
 
   $effect(() => {
     const catalog = app.testPilot.catalog;
@@ -54,12 +60,12 @@
         if (t.status === "pass" || t.status === "fail") marked++;
       }
       const isComplete = marked === total;
-      const was = prevSectionComplete[section.title] === true;
+      const was = prevSectionComplete.get(section.title) === true;
       // Fire on the transition only — leaves manual re-expand alone.
       if (isComplete && !was) {
         collapsedSections[section.title] = true;
       }
-      prevSectionComplete[section.title] = isComplete;
+      prevSectionComplete.set(section.title, isComplete);
     }
   });
   // Section-collapse state (id-keyed by section title).
@@ -152,6 +158,146 @@
   // kebab closes the others.
   let sectionKebabOpen = $state<string | null>(null);
   let testKebabOpen = $state<string | null>(null);
+
+  // Phase 14.4 — drag-and-drop reorder state. Grip handles on each
+  // section card + test row drive native HTML5 drag; we track the
+  // currently-dragged item plus the per-target insertion hint
+  // ("above" / "below" the row at hand) so we can render a thin pink
+  // bar at the precise drop point. Within-section only for v1 — a
+  // test dragged over a different section's rows is silently
+  // rejected (drop hint never sets). Move-up/down kebab arrows stay
+  // wired to the old `moveTestPilotSection/Test` calls; drag goes
+  // through the new index-based `reorderTestPilotSection/Test`.
+  type DragKind = "section" | "test";
+  type DragItem = { kind: DragKind; sectionTitle: string; testId?: string };
+  type DropHint = { key: string; position: "above" | "below" };
+  let dragging = $state<DragItem | null>(null);
+  let dropHint = $state<DropHint | null>(null);
+
+  function dragKey(item: DragItem): string {
+    return item.testId
+      ? `test:${item.testId}`
+      : `section:${item.sectionTitle}`;
+  }
+
+  function onItemDragStart(e: DragEvent, item: DragItem) {
+    // Block drag during inline edit so the user's typing isn't
+    // hijacked by a stray drag start.
+    if (editingField != null) {
+      e.preventDefault();
+      return;
+    }
+    dragging = item;
+    if (e.dataTransfer) {
+      e.dataTransfer.effectAllowed = "move";
+      // Stash a key so a hypothetical external drop target could
+      // identify what was dragged. Not load-bearing — internal drop
+      // reads `dragging` directly.
+      e.dataTransfer.setData("text/plain", dragKey(item));
+    }
+  }
+
+  function onItemDragOver(e: DragEvent, target: DragItem) {
+    if (!dragging) return;
+    if (dragging.kind !== target.kind) return;
+    // Within-section only: a test dragged over a row in a different
+    // section gets no drop hint, so the drop is silently rejected.
+    if (
+      target.kind === "test" &&
+      dragging.sectionTitle !== target.sectionTitle
+    ) {
+      return;
+    }
+    e.preventDefault();
+    if (e.dataTransfer) e.dataTransfer.dropEffect = "move";
+    const rect = (e.currentTarget as HTMLElement).getBoundingClientRect();
+    const mid = rect.top + rect.height / 2;
+    const position: "above" | "below" = e.clientY < mid ? "above" : "below";
+    const key = dragKey(target);
+    // Only re-assign when something actually changed — keeps Svelte's
+    // dirty checks cheap while the user holds + moves over a row.
+    if (
+      !dropHint ||
+      dropHint.key !== key ||
+      dropHint.position !== position
+    ) {
+      dropHint = { key, position };
+    }
+  }
+
+  function onItemDrop(e: DragEvent, _target: DragItem) {
+    // `_target` is the leaf element the drop event landed on, but we
+    // route by `dropHint` instead. Without that distinction, a drop
+    // of a section onto an inner test row would route to the
+    // test-row handler (target.kind === "test") and skip the reorder
+    // even though dropHint correctly identifies the destination
+    // section. dropHint is set by whichever dragover most recently
+    // matched the dragged kind — that's the right anchor for where
+    // to insert.
+    e.preventDefault();
+    e.stopPropagation();
+    if (!dragging || !dropHint) {
+      dragging = null;
+      dropHint = null;
+      return;
+    }
+    // Drop onto self → no-op.
+    if (dropHint.key === dragKey(dragging)) {
+      dragging = null;
+      dropHint = null;
+      return;
+    }
+    const catalog = app.testPilot.catalog;
+    if (!catalog) {
+      dragging = null;
+      dropHint = null;
+      return;
+    }
+    if (dragging.kind === "section" && dropHint.key.startsWith("section:")) {
+      const targetTitle = dropHint.key.slice("section:".length);
+      let toIdx = catalog.sections.findIndex(
+        (s) => s.title === targetTitle,
+      );
+      if (toIdx >= 0) {
+        if (dropHint.position === "below") toIdx += 1;
+        const fromIdx = catalog.sections.findIndex(
+          (s) => s.title === dragging.sectionTitle,
+        );
+        // Adjust for the splice-out that happens before splice-in:
+        // when the source is before the destination, every index
+        // ≥ source shifts down by 1 after the removal.
+        if (fromIdx >= 0 && fromIdx < toIdx) toIdx -= 1;
+        app.reorderTestPilotSection(dragging.sectionTitle, toIdx);
+      }
+    } else if (
+      dragging.kind === "test" &&
+      dragging.testId &&
+      dropHint.key.startsWith("test:")
+    ) {
+      const targetTestId = dropHint.key.slice("test:".length);
+      const section = catalog.sections.find(
+        (s) => s.title === dragging.sectionTitle,
+      );
+      if (section) {
+        let toIdx = section.tests.findIndex((t) => t.id === targetTestId);
+        if (toIdx >= 0) {
+          if (dropHint.position === "below") toIdx += 1;
+          const fromIdx = section.tests.findIndex(
+            (t) => t.id === dragging.testId,
+          );
+          if (fromIdx >= 0 && fromIdx < toIdx) toIdx -= 1;
+          app.reorderTestPilotTest(dragging.testId, toIdx);
+        }
+      }
+    }
+    dragging = null;
+    dropHint = null;
+  }
+
+  function onItemDragEnd() {
+    dragging = null;
+    dropHint = null;
+  }
 
   function startEditing(field: string) {
     const c = app.testPilot.catalog;
@@ -355,14 +501,62 @@
       const inKebab =
         target.closest("[data-pinta-kebab-trigger]") ||
         target.closest("[data-pinta-kebab-menu]");
+      const inExport = target.closest("[data-pinta-export-menu]");
       if (!inStatus) dropdownTestId = null;
       if (!inKebab) {
         sectionKebabOpen = null;
         testKebabOpen = null;
       }
+      if (!inExport) exportMenuOpen = false;
     }
     document.addEventListener("click", onDocClick, true);
     return () => document.removeEventListener("click", onDocClick, true);
+  });
+
+  // Phase 14.4 — auto-scroll the side panel while a drag is in flight
+  // and the cursor approaches the top/bottom edge. Without this, long
+  // catalogs are unusable for reorder (you'd have to drop, scroll
+  // manually, re-pick the row, drop again — defeats the point of
+  // drag-and-drop). Standard pattern: window-level dragover handler
+  // measures cursor distance to the scroll container's edges and
+  // nudges scrollTop proportionally to proximity. No preventDefault
+  // here — per-element ondragover still controls where drops are
+  // allowed; this listener only scrolls.
+  onMount(() => {
+    let scrollContainerCache: HTMLElement | null = null;
+    function getScrollContainer(): HTMLElement | null {
+      if (scrollContainerCache && document.contains(scrollContainerCache)) {
+        return scrollContainerCache;
+      }
+      // The side panel's scrollable region is `<main class="flex-1
+      // overflow-y-auto p-4 space-y-4">` in App.svelte. Lookup is
+      // cached so we don't query on every dragover tick.
+      scrollContainerCache = document.querySelector<HTMLElement>(
+        "main.flex-1.overflow-y-auto",
+      );
+      return scrollContainerCache;
+    }
+    const SCROLL_EDGE_PX = 80;
+    const MAX_SCROLL_SPEED = 14;
+    function onWindowDragOver(e: DragEvent) {
+      if (!dragging) return;
+      const container = getScrollContainer();
+      if (!container) return;
+      const rect = container.getBoundingClientRect();
+      const distFromTop = e.clientY - rect.top;
+      const distFromBottom = rect.bottom - e.clientY;
+      if (distFromTop >= 0 && distFromTop < SCROLL_EDGE_PX) {
+        // Closer to top → faster upward scroll. `t` is 0 at the edge
+        // boundary, 1 right at the top.
+        const t = (SCROLL_EDGE_PX - distFromTop) / SCROLL_EDGE_PX;
+        container.scrollTop -= MAX_SCROLL_SPEED * t;
+      } else if (distFromBottom >= 0 && distFromBottom < SCROLL_EDGE_PX) {
+        const t = (SCROLL_EDGE_PX - distFromBottom) / SCROLL_EDGE_PX;
+        container.scrollTop += MAX_SCROLL_SPEED * t;
+      }
+    }
+    window.addEventListener("dragover", onWindowDragOver);
+    return () => window.removeEventListener("dragover", onWindowDragOver);
   });
 
   function onPickFile() {
@@ -443,11 +637,12 @@
           }
           // Poll until this row's pending entry clears (success, error,
           // or timeout — handleDetailSync / armDetailTimeout / cancel
-          // all delete the entry). Cheap polling beats wiring a per-row
-          // promise channel through state.svelte.ts for this UI
-          // affordance.
+          // all delete the entry). 50ms keeps cumulative idle wait
+          // under ~25ms/row average; a promise registry on state.svelte
+          // would be tidier but for now the cost of the tight poll is
+          // a single reactive object read every frame, which is free.
           while (app.testPilot.pendingDetails[test.id]) {
-            await new Promise((r) => setTimeout(r, 250));
+            await new Promise((r) => setTimeout(r, 50));
           }
           // Stop the queue if the last fetch errored or timed out — no
           // sense piling more onto a wedged agent. The user can retry.
@@ -552,22 +747,61 @@
     return { pass, fail, untested, total: pass + fail + untested };
   }
 
-  function downloadExport() {
-    const md = app.exportResults();
-    const blob = new Blob([md], { type: "text/markdown" });
+  /** Shared filename stem for any export — strips a trailing `.md` so
+   *  re-export doesn't pile up `…-results-results-2026-05-24.md`. */
+  function exportStem(): string {
+    return (app.testPilot.catalog?.filename ?? "test-spec").replace(/\.md$/i, "");
+  }
+
+  /** Trigger a browser download for a Blob, then revoke the object URL.
+   *  Shared by all four export variants below. */
+  function downloadBlob(blob: Blob, filename: string): void {
     const url = URL.createObjectURL(blob);
     const a = document.createElement("a");
     a.href = url;
-    const ts = new Date().toISOString().slice(0, 10);
-    const stem = (app.testPilot.catalog?.filename ?? "test-spec").replace(
-      /\.md$/i,
-      "",
-    );
-    a.download = `${stem}-results-${ts}.md`;
+    a.download = filename;
     document.body.appendChild(a);
     a.click();
     a.remove();
     URL.revokeObjectURL(url);
+  }
+
+  function downloadExport() {
+    const md = app.exportResults();
+    const ts = new Date().toISOString().slice(0, 10);
+    downloadBlob(
+      new Blob([md], { type: "text/markdown" }),
+      `${exportStem()}-results-${ts}.md`,
+    );
+    exportMenuOpen = false;
+  }
+
+  function downloadTesterSheetMd() {
+    const md = app.exportTesterSheetMarkdown();
+    const ts = new Date().toISOString().slice(0, 10);
+    downloadBlob(
+      new Blob([md], { type: "text/markdown" }),
+      `${exportStem()}-tester-${ts}.md`,
+    );
+    exportMenuOpen = false;
+  }
+
+  function downloadTesterSheetDocx() {
+    const bytes = app.exportTesterSheetDocx();
+    if (!bytes) return;
+    const ts = new Date().toISOString().slice(0, 10);
+    // Slice into a fresh ArrayBuffer view because some browsers refuse
+    // Blob construction from a SharedArrayBuffer-backed Uint8Array.
+    // Copy is cheap relative to the OOXML zip's typical size.
+    const buf = bytes.slice().buffer;
+    downloadBlob(
+      new Blob([buf], {
+        type:
+          "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+      }),
+      `${exportStem()}-tester-${ts}.docx`,
+    );
+    exportMenuOpen = false;
   }
 
   function clearCatalog() {
@@ -687,20 +921,28 @@
     </button>
   </section>
 {:else if !app.testPilot.catalog && app.appMode === "standalone"}
-  <!-- STANDALONE empty state — Test Pilot catalogs are scoped per
-       project, so there's nothing to show until the user picks one. -->
+  <!-- STANDALONE empty state — testers without a companion can still
+       import a developer-shipped tester sheet (.md) and walk through
+       it offline. Pass/Fail starts blank for them to fill in; results
+       export back to .md for the developer to re-import. -->
   <section class="space-y-3 p-3">
     <div class="flex items-center gap-2">
       <span class="text-base">🛫</span>
       <h2 class="text-sm font-semibold text-ink-900 dark:text-night-text">Test Pilot</h2>
     </div>
-    <div class="rounded-md border border-ink-200 dark:border-night-line bg-ink-50 dark:bg-night-alt p-3 text-[12px] text-ink-700 dark:text-night-dim leading-snug space-y-2">
-      <p>Test Pilot catalogs are scoped per project. Connect to one above to view its catalog or start a new one.</p>
-      <p class="text-ink-500 dark:text-night-mute">
-        If you're a tester, ask the developer for their project's
-        <code class="font-mono text-[10px] bg-ink-100 dark:bg-night-alt px-1 rounded">pinta-companion</code>
-        command.
-      </p>
+    <p class="text-[12px] text-ink-700 dark:text-night-dim leading-snug">
+      Got a tester sheet from the developer? Import it and start walking through the tests. Pass/Fail marks save locally; export your results back as markdown when you're done.
+    </p>
+    <button
+      type="button"
+      class="w-full inline-flex items-center justify-center gap-1.5 rounded-md bg-brand-pink text-white text-sm font-medium px-3 py-2.5 hover:bg-brand-magenta dark:hover:bg-brand-pink-light"
+      onclick={onPickFile}
+    >
+      <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" y1="3" x2="12" y2="15"/></svg>
+      Import tester sheet
+    </button>
+    <div class="rounded-md border border-ink-200 dark:border-night-line bg-ink-50 dark:bg-night-alt p-3 text-[11px] text-ink-700 dark:text-night-dim leading-snug space-y-1.5">
+      <p>Need to generate a new catalog instead? Ask the developer for their project's <code class="font-mono text-[10px] bg-ink-100 dark:bg-night-alt px-1 rounded">pinta-companion</code> command and connect above.</p>
     </div>
   </section>
 {:else if !app.testPilot.catalog}
@@ -768,7 +1010,10 @@
       </div>
 
       <!-- Combined card: Expected + Steps + actions -->
-      <div class="rounded-lg border border-ink-200 dark:border-night-line bg-white dark:bg-night-card p-4 space-y-3">
+      <div
+        class="rounded-lg border border-ink-200 dark:border-night-line bg-white dark:bg-night-card p-4 space-y-3"
+        class:pinta-loading-card={app.testPilot.pendingDetails[test.id]}
+      >
       <!-- Expected (top of card, divider below) -->
       <div class="pb-3 border-b border-ink-200 dark:border-night-line">
         <div class="text-[10px] uppercase tracking-wider font-semibold text-ink-500 dark:text-night-mute mb-1.5">Expected result</div>
@@ -1187,15 +1432,54 @@
           <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="M3 6h18"/><path d="M8 6V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/><path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6"/></svg>
           Clear marks
         </button>
-        <button
-          type="button"
-          class="inline-flex items-center gap-1 text-[11px] text-ink-700 dark:text-night-dim hover:text-brand-pink dark:hover:text-brand-pink-light px-2 py-1.5 rounded-md border border-ink-200 dark:border-night-line bg-white dark:bg-night-card"
-          onclick={downloadExport}
-          title="Download the current results as a markdown report"
-        >
-          <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
-          Export
-        </button>
+        <div class="relative" data-pinta-export-menu>
+          <button
+            type="button"
+            class="inline-flex items-center gap-1 text-[11px] text-ink-700 dark:text-night-dim hover:text-brand-pink dark:hover:text-brand-pink-light px-2 py-1.5 rounded-md border border-ink-200 dark:border-night-line bg-white dark:bg-night-card"
+            onclick={() => (exportMenuOpen = !exportMenuOpen)}
+            title="Export this catalog — results MD, tester sheet MD, or tester sheet DOCX"
+            aria-haspopup="menu"
+            aria-expanded={exportMenuOpen}
+          >
+            <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
+            Export
+            <svg width="9" height="9" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="6 9 12 15 18 9"/></svg>
+          </button>
+          {#if exportMenuOpen}
+            <div
+              class="absolute right-0 top-full mt-1 z-40 w-64 rounded-md border border-ink-200 dark:border-night-line bg-white dark:bg-night-card shadow-lg overflow-hidden"
+              role="menu"
+            >
+              <button
+                type="button"
+                class="w-full text-left px-3 py-2 text-[12px] text-ink-800 dark:text-night-text hover:bg-ink-50 dark:hover:bg-night-alt border-b border-ink-100 dark:border-night-line"
+                onclick={downloadExport}
+                role="menuitem"
+              >
+                <div class="font-semibold">Results (.md)</div>
+                <div class="text-[10.5px] text-ink-500 dark:text-night-mute leading-snug mt-0.5">Sign-off report with Pass/Fail marks + per-row chat threads.</div>
+              </button>
+              <button
+                type="button"
+                class="w-full text-left px-3 py-2 text-[12px] text-ink-800 dark:text-night-text hover:bg-ink-50 dark:hover:bg-night-alt border-b border-ink-100 dark:border-night-line"
+                onclick={downloadTesterSheetMd}
+                role="menuitem"
+              >
+                <div class="font-semibold">Tester sheet (.md)</div>
+                <div class="text-[10.5px] text-ink-500 dark:text-night-mute leading-snug mt-0.5">Embeds the Help-generated steps per row, leaves Result blank for the tester. Re-importable in standalone mode.</div>
+              </button>
+              <button
+                type="button"
+                class="w-full text-left px-3 py-2 text-[12px] text-ink-800 dark:text-night-text hover:bg-ink-50 dark:hover:bg-night-alt"
+                onclick={downloadTesterSheetDocx}
+                role="menuitem"
+              >
+                <div class="font-semibold">Tester sheet (.docx)</div>
+                <div class="text-[10.5px] text-ink-500 dark:text-night-mute leading-snug mt-0.5">Same content as the tester MD, but opens directly in Word — no pandoc needed.</div>
+              </button>
+            </div>
+          {/if}
+        </div>
       </div>
     </div>
 
@@ -1244,8 +1528,63 @@
         {@const editingThisSection =
           editingField === `section:${section.title}` ||
           (editingField === "section:" && section.title === "")}
-        <div class="rounded-lg border border-ink-200 dark:border-night-line bg-ink-50 dark:bg-night-alt overflow-hidden">
-          <div class="pinta-section-trigger flex items-stretch text-[12px] font-medium text-ink-900 dark:text-night-text">
+        {@const isSectionDragging =
+          dragging?.kind === "section" &&
+          dragging.sectionTitle === section.title}
+        {@const sectionDropKey = `section:${section.title}`}
+        {@const sectionDropAbove =
+          dropHint?.key === sectionDropKey && dropHint.position === "above"}
+        {@const sectionDropBelow =
+          dropHint?.key === sectionDropKey && dropHint.position === "below"}
+        <div
+          class="relative rounded-lg border border-ink-200 dark:border-night-line bg-ink-50 dark:bg-night-alt transition-opacity"
+          class:opacity-50={isSectionDragging}
+          ondragover={(e) =>
+            onItemDragOver(e, { kind: "section", sectionTitle: section.title })}
+          ondrop={(e) =>
+            onItemDrop(e, { kind: "section", sectionTitle: section.title })}
+        >
+          {#if sectionDropAbove}
+            <span class="absolute -top-1 left-0 right-0 h-0.5 rounded-full bg-brand-pink dark:bg-brand-pink-light pointer-events-none" aria-hidden="true"></span>
+          {/if}
+          {#if sectionDropBelow}
+            <span class="absolute -bottom-1 left-0 right-0 h-0.5 rounded-full bg-brand-pink dark:bg-brand-pink-light pointer-events-none" aria-hidden="true"></span>
+          {/if}
+          <!-- Section card was previously `overflow-hidden` so the
+               header's hover-background didn't bleed past the rounded
+               corners. That clipped the per-row kebab dropdowns (Edit
+               title / Move / Delete) any time they extended past the
+               card edge. Section header now opts into its own
+               `rounded-t-lg` so the corner-mask use-case still works
+               without trapping descendants. -->
+          <div class="pinta-section-trigger rounded-t-lg flex items-stretch text-[12px] font-medium text-ink-900 dark:text-night-text">
+            <!-- Drag handle (Phase 14.4) — grip icon visible on hover.
+                 Only this element is `draggable`, so the rest of the
+                 header (expand toggle, tally, kebab) stays click-only
+                 and the user can't accidentally start a drag while
+                 trying to interact with other affordances. -->
+            {#if !editingThisSection}
+              <span
+                class="pinta-drag-handle shrink-0 self-stretch inline-flex items-center justify-center w-5 text-ink-400 dark:text-night-mute hover:text-ink-700 dark:hover:text-night-text cursor-grab active:cursor-grabbing opacity-0 transition-opacity"
+                draggable="true"
+                role="button"
+                tabindex="-1"
+                aria-label="Drag to reorder section"
+                title="Drag to reorder"
+                ondragstart={(e) =>
+                  onItemDragStart(e, {
+                    kind: "section",
+                    sectionTitle: section.title,
+                  })}
+                ondragend={onItemDragEnd}
+              >
+                <svg width="10" height="14" viewBox="0 0 6 12" fill="currentColor" aria-hidden="true">
+                  <circle cx="1.5" cy="2" r="0.85"/><circle cx="4.5" cy="2" r="0.85"/>
+                  <circle cx="1.5" cy="6" r="0.85"/><circle cx="4.5" cy="6" r="0.85"/>
+                  <circle cx="1.5" cy="10" r="0.85"/><circle cx="4.5" cy="10" r="0.85"/>
+                </svg>
+              </span>
+            {/if}
             {#if editingThisSection}
               <!-- Inline-edit: the entire left side becomes an input.
                    Collapse toggle is hidden while editing (the user is
@@ -1454,12 +1793,68 @@
                 {@const isActive = activeTestId === test.id}
                 {@const editingTitle = editingField === `test-title:${test.id}`}
                 {@const editingExpected = editingField === `test-expected:${test.id}`}
+                {@const isTestDragging =
+                  dragging?.kind === "test" && dragging.testId === test.id}
+                {@const testDropKey = `test:${test.id}`}
+                {@const testDropAbove =
+                  dropHint?.key === testDropKey && dropHint.position === "above"}
+                {@const testDropBelow =
+                  dropHint?.key === testDropKey && dropHint.position === "below"}
                 <li
-                  class="relative border-b border-ink-200 dark:border-night-line last:border-b-0"
+                  class="relative border-b border-ink-200 dark:border-night-line last:border-b-0 transition-opacity"
+                  class:opacity-50={isTestDragging}
                   data-test-row={test.id}
+                  ondragover={(e) =>
+                    onItemDragOver(e, {
+                      kind: "test",
+                      sectionTitle: section.title,
+                      testId: test.id,
+                    })}
+                  ondrop={(e) =>
+                    onItemDrop(e, {
+                      kind: "test",
+                      sectionTitle: section.title,
+                      testId: test.id,
+                    })}
                 >
+                  {#if testDropAbove}
+                    <span class="absolute -top-px left-2 right-2 h-0.5 rounded-full bg-brand-pink dark:bg-brand-pink-light pointer-events-none z-10" aria-hidden="true"></span>
+                  {/if}
+                  {#if testDropBelow}
+                    <span class="absolute -bottom-px left-2 right-2 h-0.5 rounded-full bg-brand-pink dark:bg-brand-pink-light pointer-events-none z-10" aria-hidden="true"></span>
+                  {/if}
+                  <!-- Drag handle (Phase 14.4) — grip icon at the
+                       leading edge of each row, opacity-0 by default
+                       so it doesn't visually compete with the status
+                       checkbox. Fades in on row hover via the
+                       pinta-test-row group selector (see app.css).
+                       Hidden while inline-editing this row so the
+                       caret cursor isn't fighting a grab cursor. -->
+                  {#if !editingTitle && !editingExpected}
+                    <span
+                      class="pinta-drag-handle absolute left-0.5 top-1/2 -translate-y-1/2 inline-flex items-center justify-center w-4 h-7 text-ink-400 dark:text-night-mute hover:text-ink-700 dark:hover:text-night-text cursor-grab active:cursor-grabbing opacity-0 transition-opacity"
+                      draggable="true"
+                      role="button"
+                      tabindex="-1"
+                      aria-label="Drag to reorder test"
+                      title="Drag to reorder"
+                      ondragstart={(e) =>
+                        onItemDragStart(e, {
+                          kind: "test",
+                          sectionTitle: section.title,
+                          testId: test.id,
+                        })}
+                      ondragend={onItemDragEnd}
+                    >
+                      <svg width="8" height="12" viewBox="0 0 6 12" fill="currentColor" aria-hidden="true">
+                        <circle cx="1.5" cy="2" r="0.85"/><circle cx="4.5" cy="2" r="0.85"/>
+                        <circle cx="1.5" cy="6" r="0.85"/><circle cx="4.5" cy="6" r="0.85"/>
+                        <circle cx="1.5" cy="10" r="0.85"/><circle cx="4.5" cy="10" r="0.85"/>
+                      </svg>
+                    </span>
+                  {/if}
                   <div
-                    class="flex items-start gap-3 px-3 py-3 transition-colors {isActive
+                    class="pinta-test-row flex items-start gap-3 px-3 py-3 transition-colors {isActive
                       ? 'bg-ink-100 dark:bg-night-alt'
                       : 'bg-white dark:bg-night-card'}"
                   >
@@ -1808,11 +2203,45 @@
     greeting={`Hi${firstName ? ` ${firstName}` : ""} — I can help you review ${chatTest?.id ?? "this test"}. What would you like to check?`}
     quickPrompts={[
       { label: "Summarize this test", prompt: `Summarize ${chatTest?.id ?? "this test"} in 2-3 sentences — what it's checking, why it matters, and what the tester should look for.` },
-      { label: "Explain a field", prompt: `Walk me through the fields / UI elements involved in ${chatTest?.id ?? "this test"}. What does each one do?` },
+      { label: "Submit Gitlab Issue", prompt: `Help me draft a GitLab issue for a bug I found while running ${chatTest?.id ?? "this test"}. Ask me for the repro steps, expected vs actual behavior, and severity, then format it as a GitLab issue (title + markdown body).` },
       { label: "Check for issues", prompt: `Are there any common failure modes or edge cases I should watch for when running ${chatTest?.id ?? "this test"}?` },
+      // Format hint at the end is load-bearing: pushes the agent
+      // toward the §7.10.3a `N. **Title** — Outcome` shape so the
+      // "Add N to spec" button reliably appears on the reply.
+      { label: "Suggest tests", prompt: `Suggest 5-8 additional test scenarios that belong under "${chatSection}" alongside ${chatTest?.id ?? "this test"}. Focus on adjacent edge cases, permission paths, error states, and device variants I might not have covered. Format each suggestion on its own line as \`N. **Concise test title** — Expected outcome.\` so I can one-click add the ones I want to my spec.` },
     ]}
     onClear={() => {
       if (chatTestId) app.clearChat(chatTestId);
+    }}
+    onExport={() => {
+      if (!chatTestId) return;
+      const md = app.exportTestPilotRowChatMarkdown(chatTestId);
+      const ts = new Date().toISOString().slice(0, 10);
+      downloadBlob(
+        new Blob([md], { type: "text/markdown" }),
+        `pinta-chat-${chatTestId}-${ts}.md`,
+      );
+    }}
+    addToSectionLabel={chatSection}
+    onAddSuggestions={(items) => {
+      // Phase 14.3 — one-click batch add from agent suggestions.
+      // The button only renders when both props are set + the
+      // reply contains parseable `**Title** — Outcome` items, so
+      // we always have a real section to target here.
+      if (chatSection && items.length > 0) {
+        app.addTestPilotTests(chatSection, items);
+      }
+    }}
+    onAddSuggestionsToNewSection={(title, items) => {
+      // Phase 14.3 — secondary route: user opted to drop the
+      // suggestions into a fresh section. Pass `chatSection` as
+      // the insertion anchor so the new category lands directly
+      // BELOW the section the user was chatting about, instead of
+      // at the bottom of the catalog (where it'd be visually
+      // disconnected from the conversation that produced it).
+      if (title && items.length > 0) {
+        app.addTestPilotSectionWithTests(title, items, chatSection);
+      }
     }}
     onClose={() => { chatOpen = false; chatDraft = ""; chatTestId = null; }}
     onSend={(prompt) => {

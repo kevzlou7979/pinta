@@ -8,6 +8,73 @@ For the architectural design behind each item, see
 
 ### Added
 
+- **Public documentation page (`docs/docs.html`).** New sibling to
+  the landing page, linked from the top nav between Install and
+  Privacy. Sidebar TOC + grouped sections: Getting started, Modules
+  (Annotate / GitLab Issues / Test Pilot / Chat / AuditFlow),
+  Multi-agent (role flags + multi-project), and Reference (Settings,
+  standalone mode, share files, troubleshooting, privacy). Theme
+  toggle persists across pages via the same `pinta-theme`
+  localStorage key the landing page uses.
+
+- **Phase 18 — agent role routing (multi-terminal specialization).**
+  Run multiple `/pinta` Claude Code terminals on the same project
+  and dedicate each one to a workload: `/pinta --annotate` for
+  source edits, `--test-pilot` for UAT + per-row chat, `--audit`
+  for AuditFlow runs, `--chat` for global chat / Just Ask. Flags
+  stack (`--test-pilot --audit`); no flag = generalist (current
+  behavior, claims everything). Two layers:
+
+  - **18a — skill-side filter.** SKILL.md §1.5 parses argv into
+    `$ROLES`; §3.5.0 filters each session against the role allowlist
+    before claiming. Mismatched sessions silently `continue` back to
+    the SSE stream so another terminal can pick them up.
+
+  - **18b — companion-enforced.** `POST /v1/sessions/:id/claim` now
+    accepts a `role` field; `tryClaim(id, claimerId, role)` rejects
+    cross-role claims with 403 `{error: "role mismatch",
+    expectedRole}`. Plugs the trust-model crack where an off-script
+    agent rationalizes a cross-role "rescue" — the bash filter is
+    the soft guard, the companion is the hard floor. Generalist
+    calls omit `role` and preserve original first-wins semantics.
+    `expectedSessionRole(session)` lives in `@pinta/shared`.
+
+  Side panel surfaces a 10s claim-warning when no `/pinta` terminal
+  is claiming the session's kind (`ExtensionState.armClaimWarning`).
+  See `spec/SPEC.md` §8 Phase 18.
+
+- **Phase 15 — AuditFlow module (15a + 15b).** Lighthouse-style
+  audit surface in its own side-panel tab. Five built-in
+  categories: **Security** (XSS, CSRF, `eval` / `{@html}` misuse,
+  secret leakage, `npm audit`); **Performance** (bundle entry
+  count, prod deps, sync fetches, missing lazy routes, build
+  target sanity, missing `loading="lazy"`); **Accessibility**
+  (alt text, labeled inputs, ARIA, heading hierarchy, click on
+  non-interactive, focus-visible, missing `lang`); **Mobile**
+  (viewport meta, fixed-px containers, touch-target sizing,
+  hover-only interactions, horizontal-overflow risks, mouse-only
+  drag listeners); **Cross-Browser** stub (full caniuse matrix
+  arrives with 15c). Every finding has a **Fix with agent** button
+  that composes a Pinta annotation pre-filled with check details
+  and switches to the Annotate tab. Deterministic score:
+  `(pass + warn × 0.5) / (pass + warn + fail) × 100`, info checks
+  excluded. Wire: extends `module.query.submit` with
+  `moduleId: "audit-flow"`; new `AuditCheck` / `AuditCategoryResult`
+  / `AuditRun` shapes in `@pinta/shared`. Five pure helpers + 23
+  vitest cases in `extension/src/lib/audit-flow.ts`.
+
+- **Phase 13 — Test Pilot catalog editing.** Right-click kebab on
+  any section or row for delete / add / rename / move-up / move-down
+  / "add test below". Drag-and-drop also works — grab a row's grip
+  handle on the leading edge. Inline edit on titles and expected
+  text (Enter / blur commits, Escape cancels). Edits sync to
+  `.pinta/test-docs/{docId}.md` on disk via new
+  `PUT /v1/test-docs/:docId` endpoint so the agent's `?` (detail
+  steps) flow works against rows you added yourself. User-added
+  rows mint with `USER-N` ids; SKILL.md §7.10.1b instructs the
+  agent to preserve them verbatim across regenerate. Window-level
+  dragover auto-scrolls the panel during long drags.
+
 - **Test Pilot — interactive UAT module** in its own side-panel tab.
   Import a hand-written markdown test spec or let the agent generate
   one from project context; step through the resulting catalog row by
@@ -42,7 +109,72 @@ For the architectural design behind each item, see
   button doesn't resurrect cleared annotations via the server's
   drafting-idempotency.
 
+- **Chat module (Phase 14) — three-tier inquiry surface.** Single
+  Settings toggle lights up: a global chat FAB at the bottom-right
+  corner of the side panel (the toolbar icon was promoted to a FAB
+  for consistency); an Annotate "Just Ask" checkbox in the submit
+  footer; and a per-row chat icon on every Test Pilot catalog row.
+  All three reach the same agent via a new `op: "chat"` queryComment.
+  Verbosity controlled by a `detailed_responses` module setting
+  (mirrors Test Pilot's `detailed_steps`). Threads persist:
+  `pinta-global-chat` (rolling 200-msg cap), `pinta-annotate-chats`
+  (keyed by session id), and `TestPilotTest.chat[]` inside the
+  catalog blob.
+
+- **Sequential per-annotation flow** in Annotate "Just Ask". When you
+  tick Just Ask with 2+ annotations and click Ask agent, each
+  annotation gets its own user bubble (with a target-selector chip)
+  and its own focused agent reply, in order — not one bundled "1. …
+  2. … 3. …" wall of text. The loop polls the per-batch pending flag
+  between asks so each reply lands inline before the next ask fires.
+
+- **Tester sheet export (.md + .docx)** under the Test Pilot Export
+  dropdown. **Tester sheet (.md)** embeds the agent's per-row Help
+  steps as a per-section appendix and leaves the Result column blank
+  for the external tester. **Tester sheet (.docx)** is hand-rolled
+  OOXML (via the bundled `fflate`; no new npm dep) so testers can
+  double-click and open in Word with no `pandoc` step. Round-trip
+  closes when the tester re-exports their .md with marks filled —
+  developer re-imports and Pass/Fail comes back populated.
+
+- **Standalone Test Pilot import.** Testers running Pinta in
+  standalone mode (no companion / no agent) can now import a
+  developer-shipped tester sheet via the empty-state file picker.
+  `parseTestDocMarkdown` reads both formats — results MD with Pass/
+  Fail marks AND tester-sheet MD with blank Result + Steps appendix
+  — without round-tripping through the agent.
+
+- **Test Pilot loading border on the active detail card.** The
+  rotating conic-gradient ring around the detail card while
+  `fetchDetailSteps` is in flight is now visible against the dark
+  charcoal panel (two-arc sweep over a 25%-opacity baseline pink +
+  soft drop-shadow). 3s/revolution; reduced-motion fallback is a
+  solid pink ring.
+
+- **Markdown extensions in `parseStep`.** Chat replies and detail
+  steps now render `**bold**`, `# ATX headings`, `- bulleted` /
+  `1. numbered` lists, and pipe tables — not just the prior subset
+  (inline `code`, fenced blocks, `> Note:` callouts). Long agent
+  replies stop reading as a wall of text.
+
+- **Auto-grow chat input.** ChatSheet's textarea now expands with
+  content (capped at ~6 lines, scrolls after). Switched the wrapper
+  from a pill to a rounded-rectangle for multi-line readability;
+  send button anchored to the bottom-right corner so it never
+  overlaps the caret in long drafts.
+
 ### Fixed
+
+- **Mojibake repair on agent replies (`Ã©` → `é`).** Agent replies
+  containing French / Spanish / Portuguese accents sometimes landed
+  with UTF-8 bytes decoded as Latin-1 somewhere upstream (`Accédez`
+  → `AccÃ©dez`). `repairMojibake` in `state.svelte.ts` detects the
+  telltale `0xC3 + continuation byte` signature, reinterprets the
+  string's code units as UTF-8 bytes, and decodes (`fatal: true`,
+  so it bails on garbage). Applied to chat replies (Test Pilot,
+  global, Annotate) and to detail-step bodies.
+
+
 
 - **Detailed help steps toggle now invalidates cached row detail.**
   Flipping `detailed_steps` in Settings used to leave previously-fetched

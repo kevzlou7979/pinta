@@ -80,6 +80,7 @@
   class:border-red-300={annotation.status === "error"}
   class:dark:border-red-900={annotation.status === "error"}
   class:opacity-90={annotation.status === "done"}
+  class:pinta-loading-card={annotation.status === "applying" || pending}
 >
   <div class="flex items-start gap-2">
     <!-- Status indicator (or numbered badge in imported read-only mode) -->

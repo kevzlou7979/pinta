@@ -29,6 +29,25 @@ body {
   color: theme("colors.night.text");
 }
 
+/* Phase 14.4 — Test Pilot drag-and-drop grip handles.
+ * Each section card + test row has a `.pinta-drag-handle` span at the
+ * leading edge. Default opacity-0 (kept off-screen visually) so it
+ * doesn't compete with the row's primary affordances; fades in to 0.7
+ * when the user hovers the section card OR the test row's interior.
+ * Hovering the grip itself bumps it to 1.0 for a clear "this is what
+ * I'd grab" cue. focus-visible mirrors hover for keyboard parity. */
+.pinta-section-trigger:hover .pinta-drag-handle,
+.pinta-test-row:hover ~ .pinta-drag-handle,
+.pinta-test-row:hover + .pinta-drag-handle,
+li:hover > .pinta-drag-handle,
+div:hover > .pinta-drag-handle {
+  opacity: 0.7;
+}
+.pinta-drag-handle:hover,
+.pinta-drag-handle:focus-visible {
+  opacity: 1 !important;
+}
+
 /* Phase 14 — chat bottom-sheet entrance.
  * Slides the sheet up from beneath the viewport into place. Used by
  * the Test Pilot chat panel; trigger via `animation: pinta-sheet-slide-up
@@ -63,6 +82,68 @@ body {
 .pinta-chat-dot {
   display: inline-block;
   animation: pinta-chat-dot 1.1s ease-in-out infinite;
+}
+
+/* Phase 14.2 — rotating pink border for "agent thinking" card states.
+ * A conic-gradient sweep of brand pink rotates around the card edge
+ * while the agent is processing. Applied to AnnotationCard (status
+ * "applying" or session-pending) and the Test Pilot detail card
+ * (while fetchDetailSteps is in flight). The mask trick carves out
+ * the inside so only a thin ring renders, replacing the static card
+ * border visually for the duration of the loading state. */
+@property --pinta-loader-angle {
+  syntax: "<angle>";
+  initial-value: 0deg;
+  inherits: false;
+}
+@keyframes pinta-loader-spin {
+  to { --pinta-loader-angle: 360deg; }
+}
+.pinta-loading-card {
+  position: relative;
+}
+.pinta-loading-card::before {
+  content: "";
+  position: absolute;
+  inset: -1px;
+  border-radius: inherit;
+  padding: 2px;
+  /* Two bright sweeps 180° apart over a constant baseline glow so the
+     border always reads as "active" — the prior 40°-bright / 320°-faint
+     stops were so subtle the loading state looked indistinguishable from
+     the static card border. Baseline keeps a soft pink ring visible even
+     between sweeps; the two arcs travel together at 1.6s/rev. */
+  background: conic-gradient(
+    from var(--pinta-loader-angle),
+    rgba(255, 61, 110, 0.25) 0deg,
+    #ff3d6e 70deg,
+    rgba(255, 61, 110, 0.25) 140deg,
+    rgba(255, 90, 133, 0.35) 220deg,
+    #ff5a85 260deg,
+    rgba(255, 61, 110, 0.25) 330deg,
+    rgba(255, 61, 110, 0.25) 360deg
+  );
+  -webkit-mask:
+    linear-gradient(#000 0 0) content-box,
+    linear-gradient(#000 0 0);
+          mask:
+    linear-gradient(#000 0 0) content-box,
+    linear-gradient(#000 0 0);
+  -webkit-mask-composite: xor;
+          mask-composite: exclude;
+  animation: pinta-loader-spin 3s linear infinite;
+  pointer-events: none;
+  /* Soft outer glow so the spinning ring also reads against the
+     surrounding panel background, not just the card edge. */
+  filter: drop-shadow(0 0 4px rgba(255, 61, 110, 0.35));
+}
+@media (prefers-reduced-motion: reduce) {
+  .pinta-loading-card::before {
+    animation: none;
+    /* With motion disabled, fall back to a steady solid pink ring so
+       there's still an unmistakable "loading" affordance. */
+    background: #ff3d6e;
+  }
 }
 
 /* ---------------------------------------------------------------------

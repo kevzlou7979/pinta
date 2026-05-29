@@ -164,10 +164,58 @@ const CHAT: ModuleSpec = {
   mode: "inquiry",
   sessionCheckboxLabel: "",
   sessionCheckboxHint: "",
+  settings: [
+    {
+      key: "detailed_responses",
+      type: "boolean",
+      label: "Detailed responses",
+      hint: "Off (default) — concise, tester-friendly replies. Uses fewer tokens. On — deeper technical detail (curl, payloads, env vars, ARIA names, code blocks). Slower and more expensive. Same shape as Test Pilot's \"Detailed help steps\" but covers every chat surface (global, Annotate Just Ask, Test Pilot per-row).",
+      default: false,
+    },
+    {
+      key: "redact_pii",
+      type: "boolean",
+      label: "Redact PII from page content (recommended)",
+      hint: "On (default) — strip emails, phone numbers, credit-card-shaped digit runs, US-SSN-shaped strings, and long numeric IDs from the captured outerHTML / nearbyText before sending to the agent. Replaces each match with [REDACTED:<kind>]. Token / API-key scrubbing is always on (separate pipeline). Turn off if PII is essential context for your agent's reply — e.g. \"why does this email field show jane@example.com?\" stops working when emails are redacted.",
+      default: true,
+    },
+  ],
+};
+
+/**
+ * AuditFlow — interactive module (Phase 15). Runs Lighthouse-style
+ * audits on the user's project and routes each finding into an
+ * actionable handoff: Fix-with-agent (composes a pre-filled Pinta
+ * annotation, opens the Annotate tab for review), Discuss (Phase 14
+ * chat), File issue (GitLab module). The audit is the source of work;
+ * the existing modules become sinks that consume findings.
+ *
+ * Phase 15a ships Security only + card view + Fix-with-agent.
+ * Categories 2-5 land in 15b; custom audits in 15c; cross-run
+ * fingerprint persistence in 15d; GitLab + Chat handoffs in 15e.
+ *
+ * No settings in 15a — Security is always-on, the only built-in
+ * category. 15b adds browser-target selection for Cross Browser;
+ * 15c adds custom-audit storage. Settings array stays narrow until
+ * those phases land.
+ */
+const AUDIT_FLOW: ModuleSpec = {
+  id: "audit-flow",
+  name: "AuditFlow",
+  description:
+    "Run Lighthouse-style audits on your project — Security (Phase 15a), then Performance / Accessibility / Mobile / Cross-Browser (15b). Each finding is one click from being fixed: Fix-with-agent opens the Annotate tab pre-filled with the check details, so audits become a source of work that flows into Pinta's existing edit pipeline.",
+  mode: "interactive",
+  sessionCheckboxLabel: "",
+  sessionCheckboxHint: "",
   settings: [],
 };
 
-export const BUILTIN_MODULES: ModuleSpec[] = [GITLAB_ISSUES, TEST_PILOT, CHAT];
+export const BUILTIN_MODULES: ModuleSpec[] = [
+  GITLAB_ISSUES,
+  TEST_PILOT,
+  CHAT,
+  AUDIT_FLOW,
+];
 
 export function getModuleSpec(id: string): ModuleSpec | null {
   return BUILTIN_MODULES.find((m) => m.id === id) ?? null;

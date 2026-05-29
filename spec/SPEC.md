@@ -321,7 +321,14 @@ POST   /v1/sessions/:id/claim                              → { claimerId } →
 POST   /v1/sessions/:id/annotations/:annId/status          → { status, errorMessage? }
 DELETE /v1/sessions                                        → wipe history (preserves any active drafting session)
 DELETE /v1/test-docs                                       → wipe .pinta/test-docs/ (Test Pilot, Phase 12)
+PUT    /v1/test-docs/:docId                                → { content } → rewrite .pinta/test-docs/:docId.md (Phase 13)
+PUT    /v1/test-docs/:docId/results[/:authorSlug]          → { content } → write per-author Pass/Fail sidecar (Phase 13)
+GET    /v1/test-docs/:docId/results[/:authorSlug]          → read sidecar content (Phase 13)
 ```
+
+`:authorSlug` is the lowercased + kebab-cased catalog author name
+(`[a-z0-9-]{1,64}`). When omitted, the companion picks the most
+recent sidecar so a single-tester project still round-trips cleanly.
 
 **WebSocket protocol** (extension ↔ companion)
 
@@ -1092,7 +1099,7 @@ inside the extension with a settings schema and matching agent
 instructions in the `/pinta` skill; new modules just add an entry to
 `extension/src/lib/modules.ts` plus a §7.9 / §7.10 block in the skill.
 
-Two module surface kinds:
+Three module surface kinds:
 
 - **`mode: "per-submit"`** — module ticks alongside the user's
   annotation batch and runs after the agent's source edits land
@@ -1104,6 +1111,13 @@ Two module surface kinds:
   carrying a `kind: "query"` annotation (Test Pilot). Surfaces as a
   top-level tab; carried on the wire as the new
   `module.query.submit` ClientMessage.
+- **`mode: "inquiry"`** — Phase 14 addition. Module is cross-cutting,
+  with no tab of its own; the agent answers questions without editing
+  source files. Surfaces by lighting up FABs / checkboxes / header
+  icons on other tabs when the module is enabled (Chat module lights
+  up the global header chat FAB, Annotate's "Just Ask" checkbox, and
+  the Test Pilot per-row chat icon). Carried on the wire as
+  `module.query.submit` with `op: "chat"`.
 
 **Shipped modules (v0.3.0+):**
 
@@ -1183,8 +1197,9 @@ carry secrets (e.g. future tokens) are stripped from `.pinta`
 share-file exports so they never travel between machines.
 
 **Out of scope for first cut:**
-- Per-tester sign-off / completion form on the exported catalog
-  (parked; see memory `test-pilot-signoff-spec.md`).
+- Per-tester sign-off / completion form on the exported catalog —
+  addressed by Phase 13b (tester-sheet .md / .docx export + standalone
+  local-parser import).
 - Manual catalog editing (delete / add / rename / reorder rows and
   sections) — addressed by Phase 13.
 - Custom user-authored modules (today's set is built-in only).
@@ -1192,7 +1207,7 @@ share-file exports so they never travel between machines.
 
 ---
 
-### Phase 13 — Test Pilot: catalog editing — Planned
+### Phase 13 — Test Pilot: catalog editing — Shipped
 
 Phase 12 ships a Test Pilot catalog the user can mark Pass / Fail
 against but can't edit. In practice AI-generated catalogs (from both
@@ -1253,7 +1268,19 @@ No new types, no new WS messages, no new storage keys.
 **Full implementation plan:** see parked spec memory
 `test-pilot-catalog-editing.md`.
 
-### Phase 14 — Inquiry mode: contextual + global chat — Planned
+**Tester-sheet round-trip (13b).** Layered on top: developer-side
+"Export → Tester sheet (.md / .docx)" produces a catalog dump with
+the agent's per-row Help steps embedded and the Result column blank.
+External testers (typically running standalone Pinta with no
+companion) import the .md via the empty-state file picker — a local
+JS parser (`parseTestDocMarkdown` in `extension/src/lib/test-pilot-doc.ts`)
+reconstructs the catalog + steps without round-tripping through the
+agent. .docx is hand-rolled OOXML via the bundled `fflate` zip
+helper; no new npm dependency. Round-trip closes when the tester
+re-exports the same MD with Result marks filled in; the developer
+re-imports and Pass/Fail status comes back populated.
+
+### Phase 14 — Inquiry mode: contextual + global chat — Shipped
 
 Adds *inquiry* as the third module mode alongside the existing
 *per-submit* (GitLab Issues) and *interactive* (Test Pilot). Ships
@@ -1303,9 +1330,24 @@ Pinta closes that loop and makes the agent feel like one assistant
 surfaced where it's needed, not a per-module bot.
 
 **Replaces** the Test Pilot per-row Notes textarea + `comment` field
-shipped in v0.3.2. Migration: existing `comment` strings get seeded
-as the first user-role message in the row's new `chat[]` array so
-typed notes survive the upgrade.
+that briefly existed pre-v0.3.1. Migration: existing `comment` strings
+get seeded as the first user-role message in the row's new `chat[]`
+array so typed notes survive the upgrade.
+
+**Per-module verbosity.** `chat` ships with a `detailed_responses`
+boolean setting (mirrors Test Pilot's `detailed_steps`). When off,
+the agent returns short answers; when on, agent is encouraged to
+include code snippets / step-by-step breakdowns. Single setting, all
+three surfaces honor it.
+
+**Sequential per-annotation flow.** Annotate "Just Ask" with multiple
+annotations no longer bundles them into one ask. Each annotation gets
+its own user bubble (with a target-selector chip) and its own focused
+agent reply, in order — agent answers row 1, then row 2, etc.
+Implemented as a polling `for…await` loop in `App.svelte`
+(`askAgentWithBatch`) over `sendAnnotateChatMessageForAnnotation`,
+which sets `context.annotationCount: 1` and `context.perAnnotation:
+true` per ask so the skill answers focused.
 
 **Module-mode taxonomy after this lands:**
 
@@ -1323,7 +1365,7 @@ three-tier module is the diff outlined in `chat-module-spec.md`.
 threads, chat history search, "agent proposes Pass/Fail" from reply
 analysis, page-level FAB on the user's app (side-panel only).
 
-### Phase 15 — AuditFlow module — Planned
+### Phase 15 — AuditFlow module — 15a + 15b shipped; 15c-e Planned
 
 A Lighthouse-style audit surface as a Pinta module. Module id:
 `audit-flow`, mode: `interactive` (own side-panel tab). What makes
@@ -1405,6 +1447,61 @@ spec memory `auditflow-module-spec.md`.
 (GitLab-only until those modules exist); auto-apply fixes without
 preview (opt-in setting); concurrent audit runs (single in-flight);
 "agent proposes its own audit rules" meta-feature (deferred to 15d+).
+
+---
+
+### Phase 18 — Agent role routing (multi-terminal specialization) — 18a + 18b shipped
+
+> Phases 16 (Test Pilot sign-off) and 17 (Claude Design) are spec-locked
+> in parked memory + the public roadmap timeline; their full sections in
+> this doc are still pending writeup.
+
+Today's claim model is "all `/pinta` terminals in a project hear
+every session, fastest claim wins" (SKILL.md §3.5). That's right for
+redundancy but wasteful when a user runs 4 terminals and wants each
+dedicated to a workload — Annotate work fights Test Pilot pings for
+the same agent's attention.
+
+Phase 18 adds **role flags** the user passes when starting `/pinta`.
+Each agent declares which session kinds it claims; sessions outside
+its role get silently skipped to other terminals.
+
+```
+/pinta --annotate    → base annotation submits (no chat / test-pilot / audit modules)
+/pinta --test-pilot  → modules[].id contains "test-pilot"
+/pinta --audit       → modules[].id contains "audit-flow"
+/pinta --chat        → modules[].id contains "chat"
+/pinta               → role = any (default; current behavior)
+```
+
+Flags stack: `/pinta --test-pilot --audit` claims both. At least one
+terminal must accept each kind in use, else those sessions time out
+unclaimed.
+
+**Why now:** as more modules ship (chat, audit, future inquiry verbs),
+the "one agent claims everything" pattern degrades — a long audit
+run blocks the user's next annotation submit because both go to the
+same terminal. Role routing lets a dedicated annotate agent stay
+responsive while a separate audit agent does the heavy read.
+
+**Phasing:**
+
+- **18a — shipped.** Skill-only filter. Each `/pinta` reads its CLI
+  args, filters sessions client-side before claiming. SKILL.md §1.5
+  + §3.5.0 guard. Trust model: relies on each agent honoring its
+  role.
+- **18b — shipped.** Companion-enforced role on the claim endpoint.
+  `POST /v1/sessions/:id/claim` accepts `role`; mismatches get 403
+  with `expectedRole`. Closes the trust-model gap surfaced by an
+  off-script agent rationalizing a cross-role "rescue" — see
+  `companion/src/store.ts` `tryClaim` and the `Phase 18b` test block
+  in `companion/src/store.test.ts`. Generalists (no flag) omit
+  `role` and preserve original first-wins behavior.
+
+**Out of scope for v1:** load balancing across terminals with the
+same role (first-claim-wins still applies inside a role); auto-role
+detection ("watch what this terminal does and infer its role"); UI
+in the side panel to see which terminal claimed each session.
 
 ---
 

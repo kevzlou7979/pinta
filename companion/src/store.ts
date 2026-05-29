@@ -7,7 +7,9 @@ import type {
   Session,
   SessionStatus,
   SessionProducer,
+  SessionRole,
 } from "@pinta/shared";
+import { expectedSessionRole } from "@pinta/shared";
 
 type Waiter = (session: Session) => void;
 type Listener = (session: Session) => void;
@@ -489,11 +491,26 @@ export class SessionStore {
   async tryClaim(
     sessionId: string,
     claimerId: string,
+    role: SessionRole | null = null,
   ): Promise<
     | { ok: true; session: Session }
-    | { ok: false; claimedBy: string; claimedAt: number }
+    | { ok: false; reason: "already-claimed"; claimedBy: string; claimedAt: number }
+    | { ok: false; reason: "role-mismatch"; expectedRole: SessionRole }
   > {
     const session = this.requireSession(sessionId);
+
+    // Phase 18b — companion-enforced role routing. When a terminal
+    // declares its role (via /pinta --<role>) the skill sends it on
+    // every claim. We reject mismatches outright; the agent can't
+    // "rescue" sessions outside its lane even if it tries to. Generalists
+    // (no role) fall through and the trust model continues to apply.
+    if (role) {
+      const expected = expectedSessionRole(session);
+      if (role !== expected) {
+        return { ok: false, reason: "role-mismatch", expectedRole: expected };
+      }
+    }
+
     const now = Date.now();
     const claimAge = now - (session.claimedAt ?? 0);
     const stale = !!session.claimedBy && claimAge > CLAIM_TTL_MS;
@@ -501,6 +518,7 @@ export class SessionStore {
     if (session.claimedBy && session.claimedBy !== claimerId && !stale) {
       return {
         ok: false,
+        reason: "already-claimed",
         claimedBy: session.claimedBy,
         claimedAt: session.claimedAt ?? 0,
       };

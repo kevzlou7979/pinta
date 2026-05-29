@@ -1,5 +1,10 @@
 import type {
   Annotation,
+  AnnotationTarget,
+  AuditCategoryId,
+  AuditCategoryResult,
+  AuditCheck,
+  AuditRun,
   ClientMessage,
   ImportedSession,
   ServerMessage,
@@ -31,9 +36,23 @@ import {
 import { decodePintaFile, decodePintaMarkdown } from "./pinta-file.js";
 import { uid } from "./id.js";
 import {
+  countRedactionPlaceholders,
+  redactPii,
+  scanCapturedContextForInjection,
+} from "./chat-guards.js";
+import {
   composeTestDocMarkdown as composeTestDocMarkdownPure,
+  composeTesterSheetMarkdown,
+  composeTesterSheetDocx,
   nextUserTestId as nextUserTestIdPure,
+  parseTestDocMarkdown,
 } from "./test-pilot-doc.js";
+import {
+  categoryDisplayName,
+  composeAuditFixComment,
+  computeCategoryScore,
+  ratingFromScore,
+} from "./audit-flow.js";
 
 const SELECTED_KEY = "pinta-selected-companion";
 
@@ -71,6 +90,11 @@ export type ChatMessage = {
    *  the global tier supports paste; other tiers don't populate this.
    *  Renders as a thumbnail grid below the bubble text. */
   images?: ChatImage[];
+  /** Optional annotation-target chip rendered above the bubble text.
+   *  Set by the Annotate "Just Ask" sequential-per-annotation flow so
+   *  each user bubble shows which DOM element its question is about.
+   *  Other chat surfaces (global, Test Pilot) leave this undefined. */
+  targetSelector?: string;
   /** Round-trip time in ms, set on agent messages only. Computed as
    *  `Date.now() - previousUserMessage.at` when the reply lands.
    *  Surfaced under the bubble ("12s" / "1.4m"). */
@@ -139,6 +163,132 @@ export type TestPilotPending =
  *   deployed URLs who have no project on disk.
  */
 export type AppMode = "discovering" | "connected" | "standalone";
+
+/**
+ * Repair text that was decoded as Latin-1 / Windows-1252 somewhere
+ * upstream when its bytes were actually UTF-8. Symptom seen in agent
+ * replies on Windows: French / Spanish accents render as `Ã©`, `Ã `,
+ * `Ã§`, etc. — that's the 0xC3 0xXX UTF-8 byte pair being read one
+ * byte per character.
+ *
+ * Heuristic: precheck for the telltale `Ã` + Latin-1-tail pattern.
+ * If found, reinterpret each char's low byte as a UTF-8 byte and
+ * try to decode (`fatal: true` so we bail on garbage). Only flips
+ * to the repaired text if the decode succeeds — otherwise the
+ * original is returned unchanged.
+ *
+ * Conservative on purpose: every char in the input must fit in
+ * Latin-1 (charCode ≤ 0xFF) for the round-trip to be meaningful.
+ * Mixed strings (some already-good UTF-8 + some mojibake'd) get
+ * left alone rather than corrupted further.
+ */
+/**
+ * Heuristic repair for Unicode replacement characters (U+FFFD) that
+ * leak through the agent → companion → extension pipeline when a
+ * multi-byte UTF-8 character is truncated upstream (most often the
+ * em-dash `—` losing its leading byte on Windows stdout — agent emits
+ * "row — confirm", a byte drops, decoder substitutes `�`, you see
+ * "row � confirm" in the side panel).
+ *
+ * The bad bytes are gone by the time we see the string — we can't
+ * recover the original. But we CAN observe what the agent actually
+ * tends to write: a `�` between two word characters with surrounding
+ * spaces is almost always an em-dash separator. Other patterns are
+ * left alone because guessing wrong would silently rewrite real
+ * content. Bare `�` (no spaces) also stays put.
+ *
+ * Also fires a console warning per call so the underlying transmission
+ * bug stays visible — repaired ≠ "no problem".
+ */
+function repairReplacementChars(s: string): string {
+  if (!s.includes("�")) return s;
+  // eslint-disable-next-line no-console
+  console.warn(
+    "[pinta] agent text contained replacement chars (\\uFFFD) — most likely a multi-byte UTF-8 character was truncated upstream. Attempting heuristic repair.",
+  );
+  // " — " is the only safe substitution. Spaces on both sides + word
+  // chars on either side narrow the pattern down to "punctuation
+  // separator between phrases" — the em-dash case. Multiple
+  // consecutive `�` (rare; happens when two adjacent multi-byte chars
+  // both got mangled) collapse to a single em-dash here, which is
+  // closer to the agent's likely intent than three pasted `—`s.
+  return s.replace(/(\w)\s+�+\s+(\w)/g, "$1 — $2");
+}
+
+function repairMojibake(s: string): string {
+  // 0xC3 followed by a UTF-8 continuation byte (0x80-0xBF) is the
+  // unmistakable signature of mojibake'd Latin codepoints — the
+  // leading 0xC3 always renders as the upper-case A-tilde glyph.
+  // Use code-unit hex escapes throughout so the regex carries no
+  // non-ASCII characters and the class-range syntax is unambiguous
+  // (a literal `-` at the start of a class is just a dash, not a
+  // range marker — that was the bug in the first cut of this).
+  if (!/\xC3[\x80-\xBF]/.test(s)) return s;
+  for (let i = 0; i < s.length; i++) {
+    if (s.charCodeAt(i) > 0xff) return s;
+  }
+  try {
+    const bytes = new Uint8Array(s.length);
+    for (let i = 0; i < s.length; i++) {
+      bytes[i] = s.charCodeAt(i);
+    }
+    return new TextDecoder("utf-8", { fatal: true }).decode(bytes);
+  } catch {
+    return s;
+  }
+}
+
+type ParsedChatReply = {
+  payload: { type?: string; reply?: string; [k: string]: unknown } | null;
+  replyText: string;
+  wasLooseFallback: boolean;
+};
+
+/** Lenient parser for the chat surfaces' `mark_session_done` payload.
+ *  Per SKILL.md §7.10.3 the agent should return strict JSON shaped like
+ *  `{"type":"chat","reply":"<markdown>"}` — but skill versions vary and
+ *  models occasionally wrap the envelope in a markdown code fence or
+ *  ship a bare prose answer. Rather than strand the user with "couldn't
+ *  parse," try three escalating strategies and fall back to using the
+ *  raw summary as the reply. Postel's law — show the answer, log the
+ *  protocol violation. */
+function parseAgentChatReply(summary: string): ParsedChatReply {
+  if (!summary) return { payload: null, replyText: "", wasLooseFallback: false };
+
+  const candidates: string[] = [summary];
+  const fence = summary.match(/```(?:json)?\s*([\s\S]*?)\s*```/);
+  if (fence?.[1]) candidates.push(fence[1]);
+  const firstBrace = summary.indexOf("{");
+  const lastBrace = summary.lastIndexOf("}");
+  if (firstBrace >= 0 && lastBrace > firstBrace) {
+    candidates.push(summary.slice(firstBrace, lastBrace + 1));
+  }
+
+  for (const candidate of candidates) {
+    try {
+      const parsed = JSON.parse(candidate) as ParsedChatReply["payload"];
+      if (parsed && typeof parsed.reply === "string") {
+        return {
+          payload: parsed,
+          replyText: repairReplacementChars(repairMojibake(parsed.reply)),
+          wasLooseFallback: false,
+        };
+      }
+    } catch {
+      // try next candidate
+    }
+  }
+
+  console.warn(
+    "[pinta] chat agent didn't return a parseable JSON envelope; falling back to raw summary as reply text. Check the skill version. First 200 chars:",
+    summary.slice(0, 200),
+  );
+  return {
+    payload: null,
+    replyText: repairReplacementChars(repairMojibake(summary.trim())),
+    wasLooseFallback: true,
+  };
+}
 
 /** Best-effort token-count extractor from an agent chat payload.
  *  Accepts the structured `usage.totalTokens` shape (preferred) plus
@@ -284,12 +434,24 @@ class ExtensionState {
     pendingGlobal: boolean;
     annotateBatch: Record<string, ChatMessage[]>;
     pendingAnnotateBatch: Record<string, boolean>;
+    /** Phase 14.5 (Phase D) — per-batch chat-hardening summary from
+     *  the most recent send. Surfaced by ChatSheet as a badge above
+     *  the input so the user knows the agent is reasoning over
+     *  scrubbed context. `counts` is `[REDACTED:<kind>]` occurrences
+     *  in the queryComment (token + PII patterns); `injection` is
+     *  the list of prompt-injection marker kinds detected. Cleared
+     *  on Clear chat. */
+    annotateRedactions: Record<
+      string,
+      { counts: Record<string, number>; injection: string[] }
+    >;
     error: string | null;
   }>({
     global: [],
     pendingGlobal: false,
     annotateBatch: {},
     pendingAnnotateBatch: {},
+    annotateRedactions: {},
     error: null,
   });
 
@@ -387,6 +549,7 @@ class ExtensionState {
     void this.loadStandaloneOrigins();
     void this.loadGlobalChat();
     void this.loadAnnotateChats();
+    void this.loadAuditRun();
     // Stage the legacy global catalog (if any) for the first companion
     // to claim. The actual per-project load happens inside connectTo.
     void this.readLegacyTestPilot();
@@ -723,9 +886,26 @@ class ExtensionState {
   }
 
   async importTestDoc(filename: string, content: string): Promise<void> {
+    // Standalone branch — no companion, no agent. Parse the markdown
+    // locally so external testers can open a developer-shipped tester
+    // sheet and walk through it without needing a Claude Code terminal
+    // running. Falls through to the agent-assisted path when connected
+    // because the agent's parse handles edge cases (free-form spec
+    // formats, fix-ups, deduping) that the local parser doesn't.
     if (!this.client || this.connectionStatus !== "connected") {
-      this.testPilot.error =
-        "No companion connected. Start `pinta-companion .` in your project to use Test Pilot.";
+      const parsed = parseTestDocMarkdown(filename, content);
+      if (!parsed) {
+        this.testPilot.error =
+          "Couldn't read this file — does it look like a Pinta test sheet? Expected `# Title`, `## Section`, and a `| ID | Test | Expected | Result |` table per section.";
+        return;
+      }
+      // Reuse the existing catalog's docId on re-import so any per-doc
+      // disk artifacts stay anchored.
+      if (this.testPilot.catalog?.docId) parsed.docId = this.testPilot.catalog.docId;
+      this.testPilot.catalog = parsed;
+      this.testPilot.pending = null;
+      this.testPilot.error = null;
+      void this.saveTestPilot();
       return;
     }
     // Same rationale as generateTestDoc — reuse the existing docId so a
@@ -1129,7 +1309,10 @@ class ExtensionState {
     const payloadTestId =
       typeof payload.testId === "string" ? payload.testId : null;
     const testId = payloadTestId ?? fallbackTestId ?? null;
-    const reply = typeof payload.reply === "string" ? payload.reply : "";
+    const reply =
+      typeof payload.reply === "string"
+        ? repairReplacementChars(repairMojibake(payload.reply))
+        : "";
     if (!testId || !reply) return;
     const catalog = this.testPilot.catalog;
     if (!catalog) return;
@@ -1174,35 +1357,26 @@ class ExtensionState {
     if (session.status === "done") {
       this.clearChatTimer(testId);
       const summary = session.appliedSummary ?? "";
-      try {
-        const payload = JSON.parse(summary) as {
-          type?: string;
-          [k: string]: unknown;
-        };
-        // Accept both `test-pilot-chat` (per SKILL.md §7.10.3a) and
-        // the plain `chat` shape used by the global / annotate-batch
-        // surfaces — some agents collapse to a single reply type for
-        // all chat surfaces. testId fallback covers agents that omit
-        // it from the payload (the routing layer already knows it
-        // from the queryComment).
-        if (payload.type === "test-pilot-chat" || payload.type === "chat") {
-          this.applyChatResult(payload, testId);
-        } else {
-          console.warn(
-            `[pinta] chat reply for ${testId} had unrecognized type=${String(payload.type)}; payload:`,
-            payload,
-          );
-          this.testPilot.error =
-            "Agent returned an unrecognized response. Check the skill version.";
-        }
-      } catch (err) {
+      const { payload, replyText } = parseAgentChatReply(summary);
+
+      if (payload && (payload.type === "test-pilot-chat" || payload.type === "chat")) {
+        // Strict happy path — agent followed SKILL.md §7.10.3a contract.
+        this.applyChatResult(payload, testId);
+      } else if (payload) {
+        // Parsed but wrong `type` — agent improvised. Use the payload anyway
+        // so usage/telemetry still flow through; applyChatResult already
+        // tolerates missing testId via its fallback arg.
         console.warn(
-          `[pinta] couldn't parse chat reply for ${testId}:`,
-          err,
-          "summary:",
-          summary.slice(0, 200),
+          `[pinta] chat reply for ${testId} had unrecognized type=${String(payload.type)}; using payload anyway`,
+          payload,
         );
-        this.testPilot.error = `Couldn't parse agent response: ${(err as Error).message}`;
+        this.applyChatResult(payload, testId);
+      } else if (replyText) {
+        // JSON parse failed entirely — synthesize a minimal payload from
+        // the raw text so applyChatResult can still post the message.
+        this.applyChatResult({ reply: replyText }, testId);
+      } else {
+        this.testPilot.error = "Agent returned an empty response.";
       }
       if (hadPending) delete this.testPilot.pendingChats[testId];
     } else if (session.status === "error") {
@@ -1248,14 +1422,33 @@ class ExtensionState {
         | ChatMessage[]
         | undefined;
       if (Array.isArray(raw)) {
-        this.chat.global = raw.filter(
-          (m) =>
-            m &&
-            typeof m === "object" &&
-            typeof m.id === "string" &&
-            (m.role === "user" || m.role === "agent") &&
-            typeof m.text === "string",
-        ) as ChatMessage[];
+        this.chat.global = raw
+          .filter(
+            (m) =>
+              m &&
+              typeof m === "object" &&
+              typeof m.id === "string" &&
+              (m.role === "user" || m.role === "agent") &&
+              typeof m.text === "string",
+          )
+          // Defense in depth: scrub `images[].dataUrl` entries that
+          // don't look like real data: URLs before they hit the
+          // rendering path (ChatSheet wires the dataUrl into both
+          // `<img src>` and `<a href target="_blank">`). chrome.storage
+          // isolation means we don't expect bad data in practice, but
+          // a future import / migration path could re-introduce it.
+          .map((m) => {
+            if (!Array.isArray((m as ChatMessage).images)) return m;
+            const cleaned = (m as ChatMessage).images!.filter(
+              (im) =>
+                im &&
+                typeof im.dataUrl === "string" &&
+                im.dataUrl.startsWith("data:image/"),
+            );
+            return cleaned.length > 0
+              ? { ...(m as ChatMessage), images: cleaned }
+              : { ...(m as ChatMessage), images: undefined };
+          }) as ChatMessage[];
       }
     } catch {
       // storage missing — empty thread is fine
@@ -1421,6 +1614,45 @@ class ExtensionState {
     const url = this.lastUrl ?? "";
     const detailedResponses =
       this.modules["chat"]?.settings?.detailed_responses === true;
+    // Phase 14.5 — if the chat module's redact_pii setting is on
+    // (default), scrub emails / phone / card / SSN / long-id patterns
+    // from each captured outerHTML + nearbyText entry before they go
+    // over the wire. Token / API-key scrubbing already happens at
+    // capture time (content/capture.ts:scrubInlineSecrets) and is
+    // always on.
+    const redactPiiEnabled =
+      this.modules["chat"]?.settings?.redact_pii !== false;
+    const annotationsForContext = (session?.annotations ?? []).map((a, i) => {
+      const primary = a.targets?.[0] ?? a.target;
+      const rawHtml = primary?.outerHTML?.slice(0, 600);
+      const rawNearby = primary?.nearbyText?.slice(0, 5);
+      return {
+        id: a.id,
+        index: i + 1,
+        kind: a.kind,
+        comment: a.comment,
+        selector: primary?.selector,
+        outerHTML:
+          rawHtml && redactPiiEnabled ? redactPii(rawHtml) : rawHtml,
+        nearbyText:
+          rawNearby && redactPiiEnabled
+            ? rawNearby.map((t) => redactPii(t))
+            : rawNearby,
+        url: a.url,
+      };
+    });
+    // Phase 14.5 — flag captured page content that contains prompt-
+    // injection openings so the skill can be extra cautious (and a
+    // future UI badge can warn the user). Detection only — we don't
+    // alter the payload here. The skill's §7.10.3 trust-boundary rules
+    // tell the agent to treat captured fields as data regardless.
+    const injectionMarkers = scanCapturedContextForInjection(annotationsForContext);
+    if (injectionMarkers.length > 0) {
+      // eslint-disable-next-line no-console
+      console.warn(
+        `[pinta] captured page content contained possible prompt-injection markers: ${injectionMarkers.join(", ")}. Forwarding to agent with a trust-boundary flag.`,
+      );
+    }
     const queryComment = JSON.stringify({
       op: "chat",
       batchId,
@@ -1429,17 +1661,144 @@ class ExtensionState {
         kind: "annotate-batch",
         annotationCount: session?.annotations.length ?? 0,
         pageUrl: url,
-        annotations: session?.annotations.map((a) => ({
-          id: a.id,
-          kind: a.kind,
-          comment: a.comment,
-          selector: a.target?.selector ?? a.targets?.[0]?.selector,
-          url: a.url,
-        })),
+        annotations: annotationsForContext,
         detailedResponses,
+        ...(injectionMarkers.length > 0 ? { injectionMarkers } : {}),
       },
       history: history.map((m) => ({ role: m.role, text: m.text })),
     });
+    // Phase 14.5 — stash a redaction summary for the UI badge. Counted
+    // from the final serialized payload so the numbers reflect what
+    // actually went over the wire (after both capture-time scrubbing
+    // and chat-side PII redaction). Cleared on Clear chat.
+    this.chat.annotateRedactions[batchId] = {
+      counts: countRedactionPlaceholders(queryComment),
+      injection: injectionMarkers,
+    };
+    this.chat.pendingAnnotateBatch[batchId] = true;
+    this.send({
+      type: "module.query.submit",
+      url,
+      moduleId: "chat",
+      moduleSettings: {},
+      queryComment,
+    });
+  }
+
+  /**
+   * Per-annotation variant used by the Annotate "Just Ask" auto-compose
+   * flow. Pushes a single user bubble carrying the annotation's selector
+   * chip + comment, then sends a focused chat ask scoped to JUST that
+   * annotation so the agent's reply lands inline below it rather than
+   * being one wall-of-text consolidated reply at the end of the batch.
+   *
+   * Caller is expected to drive this in a sequential loop — await this
+   * call, then poll `chat.pendingAnnotateBatch[batchId]` until it
+   * clears (the reply has landed via `handleNonTestPilotChatSync`),
+   * then issue the next annotation. That ordering is what produces the
+   * "lazy-loading" feel of bubbles + replies appearing one at a time.
+   */
+  async sendAnnotateChatMessageForAnnotation(
+    batchId: string,
+    annotation: Annotation,
+    prompt: string,
+    selector: string,
+  ): Promise<void> {
+    const text = prompt.trim();
+    if (!text) return;
+    if (this.chat.pendingAnnotateBatch[batchId]) return;
+    if (!this.client || this.connectionStatus !== "connected") {
+      this.chat.error =
+        "No companion connected. Start `pinta-companion .` in your project to use chat.";
+      return;
+    }
+    const userMsg: ChatMessage = {
+      id: crypto.randomUUID(),
+      role: "user",
+      text,
+      at: Date.now(),
+      targetSelector: selector,
+    };
+    const existing = this.chat.annotateBatch[batchId] ?? [];
+    this.chat.annotateBatch[batchId] = [...existing, userMsg];
+    this.chat.error = null;
+    void this.saveAnnotateChats();
+
+    const history = this.chat.annotateBatch[batchId].slice(
+      -ExtensionState.CHAT_HISTORY_CAP,
+    );
+    const url = this.lastUrl ?? "";
+    const detailedResponses =
+      this.modules["chat"]?.settings?.detailed_responses === true;
+    const primary = annotation.targets?.[0] ?? annotation.target;
+    const redactPiiEnabled =
+      this.modules["chat"]?.settings?.redact_pii !== false;
+    const rawHtml = primary?.outerHTML?.slice(0, 600);
+    const rawNearby = primary?.nearbyText?.slice(0, 5);
+    const scopedAnnotation = {
+      id: annotation.id,
+      index: 1,
+      kind: annotation.kind,
+      comment: annotation.comment,
+      selector: primary?.selector,
+      outerHTML:
+        rawHtml && redactPiiEnabled ? redactPii(rawHtml) : rawHtml,
+      nearbyText:
+        rawNearby && redactPiiEnabled
+          ? rawNearby.map((t) => redactPii(t))
+          : rawNearby,
+      url: annotation.url,
+    };
+    // Phase 14.5 — same injection-marker scan as the batch sender, but
+    // over the single annotation in this scoped ask. See sibling method
+    // for rationale.
+    const injectionMarkers = scanCapturedContextForInjection([scopedAnnotation]);
+    if (injectionMarkers.length > 0) {
+      // eslint-disable-next-line no-console
+      console.warn(
+        `[pinta] captured page content for ${annotation.id} contained possible prompt-injection markers: ${injectionMarkers.join(", ")}.`,
+      );
+    }
+    const queryComment = JSON.stringify({
+      op: "chat",
+      batchId,
+      prompt: text,
+      context: {
+        kind: "annotate-batch",
+        annotationCount: 1,
+        pageUrl: url,
+        // Scoped to one annotation so the agent doesn't try to address
+        // the whole batch in this reply — the next annotation will get
+        // its own focused ask in the caller's sequential loop.
+        annotations: [scopedAnnotation],
+        detailedResponses,
+        /** Hint for the skill: this ask is intentionally narrow. Reply
+         *  should focus on this annotation only; don't enumerate the
+         *  whole batch. Older skills that ignore the flag still get the
+         *  scoped `annotations` array so behavior degrades gracefully. */
+        perAnnotation: true,
+        ...(injectionMarkers.length > 0 ? { injectionMarkers } : {}),
+      },
+      history: history.map((m) => ({ role: m.role, text: m.text })),
+    });
+    // Phase 14.5 — accumulate redaction counts across the sequential
+    // per-annotation flow so the UI badge reflects the total across
+    // ALL annotations in this batch, not just the most recent one.
+    const newCounts = countRedactionPlaceholders(queryComment);
+    const existingSummary = this.chat.annotateRedactions[batchId];
+    const mergedCounts: Record<string, number> = {
+      ...(existingSummary?.counts ?? {}),
+    };
+    for (const [k, v] of Object.entries(newCounts)) {
+      mergedCounts[k] = (mergedCounts[k] ?? 0) + v;
+    }
+    const mergedInjection = [
+      ...new Set([...(existingSummary?.injection ?? []), ...injectionMarkers]),
+    ];
+    this.chat.annotateRedactions[batchId] = {
+      counts: mergedCounts,
+      injection: mergedInjection,
+    };
     this.chat.pendingAnnotateBatch[batchId] = true;
     this.send({
       type: "module.query.submit",
@@ -1469,17 +1828,7 @@ class ExtensionState {
     if (!binding) return false;
     if (session.status === "done") {
       const summary = session.appliedSummary ?? "";
-      let payload: { type?: string; reply?: string; [k: string]: unknown } | null = null;
-      try {
-        payload = JSON.parse(summary) as typeof payload;
-      } catch {
-        this.chat.error = "Couldn't parse agent response.";
-        this.pendingChatSessions.delete(session.id);
-        if (binding.kind === "global") this.chat.pendingGlobal = false;
-        else delete this.chat.pendingAnnotateBatch[binding.batchId];
-        return true;
-      }
-      const reply = typeof payload?.reply === "string" ? payload.reply : "";
+      const { payload, replyText: reply } = parseAgentChatReply(summary);
       if (reply) {
         // Telemetry: round-trip time = now - most recent user message's at.
         // Token count if the agent reported it.
@@ -1495,7 +1844,7 @@ class ExtensionState {
           text: reply,
           at: now,
           elapsedMs: lastUser ? now - lastUser.at : undefined,
-          tokens: extractTokens(payload),
+          tokens: payload ? extractTokens(payload) : undefined,
         };
         if (binding.kind === "global") {
           this.chat.global = [...this.chat.global, agentMsg];
@@ -1507,6 +1856,16 @@ class ExtensionState {
           void this.saveAnnotateChats();
         }
         this.chat.error = null;
+      } else {
+        // Truly empty response — agent returned no parseable text AND
+        // no raw fallback either, OR the summary was whitespace-only.
+        // Surface a recovery hint instead of a bare error: explains
+        // the most likely cause (agent had no answer for an
+        // image-context-needed prompt) and what to try.
+        this.chat.error =
+          "Agent returned an empty response. This usually means the prompt needed visual context the agent couldn't see " +
+          "(e.g. \"suggest icons that match this\" without a screenshot), or a tool call failed silently. " +
+          "Try rephrasing with more context (paste a screenshot, mention the file path), or restart `/pinta` if the agent seems stuck.";
       }
       this.pendingChatSessions.delete(session.id);
       if (binding.kind === "global") this.chat.pendingGlobal = false;
@@ -1534,6 +1893,7 @@ class ExtensionState {
    *  the user discards a draft session or submits it. */
   clearAnnotateChat(batchId: string): void {
     delete this.chat.annotateBatch[batchId];
+    delete this.chat.annotateRedactions[batchId];
     void this.saveAnnotateChats();
   }
 
@@ -1883,6 +2243,22 @@ class ExtensionState {
     this.commitCatalogEdit();
   }
 
+  /** Reorder a section to an absolute index. Used by drag-and-drop
+   *  (Phase 14.4) where the user drops the section at a specific
+   *  position rather than nudging it one slot at a time. Clamps
+   *  `toIdx` into valid bounds; no-op when source and destination
+   *  resolve to the same slot. */
+  reorderTestPilotSection(title: string, toIdx: number): void {
+    const found = this.findSection(title);
+    if (!found) return;
+    const sections = this.testPilot.catalog!.sections;
+    const clamped = Math.max(0, Math.min(toIdx, sections.length - 1));
+    if (found.idx === clamped) return;
+    const [moved] = sections.splice(found.idx, 1);
+    sections.splice(clamped, 0, moved!);
+    this.commitCatalogEdit();
+  }
+
   /** Append a test to the named section. Auto-mints a `USER-N` id if
    *  the caller didn't supply one. `test`/`expected` default to empty
    *  strings so the UI can drop the user into inline-edit mode. */
@@ -1901,6 +2277,120 @@ class ExtensionState {
     });
     this.commitCatalogEdit();
     return id;
+  }
+
+  /** Batch-add multiple tests to a section in one commit. Used by the
+   *  chat "Add N to spec" affordance — when the agent suggests a list
+   *  of test scenarios, the user clicks once and all of them land
+   *  under the row's section with sequential USER-N ids. One persist
+   *  + one disk push at the end (not N), so the on-disk markdown
+   *  stays atomic from the user's perspective. Returns the new ids
+   *  in insertion order, or null if the section wasn't found.
+   *
+   *  Skips entries whose test text is empty (defensive against a
+   *  loose parser returning blank rows). */
+  addTestPilotTests(
+    sectionTitle: string,
+    inputs: { test: string; expected: string }[],
+  ): string[] | null {
+    const found = this.findSection(sectionTitle);
+    if (!found) return null;
+    const ids: string[] = [];
+    // Mint ids by walking the catalog after each push so collisions
+    // are impossible even within the batch (nextUserTestId reads the
+    // current catalog state).
+    for (const input of inputs) {
+      const test = input.test.trim();
+      if (!test) continue;
+      const id = this.nextUserTestId();
+      found.section.tests.push({
+        id,
+        test,
+        expected: (input.expected ?? "").trim(),
+        status: "untested",
+      });
+      ids.push(id);
+    }
+    if (ids.length === 0) return ids;
+    this.commitCatalogEdit();
+    return ids;
+  }
+
+  /** Create a new section AND bulk-add tests into it in one commit.
+   *  Used by the chat "+ New section…" affordance — the user can
+   *  route agent suggestions into a fresh category instead of the
+   *  row's current parent. One persist + one disk push at end:
+   *  either the new section exists with all its tests, or nothing
+   *  landed (atomic from the user's POV). Empty inputs are skipped
+   *  the same way addTestPilotTests does.
+   *
+   *  Returns the new test ids in insertion order, or null if there's
+   *  no catalog loaded. An empty input array still creates the
+   *  section (the user might want to seed it manually after). */
+  addTestPilotSectionWithTests(
+    sectionTitle: string,
+    inputs: { test: string; expected: string }[],
+    /** Title of an existing section to insert the new section
+     *  immediately after. Used by the chat-suggestions flow so a new
+     *  category lands next to the section the user was asking about,
+     *  not at the bottom of the catalog. Falls back to a normal
+     *  `push` when omitted or not found. */
+    insertAfterSectionTitle?: string,
+  ): string[] | null {
+    const c = this.testPilot.catalog;
+    if (!c) return null;
+    const title = sectionTitle.trim();
+    if (!title) return null;
+    const section: TestPilotSection = { title, tests: [] };
+    const ids: string[] = [];
+    for (const input of inputs) {
+      const test = input.test.trim();
+      if (!test) continue;
+      // Walk the WHOLE catalog (including the not-yet-pushed section)
+      // for the next id so within-batch collisions stay impossible.
+      // Push the in-progress section first so its tests count.
+      const id = this.nextUserTestIdConsidering([
+        ...c.sections,
+        section,
+      ]);
+      section.tests.push({
+        id,
+        test,
+        expected: (input.expected ?? "").trim(),
+        status: "untested",
+      });
+      ids.push(id);
+    }
+    const anchorIdx = insertAfterSectionTitle
+      ? c.sections.findIndex((s) => s.title === insertAfterSectionTitle)
+      : -1;
+    if (anchorIdx >= 0) {
+      c.sections.splice(anchorIdx + 1, 0, section);
+    } else {
+      c.sections.push(section);
+    }
+    this.commitCatalogEdit();
+    return ids;
+  }
+
+  /** Like nextUserTestId() but takes an explicit sections list so the
+   *  caller can include rows that haven't been pushed into the catalog
+   *  yet (e.g. mid-batch when assembling a new section). Pure derived
+   *  computation — no state mutation. */
+  private nextUserTestIdConsidering(
+    sections: { tests: { id: string }[] }[],
+  ): string {
+    let max = 0;
+    for (const s of sections) {
+      for (const t of s.tests) {
+        const m = /^USER-(\d+)$/.exec(t.id);
+        if (m) {
+          const n = parseInt(m[1]!, 10);
+          if (n > max) max = n;
+        }
+      }
+    }
+    return `USER-${max + 1}`;
   }
 
   /** Patch a test's `test` (title) or `expected` fields. Ignores
@@ -1937,6 +2427,21 @@ class ExtensionState {
     this.commitCatalogEdit();
   }
 
+  /** Reorder a test to an absolute index within its section. Used by
+   *  drag-and-drop (Phase 14.4). Same within-section-only contract as
+   *  moveTestPilotTest. Clamps `toIdx`; no-op when source and
+   *  destination resolve to the same slot. */
+  reorderTestPilotTest(testId: string, toIdx: number): void {
+    const found = this.findTest(testId);
+    if (!found) return;
+    const tests = found.section.tests;
+    const clamped = Math.max(0, Math.min(toIdx, tests.length - 1));
+    if (found.tIdx === clamped) return;
+    const [moved] = tests.splice(found.tIdx, 1);
+    tests.splice(clamped, 0, moved!);
+    this.commitCatalogEdit();
+  }
+
   /** UI signals an inline edit is in flight so an incoming catalog
    *  payload (e.g. user re-runs Generate mid-edit) doesn't clobber it.
    *  Side panel calls this on startEditing/commitEdit/cancelEdit. */
@@ -1945,6 +2450,609 @@ class ExtensionState {
   }
 
   // ─── /Phase 13 ──────────────────────────────────────────────────────
+
+  // ─── Phase 15 — AuditFlow ───────────────────────────────────────────
+  //
+  // Interactive module like Test Pilot. The user picks categories +
+  // scope and clicks Run; the agent inspects the project and returns
+  // a structured AuditRun (overall score + per-category checks). Each
+  // check has a status (pass/warn/fail/info) and an optional fixHint
+  // that the user can route into Annotate via Fix-with-agent.
+  //
+  // 15a ships Security only; rest of categories arrive in 15b. Single
+  // in-flight run + single persisted last-completed run for v1 (no
+  // run history yet — that's 15d).
+
+  /** Persisted across panel reloads. Same shape Test Pilot uses for
+   *  its current catalog — one key, one value. */
+  private static readonly AUDIT_KEY = "pinta-audit-current-run";
+  /** Per-user category-selection preference. Survives panel reloads
+   *  so users don't re-tick boxes every run. */
+  private static readonly AUDIT_SELECTED_KEY = "pinta-audit-selected-categories";
+
+  /** Hard ceiling on a single audit run. Security category alone is
+   *  ~30s typical; full 5-category audit can run minutes. Generous so
+   *  legitimate slow runs aren't killed, bounded so a wedged agent
+   *  doesn't spin forever. Mirrors Test Pilot's generate-doc ceiling. */
+  private static readonly AUDIT_TIMEOUT_MS = 600_000;
+
+  /** How long a session can sit in "submitted" status before we
+   *  warn the user that no `/pinta` terminal is claiming it. Agents
+   *  with SSE see new sessions instantly, so 10s is a comfortable
+   *  ceiling — if no claim has arrived by then, either no `/pinta`
+   *  is running OR the user has role flags configured (Phase 18a)
+   *  that don't cover this session's kind. The warning surfaces a
+   *  concrete `/pinta --flag` hint based on session.modules so the
+   *  user knows exactly which terminal they need.
+   *
+   *  Separate from the per-flow timeouts (audit 600s, test pilot
+   *  120s, etc.) — those handle "agent claimed but stuck"; this
+   *  handles "no agent claimed at all". */
+  private static readonly CLAIM_WARNING_MS = 10_000;
+
+  /** Per-session claim-warning timers. Keyed by session.id so
+   *  multiple in-flight submissions each get their own timer.
+   *  Cleared when the session moves out of "submitted" status. */
+  private claimWarnings = new Map<string, ReturnType<typeof setTimeout>>();
+
+  audit = $state<{
+    /** Most recent completed run, or null if the user hasn't run yet. */
+    currentRun: AuditRun | null;
+    /** In-flight run metadata. Cleared on completion / error / cancel. */
+    pending: { runId: string; startedAt: number } | null;
+    /** Which categories the user wants the next run to cover. The
+     *  picker in AuditFlowTab writes to this; runAudit reads from it.
+     *  Defaults to ["security"] (the always-available v1 category).
+     *  Persists to chrome.storage so the user's selection sticks. */
+    selectedCategories: AuditCategoryId[];
+    error: string | null;
+  }>({
+    currentRun: null,
+    pending: null,
+    selectedCategories: ["security"],
+    error: null,
+  });
+
+  private auditTimer: ReturnType<typeof setTimeout> | null = null;
+
+  async loadAuditRun(): Promise<void> {
+    try {
+      const stored = await chrome.storage?.local?.get(
+        ExtensionState.AUDIT_KEY,
+      );
+      const raw = stored?.[ExtensionState.AUDIT_KEY] as AuditRun | undefined;
+      if (raw && typeof raw === "object" && Array.isArray(raw.categories)) {
+        this.audit.currentRun = raw;
+      }
+    } catch {
+      // storage missing (test env) — defaults are fine
+    }
+    // Also restore the user's category-selection preference so the
+    // empty-state checkboxes reflect what they picked last time.
+    try {
+      const stored = await chrome.storage?.local?.get(
+        ExtensionState.AUDIT_SELECTED_KEY,
+      );
+      const raw = stored?.[ExtensionState.AUDIT_SELECTED_KEY] as
+        | string[]
+        | undefined;
+      if (Array.isArray(raw) && raw.length > 0) {
+        // Only accept ids we currently recognize. New phases may add
+        // ids (cross-browser, custom audits); old stored selections
+        // that mention them are kept verbatim — runAudit just sends
+        // them on the wire and the agent decides what to do.
+        this.audit.selectedCategories = raw.filter(
+          (s): s is AuditCategoryId => typeof s === "string",
+        );
+      }
+    } catch {
+      // storage missing — defaults stand
+    }
+  }
+
+  /** Update the audit category selection. Writes to memory + persists
+   *  to chrome.storage so the empty-state checkboxes rehydrate
+   *  correctly on next panel open. Empty arrays are rejected (the
+   *  Run button is also disabled at zero — defense-in-depth). */
+  setAuditSelectedCategories(categories: AuditCategoryId[]): void {
+    if (categories.length === 0) return;
+    this.audit.selectedCategories = categories;
+    try {
+      void chrome.storage?.local?.set({
+        [ExtensionState.AUDIT_SELECTED_KEY]: categories,
+      });
+    } catch {
+      // ignore — in-memory still drives the next run this session
+    }
+  }
+
+  private async saveAuditRun(): Promise<void> {
+    try {
+      if (this.audit.currentRun) {
+        await chrome.storage?.local?.set({
+          [ExtensionState.AUDIT_KEY]: $state.snapshot(this.audit.currentRun),
+        });
+      } else {
+        await chrome.storage?.local?.remove(ExtensionState.AUDIT_KEY);
+      }
+    } catch (err) {
+      if (ExtensionState.isQuotaExceeded(err)) {
+        this.audit.error =
+          "Browser storage is full — audit results couldn't save. " +
+          "Try clearing chat history or older Test Pilot catalogs.";
+      }
+    }
+  }
+
+  /** Kick off an audit run. Reads `this.audit.selectedCategories`
+   *  for which categories to inspect (set by the picker UI), or
+   *  accepts an explicit override for ad-hoc runs / re-runs. Bails
+   *  in standalone — audits need the agent to read project files. */
+  async runAudit(categories?: AuditCategoryId[]): Promise<void> {
+    if (this.audit.pending) return;
+    if (!this.client || this.connectionStatus !== "connected") {
+      this.audit.error =
+        "No companion connected. Start `pinta-companion .` in your project to run AuditFlow.";
+      return;
+    }
+    const cats = categories ?? this.audit.selectedCategories;
+    if (cats.length === 0) {
+      this.audit.error = "Pick at least one category before running the audit.";
+      return;
+    }
+    const runId = crypto.randomUUID();
+    const startedAt = Date.now();
+    this.audit.pending = { runId, startedAt };
+    this.audit.error = null;
+    this.armAuditTimeout();
+    const url = this.lastUrl ?? "";
+    const queryComment = JSON.stringify({
+      op: "audit",
+      runId,
+      categories: cats,
+      scope: { kind: "project" }, // 15a: project scope only
+    });
+    this.send({
+      type: "module.query.submit",
+      url,
+      moduleId: "audit-flow",
+      moduleSettings: {},
+      queryComment,
+    });
+  }
+
+  /** User clicked Cancel on a stuck audit run. */
+  cancelAudit(): void {
+    if (!this.audit.pending) return;
+    this.clearAuditTimeout();
+    this.audit.pending = null;
+    this.audit.error = "Audit cancelled.";
+  }
+
+  private armAuditTimeout(): void {
+    this.clearAuditTimeout();
+    this.auditTimer = setTimeout(() => {
+      if (!this.audit.pending) return;
+      this.audit.pending = null;
+      this.audit.error =
+        "Timed out waiting for the audit to finish. " +
+        "Make sure `/pinta` is running in a Claude Code terminal for this project.";
+    }, ExtensionState.AUDIT_TIMEOUT_MS);
+  }
+
+  private clearAuditTimeout(): void {
+    if (this.auditTimer) {
+      clearTimeout(this.auditTimer);
+      this.auditTimer = null;
+    }
+  }
+
+  /** Routed from `onMessage` when a `session.synced` with
+   *  `op: "audit"` arrives. Done → applyAuditResult; error → surface
+   *  errorMessage. Lenient on the `type` field so an older /pinta
+   *  session (started before §7.11 of SKILL.md landed) doesn't brick
+   *  the audit UI when it improvises a different type string. */
+  private handleAuditSync(session: Session): void {
+    if (!this.audit.pending) return;
+    if (session.status === "done") {
+      this.clearAuditTimeout();
+      const summary = session.appliedSummary ?? "";
+      try {
+        const payload = JSON.parse(summary) as {
+          type?: string;
+          [k: string]: unknown;
+        };
+        // Accept several `type` aliases the agent might emit. If the
+        // type field is missing entirely but the payload has a
+        // categories array, accept the shape too — that's the
+        // load-bearing field and any reasonable audit response will
+        // have it. Surfaces older /pinta sessions that haven't
+        // re-loaded the new SKILL.md.
+        const AUDIT_TYPE_ALIASES = new Set([
+          "audit-flow-run",
+          "audit-run",
+          "audit-result",
+          "audit",
+          "auditFlow",
+          "audit_flow_run",
+        ]);
+        const typeIsAuditShaped =
+          typeof payload.type === "string" &&
+          AUDIT_TYPE_ALIASES.has(payload.type);
+        const shapeIsAuditShaped = Array.isArray(payload.categories);
+        if (typeIsAuditShaped || shapeIsAuditShaped) {
+          this.applyAuditResult(payload);
+        } else {
+          // Show what the agent actually returned so the user can
+          // diagnose without opening DevTools. Cap at 200 chars so
+          // long prose replies don't blow out the error banner.
+          const preview = summary.slice(0, 200);
+          this.audit.error =
+            `Agent returned an unrecognized response. ` +
+            `Restart \`/pinta\` in your project (the SKILL.md §7.11 audit handler may not have loaded yet). ` +
+            (preview ? `Agent said: "${preview}${summary.length > 200 ? "…" : ""}"` : "");
+        }
+      } catch (err) {
+        this.audit.error = `Couldn't parse agent response: ${(err as Error).message}`;
+      }
+      this.audit.pending = null;
+    } else if (session.status === "error") {
+      this.clearAuditTimeout();
+      this.audit.error = session.errorMessage ?? "Audit run failed.";
+      this.audit.pending = null;
+    }
+  }
+
+  private applyAuditResult(payload: { [k: string]: unknown }): void {
+    // Accept several legal shapes:
+    //   (a) categories: AuditCategoryResult[] — preferred (SKILL.md spec)
+    //   (b) checks: AuditCheck[] — older / improvised shape with no
+    //       category wrapping. Wrap into a single synthetic "security"
+    //       category so the UI renders.
+    let categories: AuditCategoryResult[] = [];
+    if (Array.isArray(payload.categories)) {
+      categories = payload.categories as AuditCategoryResult[];
+    } else if (Array.isArray(payload.checks)) {
+      // Synthesize a Security category from a flat checks list.
+      const checks = payload.checks as AuditCheck[];
+      categories = [
+        {
+          id: "security",
+          name: "Security",
+          score: computeCategoryScore(checks),
+          checks,
+        },
+      ];
+    }
+    // Normalize each category — fill in score if missing, ensure
+    // name + checks arrays are well-formed. Defensive against agent
+    // omissions; the UI assumes these fields are present.
+    categories = categories.map((c) => ({
+      id: c.id ?? ("security" as AuditCategoryId),
+      name: c.name ?? categoryDisplayName(c.id),
+      score: typeof c.score === "number" ? c.score : computeCategoryScore(c.checks ?? []),
+      checks: Array.isArray(c.checks) ? c.checks : [],
+    }));
+    const runId =
+      typeof payload.runId === "string"
+        ? payload.runId
+        : (this.audit.pending?.runId ?? crypto.randomUUID());
+    // Compute overall + rating client-side if missing. The agent
+    // SHOULD include both per SKILL.md, but a degraded payload
+    // shouldn't leave the UI showing 0 / "Unknown".
+    const overall =
+      typeof payload.overall === "number"
+        ? payload.overall
+        : categories.length > 0
+          ? Math.round(
+              categories.reduce((sum, c) => sum + c.score, 0) /
+                categories.length,
+            )
+          : 0;
+    const rating =
+      typeof payload.rating === "string"
+        ? payload.rating
+        : ratingFromScore(overall);
+    const run: AuditRun = {
+      runId,
+      startedAt: this.audit.pending?.startedAt ?? Date.now(),
+      completedAt: Date.now(),
+      categories,
+      overall,
+      rating,
+    };
+    this.audit.currentRun = run;
+    this.audit.error = null;
+    void this.saveAuditRun();
+  }
+
+
+  /** Wipe the audit run from in-memory + chrome.storage. The user
+   *  clicked Clear results on the AuditFlow tab. */
+  clearAuditRun(): void {
+    this.audit.currentRun = null;
+    this.audit.error = null;
+    void this.saveAuditRun();
+  }
+
+  /**
+   * Fix-with-agent handoff. Composes a Pinta annotation pre-filled
+   * from the audit check, drops it into the active draft session,
+   * and switches the side-panel active tab to "annotate" so the user
+   * can review the prefilled comment before clicking Submit. If the
+   * check carries a `suggestedAnnotation`, that wins; otherwise we
+   * synthesize a kind:"select" annotation with sourceFile / sourceLine
+   * from `where` and a composed comment.
+   *
+   * Returns the new annotation id on success so the caller can scroll
+   * to it / focus its comment. Standalone mode: silently bails (no
+   * companion to ship the eventual submit to).
+   */
+  async handoffAuditCheckToAnnotate(check: AuditCheck): Promise<string | null> {
+    if (this.appMode !== "connected") {
+      this.audit.error =
+        "Fix-with-agent needs a connected companion. Open this project in Claude Code and re-run.";
+      return null;
+    }
+    // Ensure there's a draft session to append to.
+    const url = this.lastUrl ?? "";
+    if (!this.session) {
+      await this.ensureSession(url);
+    }
+    const id = uid("ann");
+    let annotation: Annotation;
+    if (check.suggestedAnnotation) {
+      // Agent supplied a fully-formed annotation. Re-stamp id +
+      // createdAt so the existing draft's per-annotation tracking
+      // doesn't collide with whatever id the agent invented.
+      annotation = {
+        ...check.suggestedAnnotation,
+        id,
+        createdAt: Date.now(),
+        url: check.suggestedAnnotation.url ?? check.where?.url ?? url,
+      };
+    } else {
+      // Synthesize. kind:"select" with a synthetic target carrying
+      // sourceFile/sourceLine from the check — the agent's existing
+      // §4 (locate source) handles `target.sourceFile` directly even
+      // when selector is empty, so this composes cleanly without
+      // SKILL.md changes. Comment carries the full check context so
+      // the agent has enough to act.
+      const composed = composeAuditFixComment(check);
+      const target: AnnotationTarget = {
+        selector: "",
+        outerHTML: "",
+        computedStyles: {},
+        nearbyText: [],
+        boundingRect: { x: 0, y: 0, width: 0, height: 0 },
+        sourceFile: check.where?.file,
+        sourceLine: check.where?.line,
+      };
+      annotation = {
+        id,
+        createdAt: Date.now(),
+        kind: "select",
+        strokes: [],
+        color: "#FF3D6E",
+        comment: composed,
+        targets: [target],
+        target,
+        url: check.where?.url ?? url,
+      };
+    }
+    await this.addAnnotation(annotation);
+    return id;
+  }
+
+  // ─── /Phase 15 ──────────────────────────────────────────────────────
+
+  // ─── Phase 18a — claim-warning UX ──────────────────────────────────
+  //
+  // When a session sits in "submitted" status for more than
+  // CLAIM_WARNING_MS without any `/pinta` agent claiming it, surface
+  // a recovery hint to the user. Two causes covered:
+  //   1. No `/pinta` terminal is running at all.
+  //   2. Phase 18a role flags are in use and no terminal accepts
+  //      this session's kind.
+  // The message routes to the right error slot based on the session's
+  // modules so the affected surface (annotation footer / Test Pilot
+  // tab / AuditFlow tab / chat sheet) shows the hint where the user
+  // is already looking. Different from the per-flow long-timeout
+  // (audit 600s etc.) — those handle "agent picked up, then got
+  // stuck"; this handles "no agent ever picked up".
+
+  /** Identify the kind of a session from its modules[] so the warning
+   *  message can name the right `/pinta --flag` to start. */
+  private static sessionRoleKind(
+    session: Session,
+  ): "annotate" | "test-pilot" | "audit" | "chat" {
+    const ids = session.modules?.map((m) => m.id) ?? [];
+    if (ids.includes("audit-flow")) return "audit";
+    if (ids.includes("test-pilot")) return "test-pilot";
+    if (ids.includes("chat")) return "chat";
+    return "annotate";
+  }
+
+  /** Compose the unclaimed-session hint. References the role flag the
+   *  user would set on a `/pinta` terminal to handle this kind. */
+  private static composeClaimWarning(
+    kind: "annotate" | "test-pilot" | "audit" | "chat",
+  ): string {
+    const flagHint = {
+      annotate:
+        "Run `/pinta` in your project's Claude Code terminal (or `/pinta --annotate` if you've set up role routing in Phase 18a).",
+      "test-pilot":
+        "No `/pinta` terminal is claiming Test Pilot sessions. Start one with `/pinta --test-pilot` or `/pinta` (no flag = generalist).",
+      audit:
+        "No `/pinta` terminal is claiming AuditFlow sessions. Start one with `/pinta --audit` or `/pinta` (no flag = generalist).",
+      chat:
+        "No `/pinta` terminal is claiming chat sessions. Start one with `/pinta --chat` or `/pinta` (no flag = generalist).",
+    }[kind];
+    return (
+      `Session has been waiting ${ExtensionState.CLAIM_WARNING_MS / 1000}s with no agent claiming. ` +
+      `Either no \`/pinta\` is running in this project, or your role flags don't cover this session. ` +
+      flagHint
+    );
+  }
+
+  /** Arm a one-shot warning timer for a session that's just entered
+   *  "submitted" status. Idempotent — if a timer already exists for
+   *  this session.id (e.g. server re-broadcast the same submitted
+   *  state after a reconnect), the existing timer keeps ticking
+   *  instead of resetting. That way a reconnect mid-wait doesn't
+   *  extend the user's silence. */
+  private armClaimWarning(session: Session): void {
+    if (this.claimWarnings.has(session.id)) return;
+    const kind = ExtensionState.sessionRoleKind(session);
+    const timer = setTimeout(() => {
+      this.claimWarnings.delete(session.id);
+      // Only fire if the session is still our concern AND still in
+      // submitted state. Re-check from current state to avoid surfacing
+      // a stale warning after the user already cancelled / cleared.
+      const msg = ExtensionState.composeClaimWarning(kind);
+      switch (kind) {
+        case "audit":
+          if (this.audit.pending) this.audit.error = msg;
+          break;
+        case "test-pilot":
+          if (this.testPilot.pending) this.testPilot.error = msg;
+          break;
+        case "chat":
+          // Either global pending OR an annotate-batch pending counts
+          // as the chat surface being open and waiting.
+          if (
+            this.chat.pendingGlobal ||
+            Object.keys(this.chat.pendingAnnotateBatch).length > 0
+          ) {
+            this.chat.error = msg;
+          }
+          break;
+        case "annotate":
+        default:
+          if (this.session?.id === session.id && this.session.status === "submitted") {
+            this.lastError = msg;
+          }
+          break;
+      }
+    }, ExtensionState.CLAIM_WARNING_MS);
+    this.claimWarnings.set(session.id, timer);
+  }
+
+  /** Cancel a pending claim-warning. Called when the session moves
+   *  out of "submitted" (claimed → applying, or completed, or errored).
+   *  Also called when the user cancels / clears manually. */
+  private clearClaimWarning(sessionId: string): void {
+    const timer = this.claimWarnings.get(sessionId);
+    if (timer) {
+      clearTimeout(timer);
+      this.claimWarnings.delete(sessionId);
+    }
+  }
+
+  // ─── /Phase 18a ─────────────────────────────────────────────────────
+
+  /**
+   * Shared markdown renderer for a single chat thread. Used by all three
+   * chat surfaces' export buttons (global header FAB, Annotate Just
+   * Ask, Test Pilot per-row). Format is deliberately readable in any
+   * markdown viewer + pandoc-compatible so testers / reviewers can
+   * convert to PDF / DOCX without further processing.
+   *
+   * Image attachments are summarized as `[image: name]` placeholders
+   * because the base64 data URLs would balloon the file size + aren't
+   * meaningfully readable inline.
+   */
+  private renderChatMarkdown(
+    title: string,
+    context: string | null,
+    messages: ChatMessage[],
+  ): string {
+    const now = new Date();
+    const stamp = `${now.toISOString().slice(0, 10)} at ${now.toLocaleTimeString(undefined, { hour: "numeric", minute: "2-digit" })}`;
+    const userCount = messages.filter((m) => m.role === "user").length;
+    const agentCount = messages.filter((m) => m.role === "agent").length;
+    let out = `# ${title}\n\n`;
+    if (context) out += `_Context: ${context}_\n\n`;
+    out += `_Exported on ${stamp} — ${userCount} from you, ${agentCount} from the agent._\n\n`;
+    if (messages.length === 0) {
+      out += `_(empty thread)_\n`;
+      return out;
+    }
+    out += `---\n\n`;
+    for (const m of messages) {
+      const who = m.role === "user" ? "You" : "Agent";
+      const clock = new Date(m.at).toLocaleTimeString(undefined, {
+        hour: "numeric",
+        minute: "2-digit",
+      });
+      const meta: string[] = [clock];
+      if (m.elapsedMs != null) {
+        const s = m.elapsedMs / 1000;
+        meta.push(
+          s < 60 ? `${s.toFixed(s < 10 ? 1 : 0)}s` : `${(s / 60).toFixed(1)}m`,
+        );
+      }
+      if (m.tokens != null) {
+        meta.push(
+          m.tokens < 1000 ? `${m.tokens} tok` : `${(m.tokens / 1000).toFixed(1)}k tok`,
+        );
+      }
+      out += `**${who}** · ${meta.join(" · ")}\n`;
+      if (m.targetSelector) out += `> Target: \`${m.targetSelector}\`\n\n`;
+      const body = (m.text ?? "").trim();
+      if (body) out += `${body}\n\n`;
+      if (m.images && m.images.length > 0) {
+        for (let i = 0; i < m.images.length; i++) {
+          const img = m.images[i]!;
+          out += `_[image: ${img.name || `attachment-${i + 1}`}]_\n`;
+        }
+        out += `\n`;
+      }
+      out += `---\n\n`;
+    }
+    return out;
+  }
+
+  /** Tester-friendly export of the global chat thread. */
+  exportGlobalChatMarkdown(): string {
+    const ctx = this.selectedCompanion
+      ? this.selectedCompanion.projectRoot.split(/[\\/]/).filter(Boolean).pop() ?? ""
+      : "standalone";
+    return this.renderChatMarkdown(
+      "Pinta global chat",
+      `Pinta · ${ctx}`,
+      this.chat.global,
+    );
+  }
+
+  /** Export an Annotate "Just Ask" thread (per-submit-batch). */
+  exportAnnotateChatMarkdown(batchId: string): string {
+    const thread = this.chat.annotateBatch[batchId] ?? [];
+    return this.renderChatMarkdown(
+      "Pinta Annotate chat",
+      `Submit batch ${batchId}`,
+      thread,
+    );
+  }
+
+  /** Export the chat thread for a single Test Pilot row. */
+  exportTestPilotRowChatMarkdown(testId: string): string {
+    const catalog = this.testPilot.catalog;
+    if (!catalog) return this.renderChatMarkdown("Pinta Test Pilot chat", null, []);
+    for (const section of catalog.sections) {
+      for (const t of section.tests) {
+        if (t.id === testId) {
+          const ctx = `${testId} · ${section.title}${t.test ? ` · ${t.test}` : ""}`;
+          return this.renderChatMarkdown(
+            `Pinta Test Pilot chat — ${testId}`,
+            ctx,
+            t.chat ?? [],
+          );
+        }
+      }
+    }
+    return this.renderChatMarkdown(`Pinta Test Pilot chat — ${testId}`, null, []);
+  }
 
   /** Render a markdown report from the current catalog. */
   exportResults(): string {
@@ -2018,6 +3126,30 @@ class ExtensionState {
       }
     }
     return out;
+  }
+
+  /**
+   * Render the catalog as a "tester sheet" markdown — same shape as
+   * `composeTesterSheetMarkdown`, no surrounding state lookups. Result
+   * column blank, Help-generated steps embedded per test. Standalone
+   * testers (or anyone who reads the file in Word via the .docx
+   * companion export) walk through and fill in marks themselves.
+   */
+  exportTesterSheetMarkdown(): string {
+    const c = this.testPilot.catalog;
+    if (!c) return "# Test Pilot — no catalog loaded\n";
+    return composeTesterSheetMarkdown(c);
+  }
+
+  /**
+   * Render the catalog as a DOCX byte array. Caller wraps in a Blob +
+   * triggers download. Returns `null` when there's no catalog so the
+   * UI can skip the download dance.
+   */
+  exportTesterSheetDocx(): Uint8Array | null {
+    const c = this.testPilot.catalog;
+    if (!c) return null;
+    return composeTesterSheetDocx(c);
   }
 
   clearTestPilot(): void {
@@ -2857,6 +3989,20 @@ class ExtensionState {
       }
       case "session.created":
       case "session.synced": {
+        // Phase 18a — claim-warning lifecycle. Arm a 10s warning the
+        // moment a session enters "submitted" status; clear it the
+        // moment it leaves (claimed → applying, completed, errored).
+        // Single insertion point that covers every downstream
+        // session kind (annotation / Test Pilot / AuditFlow / Chat)
+        // because they all flow through this switch arm. If the
+        // warning fires, the message routes to the right error slot
+        // via sessionRoleKind based on the session's modules.
+        if (msg.session.status === "submitted") {
+          this.armClaimWarning(msg.session);
+        } else {
+          this.clearClaimWarning(msg.session.id);
+        }
+
         // Route Test Pilot query session events away from the regular
         // annotation flow so the draft isn't disturbed. Detect by EITHER
         // the pinned sessionId OR the session.modules payload — the
@@ -2886,6 +4032,18 @@ class ExtensionState {
           msg.session.modules?.some((m) => m.id === "chat") ?? false;
         if (isChatSession) {
           this.handleNonTestPilotChatSync(msg.session);
+          return;
+        }
+        // Phase 15 — AuditFlow sessions (modules: [{id: "audit-flow"}])
+        // also bypass the annotation draft. Done / error apply to the
+        // audit.* slot via handleAuditSync; intermediate statuses are
+        // no-ops here but MUST early-return for the same reason as the
+        // chat branch above (would otherwise overwrite the user's
+        // active annotation draft with the audit's ephemeral session).
+        const isAuditSession =
+          msg.session.modules?.some((m) => m.id === "audit-flow") ?? false;
+        if (isAuditSession) {
+          this.handleAuditSync(msg.session);
           return;
         }
         const isInteractiveModuleSession =
@@ -3198,7 +4356,7 @@ class ExtensionState {
           : null;
     if (!testId) return;
     const steps = Array.isArray(payload.steps)
-      ? payload.steps.map((s) => String(s))
+      ? payload.steps.map((s) => repairReplacementChars(repairMojibake(String(s))))
       : [];
     const catalog = this.testPilot.catalog;
     if (!catalog) return;

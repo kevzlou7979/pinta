@@ -39,17 +39,18 @@ export default {
           magenta: "#C72D7D",
           ink: "#1A1A1A",
         },
-        // Night palette — indigo/violet surfaces for dark mode.
-        // Mirrors the docs site so the brand reads the same on either.
+        // Night palette — neutral charcoal surfaces for dark mode.
+        // Kept hue-free so the warm brand.pink-light accent reads as the
+        // single point of color against deep charcoal.
         night: {
-          bg: "#0E0A18",
-          alt: "#161024",
-          card: "#1A1430",
-          line: "#2A2240",
-          line2: "#3A3158",
-          text: "#ECE8F7",
-          dim: "#A8A0C4",
-          mute: "#7A7299",
+          bg: "#0F0F12",
+          alt: "#15151A",
+          card: "#1A1A20",
+          line: "#2A2A33",
+          line2: "#3A3A45",
+          text: "#ECECF0",
+          dim: "#A8A8B5",
+          mute: "#7A7A88",
         },
       },
     },
