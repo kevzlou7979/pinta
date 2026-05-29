@@ -276,12 +276,15 @@
   }
 
   function onKeyDown(e: KeyboardEvent) {
-    // Cmd/Ctrl+Enter sends; bare Enter inserts a newline so testers
-    // can write multi-line questions without accidentally sending.
-    if (e.key === "Enter" && (e.metaKey || e.ctrlKey)) {
-      e.preventDefault();
-      handleSend();
-    }
+    // Enter sends; Alt+Enter (or Cmd/Ctrl+Enter as a holdover for
+    // existing muscle memory) inserts a newline. Shift+Enter also
+    // newlines so the platform default still works. IME composition
+    // is bypassed (isComposing) so picking a candidate doesn't fire
+    // a send mid-word.
+    if (e.key !== "Enter" || e.isComposing) return;
+    if (e.altKey || e.shiftKey || e.metaKey || e.ctrlKey) return;
+    e.preventDefault();
+    handleSend();
   }
 
   function handleClose() {
@@ -836,8 +839,11 @@
       {/if}
     </div>
 
-    <!-- Input bar -->
-    <div class="shrink-0 border-t border-ink-200 dark:border-night-line p-3 bg-white dark:bg-night-card">
+    <!-- Input bar. Right padding bumped a hair past p-3 so the rounded
+         wrapper + send button keep visible clearance from the side
+         panel's vertical scrollbar — without it the pink button sat
+         flush against the scrollbar at the panel's right edge. -->
+    <div class="shrink-0 border-t border-ink-200 dark:border-night-line p-3 pr-4 bg-white dark:bg-night-card">
       {#if app.connectionStatus !== "connected"}
         <p class="text-[11px] text-red-600 dark:text-red-400 mb-2 leading-snug">
           Companion disconnected. Reconnect to ask the agent.
@@ -923,7 +929,7 @@
             class="absolute right-1.5 bottom-1.5 w-9 h-9 rounded-full bg-brand-pink text-white hover:bg-brand-magenta dark:hover:bg-brand-pink-light disabled:opacity-50 inline-flex items-center justify-center transition-opacity shadow-sm"
             onclick={handleSend}
             disabled={pending || (draft.trim() === "" && attachedImages.length === 0) || app.connectionStatus !== "connected"}
-            title="Send (Cmd/Ctrl + Enter)"
+            title="Send (Enter) · Alt+Enter for newline"
             aria-label="Send message"
           >
             {#if pending}
@@ -939,7 +945,7 @@
            stays clean. -->
       {#if draft.length > 0}
         <p class="mt-1.5 px-3 text-[10px] text-ink-400 dark:text-night-mute leading-snug">
-          <kbd class="font-mono">⌘/Ctrl + Enter</kbd> to send · <kbd class="font-mono">Enter</kbd> for a new line
+          <kbd class="font-mono">Enter</kbd> to send · <kbd class="font-mono">Alt + Enter</kbd> for a new line
         </p>
       {/if}
     </div>

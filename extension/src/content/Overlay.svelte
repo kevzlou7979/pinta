@@ -82,6 +82,26 @@
     if (next !== "select") clearSelectState();
   }
 
+  // Mirror the content script's active mode back to the side panel so
+  // its toolbar pressed-state stays in sync with what's actually
+  // happening on the page. Without this, hotkey-driven changes
+  // (Alt+S / Alt+P / Alt+X) AND Esc-driven exits silently desynced
+  // the side panel: the toolbar Select button stayed lit after Esc
+  // cleared select mode on the page. chrome.runtime.sendMessage
+  // delivers to every extension page; the side panel filters by
+  // sender.tab.id so a content script on tab A doesn't update the
+  // toolbar for a side panel currently viewing tab B.
+  $effect(() => {
+    const mode = content.mode;
+    const tool = mode === "draw" ? content.tool : undefined;
+    try {
+      chrome.runtime.sendMessage({ type: "mode.changed", mode, tool });
+    } catch {
+      // Extension reloaded / context invalidated — nothing to do here;
+      // the page will re-mount its overlay on the next reload.
+    }
+  });
+
   // Listen for mode toggles + annotated-pin lifecycle from the side panel.
   onMount(() => {
     const handler = (msg: unknown) => {

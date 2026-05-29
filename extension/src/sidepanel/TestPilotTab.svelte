@@ -153,6 +153,13 @@
   //   "test-expected:ID"                     — test row expected text
   let editingField = $state<string | null>(null);
   let editingDraft = $state("");
+  // When a row is freshly added via "Add test", we drop the user into
+  // the title editor first; on commit we chain straight into the
+  // expected editor for the same row so adding an entry is a single
+  // title-then-expected flow (rather than forcing them to hunt for the
+  // kebab → "Edit expected"). Holds the new row's id while that chain
+  // is pending; cleared once expected opens (or the add is cancelled).
+  let chainExpectedId = $state<string | null>(null);
   // Kebab menus — keyed by section title (sections) or test id (rows).
   // Outside-click handler nulls them. Mutually exclusive — opening any
   // kebab closes the others.
@@ -355,6 +362,14 @@
     } else if (field.startsWith("test-title:")) {
       const id = field.slice("test-title:".length);
       app.updateTestPilotTest(id, { test: draft });
+      // Freshly-added row: chain into its expected editor so the user
+      // fills both fields in one pass instead of leaving "(no expected
+      // result yet)" behind.
+      if (chainExpectedId === id) {
+        chainExpectedId = null;
+        startEditing(`test-expected:${id}`);
+        return;
+      }
     } else if (field.startsWith("test-expected:")) {
       const id = field.slice("test-expected:".length);
       app.updateTestPilotTest(id, { expected: draft });
@@ -373,6 +388,10 @@
         }
       }
     }
+    // Bailing out of a brand-new row's title — drop the pending
+    // title→expected chain so we don't yank the user into the expected
+    // editor of a row they just abandoned.
+    chainExpectedId = null;
     editingField = null;
     app.setTestPilotEditingActive(false);
   }
@@ -429,7 +448,9 @@
     sectionKebabOpen = null;
     const newId = app.addTestPilotTest(title, { test: "", expected: "" });
     if (newId) {
-      // Drop the user into inline-edit on the new row's title.
+      // Drop the user into inline-edit on the new row's title, then
+      // chain into the expected editor on commit (see commitEdit).
+      chainExpectedId = newId;
       startEditing(`test-title:${newId}`);
       // Make sure the section is expanded so the user can see the
       // input they're about to type into.

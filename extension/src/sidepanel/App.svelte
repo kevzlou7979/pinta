@@ -284,6 +284,11 @@
     /** `imported.located` — content script reports selector-resolution count. */
     matched?: number;
     total?: number;
+    /** `mode.changed` — content script broadcasts its active mode so the
+     *  toolbar pressed-state mirrors hotkey + Esc-driven changes on the
+     *  page. `tool` is only carried when mode === "draw". */
+    mode?: ActiveMode;
+    tool?: Tool;
   };
 
   /** Selector-resolution count for the currently-viewed imported session,
@@ -477,6 +482,17 @@
     }
     if (m?.type === "imported.located" && typeof m.matched === "number" && typeof m.total === "number") {
       importedLocated = { matched: m.matched, total: m.total };
+      return;
+    }
+    if (m?.type === "mode.changed" && sender.tab?.id === activeTabId) {
+      // Sync toolbar pressed-state with the content script's actual mode.
+      // Hotkeys (Alt+S / Alt+P / Alt+X) and Esc-driven exits change mode
+      // on the page without going through `setActive`, so without this
+      // mirror the toolbar would lie about what's active.
+      if (m.mode === "select") activeTool = "select";
+      else if (m.mode === "image") activeTool = "image";
+      else if (m.mode === "draw") activeTool = (m.tool as Tool | undefined) ?? activeTool;
+      else activeTool = null;
       return;
     }
     if (m?.type === "annotation.target-selected") {

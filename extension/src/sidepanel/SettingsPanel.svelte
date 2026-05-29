@@ -329,4 +329,91 @@
       {/if}
     </div>
   </div>
+
+  <!-- Phase 18 — keybindings reference. Read-only; the bindings
+       themselves live in code (Overlay.svelte hotkey handler,
+       ChatSheet/CommentInput/ElementEditor key handlers). When the
+       bindings change, update this list AND /staging walks the same
+       inventory to flag drift. The sections mirror where the user is
+       when the shortcut applies, so they don't try Alt+S inside a
+       textarea and wonder why nothing happens. -->
+  <div class="space-y-2">
+    <h3 class="text-xs uppercase tracking-wide text-ink-500 dark:text-night-mute font-medium">
+      Keyboard shortcuts
+    </h3>
+    <div class="rounded-md border border-ink-200 dark:border-night-line bg-white dark:bg-night-card p-3 space-y-3">
+      <div>
+        <p class="text-[11px] font-semibold text-ink-900 dark:text-night-text mb-1.5">
+          On the page
+        </p>
+        <dl class="space-y-1 text-[12px]">
+          {#each [
+            { keys: ["Alt", "S"], label: "Toggle Select mode" },
+            { keys: ["Alt", "P"], label: "Toggle Draw mode" },
+            { keys: ["Alt", "X"], label: "Exit to idle" },
+            { keys: ["Esc"], label: "Cancel current annotation / exit mode" },
+          ] as kb (kb.label)}
+            <div class="flex items-center justify-between gap-3">
+              <dt class="text-ink-700 dark:text-night-dim min-w-0 flex-1 truncate">{kb.label}</dt>
+              <dd class="shrink-0 flex items-center gap-0.5">
+                {#each kb.keys as k, i (i)}
+                  {#if i > 0}<span class="text-[10px] text-ink-400 dark:text-night-mute">+</span>{/if}
+                  <kbd class="font-mono text-[10px] px-1.5 py-0.5 rounded border border-ink-200 dark:border-night-line bg-ink-50 dark:bg-night-bg text-ink-700 dark:text-night-text">{k}</kbd>
+                {/each}
+              </dd>
+            </div>
+          {/each}
+        </dl>
+      </div>
+
+      <div class="pt-2 border-t border-ink-100 dark:border-night-line">
+        <p class="text-[11px] font-semibold text-ink-900 dark:text-night-text mb-1.5">
+          Inline element editor + comment popover
+        </p>
+        <dl class="space-y-1 text-[12px]">
+          {#each [
+            { keys: ["Ctrl/⌘", "Enter"], label: "Submit comment / save edit" },
+            { keys: ["Esc"], label: "Cancel and close" },
+          ] as kb (kb.label)}
+            <div class="flex items-center justify-between gap-3">
+              <dt class="text-ink-700 dark:text-night-dim min-w-0 flex-1 truncate">{kb.label}</dt>
+              <dd class="shrink-0 flex items-center gap-0.5">
+                {#each kb.keys as k, i (i)}
+                  {#if i > 0}<span class="text-[10px] text-ink-400 dark:text-night-mute">+</span>{/if}
+                  <kbd class="font-mono text-[10px] px-1.5 py-0.5 rounded border border-ink-200 dark:border-night-line bg-ink-50 dark:bg-night-bg text-ink-700 dark:text-night-text">{k}</kbd>
+                {/each}
+              </dd>
+            </div>
+          {/each}
+        </dl>
+      </div>
+
+      <div class="pt-2 border-t border-ink-100 dark:border-night-line">
+        <p class="text-[11px] font-semibold text-ink-900 dark:text-night-text mb-1.5">
+          Chat input
+        </p>
+        <dl class="space-y-1 text-[12px]">
+          {#each [
+            { keys: ["Enter"], label: "Send message" },
+            { keys: ["Alt", "Enter"], label: "New line (Shift+Enter also works)" },
+          ] as kb (kb.label)}
+            <div class="flex items-center justify-between gap-3">
+              <dt class="text-ink-700 dark:text-night-dim min-w-0 flex-1 truncate">{kb.label}</dt>
+              <dd class="shrink-0 flex items-center gap-0.5">
+                {#each kb.keys as k, i (i)}
+                  {#if i > 0}<span class="text-[10px] text-ink-400 dark:text-night-mute">+</span>{/if}
+                  <kbd class="font-mono text-[10px] px-1.5 py-0.5 rounded border border-ink-200 dark:border-night-line bg-ink-50 dark:bg-night-bg text-ink-700 dark:text-night-text">{k}</kbd>
+                {/each}
+              </dd>
+            </div>
+          {/each}
+        </dl>
+      </div>
+
+      <p class="text-[10px] text-ink-500 dark:text-night-mute italic leading-snug pt-1">
+        Page shortcuts ignore inputs / textareas / contenteditable so
+        typing into form fields on your app never triggers them.
+      </p>
+    </div>
+  </div>
 </section>
