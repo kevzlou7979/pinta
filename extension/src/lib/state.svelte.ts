@@ -130,6 +130,14 @@ export type TestPilotTest = {
 export type TestPilotSection = {
   title: string;
   tests: TestPilotTest[];
+  /** Phase 14.7 — section-scoped chat thread. The section chat icon
+   *  opens a conversation about the whole section (all its rows are
+   *  sent to the agent as context). Persisted with the catalog via
+   *  `saveTestPilot()`, same as the per-row `TestPilotTest.chat`.
+   *  Empty / unset until the tester asks something. Keyed off the
+   *  section title for routing, so it's carried over by-title on
+   *  regen (see applyCatalogResult). */
+  chat?: ChatMessage[];
 };
 
 /** The full catalog extracted from one imported markdown doc. */
@@ -402,6 +410,19 @@ class ExtensionState {
      *  `pendingDetails` — multiple rows can have asks in flight at
      *  once, each row's send button drives its own spinner. */
     pendingChats: Record<string, { askedAt: number }>;
+    // Phase 14.6 — section-level "Suggest Test". `pendingSectionSuggest`
+    // drives the pill spinner (keyed by section title); `sectionSuggestions`
+    // holds the agent's returned scenarios for the inline checklist until
+    // the user adds or dismisses them. Both transient — NOT persisted.
+    pendingSectionSuggest: Record<string, { askedAt: number }>;
+    sectionSuggestions: Record<
+      string,
+      { test: string; expected: string; checked: boolean }[]
+    >;
+    // Phase 14.7 — in-flight section-chat asks, keyed by section title.
+    // Mirrors `pendingChats` (per-row) so a section's send button can
+    // spin independently.
+    pendingSectionChats: Record<string, { askedAt: number }>;
     error: string | null;
     /** True while the user has an inline edit (section rename, test
      *  title / expected, catalog meta) in flight. Set by the side
@@ -409,7 +430,7 @@ class ExtensionState {
      *  `applyCatalogResult` bails when this is true so a mid-edit
      *  Generate result doesn't clobber the user's in-progress text. */
     editingActive: boolean;
-  }>({ catalog: null, pending: null, pendingDetails: {}, pendingChats: {}, error: null, editingActive: false });
+  }>({ catalog: null, pending: null, pendingDetails: {}, pendingChats: {}, pendingSectionSuggest: {}, sectionSuggestions: {}, pendingSectionChats: {}, error: null, editingActive: false });
 
   /**
    * Phase 14 — cross-cutting chat state for the two non-Test-Pilot
@@ -475,6 +496,12 @@ class ExtensionState {
    *  `detailTimers` — keyed by row id so each chat ask times out on
    *  its own clock without stomping a parallel one. */
   private chatTimers = new Map<string, ReturnType<typeof setTimeout>>();
+  /** Per-section-title timers for concurrent section-chat sends (Phase
+   *  14.7). Same shape as `chatTimers` but keyed by section title. */
+  private sectionChatTimers = new Map<
+    string,
+    ReturnType<typeof setTimeout>
+  >();
   /** Hard ceiling for any single Test Pilot query (doc-parse or
    *  detail-steps). Generous — long markdown docs take a while — but
    *  bounded. After this we surface a recovery message. */
@@ -1246,6 +1273,293 @@ class ExtensionState {
     });
   }
 
+  // ────────────────────────────────────────────────────────────────
+  // Phase 14.6 — section-level "Suggest Test". The user clicks the
+  // "Suggest Test" pill on a section header; the agent inspects the
+  // spec + app for coverage gaps *within that section's theme* and
+  // returns new scenarios. They render in an inline checklist under
+  // the header; ticked rows land as USER-N tests via addTestPilotTests
+  // (the same commit path as the per-row chat "Add N" affordance).
+  //
+  // Routing key is the section title (not a testId): op "suggest-tests"
+  // with a top-level `sectionTitle`, handled by handleSuggestSync.
+  // Agent handler: SKILL.md §7.10.4.
+  // ────────────────────────────────────────────────────────────────
+
+  /** Ask the agent for additional test scenarios for one section. */
+  async requestSectionSuggestions(sectionTitle: string): Promise<void> {
+    const catalog = this.testPilot.catalog;
+    if (!catalog) return;
+    if (this.testPilot.pendingSectionSuggest[sectionTitle]) return;
+    if (!this.client || this.connectionStatus !== "connected") {
+      this.testPilot.error =
+        "No companion connected. Start `pinta-companion .` in your project to suggest tests.";
+      return;
+    }
+    const section = catalog.sections.find((s) => s.title === sectionTitle);
+    if (!section) return;
+
+    const existing = section.tests.map((t) => ({
+      id: t.id,
+      test: t.test,
+      expected: t.expected,
+    }));
+    const detailedResponses =
+      this.modules["chat"]?.settings?.detailed_responses === true;
+    const queryComment = JSON.stringify({
+      op: "suggest-tests",
+      docId: catalog.docId,
+      sectionTitle,
+      existing,
+      count: 6,
+      detailedResponses,
+    });
+    const settings = this.modules["test-pilot"]?.settings ?? {};
+
+    this.testPilot.pendingSectionSuggest[sectionTitle] = {
+      askedAt: Date.now(),
+    };
+    // Drop any stale prior suggestions so the panel doesn't flash old
+    // picks while the new request is in flight.
+    delete this.testPilot.sectionSuggestions[sectionTitle];
+    this.testPilot.error = null;
+    this.send({
+      type: "module.query.submit",
+      url: this.lastUrl ?? "",
+      moduleId: "test-pilot",
+      moduleSettings: settings,
+      queryComment,
+    });
+  }
+
+  /** Handle a suggest-tests session.synced. Parses the agent's
+   *  structured suggestion list and stashes it for the inline
+   *  checklist keyed by sectionTitle. Mirrors handleChatSync. */
+  private handleSuggestSync(session: Session, sectionTitle: string): void {
+    if (session.status === "done") {
+      delete this.testPilot.pendingSectionSuggest[sectionTitle];
+      const summary = session.appliedSummary ?? "";
+      let items: { test: string; expected: string }[] = [];
+      try {
+        const payload = JSON.parse(summary) as {
+          type?: string;
+          suggestions?: { test?: string; expected?: string }[];
+        };
+        if (Array.isArray(payload.suggestions)) {
+          items = payload.suggestions
+            .map((s) => ({
+              test: (s.test ?? "").trim(),
+              expected: (s.expected ?? "").trim(),
+            }))
+            .filter((s) => s.test.length > 0);
+        }
+      } catch {
+        // Fall back to the markdown suggestion parser (the same shape
+        // the per-row chat "Add N" button uses) so a prose reply that
+        // skipped the JSON envelope still yields rows.
+        // Malformed JSON envelope — leave items empty; the
+        // "no suggestions" branch below surfaces a retry hint.
+        items = [];
+      }
+      if (items.length === 0) {
+        this.testPilot.error = `No new test suggestions came back for "${sectionTitle}".`;
+        return;
+      }
+      this.testPilot.sectionSuggestions[sectionTitle] = items.map((it) => ({
+        ...it,
+        checked: true,
+      }));
+    } else if (session.status === "error") {
+      delete this.testPilot.pendingSectionSuggest[sectionTitle];
+      this.testPilot.error =
+        session.errorMessage ?? "Suggestion request failed.";
+    }
+  }
+
+  /** Add the ticked suggestions for a section as USER-N rows, then
+   *  clear the inline panel. */
+  addCheckedSuggestions(sectionTitle: string): void {
+    const list = this.testPilot.sectionSuggestions[sectionTitle];
+    if (!list) return;
+    const picked = list
+      .filter((s) => s.checked)
+      .map((s) => ({ test: s.test, expected: s.expected }));
+    if (picked.length > 0) {
+      this.addTestPilotTests(sectionTitle, picked);
+    }
+    delete this.testPilot.sectionSuggestions[sectionTitle];
+  }
+
+  /** Discard the inline suggestion panel without adding anything. */
+  dismissSectionSuggestions(sectionTitle: string): void {
+    delete this.testPilot.sectionSuggestions[sectionTitle];
+  }
+
+  // ────────────────────────────────────────────────────────────────
+  // Phase 14.7 — section-scoped chat. Mirrors the per-row chat
+  // (`sendChatMessage` / `handleChatSync` / `applyChatResult`) but the
+  // thread lives on `TestPilotSection.chat` and the agent gets ALL the
+  // section's rows as context (kind: "test-section"). Routed by section
+  // title since there's no testId. Agent handler: SKILL.md §7.10.3d.
+  // ────────────────────────────────────────────────────────────────
+
+  /** Send a chat prompt scoped to a whole section. */
+  async sendSectionChatMessage(
+    sectionTitle: string,
+    prompt: string,
+  ): Promise<void> {
+    const text = prompt.trim();
+    if (!text) return;
+    const catalog = this.testPilot.catalog;
+    if (!catalog) return;
+    if (this.testPilot.pendingSectionChats[sectionTitle]) return;
+    if (!this.client || this.connectionStatus !== "connected") {
+      this.testPilot.error =
+        "No companion connected. Start `pinta-companion .` in your project to use chat.";
+      return;
+    }
+    const section = catalog.sections.find((s) => s.title === sectionTitle);
+    if (!section) return;
+
+    const userMsg: ChatMessage = {
+      id: crypto.randomUUID(),
+      role: "user",
+      text,
+      at: Date.now(),
+    };
+    section.chat = [...(section.chat ?? []), userMsg];
+    this.testPilot.error = null;
+    void this.saveTestPilot();
+    this.pushResultsToCompanion();
+
+    const history = (section.chat ?? []).slice(
+      -ExtensionState.CHAT_HISTORY_CAP,
+    );
+    const detailedResponses =
+      this.modules["chat"]?.settings?.detailed_responses === true;
+    const queryComment = JSON.stringify({
+      op: "chat",
+      docId: catalog.docId,
+      sectionTitle,
+      prompt: text,
+      context: {
+        kind: "test-section",
+        sectionTitle,
+        tests: section.tests.map((t) => ({
+          id: t.id,
+          test: t.test,
+          expected: t.expected,
+          status: t.status,
+        })),
+        detailedResponses,
+      },
+      history: history.map((m) => ({ role: m.role, text: m.text })),
+    });
+    const settings = this.modules["test-pilot"]?.settings ?? {};
+    this.testPilot.pendingSectionChats[sectionTitle] = { askedAt: Date.now() };
+    this.armSectionChatTimeout(sectionTitle);
+    this.send({
+      type: "module.query.submit",
+      url: this.lastUrl ?? "",
+      moduleId: "test-pilot",
+      moduleSettings: settings,
+      queryComment,
+    });
+  }
+
+  /** Wipe a section's chat thread. Persists. */
+  clearSectionChat(sectionTitle: string): void {
+    const catalog = this.testPilot.catalog;
+    if (!catalog) return;
+    const section = catalog.sections.find((s) => s.title === sectionTitle);
+    if (section?.chat && section.chat.length > 0) {
+      delete section.chat;
+      void this.saveTestPilot();
+    }
+  }
+
+  private armSectionChatTimeout(sectionTitle: string): void {
+    this.clearSectionChatTimer(sectionTitle);
+    const t = setTimeout(() => {
+      if (!this.testPilot.pendingSectionChats[sectionTitle]) return;
+      delete this.testPilot.pendingSectionChats[sectionTitle];
+      this.sectionChatTimers.delete(sectionTitle);
+      this.testPilot.error =
+        `Timed out waiting for the agent to answer for "${sectionTitle}". ` +
+        `Make sure \`/pinta\` is running in a Claude Code terminal for this project, then try again.`;
+    }, ExtensionState.TEST_PILOT_TIMEOUT_MS);
+    this.sectionChatTimers.set(sectionTitle, t);
+  }
+
+  private clearSectionChatTimer(sectionTitle: string): void {
+    const t = this.sectionChatTimers.get(sectionTitle);
+    if (t) {
+      clearTimeout(t);
+      this.sectionChatTimers.delete(sectionTitle);
+    }
+  }
+
+  /** Routed from `onMessage` when a `session.synced` with `op: "chat"`
+   *  and no testId (a section-scoped ask) arrives. Appends the reply as
+   *  an agent-role message on the section's thread. */
+  private handleSectionChatSync(
+    session: Session,
+    sectionTitle: string,
+  ): void {
+    const hadPending = !!this.testPilot.pendingSectionChats[sectionTitle];
+    if (session.status === "done") {
+      this.clearSectionChatTimer(sectionTitle);
+      const summary = session.appliedSummary ?? "";
+      const { payload, replyText } = parseAgentChatReply(summary);
+      const reply =
+        (payload && typeof payload.reply === "string"
+          ? payload.reply
+          : replyText) ?? "";
+      if (reply) {
+        this.applySectionChatResult(sectionTitle, reply, payload ?? {});
+      } else {
+        this.testPilot.error = "Agent returned an empty response.";
+      }
+      if (hadPending)
+        delete this.testPilot.pendingSectionChats[sectionTitle];
+    } else if (session.status === "error") {
+      this.clearSectionChatTimer(sectionTitle);
+      this.testPilot.error =
+        session.errorMessage ?? `Chat query failed for "${sectionTitle}".`;
+      if (hadPending)
+        delete this.testPilot.pendingSectionChats[sectionTitle];
+    }
+  }
+
+  /** Append an agent reply to a section's chat thread + persist. */
+  private applySectionChatResult(
+    sectionTitle: string,
+    reply: string,
+    payload: { [k: string]: unknown },
+  ): void {
+    const catalog = this.testPilot.catalog;
+    if (!catalog) return;
+    const section = catalog.sections.find((s) => s.title === sectionTitle);
+    if (!section) return;
+    const cleaned = repairReplacementChars(repairMojibake(reply));
+    const lastUser = [...(section.chat ?? [])]
+      .reverse()
+      .find((m) => m.role === "user");
+    const now = Date.now();
+    const agentMsg: ChatMessage = {
+      id: crypto.randomUUID(),
+      role: "agent",
+      text: cleaned,
+      at: now,
+      elapsedMs: lastUser ? now - lastUser.at : undefined,
+      tokens: extractTokens(payload),
+    };
+    section.chat = [...(section.chat ?? []), agentMsg];
+    this.testPilot.error = null;
+    void this.saveTestPilot();
+    this.pushResultsToCompanion();
+  }
+
   /** Cancel an in-flight chat send (rarely needed in UI — single
    *  message at a time per row — but mirrors `cancelDetailFetch` for
    *  symmetry and stuck-spinner recovery). */
@@ -1401,7 +1715,8 @@ class ExtensionState {
    *  module.query.submit so multiple in-flight asks don't collide. */
   private pendingChatSessions: Map<
     string,
-    { kind: "global" } | { kind: "annotate-batch"; batchId: string }
+    | { kind: "global" }
+    | { kind: "annotate-batch"; batchId: string }
   > = new Map();
 
   /** Soft-trim helper to keep the global thread bounded. */
@@ -1815,7 +2130,9 @@ class ExtensionState {
    *  back to the right slot. */
   rememberChatSession(
     sessionId: string,
-    binding: { kind: "global" } | { kind: "annotate-batch"; batchId: string },
+    binding:
+      | { kind: "global" }
+      | { kind: "annotate-batch"; batchId: string },
   ): void {
     this.pendingChatSessions.set(sessionId, binding);
   }
@@ -2478,17 +2795,20 @@ class ExtensionState {
 
   /** How long a session can sit in "submitted" status before we
    *  warn the user that no `/pinta` terminal is claiming it. Agents
-   *  with SSE see new sessions instantly, so 10s is a comfortable
-   *  ceiling — if no claim has arrived by then, either no `/pinta`
-   *  is running OR the user has role flags configured (Phase 18a)
-   *  that don't cover this session's kind. The warning surfaces a
-   *  concrete `/pinta --flag` hint based on session.modules so the
-   *  user knows exactly which terminal they need.
+   *  with SSE see new sessions instantly, but a busy agent can be
+   *  mid-think (coalescing / running another tool) for a while before
+   *  it gets around to the claim POST, so 10s was too eager — it
+   *  surfaced the warning on perfectly healthy slow claims. 3min is a
+   *  generous ceiling that still catches the real cases: no `/pinta`
+   *  running, OR role flags (Phase 18a) that don't cover this
+   *  session's kind. The warning surfaces a concrete `/pinta --flag`
+   *  hint based on session.modules so the user knows exactly which
+   *  terminal they need.
    *
    *  Separate from the per-flow timeouts (audit 600s, test pilot
    *  120s, etc.) — those handle "agent claimed but stuck"; this
    *  handles "no agent claimed at all". */
-  private static readonly CLAIM_WARNING_MS = 10_000;
+  private static readonly CLAIM_WARNING_MS = 180_000;
 
   /** Per-session claim-warning timers. Keyed by session.id so
    *  multiple in-flight submissions each get their own timer.
@@ -2655,8 +2975,12 @@ class ExtensionState {
   private handleAuditSync(session: Session): void {
     if (!this.audit.pending) return;
     if (session.status === "done") {
-      this.clearAuditTimeout();
       const summary = session.appliedSummary ?? "";
+      // Ignore an empty "done" (multi-agent race) rather than crashing
+      // JSON.parse — keep `pending` + the timeout so a valid audit
+      // response can still land. See handleTestPilotSync for rationale.
+      if (summary.trim() === "") return;
+      this.clearAuditTimeout();
       try {
         const payload = JSON.parse(summary) as {
           type?: string;
@@ -2700,6 +3024,16 @@ class ExtensionState {
       this.clearAuditTimeout();
       this.audit.error = session.errorMessage ?? "Audit run failed.";
       this.audit.pending = null;
+    } else if (session.status === "applying") {
+      // A claim landed — the agent is now running this audit. Retract
+      // any stale "no agent claiming" warning that the 10s claim-timer
+      // fired in the race window (the timer's audit branch guards only
+      // on `audit.pending`, which stays true for the whole run, so it
+      // can surface even after a slightly-slow claim — see
+      // armClaimWarning). The only error that can be present this early
+      // in the lifecycle is that warning; parse / run-failure errors
+      // are set on `done` / `error`, which come later.
+      this.audit.error = null;
     }
   }
 
@@ -2888,8 +3222,13 @@ class ExtensionState {
       chat:
         "No `/pinta` terminal is claiming chat sessions. Start one with `/pinta --chat` or `/pinta` (no flag = generalist).",
     }[kind];
+    const secs = ExtensionState.CLAIM_WARNING_MS / 1000;
+    const waited =
+      secs >= 60
+        ? `${Math.round(secs / 60)}min`
+        : `${secs}s`;
     return (
-      `Session has been waiting ${ExtensionState.CLAIM_WARNING_MS / 1000}s with no agent claiming. ` +
+      `Session has been waiting ${waited} with no agent claiming. ` +
       `Either no \`/pinta\` is running in this project, or your role flags don't cover this session. ` +
       flagHint
     );
@@ -4063,7 +4402,32 @@ class ExtensionState {
           // singleton `pending` slot entirely.
           if (op === "chat") {
             const testId = ExtensionState.queryField(msg.session, "testId");
-            if (testId) this.handleChatSync(msg.session, testId);
+            if (testId) {
+              this.handleChatSync(msg.session, testId);
+              return;
+            }
+            // Phase 14.7 — section-scoped chat carries `sectionTitle`
+            // instead of a testId. Route by title to the section thread.
+            const sectionTitle = ExtensionState.queryField(
+              msg.session,
+              "sectionTitle",
+            );
+            if (sectionTitle) {
+              this.handleSectionChatSync(msg.session, sectionTitle);
+              return;
+            }
+            return;
+          }
+          // Phase 14.6 — section-level "Suggest Test". Routed by
+          // sectionTitle (no testId), result lands in the inline
+          // checklist via handleSuggestSync.
+          if (op === "suggest-tests") {
+            const sectionTitle = ExtensionState.queryField(
+              msg.session,
+              "sectionTitle",
+            );
+            if (sectionTitle)
+              this.handleSuggestSync(msg.session, sectionTitle);
             return;
           }
         }
@@ -4143,8 +4507,12 @@ class ExtensionState {
     const entry = this.testPilot.pendingDetails[testId];
     if (!entry) return; // already cancelled / timed out
     if (session.status === "done") {
-      this.clearDetailTimer(testId);
       const summary = session.appliedSummary ?? "";
+      // Ignore an empty "done" (multi-agent race) rather than crashing
+      // JSON.parse — keep the pending entry + timer so a valid detail
+      // response can still land. See handleTestPilotSync for rationale.
+      if (summary.trim() === "") return;
+      this.clearDetailTimer(testId);
       try {
         const payload = JSON.parse(summary) as {
           type?: string;
@@ -4176,8 +4544,17 @@ class ExtensionState {
   private handleTestPilotSync(session: Session): void {
     if (!this.testPilot.pending) return;
     if (session.status === "done") {
-      this.clearTestPilotTimeout();
       const summary = session.appliedSummary ?? "";
+      // Ignore an empty "done": a second /pinta terminal (or a
+      // generalist agent that completed the session via the generic
+      // status path) can mark it done WITHOUT the catalog JSON. Raw
+      // JSON.parse("") throws "Unexpected end of JSON input" and would
+      // clear `pending`, masking the real catalog that lands right
+      // after. Returning here (without clearing the timeout) lets the
+      // valid response still apply, or the timeout surface a clearer
+      // "is /pinta running?" message. Guards against multi-agent races.
+      if (summary.trim() === "") return;
+      this.clearTestPilotTimeout();
       try {
         const payload = JSON.parse(summary) as {
           type?: string;
@@ -4234,10 +4611,17 @@ class ExtensionState {
     // SKILL.md generate-doc rules call this out and instruct the agent
     // to preserve stable ids during in-place regen.
     const priorById = new Map<string, TestPilotTest>();
+    // Phase 14.7 — carry the section-level chat thread across regen,
+    // keyed by section title (sections have no stable id). Same policy
+    // as the per-row chat carry-over below.
+    const priorSectionChatByTitle = new Map<string, ChatMessage[]>();
     if (sameDoc) {
       for (const section of prior.sections) {
         for (const test of section.tests) {
           priorById.set(test.id, test);
+        }
+        if (section.chat && section.chat.length > 0) {
+          priorSectionChatByTitle.set(section.title, section.chat);
         }
       }
     }
@@ -4254,6 +4638,9 @@ class ExtensionState {
       importedAt: Date.now(),
       sections: sections.map((s: any) => ({
         title: String(s?.title ?? "Untitled"),
+        // Preserve the section-level chat thread across regen of the
+        // same doc (keyed by title — see priorSectionChatByTitle).
+        chat: priorSectionChatByTitle.get(String(s?.title ?? "Untitled")),
         tests: Array.isArray(s?.tests)
           ? s.tests.map((t: any) => {
               const id = String(t?.id ?? "??");

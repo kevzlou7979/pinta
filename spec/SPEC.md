@@ -1392,6 +1392,18 @@ user review + edit before save. Stored in
 appears as a checkbox alongside the four built-ins; ships with a
 "Svelte 5" seed users install in one click.
 
+**The "Svelte 5" seed = Svelte's own official skill** (locked
+2026-06-01). Rather than hand-author the seed rules, bundle Svelte's
+`svelte-core-bestpractices` markdown from `github.com/sveltejs/ai-tools`
+(releases + `tools/skills/`) — it covers runes, `$effect`, `{@html}`,
+event handling, styling, snippets, context, and legacy-avoidance — and
+run it through the same md → `AuditRule[]` step. Optional second layer:
+shell out to Svelte's `svelte-autofixer` (`npx @sveltejs/mcp`, via the
+`POST /v1/audit/run-tool` endpoint) for a deterministic live-grammar
+pass whose findings merge into the same category card. The sibling
+`svelte-code-writer` skill carries that autofixer CLI. Ref:
+`svelte.dev/docs/ai/skills`.
+
 **Lighthouse-style UI**: big circular **overall score** card at the
 top, **per-category cards** with their own ring score + finding tally,
 expand to show check rows. Card view default; table view toggle for
@@ -1502,6 +1514,90 @@ responsive while a separate audit agent does the heavy read.
 same role (first-claim-wins still applies inside a role); auto-role
 detection ("watch what this terminal does and infer its role"); UI
 in the side panel to see which terminal claimed each session.
+
+---
+
+### Phase 19 — Importable / third-party modules (Module SDK) — Planned
+
+Today every module (GitLab Issues, Test Pilot, AuditFlow, Chat, Design
+Lint) is **bundled**: a `ModuleSpec` in `extension/src/lib/modules.ts`
+plus a hardcoded handler in `skill/pinta/SKILL.md` (§7.9–7.13). The
+top of `modules.ts` says it outright — *"Modules are bundled into the
+extension; users don't upload them."* Phase 19 turns modules into a
+first-class **extension point** so third-party developers ship their
+own without forking/rebuilding Pinta. It generalizes the `.pinta/`
+import + companion-endpoint plumbing already designed for Design Lint
+and custom audits.
+
+**Module package** (`.pinta-module` — a folder/zip):
+- `module.json` — manifest: namespaced `id` (e.g. `acme.jira-sync`),
+  `name`, `version`, `author`, `description`, `mode`
+  (`per-submit` | `interactive` | `inquiry`), `settings`
+  (the existing declarative `ModuleSettingSpec[]` — string/secret/
+  boolean, rendered generically by the Settings panel), optional
+  `recommendsScreenshot`, `engines.pintaVersion`, and a `capabilities`
+  list (declared permissions — `read-files`, `run-tool:<cmd>`,
+  `network:<host>`).
+- `agent.md` — the runtime instructions the skill loads when a session
+  carries this module id (the author-written equivalent of a SKILL.md
+  §7.x handler).
+- optional `tools/` — declared companion shell-outs with arg schemas,
+  gated by capability + user consent.
+
+**Install / discovery** (reuses the Design-Lint plumbing): extension
+imports a folder/zip/URL → `POST /v1/modules` → companion extracts to
+`.pinta/modules/<id>/` (manifest validation + path-traversal guard).
+`GET /v1/modules` returns installed manifests; the extension merges
+them with `BUILTIN_MODULES` so settings forms + footer checkboxes
+render with zero bundled code. `DELETE /v1/modules/:id` uninstalls.
+
+**Run** — a new generic **SKILL.md §7.14 "imported module dispatch"**:
+when `session.modules[].id` is not a built-in, the agent loads
+`.pinta/modules/<id>/agent.md` and follows it, under the **same
+sandbox as Test Pilot/audit** (read + emit; **no** file writes, **no**
+shell, **no** network) unless the manifest declared a capability the
+user explicitly approved at import. Same `mark_session_done(JSON)`
+output contract.
+
+**v1 scope = `per-submit` modules only** (like GitLab Issues — footer
+checkbox + settings form + `agent.md`, no custom UI). `interactive` /
+`inquiry` modules own a side-panel tab/sheet (custom Svelte) and can't
+be safely imported yet — deferred, possibly via a later constrained
+"query-form → agent → markdown-result" declarative template.
+
+**Security is the load-bearing concern** — an imported module is a
+stranger writing instructions for the user's coding agent (and maybe
+shell commands). Mandatory trust gate: at import, show the full
+manifest + `agent.md` + declared capabilities and require explicit,
+per-capability consent; default-deny file-write / shell / network;
+apply the same trust-boundary rules as chat (§7.10.3 — module text and
+captured page content are *data*, never escalation). Signed modules +
+a curated registry (`pinta module add acme.jira-sync`) are a later
+trust tier; v1 is local import + explicit review. Ties into the Pro/
+marketplace question in the monetization spec.
+
+**Anthropic-compliance hard rules (never cross).** The module platform must
+not drift into a pattern Anthropic's terms forbid: (1) modules run inside the
+user's own *interactive* Claude Code (`/pinta`) — never a headless / Agent-SDK
+/ `claude -p` / cron path; (2) **bring-your-own-Claude per user** — a module
+or registry must never route multiple users through one Claude subscription or
+proxy credentials; (3) no Claude.ai OAuth. A hosted marketplace must keep each
+user on their own API key, and Pinta charges for modules, never for Claude
+access. (This is the exact line that got OpenClaw-style tools cut off from
+subscriptions in Apr 2026.)
+
+**Files to touch (when built):** `shared/src/types.ts`
+(`ModuleManifest`, `ModuleCapability`); `extension/src/lib/modules.ts`
+(merge built-in + companion-fetched manifests); a Settings import UI
+(reuse the Design-Lint zip picker); `companion/src/server.ts` +
+`store.ts` (`/v1/modules` routes + extract to `.pinta/modules/` +
+validation); `skill/pinta/SKILL.md` (§7.14 generic dispatch +
+capability gating).
+
+**Open questions:** manifest JSON vs YAML + id-collision rules;
+whether to ship a constrained interactive-UI DSL or defer entirely;
+capability-model granularity (file scope, shell allowlist, network
+hosts); registry + signing timeline; `pintaVersion` engine compat.
 
 ---
 

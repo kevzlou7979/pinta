@@ -325,6 +325,22 @@
   let downloadMenuOpen = $state(false);
   let bundleBusy = $state(false);
 
+  // Close a popover when the user presses outside it. Attach to the
+  // element that wraps BOTH the trigger and the panel, so clicking the
+  // trigger (to toggle) isn't treated as an outside press. Capture-phase
+  // pointerdown so it fires before the item buttons' own click handlers.
+  function clickOutside(node: HTMLElement, onOutside: () => void) {
+    function handle(e: PointerEvent) {
+      if (!node.contains(e.target as Node)) onOutside();
+    }
+    document.addEventListener("pointerdown", handle, true);
+    return {
+      destroy() {
+        document.removeEventListener("pointerdown", handle, true);
+      },
+    };
+  }
+
   // Export-as-.pinta state — opens a small inline form when the user
   // picks "Share file (.pinta)" from the download menu. Author + accent
   // persist between exports via chrome.storage.local so they don't have
@@ -1367,7 +1383,7 @@
   >
     <div class="flex items-center gap-2 min-w-0">
       <img src="/icons/icon-32.png" alt="" width="24" height="24" />
-      <div class="min-w-0 relative">
+      <div class="min-w-0 relative" use:clickOutside={() => (projectMenuOpen = false)}>
         <h1 class="font-semibold text-sm dark:text-night-text">Pinta</h1>
         {#if app.selectedCompanion}
           <button
@@ -2074,9 +2090,7 @@
     class="border-t border-ink-200 p-3 bg-white dark:border-night-line dark:bg-night-card space-y-2"
     class:hidden={showAssociatePrompt ||
       app.viewingSettings ||
-      (activeTab === "test-pilot" &&
-        app.moduleReady("test-pilot") &&
-        !app.viewingImportedId)}
+      (activeTab !== "annotate" && !app.viewingImportedId)}
   >
     {#if app.viewingImportedId}
       {@const impFooter = app.importedSessions.find((s) => s.id === app.viewingImportedId)}
@@ -2388,7 +2402,7 @@
     {/if}
 
     {#snippet downloadDropdown()}
-      <div class="relative">
+      <div class="relative" use:clickOutside={() => (downloadMenuOpen = false)}>
         <button
           type="button"
           class="h-full rounded-md border border-ink-300 bg-white text-ink-700 text-sm font-medium px-3 hover:bg-ink-50 dark:border-night-line dark:bg-night-alt dark:text-night-dim dark:hover:bg-night-line dark:hover:text-night-text inline-flex items-center gap-1"

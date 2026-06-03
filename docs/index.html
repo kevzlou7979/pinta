@@ -495,6 +495,22 @@
     .feature p { margin: 0; color: var(--ink-dim); font-size: 14px; line-height: 1.6; }
     @media (max-width: 580px) { .features { grid-template-columns: 1fr; } }
 
+    /* Features pagination — keeps the grid compact (6 per page). */
+    .feature.pg-hide { display: none; }
+    .features-pager {
+      display: flex; justify-content: center; align-items: center; gap: 14px;
+      margin-top: 28px;
+    }
+    .features-pager button {
+      font: inherit; color: var(--ink-dim);
+      background: var(--paper); border: 1px solid var(--line);
+      border-radius: var(--radius); padding: 8px 16px; cursor: pointer;
+      transition: border-color .2s ease, color .2s ease, transform .2s ease;
+    }
+    .features-pager button:hover:not(:disabled) { border-color: var(--line-strong); color: var(--ink); transform: translateY(-1px); }
+    .features-pager button:disabled { opacity: .4; cursor: default; }
+    .features-pager .pager-status { font-size: 14px; color: var(--ink-mute); min-width: 84px; text-align: center; }
+
     /* ---------- MODULES ----------
        Built-in modules section. Two cards side-by-side with custom
        per-module accent colors, oversized animated icons, and gentle
@@ -534,6 +550,8 @@
     .module:hover::before { opacity: 1; }
     .module--gitlab { --module-accent: rgba(252,109,38,0.18); }
     .module--testpilot { --module-accent: rgba(140,80,220,0.18); }
+    .module--auditflow { --module-accent: rgba(20,184,166,0.18); }
+    .module--chat { --module-accent: rgba(59,130,246,0.18); }
 
     .module-icon {
       width: 72px; height: 72px;
@@ -559,6 +577,22 @@
     [data-theme="dark"] .module--testpilot .module-icon {
       background: linear-gradient(135deg, rgba(124,58,237,0.28), rgba(124,58,237,0.08));
       color: #d8b4fe;
+    }
+    .module--auditflow .module-icon {
+      background: linear-gradient(135deg, #e0f7f1, #cdeee2);
+      color: #0d8a6a;
+    }
+    .module--chat .module-icon {
+      background: linear-gradient(135deg, #e0eaff, #cfddff);
+      color: #2563eb;
+    }
+    [data-theme="dark"] .module--auditflow .module-icon {
+      background: linear-gradient(135deg, rgba(20,184,166,0.28), rgba(20,184,166,0.08));
+      color: #6ee7c7;
+    }
+    [data-theme="dark"] .module--chat .module-icon {
+      background: linear-gradient(135deg, rgba(59,130,246,0.28), rgba(59,130,246,0.08));
+      color: #93c5fd;
     }
 
     /* Flask icon — wiggles + spawns a bubble that drifts up on hover. */
@@ -635,6 +669,53 @@
       100% { opacity: 0; transform: scale(1); }
     }
 
+    /* AuditFlow icon — a thin scan-line sweeps top→bottom over the shield. */
+    .audit-scan {
+      position: absolute;
+      left: 14%; right: 14%;
+      top: 14%;
+      height: 2px;
+      border-radius: 2px;
+      background: linear-gradient(90deg, transparent, currentColor 25%, currentColor 75%, transparent);
+      opacity: 0;
+      pointer-events: none;
+    }
+    .module:hover .audit-scan {
+      animation: module-audit-scan 1.6s ease-in-out infinite;
+    }
+    @keyframes module-audit-scan {
+      0%   { transform: translateY(0); opacity: 0; }
+      18%  { opacity: 0.9; }
+      62%  { transform: translateY(38px); opacity: 0.9; }
+      100% { transform: translateY(52px); opacity: 0; }
+    }
+
+    /* Chat icon — three typing dots pulse inside the speech bubble. */
+    .chat-dots {
+      position: absolute;
+      left: 50%; top: 50%;
+      transform: translate(-50%, -55%);
+      display: inline-flex;
+      gap: 4px;
+      pointer-events: none;
+    }
+    .chat-dots span {
+      width: 5px; height: 5px;
+      border-radius: 50%;
+      background: currentColor;
+      opacity: 0;
+    }
+    .module:hover .chat-dots span {
+      animation: module-chat-dots 1.4s ease-in-out infinite;
+    }
+    .module:hover .chat-dots span:nth-child(2) { animation-delay: 0.18s; }
+    .module:hover .chat-dots span:nth-child(3) { animation-delay: 0.36s; }
+    @keyframes module-chat-dots {
+      0%, 60%, 100% { opacity: 0; transform: translateY(0); }
+      20%            { opacity: 1; transform: translateY(-3px); }
+      40%            { opacity: 0.5; transform: translateY(0); }
+    }
+
     .module-meta {
       display: flex; align-items: center; gap: 10px;
       flex-wrap: wrap;
@@ -664,6 +745,10 @@
     .module--testpilot .module-mode { background: #f5ecff; color: #6b21a8; border-color: rgba(124,58,237,0.25); }
     [data-theme="dark"] .module--gitlab .module-mode { background: rgba(232,83,31,0.18); color: #ffb38a; border-color: rgba(232,83,31,0.32); }
     [data-theme="dark"] .module--testpilot .module-mode { background: rgba(124,58,237,0.18); color: #d8b4fe; border-color: rgba(124,58,237,0.32); }
+    .module--auditflow .module-mode { background: #e0f7f1; color: #0d6a52; border-color: rgba(13,138,106,0.25); }
+    .module--chat .module-mode { background: #e0eaff; color: #1d4ed8; border-color: rgba(59,130,246,0.25); }
+    [data-theme="dark"] .module--auditflow .module-mode { background: rgba(20,184,166,0.18); color: #6ee7c7; border-color: rgba(20,184,166,0.32); }
+    [data-theme="dark"] .module--chat .module-mode { background: rgba(59,130,246,0.18); color: #93c5fd; border-color: rgba(59,130,246,0.32); }
 
     .module-desc {
       margin: 0 0 16px;
@@ -694,6 +779,8 @@
     }
     .module--gitlab .module-list li::before { background: #e8531f; }
     .module--testpilot .module-list li::before { background: #7c3aed; }
+    .module--auditflow .module-list li::before { background: #10b981; }
+    .module--chat .module-list li::before { background: #3b82f6; }
     [data-theme="dark"] .module-list li { color: var(--ink); }
 
     /* Reveal-on-load entrance for the modules section. Fires once per
@@ -1862,7 +1949,7 @@
         <p class="sub">
           Modules ride along on a session or run interactively from their
           own tab — tick a checkbox, grant whatever setup the module
-          needs once, and the agent handles the rest. Two ship with v0.3.x;
+          needs once, and the agent handles the rest. Four ship with v0.3.x;
           more on the way.
         </p>
       </div>
@@ -1926,6 +2013,61 @@
             <li>Inline <strong>Details</strong> checkbox — short tester-friendly steps or deep technical context per Re-ask</li>
             <li>Steps render with inline <code>code</code>, fenced blocks (Prism syntax-highlighted), and <code>&gt; Note:</code> callouts</li>
             <li>Export the catalog as markdown for sharing or <code>pandoc</code> → PDF</li>
+          </ul>
+        </article>
+        <article class="module module--auditflow">
+          <div class="module-icon">
+            <!-- Shield + check glyph. Scan line sweeps across on hover. -->
+            <svg class="shield-svg" width="36" height="36" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+              <path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z" />
+              <polyline points="9 12 12 15 16 10" />
+            </svg>
+            <span class="audit-scan" aria-hidden="true"></span>
+          </div>
+          <div class="module-meta">
+            <h3>AuditFlow</h3>
+            <span class="module-mode">Interactive</span>
+          </div>
+          <p class="module-desc">
+            Lighthouse-style audits inside Pinta — five built-ins
+            (security, performance, accessibility, mobile, cross-browser)
+            plus user-defined custom checks. Every finding is one click
+            from <strong>Fix with agent</strong>, which routes straight
+            through Annotate.
+          </p>
+          <ul class="module-list">
+            <li>Five built-in audits — security, performance, accessibility, mobile, cross-browser</li>
+            <li>Define your own audits with a markdown spec — same format the built-ins use</li>
+            <li>Per-finding <strong>Fix with agent</strong> creates an annotation pre-loaded with selector + evidence</li>
+            <li>Pass/fail summary per audit, re-run on demand, results persist per project</li>
+          </ul>
+        </article>
+        <article class="module module--chat">
+          <div class="module-icon">
+            <!-- Speech bubble. Three typing dots pulse inside on hover. -->
+            <svg class="bubble-svg" width="36" height="36" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+              <path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z" />
+            </svg>
+            <span class="chat-dots" aria-hidden="true">
+              <span></span><span></span><span></span>
+            </span>
+          </div>
+          <div class="module-meta">
+            <h3>Chat</h3>
+            <span class="module-mode">Always-on</span>
+          </div>
+          <p class="module-desc">
+            Three-tier chat that follows you across Pinta. A global tab
+            for free-form questions, a <strong>Just Ask</strong> on every
+            Annotate session, and per-row chat on Test Pilot — one wire,
+            one UI, three entry points. Threads attach selector,
+            screenshot, and surrounding context automatically.
+          </p>
+          <ul class="module-list">
+            <li>Global header tab — ask anything about the project, threads persist per workspace</li>
+            <li><strong>Just Ask</strong> on any Annotate session for a quick clarification before submitting</li>
+            <li>Per-row chat on Test Pilot — drill into a specific test without leaving the catalog</li>
+            <li>Auto-attaches the right context: selector, outerHTML, screenshot, current module state</li>
           </ul>
         </article>
       </div>
@@ -2247,6 +2389,9 @@ npx pinta-companion .
         <a href="privacy.html">Privacy</a>
       </div>
     </div>
+    <div class="container" style="margin-top:14px;font-size:12px;opacity:0.6;line-height:1.5;">
+      Pinta is <strong>bring-your-own-Claude</strong> — it runs as a skill inside your own interactive Claude Code terminal and never proxies, stores, or shares Anthropic credentials. You use your own Claude account under Anthropic&rsquo;s terms; heavy or automated workloads belong on API billing.
+    </div>
   </footer>
 
   <script>
@@ -2313,6 +2458,49 @@ npx pinta-companion .
       }, { rootMargin: '0px 0px -8% 0px', threshold: 0.12 });
 
       document.querySelectorAll('.reveal').forEach(function (el) { io.observe(el); });
+    })();
+
+    // ---------- Features pagination ----------
+    (function () {
+      var PAGE_SIZE = 6;
+      var grid = document.querySelector('.features');
+      if (!grid) return;
+      var cards = Array.prototype.slice.call(grid.querySelectorAll('.feature'));
+      if (cards.length <= PAGE_SIZE) return;
+      var pages = Math.ceil(cards.length / PAGE_SIZE);
+      var page = 0;
+
+      var pager = document.createElement('div');
+      pager.className = 'features-pager';
+      var prev = document.createElement('button');
+      prev.type = 'button'; prev.textContent = '← Prev';
+      var status = document.createElement('span');
+      status.className = 'pager-status';
+      var next = document.createElement('button');
+      next.type = 'button'; next.textContent = 'Next →';
+      pager.appendChild(prev); pager.appendChild(status); pager.appendChild(next);
+      grid.insertAdjacentElement('afterend', pager);
+
+      function render() {
+        var start = page * PAGE_SIZE;
+        cards.forEach(function (c, i) {
+          var show = i >= start && i < start + PAGE_SIZE;
+          c.classList.toggle('pg-hide', !show);
+          // Cards on later pages never scroll into view, so the reveal
+          // observer won't fire for them — force the revealed state.
+          if (show) c.classList.add('is-visible');
+        });
+        status.textContent = 'Page ' + (page + 1) + ' / ' + pages;
+        prev.disabled = page === 0;
+        next.disabled = page === pages - 1;
+      }
+      prev.addEventListener('click', function () {
+        if (page > 0) { page--; render(); document.getElementById('features').scrollIntoView({ behavior: 'smooth', block: 'start' }); }
+      });
+      next.addEventListener('click', function () {
+        if (page < pages - 1) { page++; render(); document.getElementById('features').scrollIntoView({ behavior: 'smooth', block: 'start' }); }
+      });
+      render();
     })();
 
     // ---------- Hero typewriter ----------

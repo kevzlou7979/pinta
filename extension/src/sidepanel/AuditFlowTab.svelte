@@ -124,31 +124,37 @@
      *  Cross-Browser pre-implementation so the user can see it's
      *  on the roadmap without picking it. */
     soon?: boolean;
-    /** Short tooltip describing what the category checks. */
+    /** Short dot-separated keyword line shown under the title. */
+    keywords: string;
+    /** Full sentence used as the row's hover tooltip. */
     blurb: string;
   };
   const PICKER_CATEGORIES: PickerCategory[] = [
     {
       id: "security",
       label: "Security",
+      keywords: "XSS · CSRF · secrets · {@html} · deps",
       blurb:
         "XSS, CSRF, secret leakage, eval / {@html} misuse, dependency advisories.",
     },
     {
       id: "performance",
       label: "Performance",
+      keywords: "Bundle · hotspots · lazy-load · blocking",
       blurb:
         "Bundle size, runtime hotspots, lazy-load opportunities, render-blocking resources.",
     },
     {
       id: "accessibility",
       label: "Accessibility",
+      keywords: "ARIA · alt · focus · labels · contrast",
       blurb:
         "ARIA misuse, missing alt text, focus order, label associations, color contrast.",
     },
     {
       id: "mobile",
       label: "Mobile",
+      keywords: "Viewport · touch targets · overflow",
       blurb:
         "Viewport meta, touch-target sizing, horizontal-scroll regressions, modal overlap on small viewports.",
     },
@@ -156,6 +162,7 @@
       id: "cross-browser",
       label: "Cross-Browser",
       soon: true,
+      keywords: "caniuse + browserslist",
       blurb:
         "CSS / JS features unsupported in target browsers via caniuse + browserslist. Coming in a later patch — needs the browser-target picker UI.",
     },
@@ -270,30 +277,34 @@
           independently — turn on what's relevant to skip the rest.
         </p>
       </div>
-      <div class="space-y-1.5">
+      {#snippet catIcon(id: AuditCategoryId)}
+        {#if id === "security"}
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/></svg>
+        {:else if id === "performance"}
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2"/></svg>
+        {:else if id === "accessibility"}
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="4" r="1.6"/><path d="M5 8h14"/><path d="M12 8v6"/><path d="m9 21 3-7 3 7"/></svg>
+        {:else if id === "mobile"}
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="6" y="2" width="12" height="20" rx="2"/><path d="M11 18h2"/></svg>
+        {:else}
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="10"/><path d="M2 12h20"/><path d="M12 2a15.3 15.3 0 0 1 4 10 15.3 15.3 0 0 1-4 10 15.3 15.3 0 0 1-4-10 15.3 15.3 0 0 1 4-10z"/></svg>
+        {/if}
+      {/snippet}
+      <div class="divide-y divide-ink-100 dark:divide-night-line -mx-1">
         {#each PICKER_CATEGORIES as cat (cat.id)}
           {@const picked = isCategorySelected(cat.id) && !cat.soon}
-          <label
-            class="flex items-start gap-2 text-[12px] leading-snug select-none rounded-md px-2 py-1.5 transition-colors"
-            class:cursor-pointer={!cat.soon}
-            class:cursor-not-allowed={cat.soon}
-            class:opacity-60={cat.soon}
-            class:hover:bg-ink-50={!cat.soon}
-            class:dark:hover:bg-night-alt={!cat.soon}
-          >
-            <input
-              type="checkbox"
-              class="mt-0.5 accent-brand-pink shrink-0"
-              checked={picked}
-              disabled={cat.soon}
-              onchange={(e) =>
-                toggleCategoryPick(
-                  cat.id,
-                  (e.currentTarget as HTMLInputElement).checked,
-                )}
-            />
-            <span class="flex-1">
-              <span class="font-semibold text-ink-900 dark:text-night-text inline-flex items-center gap-1.5">
+          <div class="flex items-center gap-3 px-1 py-2.5" class:opacity-60={cat.soon} title={cat.blurb}>
+            <span
+              class="shrink-0"
+              class:text-brand-pink={!cat.soon}
+              class:dark:text-brand-pink-light={!cat.soon}
+              class:text-ink-400={cat.soon}
+              class:dark:text-night-mute={cat.soon}
+            >
+              {@render catIcon(cat.id)}
+            </span>
+            <span class="flex-1 min-w-0">
+              <span class="font-bold text-[13px] text-ink-900 dark:text-night-text inline-flex items-center gap-1.5">
                 {cat.label}
                 {#if cat.soon}
                   <span class="inline-flex items-center text-[9px] uppercase tracking-wider font-bold text-ink-500 dark:text-night-mute bg-ink-100 dark:bg-night-alt border border-ink-300 dark:border-night-line rounded-full px-1.5 py-0.5">
@@ -301,11 +312,28 @@
                   </span>
                 {/if}
               </span>
-              <span class="block text-[11px] text-ink-600 dark:text-night-dim mt-0.5">
-                {cat.blurb}
+              <span class="block text-[11px] text-ink-500 dark:text-night-mute mt-0.5 truncate">
+                {cat.keywords}
               </span>
             </span>
-          </label>
+            <button
+              type="button"
+              role="switch"
+              aria-checked={picked}
+              aria-label={`Toggle ${cat.label}`}
+              disabled={cat.soon}
+              onclick={() => toggleCategoryPick(cat.id, !picked)}
+              class="relative shrink-0 w-10 h-6 rounded-full transition-colors disabled:cursor-not-allowed"
+              class:bg-brand-pink={picked}
+              class:bg-ink-200={!picked}
+              class:dark:bg-night-line={!picked}
+            >
+              <span
+                class="absolute top-0.5 left-0.5 w-5 h-5 rounded-full bg-white shadow transition-transform"
+                class:translate-x-4={picked}
+              ></span>
+            </button>
+          </div>
         {/each}
       </div>
       <button
@@ -334,8 +362,17 @@
   {/if}
 
   {#if app.audit.error}
-    <div class="rounded-md border border-red-300 bg-red-50 dark:border-red-800/50 dark:bg-red-950/30 p-2 text-[12px] text-red-700 dark:text-red-300 leading-snug">
-      {app.audit.error}
+    <div class="flex items-start gap-2 rounded-md border border-red-300 bg-red-50 dark:border-red-800/50 dark:bg-red-950/30 p-2 text-[12px] text-red-700 dark:text-red-300 leading-snug">
+      <p class="flex-1 min-w-0 break-words">{app.audit.error}</p>
+      <button
+        type="button"
+        class="shrink-0 text-red-500 hover:text-red-700 dark:text-red-400 dark:hover:text-red-200 leading-none px-1"
+        onclick={() => (app.audit.error = null)}
+        aria-label="Dismiss error"
+        title="Dismiss"
+      >
+        ✕
+      </button>
     </div>
   {/if}
 

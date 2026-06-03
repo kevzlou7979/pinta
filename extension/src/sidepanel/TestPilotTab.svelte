@@ -909,8 +909,17 @@
 {:else if app.testPilot.error && !app.testPilot.catalog}
   <!-- ERROR state (no catalog yet) ---------------------------------- -->
   <section class="space-y-3 p-3">
-    <div class="rounded-md border border-red-300 bg-red-50 dark:border-red-800/50 dark:bg-red-950/30 p-3 text-[12px] text-red-700 dark:text-red-300 leading-snug">
-      {app.testPilot.error}
+    <div class="rounded-md border border-red-300 bg-red-50 dark:border-red-800/50 dark:bg-red-950/30 p-3 text-[12px] text-red-700 dark:text-red-300 leading-snug flex items-start gap-2">
+      <span class="flex-1 min-w-0">{app.testPilot.error}</span>
+      <button
+        type="button"
+        class="shrink-0 text-red-500 hover:text-red-700 dark:text-red-400 dark:hover:text-red-200 leading-none px-1"
+        onclick={() => (app.testPilot.error = null)}
+        aria-label="Dismiss error"
+        title="Dismiss"
+      >
+        ✕
+      </button>
     </div>
     <button
       type="button"
@@ -1097,8 +1106,17 @@
           </button>
         </div>
       {:else if app.testPilot.error}
-        <div class="rounded-md border border-red-300 bg-red-50 dark:border-red-800/50 dark:bg-red-950/30 p-2 text-[12px] text-red-700 dark:text-red-300 leading-snug">
-          {app.testPilot.error}
+        <div class="rounded-md border border-red-300 bg-red-50 dark:border-red-800/50 dark:bg-red-950/30 p-2 text-[12px] text-red-700 dark:text-red-300 leading-snug flex items-start gap-2">
+          <span class="flex-1 min-w-0">{app.testPilot.error}</span>
+          <button
+            type="button"
+            class="shrink-0 text-red-500 hover:text-red-700 dark:text-red-400 dark:hover:text-red-200 leading-none px-1"
+            onclick={() => (app.testPilot.error = null)}
+            aria-label="Dismiss error"
+            title="Dismiss"
+          >
+            ✕
+          </button>
         </div>
       {:else if test.detail}
         <!-- Timeline of steps -->
@@ -1531,8 +1549,17 @@
     </div>
 
     {#if app.testPilot.error}
-      <div class="rounded-md border border-red-300 bg-red-50 dark:border-red-800/50 dark:bg-red-950/30 p-2.5 text-[12px] text-red-700 dark:text-red-300 leading-snug">
-        {app.testPilot.error}
+      <div class="rounded-md border border-red-300 bg-red-50 dark:border-red-800/50 dark:bg-red-950/30 p-2.5 text-[12px] text-red-700 dark:text-red-300 leading-snug flex items-start gap-2">
+        <span class="flex-1 min-w-0">{app.testPilot.error}</span>
+        <button
+          type="button"
+          class="shrink-0 text-red-500 hover:text-red-700 dark:text-red-400 dark:hover:text-red-200 leading-none px-1"
+          onclick={() => (app.testPilot.error = null)}
+          aria-label="Dismiss error"
+          title="Dismiss"
+        >
+          ✕
+        </button>
       </div>
     {/if}
 
@@ -1732,18 +1759,30 @@
                 <button
                   type="button"
                   data-pinta-kebab-trigger
-                  class="shrink-0 w-7 h-7 inline-flex items-center justify-center rounded-full text-ink-500 dark:text-night-dim hover:text-ink-900 dark:hover:text-night-text hover:bg-ink-100 dark:hover:bg-night-line"
+                  class="shrink-0 w-7 h-7 inline-flex items-center justify-center rounded-full hover:bg-ink-100 dark:hover:bg-night-line"
+                  class:text-brand-pink={!!app.testPilot.pendingSectionSuggest[section.title]}
+                  class:dark:text-brand-pink-light={!!app.testPilot.pendingSectionSuggest[section.title]}
+                  class:text-ink-500={!app.testPilot.pendingSectionSuggest[section.title]}
+                  class:dark:text-night-dim={!app.testPilot.pendingSectionSuggest[section.title]}
+                  class:hover:text-ink-900={!app.testPilot.pendingSectionSuggest[section.title]}
+                  class:dark:hover:text-night-text={!app.testPilot.pendingSectionSuggest[section.title]}
                   onclick={() => toggleSectionKebab(section.title)}
                   aria-haspopup="menu"
                   aria-expanded={sectionKebabOpen === section.title}
                   aria-label="Section actions"
-                  title="Section actions"
+                  title={app.testPilot.pendingSectionSuggest[section.title]
+                    ? "Suggesting tests…"
+                    : "Section actions"}
                 >
-                  <svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
-                    <circle cx="12" cy="5" r="1.6" />
-                    <circle cx="12" cy="12" r="1.6" />
-                    <circle cx="12" cy="19" r="1.6" />
-                  </svg>
+                  {#if app.testPilot.pendingSectionSuggest[section.title]}
+                    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="animate-spin" aria-hidden="true"><path d="M21 12a9 9 0 1 1-6.219-8.56"/></svg>
+                  {:else}
+                    <svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
+                      <circle cx="12" cy="5" r="1.6" />
+                      <circle cx="12" cy="12" r="1.6" />
+                      <circle cx="12" cy="19" r="1.6" />
+                    </svg>
+                  {/if}
                 </button>
                 {#if sectionKebabOpen === section.title}
                   <div
@@ -1768,6 +1807,16 @@
                     >
                       <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>
                       Add test below
+                    </button>
+                    <button
+                      type="button"
+                      class="w-full flex items-center gap-2 px-3 py-1.5 text-[12px] text-ink-700 dark:text-night-dim hover:bg-ink-50 dark:hover:bg-night-alt hover:text-ink-900 dark:hover:text-night-text disabled:opacity-40 disabled:cursor-not-allowed disabled:hover:bg-transparent disabled:hover:text-ink-700 dark:disabled:hover:text-night-dim"
+                      onclick={() => { app.requestSectionSuggestions(section.title); sectionKebabOpen = null; }}
+                      disabled={!!app.testPilot.pendingSectionSuggest[section.title]}
+                      role="menuitem"
+                    >
+                      <svg width="12" height="12" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M12 3l1.9 4.6L18.5 9.5 13.9 11.4 12 16l-1.9-4.6L5.5 9.5l4.6-1.9z"/></svg>
+                      {app.testPilot.pendingSectionSuggest[section.title] ? "Suggesting…" : "Suggest tests"}
                     </button>
                     <div class="my-1 border-t border-ink-100 dark:border-night-line"></div>
                     <button
@@ -1805,6 +1854,65 @@
               {/if}
             </div>
           </div>
+          <!-- Phase 14.6 — inline suggestion checklist. Renders when the
+               agent has returned scenarios for this section; the tester
+               ticks which to add as USER-N rows. Shows regardless of the
+               collapse state so a fresh suggestion is never hidden. -->
+          {#if (app.testPilot.sectionSuggestions[section.title]?.length ?? 0) > 0}
+            {@const suggestions = app.testPilot.sectionSuggestions[section.title] ?? []}
+            {@const checkedCount = suggestions.filter((s) => s.checked).length}
+            <div class="border-t border-brand-pink/30 dark:border-brand-pink-light/30 bg-brand-pink/5 dark:bg-brand-pink-light/5 px-3 py-2.5">
+              <div class="flex items-center justify-between mb-2">
+                <span class="text-[11px] font-semibold text-brand-pink dark:text-brand-pink-light inline-flex items-center gap-1">
+                  <svg width="12" height="12" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M12 3l1.9 4.6L18.5 9.5 13.9 11.4 12 16l-1.9-4.6L5.5 9.5l4.6-1.9z"/></svg>
+                  Suggested tests ({suggestions.length})
+                </span>
+                <button
+                  type="button"
+                  class="text-[11px] text-ink-500 dark:text-night-mute hover:text-ink-800 dark:hover:text-night-text"
+                  onclick={() => app.dismissSectionSuggestions(section.title)}
+                >Dismiss</button>
+              </div>
+              <ul class="space-y-1">
+                {#each suggestions as sug (sug.test)}
+                  <li>
+                    <button
+                      type="button"
+                      class="w-full flex items-start gap-2 text-left rounded px-1 py-1 hover:bg-brand-pink/10 dark:hover:bg-brand-pink-light/10"
+                      onclick={() => (sug.checked = !sug.checked)}
+                      aria-pressed={sug.checked}
+                    >
+                      <span
+                        class="mt-0.5 shrink-0 w-4 h-4 inline-flex items-center justify-center rounded border {sug.checked
+                          ? 'bg-brand-pink dark:bg-brand-pink-light border-brand-pink dark:border-brand-pink-light text-white dark:text-night-bg'
+                          : 'border-ink-300 dark:border-night-line bg-white dark:bg-night-alt'}"
+                      >
+                        {#if sug.checked}
+                          <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"/></svg>
+                        {/if}
+                      </span>
+                      <span class="min-w-0 flex-1">
+                        <span class="block text-[12px] font-semibold text-ink-900 dark:text-night-text leading-snug">{sug.test}</span>
+                        {#if sug.expected}
+                          <span class="block text-[11px] text-ink-500 dark:text-night-mute leading-snug">{sug.expected}</span>
+                        {/if}
+                      </span>
+                    </button>
+                  </li>
+                {/each}
+              </ul>
+              <div class="flex items-center gap-2 mt-2.5">
+                <button
+                  type="button"
+                  class="inline-flex items-center gap-1 rounded-md bg-brand-pink dark:bg-brand-pink-light text-white dark:text-night-bg text-[11px] font-semibold px-2.5 py-1 disabled:opacity-50 disabled:cursor-not-allowed hover:opacity-90"
+                  onclick={() => app.addCheckedSuggestions(section.title)}
+                  disabled={checkedCount === 0}
+                >
+                  Add selected ({checkedCount})
+                </button>
+              </div>
+            </div>
+          {/if}
           {#if !collapsed}
             <ul class="border-t border-ink-200 dark:border-night-line">
               {#each section.tests as test (test.id)}
@@ -2270,3 +2378,7 @@
     }}
   />
 {/if}
+
+<!-- Section-scoped chat removed — section help is now the icon-only
+     "Suggest Test" affordance on each section header. The per-row chat
+     sheet above is unaffected. -->

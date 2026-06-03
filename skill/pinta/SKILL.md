@@ -10,6 +10,17 @@ on their running app, and clicks Submit. The companion server (one process
 per project, discovered via `~/.pinta/registry.json`) receives the session.
 Your job is to wait for sessions, then edit the matching source files.
 
+> **Compliance & safe usage (read once).** Pinta is **bring-your-own-Claude**:
+> it runs as a skill inside the user's *interactive* Claude Code terminal and
+> never proxies, stores, or shares Anthropic credentials. Keep it in that lane:
+> **(1)** interactive terminal use only — no headless, `claude -p`, Agent SDK,
+> cron, or CI; **(2)** one user runs their **own** Claude account/key — never
+> route multiple users through one subscription; **(3)** no "Login with
+> Claude.ai" / OAuth proxying. Interactive Claude Code use is the supported
+> lane under Anthropic's subscription terms; third-party tools that route
+> requests through subscription credentials are not. Heavy / automated
+> workloads belong on **API billing**.
+
 ## Arguments
 
 `/pinta` accepts an optional flag controlling delivery mode:
@@ -1704,6 +1715,35 @@ config).
 | Inline event handlers in user content | `onclick=` / `onerror=` etc. inside any string concatenation building HTML | Any match → `fail` |
 | Dependency advisories | If `npm` is available, run `npm audit --audit-level=high --json` and parse the count | 0 high/critical → `pass`; 1-3 → `warn`; 4+ → `fail` |
 
+**COMPLETENESS — emit EVERY check, every run (applies to ALL
+categories, not just Security).** The audit is a *checklist*, not just
+a list of problems. For each row in the category's table you MUST emit
+exactly one `AuditCheck` on every run — **never silently drop a check
+because it looks clean or doesn't apply.** That's why a run can wrongly
+read "4 pass" when the category defines 9 criteria.
+
+- **Nothing to flag → `pass`.** A clean result is first-class. Give a
+  short `value` that says *why* it passed: `"0 occurrences"`,
+  `"not applicable — no React in project"`, `"all routes guarded"`.
+  Phrase the `label` positively and consistently run-to-run
+  ("No eval() / new Function()", "No innerHTML / outerHTML writes",
+  "No dangerouslySetInnerHTML", "No inline event handlers in built HTML",
+  "No hardcoded test credentials", "CSRF guards present").
+- **Risk found → `warn` / `fail`** per the row's status rule, with
+  `where` + `fixHint`.
+- **Genuinely couldn't run it → `info`** (tool unavailable / indeterminate
+  only — e.g. `npm audit` not installed → "Dependency advisories not
+  scanned"). Don't use `info` as a "didn't bother" bucket.
+- **Always populate `description`** — one or two sentences on what the
+  check verifies and why it matters, *even for passing checks*. It's the
+  per-check explainer the user expands; an empty one reads as a broken row.
+
+So **Security always returns all 9 checks, Performance 8, Accessibility 9,
+Mobile 8** — a stable, comprehensive report every run. The per-category
+`score` is computed only over pass/warn/fail (info excluded), so reporting
+clean checks as `pass` doesn't distort the number — a 100 then means "all
+9 verified clean," not "we looked at 4 things."
+
 **For each finding, build an AuditCheck:**
 
 ```json
@@ -1892,18 +1932,35 @@ curl -sf -X POST "$BASE/v1/sessions/{id}/status" \
   -d '{"status":"error","errorMessage":"..."}'
 ```
 
-## 9. Stay live for the next submission
+## 9. Stay live for the next submission — interactively, not 24/7
 
-**`--push`**: nothing to do — the Monitor keeps streaming. Just go back to
-waiting for the next notification.
+Pinta is an **interactive, user-present** tool, not an unattended daemon.
+Stay live while the user is working, but **do not run an unbounded infinite
+loop**:
 
-**`--polling`**: immediately re-enter `/v1/sessions/poll` for the next
-session. Loop indefinitely. Don't stop on your own — the queue holds the
-next submission only as long as someone is calling poll.
+- **`--push` (default, preferred):** the Monitor holds one long-lived SSE
+  stream — event-driven and near-zero cost while idle. Go back to waiting
+  for the next notification.
+- **`--polling` (fallback):** re-enter `/v1/sessions/poll` for the next
+  session.
 
-In both modes, only stop when:
+**Idle timeout — stop after ~30 minutes of no new submissions.** When the
+stream / poll has been quiet for roughly 30 minutes, stop waiting and tell
+the user: *"No submissions for a while, so I've paused to stay within
+interactive use — re-run `/pinta` when you're back."* This keeps usage
+clearly **interactive / individual** rather than an always-on automated
+agent (the pattern Anthropic's subscription plans are not designed for).
+Re-running is a single command, so the cost to the user is tiny.
+
+Also stop when:
 - The user explicitly says "stop" / "exit" / "done".
 - The companion goes down (`/v1/health` fails repeatedly) — surface and ask.
+
+> **Compliance reminder:** `/pinta` runs in an **interactive Claude Code
+> terminal, bring-your-own-Claude** (see the compliance note at the top of
+> this skill). Never run it headless / via `claude -p` / Agent SDK / cron /
+> CI, and never route one Claude session on behalf of other users — those
+> modes fall outside subscription terms. Heavy/automated use → API billing.
 
 ## Notes
 

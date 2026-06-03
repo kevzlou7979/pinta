@@ -614,6 +614,31 @@ too — see [Contributing](#contributing) above.
 
 ---
 
+## Usage, plans & Anthropic compliance
+
+Pinta is **bring-your-own-Claude**. It runs as a skill *inside your own
+interactive Claude Code terminal* — it never proxies, stores, or shares your
+Anthropic credentials, never uses "Login with Claude.ai", and is **not** an
+Agent-SDK / headless / `claude -p` / cron tool. You use Claude under your own
+Anthropic plan and terms.
+
+- **Interactive, individual use** of Claude Code (how Pinta runs) is the
+  supported lane under Anthropic's subscription plans. The `/pinta` skill is
+  event-driven and pauses itself after ~30 min idle — it is **not** an
+  always-on automated agent.
+- **Heavy or automated workloads belong on API billing**, not a Pro/Max
+  subscription.
+- **One user = their own Claude account/key.** Pinta never routes multiple
+  users through one subscription; a hosted/team setup would require each user
+  to supply their own API key.
+
+These boundaries keep Pinta within Anthropic's terms by design. If you deploy
+Pinta commercially or to a team, review the current
+[Anthropic usage terms](https://www.anthropic.com/legal) and
+[Claude Code legal docs](https://code.claude.com/docs/en/legal-and-compliance).
+
+---
+
 ## License
 
 MIT — see [`LICENSE`](LICENSE). Copyright (c) 2026 Mark Kevin Baldemor.
