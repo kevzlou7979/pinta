@@ -1,0 +1,214 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Pinta — Anthropic / Claude Code Compliance</title>
+  <meta name="description" content="How Pinta uses Claude — bring-your-own, interactive, no credential proxying — and why it stays inside Anthropic's supported usage lane." />
+  <meta name="theme-color" content="#fbf7f5" media="(prefers-color-scheme: light)" />
+  <meta name="theme-color" content="#0F0F12" media="(prefers-color-scheme: dark)" />
+  <link rel="icon" type="image/png" sizes="32x32" href="assets/icons/icon-32.png" />
+  <link rel="icon" type="image/png" sizes="16x16" href="assets/icons/icon-16.png" />
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Poppins:wght@400;500;600;700&family=JetBrains+Mono:wght@400&display=swap" rel="stylesheet" />
+  <style>
+    :root {
+      --cream: #fbf7f5;
+      --paper: #ffffff;
+      --line: #ebe0e9;
+      --ink: #16110d;
+      --ink-dim: #5a4f44;
+      --ink-mute: #9a8e7a;
+      --pink: #ff3d6e;
+    }
+    [data-theme="dark"] {
+      --cream: #0F0F12;
+      --paper: #1A1A20;
+      --line: #2A2A33;
+      --ink: #ECECF0;
+      --ink-dim: #A8A8B5;
+      --ink-mute: #7A7A88;
+    }
+    * { box-sizing: border-box; }
+    html, body { margin: 0; padding: 0; }
+    body {
+      background: var(--cream);
+      color: var(--ink);
+      font-family: "Poppins", system-ui, sans-serif;
+      font-size: 16px;
+      line-height: 1.65;
+      -webkit-font-smoothing: antialiased;
+    }
+    .wrap {
+      max-width: 720px;
+      margin: 0 auto;
+      padding: 56px 24px 96px;
+    }
+    header {
+      border-bottom: 1px solid var(--line);
+      padding-bottom: 24px;
+      margin-bottom: 40px;
+    }
+    .crumb {
+      font-size: 13px;
+      color: var(--ink-mute);
+      margin-bottom: 16px;
+    }
+    .crumb a { color: var(--ink-dim); text-decoration: none; }
+    .crumb a:hover { color: var(--pink); }
+    h1 {
+      font-size: 36px;
+      font-weight: 700;
+      letter-spacing: -0.02em;
+      margin: 0 0 8px;
+    }
+    .sub {
+      color: var(--ink-dim);
+      font-size: 15px;
+    }
+    h2 {
+      font-size: 22px;
+      font-weight: 600;
+      margin: 48px 0 12px;
+      letter-spacing: -0.01em;
+    }
+    h3 {
+      font-size: 16px;
+      font-weight: 600;
+      margin: 28px 0 8px;
+      color: var(--ink);
+    }
+    p { margin: 0 0 16px; color: var(--ink-dim); }
+    ul { margin: 0 0 16px 0; padding-left: 22px; }
+    li { margin-bottom: 6px; color: var(--ink-dim); }
+    code {
+      font-family: "JetBrains Mono", ui-monospace, monospace;
+      font-size: 0.88em;
+      background: var(--paper);
+      border: 1px solid var(--line);
+      padding: 1px 6px;
+      border-radius: 4px;
+      color: var(--ink);
+    }
+    .callout {
+      background: var(--paper);
+      border: 1px solid var(--line);
+      border-left: 3px solid var(--pink);
+      padding: 16px 20px;
+      border-radius: 6px;
+      margin: 20px 0;
+    }
+    .callout p:last-child { margin-bottom: 0; }
+    strong { color: var(--ink); }
+    a { color: var(--pink); text-decoration: none; }
+    a:hover { text-decoration: underline; }
+    table {
+      width: 100%;
+      border-collapse: collapse;
+      margin: 20px 0;
+      font-size: 14.5px;
+    }
+    th, td {
+      text-align: left;
+      padding: 10px 12px;
+      border: 1px solid var(--line);
+      vertical-align: top;
+      color: var(--ink-dim);
+    }
+    th {
+      background: var(--paper);
+      color: var(--ink);
+      font-weight: 600;
+    }
+    td strong { color: var(--ink); }
+    footer {
+      border-top: 1px solid var(--line);
+      padding-top: 24px;
+      margin-top: 64px;
+      font-size: 13px;
+      color: var(--ink-mute);
+    }
+  </style>
+  <script>
+    (function () {
+      var html = document.documentElement;
+      try {
+        var stored = localStorage.getItem('pinta-theme');
+        var prefers = window.matchMedia('(prefers-color-scheme: dark)').matches;
+        var theme = stored || (prefers ? 'dark' : 'light');
+        if (theme === 'dark') html.setAttribute('data-theme', 'dark');
+      } catch (e) {}
+    })();
+  </script>
+</head>
+<body>
+  <div class="wrap">
+    <header>
+      <div class="crumb"><a href="./">← Pinta</a></div>
+      <h1>Anthropic / Claude Code Compliance</h1>
+      <p class="sub">Last reviewed 2026-06-03 · Pinta v0.4.0</p>
+    </header>
+
+    <div class="callout">
+      <p><strong>The short version:</strong> Pinta is <strong>bring-your-own-Claude</strong>. It runs as a skill <em>inside your own interactive Claude Code terminal</em>. It never proxies, stores, or shares your Anthropic credentials, never uses &ldquo;Login with Claude.ai&rdquo; OAuth, and is <strong>not</strong> a headless / Agent-SDK / <code>claude -p</code> / cron tool. You use Claude under your own Anthropic plan and terms — Pinta is only the UI that hands annotations to the agent you already run.</p>
+    </div>
+
+    <h2>1. How Pinta uses Claude</h2>
+    <p>Pinta has three pieces and <strong>none of them talk to Anthropic</strong>:</p>
+    <ul>
+      <li>The <strong>Chrome extension</strong> — captures your annotations in the browser.</li>
+      <li>The <strong>companion server</strong> (<code>pinta-companion</code>) — runs on <code>localhost</code>, writes sessions to your project's <code>.pinta/</code> folder.</li>
+      <li>The <strong>Claude Code skill</strong> (<code>/pinta</code>) — runs inside <em>your</em> already-authenticated, interactive Claude Code terminal and reads the session from the companion.</li>
+    </ul>
+    <p>The model call happens in your terminal, under your account, exactly as if you'd typed the request yourself. Pinta is a consumer <em>of</em> Claude Code, not a replacement <em>for</em> it, and it has no network path to any AI provider.</p>
+
+    <h2>2. What Pinta never does</h2>
+    <ul>
+      <li><strong>No credential proxying or sharing.</strong> There is no central Pinta account, no shared key, no relay server. Your Anthropic credentials never reach Pinta.</li>
+      <li><strong>No &ldquo;Login with Claude.ai&rdquo; / subscription OAuth.</strong> Pinta does not authenticate to Anthropic on your behalf in any form.</li>
+      <li><strong>No headless or automated agent.</strong> The <code>/pinta</code> skill is event-driven, runs in an interactive terminal, and pauses itself after ~30 minutes idle. It is not an always-on bot, not Agent-SDK, not <code>claude -p</code>, not a cron job.</li>
+      <li><strong>No multi-user fan-out through one subscription.</strong> One user = their own Claude account/key.</li>
+    </ul>
+
+    <h2>3. Subscription vs. API</h2>
+    <p><strong>Interactive, individual use</strong> of Claude Code — the way Pinta runs — is the supported lane under Anthropic's Pro/Max subscription plans. If your usage is heavy or automated, that belongs on <strong>API billing</strong>, not a subscription. Pinta doesn't change which billing applies; it inherits whatever you've signed in with in your own terminal.</p>
+
+    <h2>4. Why the OpenClaw-style ban does not apply to Pinta</h2>
+    <p>In April 2026 Anthropic stopped letting Claude <em>subscription</em> credentials be used inside third-party <em>harnesses</em> (the OpenClaw situation). The pattern Anthropic acted against is specific — and it's the opposite of how Pinta works:</p>
+    <table>
+      <thead>
+        <tr><th>The banned pattern</th><th>How Pinta works</th></tr>
+      </thead>
+      <tbody>
+        <tr><td>Logs in with the user's Claude.ai <strong>subscription OAuth</strong></td><td><strong>Never touches Claude.ai OAuth.</strong> You run your own Claude Code</td></tr>
+        <tr><td>Acts as a <strong>third-party harness</strong> that calls Claude programmatically</td><td><strong>Not a harness.</strong> It hands work to the interactive Claude Code <em>you</em> run</td></tr>
+        <tr><td><strong>Headless / automated</strong> high-volume pipelines on a subscription</td><td><strong>Interactive, human-in-the-loop</strong>, idle-paused, with the model deciding edits with your confirmation</td></tr>
+        <tr><td><strong>Proxies / shares</strong> credentials through a central service</td><td><strong>No central account</strong>; credentials never leave your machine</td></tr>
+        <tr><td>Disrupts Anthropic's <strong>prompt caching</strong></td><td>Sits outside the API path entirely; Claude Code manages its own caching</td></tr>
+      </tbody>
+    </table>
+    <p>The distinction that matters: OpenClaw <em>was</em> the thing talking to the model. Pinta is a UI that hands work to Anthropic's own officially-supported, interactive surface. The behaviors that got OpenClaw banned are exactly the ones Pinta is designed to avoid.</p>
+
+    <h2>5. Built-in modules</h2>
+    <p>Pinta's optional modules (e.g. GitLab Issues) run <em>agent-side</em>, after edits land, using <strong>your own local CLIs</strong> (<code>glab auth login</code>, etc.). They don't add any new path to Anthropic, don't store tokens, and only run when you opt in twice (Settings + per-submit checkbox). They don't change the compliance posture described above.</p>
+
+    <h2>6. Teams &amp; commercial use</h2>
+    <p>If you deploy Pinta to a team, each user must supply their own Claude account/key — Pinta will not route multiple users through one subscription. Before any commercial or team deployment, review the current Anthropic terms linked below; you are responsible for your own usage under your own plan.</p>
+
+    <h2>7. References</h2>
+    <ul>
+      <li><a href="https://www.anthropic.com/legal">Anthropic usage policies &amp; commercial terms</a></li>
+      <li><a href="https://code.claude.com/docs/en/legal-and-compliance">Claude Code legal &amp; compliance docs</a></li>
+      <li><a href="https://github.com/kevzlou7979/pinta/blob/main/README.md#usage-plans--anthropic-compliance">Pinta README — Usage, plans &amp; Anthropic compliance</a></li>
+    </ul>
+
+    <h2>8. Contact</h2>
+    <p>Questions about how Pinta uses Claude? Open an issue at <a href="https://github.com/kevzlou7979/pinta/issues">github.com/kevzlou7979/pinta/issues</a> or email <a href="mailto:kevzlou7979@gmail.com">kevzlou7979@gmail.com</a>.</p>
+
+    <footer>
+      Pinta is open source under the MIT License. Source: <a href="https://github.com/kevzlou7979/pinta">github.com/kevzlou7979/pinta</a>. This page describes Pinta's design intent and is not legal advice; Anthropic's own terms govern your use of Claude.
+    </footer>
+  </div>
+</body>
+</html>

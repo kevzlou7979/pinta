@@ -632,8 +632,15 @@ Anthropic plan and terms.
   users through one subscription; a hosted/team setup would require each user
   to supply their own API key.
 
-These boundaries keep Pinta within Anthropic's terms by design. If you deploy
-Pinta commercially or to a team, review the current
+These boundaries keep Pinta within Anthropic's terms by design. In particular,
+the April 2026 "OpenClaw" restriction — Anthropic blocking Claude **subscription**
+credentials inside third-party **harnesses** — does **not** apply to Pinta: Pinta
+isn't a harness and never touches subscription OAuth; it hands work to the
+interactive Claude Code *you* run. The full breakdown (including a side-by-side of
+the banned pattern vs. how Pinta works) lives on the
+[**Compliance page**](https://kevzlou7979.github.io/pinta/compliance.html).
+
+If you deploy Pinta commercially or to a team, review the current
 [Anthropic usage terms](https://www.anthropic.com/legal) and
 [Claude Code legal docs](https://code.claude.com/docs/en/legal-and-compliance).
 
