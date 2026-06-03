@@ -4,9 +4,28 @@ Notable changes shipped on top of the original V1 pipeline. Newest first.
 For the architectural design behind each item, see
 [`spec/SPEC.md`](spec/SPEC.md).
 
-## Unreleased
+## 0.4.0 — 2026-06-03
 
 ### Added
+
+- **Anthropic-compliance hardening.** `/pinta` now declares its
+  bring-your-own-Claude / interactive-terminal posture and bounds its
+  wait loop with a ~30-min idle timeout (`--push` preferred) instead of
+  looping indefinitely — keeping usage in Anthropic's supported
+  interactive lane. README + the docs landing page gain a "Usage, plans
+  & Anthropic compliance" note; SPEC Phase 19 (importable modules)
+  records the interactive-only / BYO-per-user / no-credential-proxy
+  hard rules.
+
+- **AuditFlow category picker — icon + toggle-switch rows.** The "Run
+  your first audit" card lists each category as an icon + title +
+  keyword line + on/off switch (Cross-Browser shows a SOON badge),
+  replacing the checkbox list.
+
+- **Test Pilot "Suggest tests" moved into the section kebab.** Dropped
+  the standalone sparkle pill and the section chat box; the section
+  kebab now has a "Suggest tests" item, and the kebab trigger spins
+  while suggestions are in flight.
 
 - **Public documentation page (`docs/docs.html`).** New sibling to
   the landing page, linked from the top nav between Install and
@@ -164,6 +183,22 @@ For the architectural design behind each item, see
   overlaps the caret in long drafts.
 
 ### Fixed
+
+- **AuditFlow reports every check, every run.** SKILL.md §7.11 now
+  mandates emitting one `AuditCheck` per criterion (clean = `pass`,
+  never omitted), so a category shows its full checklist (Security all
+  9, etc.) instead of only the subset with findings.
+
+- **Test Pilot empty agent-response no longer clobbers a good reply.**
+  The catalog / detail / audit sync handlers ignore an empty `done`
+  payload (a second racing `/pinta` terminal could mark a session done
+  without the JSON), fixing the "Unexpected end of JSON input" error.
+
+- **Every error banner is dismissible.** Test Pilot error banners gain
+  an X close button, matching Annotate / AuditFlow.
+
+- **Submit footer hidden on non-Annotate tabs**, and the companion /
+  download header dropdowns now close on an outside click.
 
 - **Mojibake repair on agent replies (`Ã©` → `é`).** Agent replies
   containing French / Spanish / Portuguese accents sometimes landed
