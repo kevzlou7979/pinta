@@ -3,42 +3,22 @@
 // inside the /pinta skill — the agent matches on `module.id` from
 // `session.modules[]` and runs the corresponding handler.
 //
-// Modules are bundled into the extension; users don't upload them. To
-// extend: add a new entry below, document its `id` in the skill, ship.
+// Built-in modules are bundled into the extension. As of Phase 19, users
+// can ALSO import their own modules (see `manifestToSpec` below) — those
+// ship as a `.pinta-module.json` and render through the same Settings /
+// footer machinery as the built-ins, with no bundled code.
 
-export type ModuleSettingType = "string" | "secret" | "boolean";
+import type {
+  ModuleSettingType,
+  ModuleSettingSpec,
+  ModuleMode,
+  ModuleManifest,
+} from "@pinta/shared";
 
-export type ModuleSettingSpec = {
-  /** Storage key under chrome.storage.local. */
-  key: string;
-  type: ModuleSettingType;
-  label: string;
-  /** Visible explainer under the field. */
-  hint?: string;
-  /** Default value used when the user hasn't filled the field yet. */
-  default?: string | boolean;
-  /** Required fields gate the module's "ready to use" state. */
-  required?: boolean;
-  /** Optional placeholder for the input. */
-  placeholder?: string;
-};
-
-/**
- * How a module surfaces in the side panel.
- * - "per-submit" — user opts in via a footer checkbox each submit. The
- *   module runs after the agent's source edits land (e.g. GitLab
- *   Issues files one issue per annotation).
- * - "interactive" — module owns its own tab in the side panel. It
- *   doesn't ride on annotation submits; the user drives it directly
- *   from within the tab (e.g. Test Pilot imports a doc and runs
- *   queries against the agent without touching source files).
- * - "inquiry" — module is cross-cutting; one Settings toggle lights up
- *   multiple chat / Q&A surfaces across the side panel (header global
- *   icon, Annotate "Just Ask" checkbox, Test Pilot FAB). Doesn't own a
- *   tab and doesn't ride on submits — it's the "ask before you commit"
- *   verb (e.g. Chat).
- */
-export type ModuleMode = "per-submit" | "interactive" | "inquiry";
+// Re-export the declarative shapes (now sourced from @pinta/shared so the
+// importable-module manifest can reference the exact same types) for
+// existing call sites that import them from this module.
+export type { ModuleSettingType, ModuleSettingSpec, ModuleMode };
 
 export type ModuleSpec = {
   id: string;
@@ -219,6 +199,29 @@ export const BUILTIN_MODULES: ModuleSpec[] = [
 
 export function getModuleSpec(id: string): ModuleSpec | null {
   return BUILTIN_MODULES.find((m) => m.id === id) ?? null;
+}
+
+/**
+ * Adapt an imported module's on-disk manifest into the `ModuleSpec`
+ * shape the Settings panel and submit footer already render. This is
+ * what lets a third-party module appear in the UI with zero bundled
+ * code — the manifest carries everything `ModuleSpec` needs.
+ *
+ * Imported modules are per-submit in v1 (footer checkbox + settings),
+ * so `sessionCheckbox*` come straight from the manifest. `settings`
+ * defaults to an empty array when the manifest omits it.
+ */
+export function manifestToSpec(m: ModuleManifest): ModuleSpec {
+  return {
+    id: m.id,
+    name: m.name,
+    description: m.description,
+    mode: m.mode,
+    sessionCheckboxLabel: m.sessionCheckboxLabel ?? "",
+    sessionCheckboxHint: m.sessionCheckboxHint ?? "",
+    settings: m.settings ?? [],
+    recommendsScreenshot: m.recommendsScreenshot,
+  };
 }
 
 /**

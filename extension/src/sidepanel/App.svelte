@@ -33,7 +33,6 @@
   import TestPilotTab from "./TestPilotTab.svelte";
   import AuditFlowTab from "./AuditFlowTab.svelte";
   import ChatSheet from "./ChatSheet.svelte";
-  import { BUILTIN_MODULES } from "../lib/modules.js";
 
   // Phase 14 chat surfaces owned by App.svelte (Test Pilot tier owns
   // its own sheet inside TestPilotTab.svelte):
@@ -255,7 +254,7 @@
     if (autoApplyEnabled) parts.push("Auto-apply");
     if (includeScreenshot) parts.push("Screenshot");
     if (annotateJustAsk) parts.push("Just Ask");
-    for (const m of BUILTIN_MODULES) {
+    for (const m of app.allModuleSpecs()) {
       if (m.mode !== "per-submit") continue;
       if (app.moduleReady(m.id) && app.tickedModules[m.id]) {
         parts.push(m.name);
@@ -754,7 +753,7 @@
   // module would otherwise file empty issues missing the visual context
   // the user just spent time capturing.
   const screenshotRequiredByModule = $derived.by(() => {
-    for (const spec of BUILTIN_MODULES) {
+    for (const spec of app.allModuleSpecs()) {
       if (!spec.recommendsScreenshot) continue;
       if (app.tickedModules[spec.id]) return true;
     }
@@ -2365,7 +2364,7 @@
           </span>
         </label>
       {/if}
-      {#each BUILTIN_MODULES.filter((m) => m.mode === "per-submit") as moduleSpec (moduleSpec.id)}
+      {#each app.allModuleSpecs().filter((m) => m.mode === "per-submit") as moduleSpec (moduleSpec.id)}
         {@const moduleReady = app.moduleReady(moduleSpec.id)}
         {@const ticked = !!app.tickedModules[moduleSpec.id]}
         {#if moduleReady}

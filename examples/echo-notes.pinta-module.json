@@ -1,0 +1,17 @@
+{
+  "$pintaModule": "1",
+  "manifest": {
+    "id": "pinta.echo-notes",
+    "name": "Echo Notes",
+    "version": "1.0.0",
+    "author": "Pinta",
+    "description": "Append each annotation's comment to a running NOTES.md log in the project root — a tiny reference module that demonstrates the importable-module pipeline (consent, the write-files capability, and the §7.12 dispatch).",
+    "mode": "per-submit",
+    "sessionCheckboxLabel": "Log annotations to NOTES.md",
+    "sessionCheckboxHint": "After the agent applies edits, append each annotation comment to NOTES.md in the project root.",
+    "recommendsScreenshot": false,
+    "capabilities": ["write-files"],
+    "engines": { "pintaVersion": ">=0.4.0" }
+  },
+  "agent": "# Echo Notes — per-submit imported module\n\nYou are running the **Echo Notes** imported module (§7.12). It keeps a\nsimple running log of what the user annotated.\n\n## What to do\n\nFor each annotation in `session.annotations`, append one bullet to\n`NOTES.md` in the project root:\n\n```\n- <ISO date> · <annotation.comment> (<annotation.targets?.[0]?.selector ?? annotation.kind>)\n```\n\nCreate `NOTES.md` with an `# Annotation log` heading if it doesn't exist;\notherwise append to the end. One Write/Edit pass for all annotations is\nfine.\n\n## Rules (do not cross)\n\n- This module declares the **`write-files`** capability. Only write if\n  the user granted it (`install.json` → `grantedCapabilities`). If they\n  didn't, do nothing and tell them to re-import granting `write-files`.\n- **Only ever touch `NOTES.md` inside the project root.** Never write\n  anywhere else, never read or write outside the project, never run\n  shell commands or make network requests — none are granted.\n- This is per-submit work that runs after the source edits land. Report\n  completion in the session summary (e.g. \"Logged 3 annotations to\n  NOTES.md\").\n"
+}

@@ -21,12 +21,18 @@ are red, no point spec-checking if the security audit caught a P0):
    already present, then runs `@sveltejs/mcp svelte-autofixer` over
    `extension/src/**/*.svelte` to surface reactivity / `$state` /
    `$effect` mistakes Pinta's own audit checklist can't catch.
-4. **`/spec`** — gaps between `spec/SPEC.md` and shipped code.
+4. **Claude Code / Anthropic policy compliance** — verify Pinta stays
+   bring-your-own-Claude + interactive-terminal-only: no credential
+   proxying, Agent SDK, headless `claude -p`, or Claude.ai OAuth that
+   would move it into Anthropic's banned third-party-tool lane (the
+   crackdown that cut off OpenClaw, Apr 2026). A change here is an
+   account-ban risk for every user, so it gates the release.
+5. **`/spec`** — gaps between `spec/SPEC.md` and shipped code.
 
 Each sub-skill produces its own report. `/staging`'s job is to:
 - Invoke them in sequence via the **Skill** tool.
 - Collect each report's findings + verdict.
-- Render one consolidated table, severity-merged across all three.
+- Render one consolidated table, severity-merged across all checks.
 - Emit a single **release-readiness verdict** the user can act on.
 
 ## 0. Sanity check the working directory
@@ -274,6 +280,78 @@ binding → 🔴.
 - IME composition guards (`isComposing`) — those are correctness
   scaffolding, not user-facing bindings.
 
+## 4.6 Claude Code / Anthropic policy compliance
+
+Anthropic restricts third-party tools from routing requests through a
+user's Claude **subscription** credentials or the **Agent SDK** (Feb /
+Apr / Jun 2026 ToS — the crackdown that cut off OpenClaw and friends).
+Pinta stays in the *supported* lane by being **bring-your-own-Claude**
+and running as a skill inside the user's **interactive** Claude Code
+terminal — it never touches Anthropic credentials. This check guards
+against a change quietly moving Pinta into the banned lane, which would
+risk an **account ban for every user**, so it is release-gating. Source
+of truth: the `feedback-anthropic-compliance` memory + `SKILL.md`'s
+compliance declaration. Report hits under `[compliance]`.
+
+### 4.6.1 The hard rules (regressions here are 🔴)
+
+| # | Rule | A violation looks like |
+|---|---|---|
+| 1 | **No Anthropic-credential handling** | extension or companion stores / reads / transmits an Anthropic API key, OAuth token, or Claude.ai cookie |
+| 2 | **No Agent-SDK / headless invocation** | code imports `@anthropic-ai/claude-agent-sdk`, or spawns `claude -p` / `claude --print` / shells out to `claude` from the companion or scripts |
+| 3 | **No Claude.ai OAuth / login-on-behalf** | any flow that authenticates a user to Claude, or a remote relay that forwards multiple users' agent requests through one account |
+| 4 | **BYO-Claude stays local** | the companion is a localhost relay only — no remote endpoint that brokers agent requests for other users |
+
+### 4.6.2 Bash spot-check
+
+```bash
+# 1 — no Anthropic credential handling. Expect "(clean)". The filter
+#     drops the §4.6.4 known-safe cases: the secret-scanner (`capture.*`
+#     detects/redacts sk-ant keys from page content) and compliance
+#     prose that FORBIDS the pattern. Eyeball any survivor.
+grep -rniE "ANTHROPIC_API_KEY|sk-ant-|x-api-key|oauth.*claude|claude.*oauth|claude\.ai/(login|oauth)" \
+  extension/src companion/src skill/pinta scripts 2>/dev/null \
+  | grep -viE "never|do not|must not|forbid|compliance|supported|bring-your-own|scrub|redact|capture\." \
+  || echo "  (clean)"
+
+# 2 — no Agent SDK / headless claude invocation in our own code. Expect "(clean)".
+grep -rniE "claude-agent-sdk|claude_code_sdk|claude +-p\b|claude +--print|spawn[^)]*claude|exec[^)]*claude" \
+  extension/src companion/src skill/pinta scripts 2>/dev/null \
+  | grep -viE "never|do not|must not|forbid|compliance|interactive" \
+  || echo "  (clean)"
+
+# 3 — bounded loop + compliance declaration still in SKILL.md. Use stable
+#     phrases (markdown emphasis / capitalisation vary, so match loosely).
+grep -ci "bring-your-own-claude" skill/pinta/SKILL.md                            # expect >= 1 (declaration)
+grep -ciE "interactively, not 24/7|idle timeout|self-paus" skill/pinta/SKILL.md  # expect >= 1 (§9 bound)
+grep -c "Loop indefinitely. Don't stop on your own" skill/pinta/SKILL.md         # MUST be 0 (regression marker)
+
+# 4 — docs disclose BYO / interactive (🟡 if missing)
+grep -lE "bring-your-own-Claude|Anthropic compliance" README.md docs/index.html
+```
+
+### 4.6.3 Severity
+
+- Any **real** hit on checks **1 or 2** (credential handling / Agent-SDK
+  / headless `claude` path) → **🔴 `[compliance]`** — this is the exact
+  pattern that gets tools banned. Block the release until removed or
+  proven a false positive.
+- **Bounded-loop regression** (check 3: the `Loop indefinitely…` string
+  returns, or the idle-timeout / compliance declaration is gone) →
+  **🟠 `[compliance]`**.
+- **Docs missing** the BYO / compliance disclosure (check 4) →
+  **🟡 `[compliance]`**.
+
+### 4.6.4 What NOT to flag
+
+- `/audit`'s secret-scan **regexes** that *look for* `sk-…` / tokens —
+  they detect secrets, they don't store them.
+- SKILL.md / README / SPEC prose that *describes* the banned patterns in
+  order to **forbid** them (the compliance declaration, trust-boundary
+  rules, the Phase 19 hard rules). Quoting a rule isn't violating it.
+- The user pasting *their own* key into *their own* Claude Code or
+  `.npmrc` outside Pinta — Pinta never sees it; out of scope.
+
 ## 5. Run `/spec`
 
 Independent of audit — invoke unconditionally (you want to know about
@@ -288,7 +366,7 @@ Capture verbatim.
 
 ## 6. Roll up
 
-Merge findings from steps 2, 3, 4, 4.5, and 5 into a single
+Merge findings from steps 2, 3, 4, 4.5, 4.6, and 5 into a single
 severity-grouped table. Drop duplicates (audit and spec both flagging
 the same issue gets listed once, with attributions in parens):
 
@@ -298,6 +376,7 @@ the same issue gets listed once, with attributions in parens):
   • [svelte]      <finding from svelte-autofixer>
   • [supply-chain] <critical CVE in dep>
   • [keybindings] <missing binding-site or unguarded form-field intercept>
+  • [compliance]  <credential proxy / Agent-SDK / headless claude path — Anthropic ban risk>
   • [spec]        <finding>
   • [audit + spec] <finding flagged by both>
 
@@ -306,6 +385,7 @@ the same issue gets listed once, with attributions in parens):
   • [svelte]      <finding>
   • [supply-chain] <high CVE in dep>
   • [keybindings] <Settings/docs mismatch with implementation>
+  • [compliance]  <bounded-loop / compliance-declaration regression in SKILL.md>
   • [spec]        <finding>
 
 🟡 NICE TO FIX — defer if pressed for time
@@ -325,8 +405,11 @@ Pick exactly one based on the merged severity:
 - **⚠️ FIX THE 🔴s AND SHIP** — 🔴s present but mechanical / scoped.
   No 🟠 architectural gaps. List the 🔴s as a punch list.
 - **🛑 HOLD** — any of: 🔴 architectural drift, 🟠 wire-protocol
-  mismatch, audit P0 security finding, missing release artifact
-  (unbumped version, `## Unreleased` heading still present, etc.).
+  mismatch, audit P0 security finding, **any 🔴 `[compliance]` finding
+  (credential proxying / Agent-SDK / headless `claude` path — moves
+  Pinta into Anthropic's banned third-party-tool lane)**, missing
+  release artifact (unbumped version, `## Unreleased` heading still
+  present, etc.).
 
 The verdict line is the most important sentence in the report — make
 it the last line and put it in bold.

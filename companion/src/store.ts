@@ -8,8 +8,46 @@ import type {
   SessionStatus,
   SessionProducer,
   SessionRole,
+  ModulePackage,
+  ModuleManifest,
+  ModuleCapability,
+  InstalledModule,
 } from "@pinta/shared";
 import { expectedSessionRole } from "@pinta/shared";
+
+/**
+ * Namespaced module id rule (Phase 19). Lowercase, dot-separated
+ * segments, each segment alphanumeric with internal hyphens — e.g.
+ * `acme.jira-sync`. MUST contain at least one dot (a namespace) and
+ * CANNOT contain `/`, `\`, `..`, or leading/trailing separators, so the
+ * id can never escape `.pinta/modules/`. Stricter sibling of the
+ * `[A-Za-z0-9_-]` docId guard in server.ts.
+ */
+const SAFE_MODULE_ID = /^[a-z0-9]+(?:-[a-z0-9]+)*(?:\.[a-z0-9]+(?:-[a-z0-9]+)*)+$/;
+
+/** Cap an imported module's instruction blob. agent.md is human-written
+ *  guidance, not data — 256 KB is generous and bounds disk + the skill's
+ *  later Read. */
+const MAX_AGENT_BYTES = 256 * 1024;
+
+const MODULE_MODES = new Set(["per-submit", "interactive", "inquiry"]);
+const CAPABILITY_PREFIXES = ["run-tool:", "network:"];
+
+/** Throws if `id` isn't a safe namespaced module id. */
+export function assertSafeModuleId(id: unknown): asserts id is string {
+  if (typeof id !== "string" || !SAFE_MODULE_ID.test(id)) {
+    throw new Error(
+      `invalid module id (expected lowercase namespaced like "acme.jira-sync")`,
+    );
+  }
+}
+
+/** True for a syntactically-valid capability string. */
+function isCapability(c: unknown): c is ModuleCapability {
+  if (typeof c !== "string") return false;
+  if (c === "read-files" || c === "write-files") return true;
+  return CAPABILITY_PREFIXES.some((p) => c.startsWith(p) && c.length > p.length);
+}
 
 type Waiter = (session: Session) => void;
 type Listener = (session: Session) => void;
@@ -247,6 +285,142 @@ export class SessionStore {
     } catch {
       // already gone / permission issue — caller treats as success.
     }
+  }
+
+  /* ──────────────────────────────────────────────────────────────────
+   * Importable modules (Phase 19)
+   *
+   * A module lives at `.pinta/modules/<id>/`:
+   *   - module.json   the validated ModuleManifest
+   *   - agent.md      author-written runtime instructions the skill loads
+   *   - install.json  { grantedCapabilities, installedAt } — the user's
+   *                   import-time consent. Default-deny: the skill never
+   *                   exceeds what's listed here.
+   *
+   * Everything is plain on-disk data the user can read and delete. The
+   * id pattern + per-module directory means an import can never write
+   * outside `.pinta/modules/`.
+   * ────────────────────────────────────────────────────────────────── */
+
+  private get modulesDir(): string {
+    return join(this.projectRoot, ".pinta", "modules");
+  }
+
+  private moduleDir(id: string): string {
+    assertSafeModuleId(id);
+    return join(this.modulesDir, id);
+  }
+
+  /**
+   * Validate the import bundle. Throws a user-facing Error on any
+   * problem (the server maps it to a 400). Returns the normalized
+   * manifest + the set of capabilities the user actually granted,
+   * filtered to the ones the manifest declared (you can't grant a
+   * capability the module never asked for).
+   */
+  private validateModulePackage(
+    pkg: ModulePackage,
+    grants: ModuleCapability[],
+  ): { manifest: ModuleManifest; granted: ModuleCapability[] } {
+    if (!pkg || typeof pkg !== "object") throw new Error("empty module package");
+    if (pkg.$pintaModule !== "1") {
+      throw new Error(`unsupported module format (expected $pintaModule "1")`);
+    }
+    if (typeof pkg.agent !== "string" || pkg.agent.trim() === "") {
+      throw new Error("module package missing agent instructions");
+    }
+    if (Buffer.byteLength(pkg.agent, "utf8") > MAX_AGENT_BYTES) {
+      throw new Error(`agent instructions too large (>${MAX_AGENT_BYTES} bytes)`);
+    }
+    const m = pkg.manifest;
+    if (!m || typeof m !== "object") throw new Error("module package missing manifest");
+    assertSafeModuleId(m.id);
+    for (const field of ["name", "version", "description", "mode"] as const) {
+      if (typeof m[field] !== "string" || (m[field] as string).trim() === "") {
+        throw new Error(`manifest missing required field: ${field}`);
+      }
+    }
+    if (!MODULE_MODES.has(m.mode)) {
+      throw new Error(`manifest has unknown mode: ${m.mode}`);
+    }
+    // Declared capabilities (if any) must be syntactically valid.
+    const declared = Array.isArray(m.capabilities) ? m.capabilities : [];
+    for (const c of declared) {
+      if (!isCapability(c)) throw new Error(`manifest declares invalid capability: ${c}`);
+    }
+    // The user can only grant what the module declared. Anything else is
+    // silently dropped — a request to grant beyond the manifest is a bug
+    // or an attack, never honored.
+    const declaredSet = new Set<string>(declared);
+    const granted = (Array.isArray(grants) ? grants : []).filter(
+      (c) => isCapability(c) && declaredSet.has(c),
+    );
+    return { manifest: m, granted };
+  }
+
+  /** Install (or replace) a module from its import bundle. */
+  async installModule(
+    pkg: ModulePackage,
+    grants: ModuleCapability[],
+  ): Promise<InstalledModule> {
+    const { manifest, granted } = this.validateModulePackage(pkg, grants);
+    const dir = this.moduleDir(manifest.id);
+    await mkdir(dir, { recursive: true });
+    const installedAt = Date.now();
+    await writeFile(join(dir, "module.json"), JSON.stringify(manifest, null, 2), "utf8");
+    await writeFile(join(dir, "agent.md"), pkg.agent, "utf8");
+    await writeFile(
+      join(dir, "install.json"),
+      JSON.stringify({ grantedCapabilities: granted, installedAt }, null, 2),
+      "utf8",
+    );
+    return { manifest, grantedCapabilities: granted, installedAt };
+  }
+
+  /** List installed modules — manifests + the user's granted capabilities.
+   *  Tolerates a missing dir (returns []) and skips any module whose
+   *  files are unreadable / malformed rather than failing the whole list. */
+  async listInstalledModules(): Promise<InstalledModule[]> {
+    let entries: string[];
+    try {
+      entries = await readdir(this.modulesDir);
+    } catch {
+      return []; // no modules dir yet
+    }
+    const out: InstalledModule[] = [];
+    for (const id of entries) {
+      if (!SAFE_MODULE_ID.test(id)) continue; // ignore stray files
+      try {
+        const dir = join(this.modulesDir, id);
+        const manifest = JSON.parse(
+          await readFile(join(dir, "module.json"), "utf8"),
+        ) as ModuleManifest;
+        let grantedCapabilities: ModuleCapability[] = [];
+        let installedAt = 0;
+        try {
+          const meta = JSON.parse(await readFile(join(dir, "install.json"), "utf8")) as {
+            grantedCapabilities?: ModuleCapability[];
+            installedAt?: number;
+          };
+          grantedCapabilities = Array.isArray(meta.grantedCapabilities)
+            ? meta.grantedCapabilities.filter(isCapability)
+            : [];
+          installedAt = typeof meta.installedAt === "number" ? meta.installedAt : 0;
+        } catch {
+          // install.json missing/corrupt → treat as no grants (default-deny).
+        }
+        out.push({ manifest, grantedCapabilities, installedAt });
+      } catch {
+        // module.json missing/corrupt — skip this entry.
+      }
+    }
+    return out.sort((a, b) => b.installedAt - a.installedAt);
+  }
+
+  /** Remove an installed module's directory. Tolerates "already gone". */
+  async uninstallModule(id: string): Promise<void> {
+    const dir = this.moduleDir(id); // throws on unsafe id
+    await rm(dir, { recursive: true, force: true });
   }
 
   /**

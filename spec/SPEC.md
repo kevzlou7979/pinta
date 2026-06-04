@@ -1517,53 +1517,54 @@ in the side panel to see which terminal claimed each session.
 
 ---
 
-### Phase 19 — Importable / third-party modules (Module SDK) — Planned
+### Phase 19 — Importable / third-party modules (Module SDK) — v1 Shipped
 
-Today every module (GitLab Issues, Test Pilot, AuditFlow, Chat, Design
-Lint) is **bundled**: a `ModuleSpec` in `extension/src/lib/modules.ts`
-plus a hardcoded handler in `skill/pinta/SKILL.md` (§7.9–7.13). The
-top of `modules.ts` says it outright — *"Modules are bundled into the
-extension; users don't upload them."* Phase 19 turns modules into a
-first-class **extension point** so third-party developers ship their
-own without forking/rebuilding Pinta. It generalizes the `.pinta/`
-import + companion-endpoint plumbing already designed for Design Lint
-and custom audits.
+Today every built-in module (GitLab Issues, Test Pilot, AuditFlow, Chat)
+is **bundled**: a `ModuleSpec` in `extension/src/lib/modules.ts` plus a
+hardcoded handler in `skill/pinta/SKILL.md`. Phase 19 turns modules into
+a first-class **extension point** so third-party developers (and the user
+themselves) ship their own without forking/rebuilding Pinta.
 
-**Module package** (`.pinta-module` — a folder/zip):
-- `module.json` — manifest: namespaced `id` (e.g. `acme.jira-sync`),
-  `name`, `version`, `author`, `description`, `mode`
-  (`per-submit` | `interactive` | `inquiry`), `settings`
-  (the existing declarative `ModuleSettingSpec[]` — string/secret/
-  boolean, rendered generically by the Settings panel), optional
-  `recommendsScreenshot`, `engines.pintaVersion`, and a `capabilities`
-  list (declared permissions — `read-files`, `run-tool:<cmd>`,
-  `network:<host>`).
-- `agent.md` — the runtime instructions the skill loads when a session
-  carries this module id (the author-written equivalent of a SKILL.md
-  §7.x handler).
-- optional `tools/` — declared companion shell-outs with arg schemas,
-  gated by capability + user consent.
+**v1 shipped scope (2026-06-03):** **per-submit modules only**, packaged
+as a **single self-contained `.pinta-module.json`** file. `interactive` /
+`inquiry` imported modules (custom tab/sheet) and zip/URL/registry
+packaging are **deferred**.
 
-**Install / discovery** (reuses the Design-Lint plumbing): extension
-imports a folder/zip/URL → `POST /v1/modules` → companion extracts to
-`.pinta/modules/<id>/` (manifest validation + path-traversal guard).
-`GET /v1/modules` returns installed manifests; the extension merges
-them with `BUILTIN_MODULES` so settings forms + footer checkboxes
-render with zero bundled code. `DELETE /v1/modules/:id` uninstalls.
+**Module package — `.pinta-module.json`** (`ModulePackage` in
+`shared/src/types.ts`):
+```jsonc
+{
+  "$pintaModule": "1",
+  "manifest": { /* ModuleManifest */ },
+  "agent": "…markdown the skill loads when a session carries this id…"
+}
+```
+- `ModuleManifest`: namespaced `id` (e.g. `acme.jira-sync` — **must**
+  contain a dot), `name`, `version`, `author`, `description`, `mode`
+  (v1 honors `per-submit`), `sessionCheckbox*`, `settings`
+  (declarative `ModuleSettingSpec[]`, rendered generically),
+  `recommendsScreenshot?`, `engines.pintaVersion?`, and `capabilities`
+  (`read-files` | `write-files` | `run-tool:<cmd>` | `network:<host>`).
+- `agent` is the author-written equivalent of a SKILL.md §7.x handler.
+- (Zip + a `tools/` directory of declared shell-outs are a later tier.)
 
-**Run** — a new generic **SKILL.md §7.14 "imported module dispatch"**:
-when `session.modules[].id` is not a built-in, the agent loads
-`.pinta/modules/<id>/agent.md` and follows it, under the **same
-sandbox as Test Pilot/audit** (read + emit; **no** file writes, **no**
-shell, **no** network) unless the manifest declared a capability the
-user explicitly approved at import. Same `mark_session_done(JSON)`
-output contract.
+**Install / discovery** (`companion/src/{server,store}.ts`): the
+extension reads the file, the user consents to capabilities, then
+`POST /v1/modules` → the companion validates (manifest shape +
+namespaced-id path-traversal guard) and writes
+`.pinta/modules/<id>/{module.json,agent.md,install.json}`.
+`GET /v1/modules` returns installed manifests + granted capabilities;
+the extension merges them with `BUILTIN_MODULES` (`manifestToSpec`) so
+settings forms + footer checkboxes render with zero bundled code.
+`DELETE /v1/modules/:id` uninstalls.
 
-**v1 scope = `per-submit` modules only** (like GitLab Issues — footer
-checkbox + settings form + `agent.md`, no custom UI). `interactive` /
-`inquiry` modules own a side-panel tab/sheet (custom Svelte) and can't
-be safely imported yet — deferred, possibly via a later constrained
-"query-form → agent → markdown-result" declarative template.
+**Run** — generic **SKILL.md §7.12 "imported-module dispatch"**: when
+`session.modules[].id` is not a built-in, the agent path-guards the id,
+loads `.pinta/modules/<id>/agent.md` + `install.json`, and follows it
+under a **default-deny sandbox** (read + emit; writes/shell/network only
+for the specific capabilities the user granted), after re-asserting the
+top-of-skill **compliance covenant** so a hostile `agent.md` can't push
+the user's Claude out of the interactive / bring-your-own-Claude lane.
 
 **Security is the load-bearing concern** — an imported module is a
 stranger writing instructions for the user's coding agent (and maybe
@@ -1586,18 +1587,23 @@ user on their own API key, and Pinta charges for modules, never for Claude
 access. (This is the exact line that got OpenClaw-style tools cut off from
 subscriptions in Apr 2026.)
 
-**Files to touch (when built):** `shared/src/types.ts`
-(`ModuleManifest`, `ModuleCapability`); `extension/src/lib/modules.ts`
-(merge built-in + companion-fetched manifests); a Settings import UI
-(reuse the Design-Lint zip picker); `companion/src/server.ts` +
-`store.ts` (`/v1/modules` routes + extract to `.pinta/modules/` +
-validation); `skill/pinta/SKILL.md` (§7.14 generic dispatch +
-capability gating).
+**Files (built in v1):** `shared/src/types.ts` (`ModuleManifest`,
+`ModulePackage`, `ModuleCapability`, `InstalledModule` + the moved
+`ModuleSettingSpec`/`ModuleMode`); `extension/src/lib/modules.ts`
+(`manifestToSpec`); `extension/src/lib/state.svelte.ts`
+(`installedModules` + import/uninstall/refresh + submit inclusion);
+`SettingsPanel.svelte` (import button + consent dialog + uninstall);
+`App.svelte` (footer checkboxes via `allModuleSpecs()`);
+`companion/src/{server,store}.ts` (`/v1/modules` routes + write to
+`.pinta/modules/` + validation); `skill/pinta/SKILL.md` (§7.12 generic
+dispatch + compliance reassertion + capability gating). Sample:
+`examples/echo-notes.pinta-module.json`.
 
-**Open questions:** manifest JSON vs YAML + id-collision rules;
-whether to ship a constrained interactive-UI DSL or defer entirely;
-capability-model granularity (file scope, shell allowlist, network
-hosts); registry + signing timeline; `pintaVersion` engine compat.
+**Deferred / open questions:** zip + `tools/` packaging; `interactive` /
+`inquiry` imported modules (constrained UI DSL); signed modules + a
+curated registry (`pinta module add acme.jira-sync`) and the Pro/
+marketplace tie-in; richer `engines.pintaVersion` enforcement;
+capability granularity (per-path file scope, multi-host network).
 
 ---
 

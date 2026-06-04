@@ -18,6 +18,13 @@
 
   let fileInput = $state<HTMLInputElement | null>(null);
   let viewing = $state<{ testId: string } | null>(null);
+  // Catalog search — filters the CATALOG view by free text matched
+  // against test id (e.g. "AUTH-1"), section title (category), and test
+  // title / expected-result content. Empty string = no filter. While a
+  // query is active, sections render expanded regardless of their saved
+  // collapse state so matches are never hidden behind a collapsed header.
+  let searchQuery = $state("");
+  const searchActive = $derived(searchQuery.trim().length > 0);
   // Export dropdown — three options (results MD, tester MD, tester DOCX)
   // surfaced as a small menu off the Export button. Closes on outside
   // click via the existing onDocClick handler below.
@@ -768,6 +775,50 @@
     return { pass, fail, untested, total: pass + fail + untested };
   }
 
+  /** True when `test` matches the active search query. A query is matched
+   *  against the test id, the test title, the expected-result text, and
+   *  the owning section title — so searching "AUTH" surfaces the whole
+   *  Authentication category, "AUTH-1" jumps to one row, and free text
+   *  ("login") matches on content. Case-insensitive substring match. */
+  function matchesQuery(test: TestPilotTest, sectionTitle: string): boolean {
+    const q = searchQuery.trim().toLowerCase();
+    if (!q) return true;
+    if (sectionTitle.toLowerCase().includes(q)) return true;
+    return (
+      test.id.toLowerCase().includes(q) ||
+      (test.test ?? "").toLowerCase().includes(q) ||
+      (test.expected ?? "").toLowerCase().includes(q)
+    );
+  }
+
+  /** Tests within a section that survive the active query. When the
+   *  section title itself matches, every row is kept (the whole category
+   *  is a hit); otherwise only content/id matches remain. */
+  function visibleTests(section: TestPilotSection): TestPilotTest[] {
+    const q = searchQuery.trim();
+    if (!q) return section.tests;
+    if (section.title.toLowerCase().includes(q.toLowerCase())) {
+      return section.tests;
+    }
+    return section.tests.filter((t) => matchesQuery(t, section.title));
+  }
+
+  /** A section is shown when there's no query, or it has ≥1 visible row. */
+  function sectionVisible(section: TestPilotSection): boolean {
+    if (!searchActive) return true;
+    return visibleTests(section).length > 0;
+  }
+
+  /** Count of rows matching the active query, across all sections —
+   *  drives the "N matches" caption under the search box. */
+  function matchCount(): number {
+    const catalog = app.testPilot.catalog;
+    if (!catalog) return 0;
+    let n = 0;
+    for (const s of catalog.sections) n += visibleTests(s).length;
+    return n;
+  }
+
   /** Shared filename stem for any export — strips a trailing `.md` so
    *  re-export doesn't pile up `…-results-results-2026-05-24.md`. */
   function exportStem(): string {
@@ -1446,43 +1497,44 @@
         {/if}
         </div>
       </div>
-      <!-- Action buttons — inline with title on wide panels, wrap to
-           next row on narrow viewports thanks to flex-wrap on the
-           parent. -->
-      <div class="flex items-center gap-1.5 shrink-0">
+      <!-- Action buttons — compact icon-only segmented group. Inline with
+           title on wide panels, wraps to next row on narrow viewports
+           thanks to flex-wrap on the parent. Labels live in title +
+           aria-label since the row is icon-only. -->
+      <div class="inline-flex items-center shrink-0 rounded-md border border-ink-200 dark:border-night-line bg-white dark:bg-night-card divide-x divide-ink-200 dark:divide-night-line">
         <button
           type="button"
-          class="inline-flex items-center gap-1 text-[11px] text-ink-700 dark:text-night-dim hover:text-brand-pink dark:hover:text-brand-pink-light px-2 py-1.5 rounded-md border border-ink-200 dark:border-night-line bg-white dark:bg-night-card"
+          class="inline-flex items-center justify-center w-8 h-8 rounded-l-md text-ink-700 dark:text-night-dim hover:text-brand-pink dark:hover:text-brand-pink-light hover:bg-ink-50 dark:hover:bg-night-alt"
           onclick={onPickFile}
-          title="Replace catalog with a new doc"
+          title="Re-import — replace catalog with a new doc"
+          aria-label="Re-import catalog"
         >
-          <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="M3 12a9 9 0 0 1 9-9 9.75 9.75 0 0 1 6.74 2.74L21 8"/><path d="M21 3v5h-5"/><path d="M21 12a9 9 0 0 1-9 9 9.75 9.75 0 0 1-6.74-2.74L3 16"/><path d="M3 21v-5h5"/></svg>
-          Re-import
+          <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 12a9 9 0 0 1 9-9 9.75 9.75 0 0 1 6.74 2.74L21 8"/><path d="M21 3v5h-5"/><path d="M21 12a9 9 0 0 1-9 9 9.75 9.75 0 0 1-6.74-2.74L3 16"/><path d="M3 21v-5h5"/></svg>
         </button>
         <button
           type="button"
-          class="inline-flex items-center gap-1 text-[11px] text-ink-700 dark:text-night-dim hover:text-red-600 dark:hover:text-red-400 px-2 py-1.5 rounded-md border border-ink-200 dark:border-night-line bg-white dark:bg-night-card disabled:opacity-50 disabled:cursor-not-allowed"
+          class="inline-flex items-center justify-center w-8 h-8 text-ink-700 dark:text-night-dim hover:text-red-600 dark:hover:text-red-400 hover:bg-ink-50 dark:hover:bg-night-alt disabled:opacity-40 disabled:cursor-not-allowed disabled:hover:bg-transparent disabled:hover:text-ink-700 dark:disabled:hover:text-night-dim"
           onclick={clearMarks}
           disabled={t.pass + t.fail === 0}
           title={t.pass + t.fail === 0
-            ? "Nothing to clear — no rows are marked yet"
-            : "Reset all Pass/Fail marks back to untested (keeps the catalog)"}
+            ? "Clear marks — nothing to clear, no rows are marked yet"
+            : "Clear marks — reset all Pass/Fail marks back to untested (keeps the catalog)"}
+          aria-label="Clear all Pass/Fail marks"
         >
-          <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="M3 6h18"/><path d="M8 6V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/><path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6"/></svg>
-          Clear marks
+          <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 6h18"/><path d="M8 6V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/><path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6"/></svg>
         </button>
         <div class="relative" data-pinta-export-menu>
           <button
             type="button"
-            class="inline-flex items-center gap-1 text-[11px] text-ink-700 dark:text-night-dim hover:text-brand-pink dark:hover:text-brand-pink-light px-2 py-1.5 rounded-md border border-ink-200 dark:border-night-line bg-white dark:bg-night-card"
+            class="inline-flex items-center justify-center gap-0.5 w-9 h-8 rounded-r-md text-ink-700 dark:text-night-dim hover:text-brand-pink dark:hover:text-brand-pink-light hover:bg-ink-50 dark:hover:bg-night-alt"
             onclick={() => (exportMenuOpen = !exportMenuOpen)}
             title="Export this catalog — results MD, tester sheet MD, or tester sheet DOCX"
             aria-haspopup="menu"
             aria-expanded={exportMenuOpen}
+            aria-label="Export catalog"
           >
-            <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
-            Export
-            <svg width="9" height="9" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="6 9 12 15 18 9"/></svg>
+            <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
+            <svg width="8" height="8" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="6 9 12 15 18 9"/></svg>
           </button>
           {#if exportMenuOpen}
             <div
@@ -1520,6 +1572,41 @@
           {/if}
         </div>
       </div>
+    </div>
+
+    <!-- SEARCH — filters the catalog by id (AUTH-1), category (section
+         title), or content (test title / expected). While active, all
+         sections render expanded so matches aren't hidden. -->
+    <div class="space-y-1">
+      <div class="relative">
+        <span class="absolute left-2.5 top-1/2 -translate-y-1/2 text-ink-400 dark:text-night-mute pointer-events-none" aria-hidden="true">
+          <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="7"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg>
+        </span>
+        <input
+          type="search"
+          bind:value={searchQuery}
+          placeholder="Search id, category, or content (e.g. AUTH-1)"
+          aria-label="Search tests"
+          class="w-full pl-8 pr-8 py-1.5 text-[12px] rounded-md border border-ink-200 dark:border-night-line bg-white dark:bg-night-card text-ink-900 dark:text-night-text placeholder:text-ink-400 dark:placeholder:text-night-mute outline-none focus:border-brand-pink dark:focus:border-brand-pink-light [&::-webkit-search-cancel-button]:appearance-none"
+        />
+        {#if searchActive}
+          <button
+            type="button"
+            class="absolute right-2 top-1/2 -translate-y-1/2 text-ink-400 dark:text-night-mute hover:text-ink-700 dark:hover:text-night-text leading-none"
+            onclick={() => (searchQuery = "")}
+            aria-label="Clear search"
+            title="Clear search"
+          >
+            <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
+          </button>
+        {/if}
+      </div>
+      {#if searchActive}
+        {@const n = matchCount()}
+        <div class="text-[11px] text-ink-500 dark:text-night-mute tabular-nums px-0.5">
+          {n} {n === 1 ? "match" : "matches"} for “{searchQuery.trim()}”
+        </div>
+      {/if}
     </div>
 
     <!-- STATS line — pass/fail/untested on the left, % complete on the
@@ -1565,8 +1652,8 @@
 
     <!-- SECTIONS -->
     <div class="space-y-3">
-      {#each app.testPilot.catalog.sections as section (section.title)}
-        {@const collapsed = collapsedSections[section.title] ?? false}
+      {#each app.testPilot.catalog.sections.filter(sectionVisible) as section (section.title)}
+        {@const collapsed = searchActive ? false : (collapsedSections[section.title] ?? false)}
         {@const secPass = section.tests.filter((t) => t.status === "pass").length}
         {@const secFail = section.tests.filter((t) => t.status === "fail").length}
         {@const secTotal = section.tests.length}
@@ -1915,7 +2002,7 @@
           {/if}
           {#if !collapsed}
             <ul class="border-t border-ink-200 dark:border-night-line">
-              {#each section.tests as test (test.id)}
+              {#each visibleTests(section) as test (test.id)}
                 {@const detailLoading = !!app.testPilot.pendingDetails[test.id]}
                 {@const detailLoaded = !!test.detail}
                 {@const chatLoading = !!app.testPilot.pendingChats[test.id]}
@@ -2285,20 +2372,42 @@
         </div>
       {/each}
 
+      <!-- No-results state — only while a query is active and nothing
+           matched. The search box above stays put so the user can edit
+           or clear the query. -->
+      {#if searchActive && matchCount() === 0}
+        <div class="rounded-lg border border-dashed border-ink-300 dark:border-night-line bg-ink-50 dark:bg-night-alt px-3 py-6 text-center space-y-2">
+          <p class="text-[12px] text-ink-600 dark:text-night-dim">
+            No tests match “{searchQuery.trim()}”.
+          </p>
+          <button
+            type="button"
+            class="text-[11px] font-medium text-brand-pink dark:text-brand-pink-light hover:underline"
+            onclick={() => (searchQuery = "")}
+          >
+            Clear search
+          </button>
+        </div>
+      {/if}
+
       <!-- Add-section affordance — appends an empty section + drops
            the user into inline-edit on its title. Mirrors the
-           "+ Add author / + Add description" pattern in the header. -->
-      <button
-        type="button"
-        class="w-full inline-flex items-center justify-center gap-1.5 rounded-lg border border-dashed border-ink-300 dark:border-night-line bg-transparent text-[12px] font-medium text-ink-500 dark:text-night-mute hover:text-brand-pink dark:hover:text-brand-pink-light hover:border-brand-pink dark:hover:border-brand-pink-light py-2.5 transition-colors"
-        onclick={onAddSection}
-      >
-        <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
-          <line x1="12" y1="5" x2="12" y2="19"/>
-          <line x1="5" y1="12" x2="19" y2="12"/>
-        </svg>
-        Add section
-      </button>
+           "+ Add author / + Add description" pattern in the header.
+           Hidden while a search is active (adding a blank section into a
+           filtered view would be confusing). -->
+      {#if !searchActive}
+        <button
+          type="button"
+          class="w-full inline-flex items-center justify-center gap-1.5 rounded-lg border border-dashed border-ink-300 dark:border-night-line bg-transparent text-[12px] font-medium text-ink-500 dark:text-night-mute hover:text-brand-pink dark:hover:text-brand-pink-light hover:border-brand-pink dark:hover:border-brand-pink-light py-2.5 transition-colors"
+          onclick={onAddSection}
+        >
+          <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+            <line x1="12" y1="5" x2="12" y2="19"/>
+            <line x1="5" y1="12" x2="19" y2="12"/>
+          </svg>
+          Add section
+        </button>
+      {/if}
     </div>
 
     <button

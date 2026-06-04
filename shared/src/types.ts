@@ -220,6 +220,132 @@ export type SessionModule = {
   settings: Record<string, string | boolean>;
 };
 
+/* ──────────────────────────────────────────────────────────────────────
+ * Module declarative shapes (Phase 19 — importable modules)
+ *
+ * These three types describe a module's *settings form* and *surface*.
+ * They used to live only in `extension/src/lib/modules.ts` for the
+ * bundled modules; they moved here so an importable module's on-disk
+ * manifest (`ModuleManifest`) can reference the exact same shape the
+ * extension already renders generically. `extension/src/lib/modules.ts`
+ * re-exports them for back-compat — no call-site churn.
+ * ──────────────────────────────────────────────────────────────────── */
+
+export type ModuleSettingType = "string" | "secret" | "boolean";
+
+export type ModuleSettingSpec = {
+  /** Storage key under chrome.storage.local. */
+  key: string;
+  type: ModuleSettingType;
+  label: string;
+  /** Visible explainer under the field. */
+  hint?: string;
+  /** Default value used when the user hasn't filled the field yet. */
+  default?: string | boolean;
+  /** Required fields gate the module's "ready to use" state. */
+  required?: boolean;
+  /** Optional placeholder for the input. */
+  placeholder?: string;
+};
+
+/**
+ * How a module surfaces in the side panel. v1 of importable modules
+ * (Phase 19) honors only `"per-submit"`; `"interactive"` / `"inquiry"`
+ * (which own a tab or light up cross-cutting surfaces) stay reserved for
+ * the bundled modules until the imported-module UI story is built out.
+ */
+export type ModuleMode = "per-submit" | "interactive" | "inquiry";
+
+/* ──────────────────────────────────────────────────────────────────────
+ * Importable modules (Phase 19)
+ *
+ * A third-party (or the user themselves) can ship a module as a single
+ * self-contained `.pinta-module.json` file — `ModulePackage`. The
+ * extension reads it, the user reviews + consents to its capabilities,
+ * and the companion writes it to `.pinta/modules/<id>/` so the `/pinta`
+ * skill can load `agent.md` when a session carries the module's id.
+ *
+ * COMPLIANCE: imported modules run ONLY inside the user's interactive
+ * `/pinta` loop — they never add a headless / Agent-SDK / cron path, and
+ * never touch Anthropic credentials. The skill's §7.12 dispatch
+ * re-asserts that covenant so a hostile `agent.md` can't push the user's
+ * Claude out of the bring-your-own-Claude lane.
+ * ──────────────────────────────────────────────────────────────────── */
+
+/**
+ * What an imported module is allowed to do beyond the read-only default.
+ * Declared in the manifest, but only ever *active* when the user grants
+ * it at import time (default-deny). The skill enforces the grant.
+ *
+ * - `"read-files"`    — read within `projectRoot` (the default posture;
+ *                       listed explicitly so a manifest can self-document).
+ * - `"write-files"`   — Edit/Write within `projectRoot`.
+ * - `run-tool:<cmd>`  — shell out to one specific command (e.g.
+ *                       `"run-tool:glab"`). The command is part of the id.
+ * - `network:<host>`  — fetch one specific host (e.g.
+ *                       `"network:api.linear.app"`).
+ */
+export type ModuleCapability =
+  | "read-files"
+  | "write-files"
+  | `run-tool:${string}`
+  | `network:${string}`;
+
+/**
+ * The on-disk manifest (`.pinta/modules/<id>/module.json`) and the
+ * `manifest` half of a `ModulePackage`. Extends the bundled `ModuleSpec`
+ * shape with packaging metadata (`version` / `author` / `capabilities` /
+ * `engines`). The id is namespaced (`acme.jira-sync`) and MUST contain a
+ * dot — the companion enforces a strict pattern to prevent it doubling as
+ * a path-traversal vector under `.pinta/modules/`.
+ */
+export type ModuleManifest = {
+  id: string;
+  name: string;
+  version: string;
+  author?: string;
+  description: string;
+  /** v1 honors only `"per-submit"`. */
+  mode: ModuleMode;
+  /** Footer checkbox label (per-submit). */
+  sessionCheckboxLabel: string;
+  /** Footer checkbox subtext (per-submit). */
+  sessionCheckboxHint: string;
+  settings?: ModuleSettingSpec[];
+  recommendsScreenshot?: boolean;
+  /** Capabilities the module *declares* it needs. Absent / empty = the
+   *  module is read-only (read + emit, like an audit). The user grants a
+   *  subset at import; the skill never exceeds the grant. */
+  capabilities?: ModuleCapability[];
+  /** Compatibility hints. `pintaVersion` is a semver range string. */
+  engines?: { pintaVersion?: string };
+};
+
+/**
+ * The single-file import bundle a user picks in Settings → Import module.
+ * `$pintaModule` is a schema-version sentinel; validators reject unknown
+ * values to leave room for format changes (mirrors `PintaFile.$pinta`).
+ */
+export type ModulePackage = {
+  $pintaModule: "1";
+  manifest: ModuleManifest;
+  /** Author-written runtime instructions the skill loads — the importable
+   *  equivalent of a hardcoded SKILL.md §7.x handler. Markdown. */
+  agent: string;
+};
+
+/**
+ * What `GET /v1/modules` returns per installed module: the manifest, the
+ * capabilities the user actually approved (NOT the full declared set),
+ * and when it landed. The extension merges these with `BUILTIN_MODULES`
+ * so settings forms + footer checkboxes render with no bundled code.
+ */
+export type InstalledModule = {
+  manifest: ModuleManifest;
+  grantedCapabilities: ModuleCapability[];
+  installedAt: number;
+};
+
 /**
  * Phase 18 — terminal role for multi-agent routing. A `/pinta` terminal
  * declares its role via CLI flags (`--annotate` / `--test-pilot` / `--audit`
@@ -385,6 +511,35 @@ export type AuditCheck = {
    *  the extension synthesizing it from where + fixHint. Optional —
    *  when absent the extension composes a fallback. */
   suggestedAnnotation?: Annotation;
+};
+
+/** Per-finding remediation disposition the user works through. Lives
+ *  OUTSIDE the AuditRun (keyed by the check's stable fingerprint id)
+ *  so re-running an audit doesn't wipe the user's progress. Only
+ *  actionable checks (status fail / warn) carry one; the default for
+ *  an actionable check with no stored entry is "open". "resolved" and
+ *  "wont-fix" both count as "addressed" in the progress rollup. */
+export type AuditDisposition = "open" | "fixing" | "resolved" | "wont-fix";
+
+/**
+ * User-curated edits layered over the AGENT-generated audit run
+ * (Phase 15 "Slice 2" — catalog editing). The agent's run is
+ * recomputed every time the user re-audits, so user edits can't live
+ * inside it; they live here and are merged over the raw run by
+ * `mergeAuditRun`. Persisted independently so edits survive re-runs.
+ *
+ * Mirrors Test Pilot's Phase 13 catalog-editing model: an immutable
+ * agent baseline + a durable user overlay.
+ */
+export type AuditOverlay = {
+  /** Custom categories the user added. id = `audit-flow-custom:${uuid}`. */
+  addedCategories: AuditCategoryResult[];
+  /** User-added checks, keyed by category id. Check id = `USER-${uuid}`. */
+  addedChecks: Record<string, AuditCheck[]>;
+  /** Field overrides on AGENT checks, keyed by check id. */
+  edits: Record<string, { label?: string; description?: string; fixHint?: string }>;
+  /** Ids of checks AND categories the user hid. */
+  deleted: string[];
 };
 
 export type AuditCategoryResult = {

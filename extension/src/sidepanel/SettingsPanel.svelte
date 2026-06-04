@@ -1,22 +1,37 @@
 <script lang="ts">
   // Settings panel — slot rendered inside the side panel's main area
   // when `app.viewingSettings` is true. Lists Pinta's built-in modules
-  // (currently just GitLab Issues) with an enable toggle and a settings
-  // form generated from each module's spec.
+  // PLUS any imported (third-party) modules installed in the active
+  // project, each with an enable toggle and a settings form generated
+  // from its spec.
   //
-  // Scope: deliberately small. No file uploads, no marketplace, no
-  // module updates. To add a module, edit `extension/src/lib/modules.ts`
-  // and ship the matching agent instructions in `skill/pinta/SKILL.md`.
+  // Importable modules (Phase 19): the user picks a `.pinta-module.json`
+  // bundle, reviews its capabilities + agent instructions in a consent
+  // dialog, and grants a subset. The companion writes it to
+  // `.pinta/modules/<id>/`; the /pinta skill loads `agent.md` (§7.12).
 
   import { app } from "../lib/state.svelte.js";
   import {
-    BUILTIN_MODULES,
     moduleIsConfigured,
     type ModuleSettingSpec,
     type ModuleSpec,
   } from "../lib/modules.js";
+  import type {
+    ModulePackage,
+    ModuleCapability,
+    InstalledModule,
+  } from "@pinta/shared";
 
   let revealedSecrets = $state<Record<string, boolean>>({});
+
+  // All module specs to render — built-ins first, then imported.
+  const specs = $derived(app.allModuleSpecs());
+  // Quick lookup: which specs are imported (vs bundled), keyed by id.
+  const importedById = $derived(
+    new Map<string, InstalledModule>(
+      app.installedModules.map((m) => [m.manifest.id, m]),
+    ),
+  );
 
   function settingValue(spec: ModuleSpec, field: ModuleSettingSpec): string | boolean {
     const stored = app.modules[spec.id]?.settings[field.key];
@@ -33,6 +48,89 @@
   function toggleSecret(key: string) {
     revealedSecrets[key] = !revealedSecrets[key];
   }
+
+  // ── Import flow ──────────────────────────────────────────────────
+  let fileInput = $state<HTMLInputElement | null>(null);
+  // The bundle awaiting consent, plus the per-capability grant checkboxes.
+  let pendingImport = $state<{ pkg: ModulePackage; fileName: string } | null>(null);
+  let grantChecked = $state<Record<string, boolean>>({});
+  let importing = $state(false);
+
+  const canImport = $derived(!!app.selectedCompanion);
+
+  /** Lenient client-side shape check — the companion does the
+   *  authoritative validation, this just catches obvious junk early. */
+  function parsePackage(text: string): ModulePackage {
+    let raw: unknown;
+    try {
+      raw = JSON.parse(text);
+    } catch {
+      throw new Error("Not valid JSON.");
+    }
+    const pkg = raw as Partial<ModulePackage>;
+    if (!pkg || typeof pkg !== "object" || pkg.$pintaModule !== "1") {
+      throw new Error('Not a Pinta module (expected `$pintaModule: "1"`).');
+    }
+    if (!pkg.manifest || typeof pkg.manifest.id !== "string") {
+      throw new Error("Module manifest is missing or has no id.");
+    }
+    if (typeof pkg.agent !== "string" || pkg.agent.trim() === "") {
+      throw new Error("Module is missing its agent instructions.");
+    }
+    return pkg as ModulePackage;
+  }
+
+  async function onFilePicked(e: Event) {
+    const input = e.currentTarget as HTMLInputElement;
+    const file = input.files?.[0];
+    input.value = ""; // allow re-picking the same file
+    if (!file) return;
+    try {
+      const pkg = parsePackage(await file.text());
+      pendingImport = { pkg, fileName: file.name };
+      // Default-deny: every declared capability starts UNCHECKED.
+      grantChecked = {};
+      app.dismissModuleError();
+    } catch (err) {
+      app.moduleError = `Couldn't read module: ${(err as Error).message}`;
+    }
+  }
+
+  function cancelImport() {
+    pendingImport = null;
+    grantChecked = {};
+  }
+
+  async function confirmImport() {
+    if (!pendingImport) return;
+    const declared = pendingImport.pkg.manifest.capabilities ?? [];
+    const granted = declared.filter((c) => grantChecked[c]) as ModuleCapability[];
+    importing = true;
+    try {
+      await app.importModule(pendingImport.pkg, granted);
+      pendingImport = null;
+      grantChecked = {};
+    } catch {
+      // app.moduleError already set by importModule — keep the dialog open
+      // so the user can retry or cancel.
+    } finally {
+      importing = false;
+    }
+  }
+
+  /** Friendly one-liner for a capability id shown in the consent dialog. */
+  function capLabel(c: ModuleCapability): string {
+    if (c === "read-files") return "Read files in this project";
+    if (c === "write-files") return "Create / edit files in this project";
+    if (c.startsWith("run-tool:")) return `Run the \`${c.slice("run-tool:".length)}\` command`;
+    if (c.startsWith("network:")) return `Make network requests to ${c.slice("network:".length)}`;
+    return c;
+  }
+
+  /** write/shell/network are the elevated ones we warn harder about. */
+  function capIsElevated(c: ModuleCapability): boolean {
+    return c !== "read-files";
+  }
 </script>
 
 <section class="space-y-3">
@@ -40,8 +138,8 @@
     <div>
       <h2 class="text-sm font-semibold text-ink-900 dark:text-night-text">Settings</h2>
       <p class="text-[11px] text-ink-500 dark:text-night-mute mt-0.5">
-        Built-in modules extend Pinta with extra workflows. Enable here, opt
-        in per submit from the footer.
+        Modules extend Pinta with extra workflows. Enable here, opt in per
+        submit from the footer. Import your own below.
       </p>
     </div>
     <button
@@ -59,10 +157,30 @@
     <h3 class="text-xs uppercase tracking-wide text-ink-500 dark:text-night-mute font-medium">
       Modules
     </h3>
-    {#each BUILTIN_MODULES as spec (spec.id)}
+
+    {#if app.moduleError}
+      <div
+        class="flex items-start gap-2 rounded-md border border-red-300 dark:border-red-800/60 bg-red-50 dark:bg-red-950/40 px-2.5 py-2 text-[11px] text-red-700 dark:text-red-300"
+        role="alert"
+      >
+        <span class="min-w-0 flex-1 leading-snug">{app.moduleError}</span>
+        <button
+          type="button"
+          class="shrink-0 text-red-500 hover:text-red-800 dark:hover:text-red-200 leading-none"
+          onclick={() => app.dismissModuleError()}
+          aria-label="Dismiss error"
+          title="Dismiss"
+        >
+          ✕
+        </button>
+      </div>
+    {/if}
+
+    {#each specs as spec (spec.id)}
       {@const entry = app.modules[spec.id]}
       {@const enabled = entry?.enabled ?? false}
       {@const ready = enabled && isReady(spec)}
+      {@const installed = importedById.get(spec.id)}
       <div
         class="rounded-md border bg-white dark:bg-night-card p-3 space-y-2"
         class:border-ink-200={!enabled || ready}
@@ -120,6 +238,33 @@
             <p class="text-[12px] text-ink-700 dark:text-night-dim mt-0.5">
               {spec.description}
             </p>
+            {#if installed}
+              <!-- Imported module — show who shipped it + the capabilities
+                   the user granted at import, and a way to remove it. -->
+              <div class="mt-1.5 flex items-center gap-1.5 flex-wrap">
+                <span class="inline-flex items-center text-[10px] uppercase tracking-wide font-semibold text-indigo-700 dark:text-indigo-300 bg-indigo-100 dark:bg-indigo-950/50 border border-indigo-300 dark:border-indigo-800/50 rounded-full px-1.5 py-0.5">
+                  Imported
+                </span>
+                <span class="text-[10px] text-ink-500 dark:text-night-mute">
+                  v{installed.manifest.version}{installed.manifest.author
+                    ? ` · ${installed.manifest.author}`
+                    : ""}
+                </span>
+              </div>
+              <div class="mt-1 flex items-center gap-1 flex-wrap">
+                {#if installed.grantedCapabilities.length === 0}
+                  <span class="text-[10px] text-ink-500 dark:text-night-mute italic">
+                    Read-only (no extra capabilities granted)
+                  </span>
+                {:else}
+                  {#each installed.grantedCapabilities as cap (cap)}
+                    <span class="inline-flex items-center font-mono text-[10px] text-ink-700 dark:text-night-dim bg-ink-100 dark:bg-night-bg border border-ink-200 dark:border-night-line rounded px-1 py-0.5">
+                      {cap}
+                    </span>
+                  {/each}
+                {/if}
+              </div>
+            {/if}
           </div>
           <label class="shrink-0 inline-flex items-center cursor-pointer">
             <input
@@ -235,11 +380,48 @@
             {/if}
           </div>
         {/if}
+
+        {#if installed}
+          <div class="pt-2 border-t border-ink-100 dark:border-night-line flex justify-end">
+            <button
+              type="button"
+              class="text-[11px] text-red-600 hover:text-red-800 dark:text-red-400 dark:hover:text-red-200 hover:underline"
+              onclick={() => app.uninstallModule(spec.id)}
+            >
+              Uninstall
+            </button>
+          </div>
+        {/if}
       </div>
     {/each}
-    <p class="text-[11px] text-ink-500 dark:text-night-mute italic">
-      More modules coming in future releases.
-    </p>
+
+    <!-- Import a third-party module (Phase 19). A module is a single
+         `.pinta-module.json` (manifest + agent instructions); the consent
+         dialog below shows exactly what it can do before anything lands. -->
+    <input
+      bind:this={fileInput}
+      type="file"
+      accept=".json,.pinta-module.json,application/json"
+      class="hidden"
+      onchange={onFilePicked}
+    />
+    <button
+      type="button"
+      class="w-full rounded-md border border-dashed border-ink-300 dark:border-night-line px-3 py-2 text-[12px] font-medium text-ink-700 dark:text-night-dim hover:border-brand-pink hover:text-brand-pink dark:hover:text-brand-pink-light disabled:opacity-50 disabled:cursor-not-allowed disabled:hover:border-ink-300 disabled:hover:text-ink-700"
+      disabled={!canImport}
+      onclick={() => fileInput?.click()}
+      title={canImport
+        ? "Import a .pinta-module.json"
+        : "Connect to a project companion to import modules"}
+    >
+      + Import module…
+    </button>
+    {#if !canImport}
+      <p class="text-[11px] text-ink-500 dark:text-night-mute italic">
+        Connect to a project to import modules — they install into that
+        project's <code>.pinta/modules/</code>.
+      </p>
+    {/if}
   </div>
 
   <div class="space-y-2">
@@ -417,3 +599,120 @@
     </div>
   </div>
 </section>
+
+<!-- ── Import consent dialog (Phase 19) ──────────────────────────────
+     An imported module is a stranger writing instructions for the user's
+     coding agent. Before anything is installed, show the manifest, the
+     full agent.md, and the declared capabilities — each granted
+     explicitly (default-deny). This is the trust boundary. -->
+{#if pendingImport}
+  {@const m = pendingImport.pkg.manifest}
+  {@const declared = m.capabilities ?? []}
+  <div
+    class="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-3"
+    role="dialog"
+    aria-modal="true"
+    aria-label="Confirm module import"
+  >
+    <div
+      class="w-full max-w-md max-h-[88vh] overflow-y-auto rounded-lg bg-white dark:bg-night-card border border-ink-200 dark:border-night-line shadow-xl p-4 space-y-3"
+    >
+      <div>
+        <h3 class="text-sm font-semibold text-ink-900 dark:text-night-text">
+          Import “{m.name}”?
+        </h3>
+        <p class="text-[11px] text-ink-500 dark:text-night-mute mt-0.5">
+          <span class="font-mono">{m.id}</span> · v{m.version}{m.author
+            ? ` · ${m.author}`
+            : ""}
+        </p>
+        <p class="text-[12px] text-ink-700 dark:text-night-dim mt-1.5 leading-snug">
+          {m.description}
+        </p>
+      </div>
+
+      <!-- Capabilities — what the module is asking permission to do.
+           Default-unchecked; the agent never exceeds what's granted. -->
+      <div class="space-y-1.5">
+        <h4 class="text-[11px] font-semibold text-ink-900 dark:text-night-text">
+          Capabilities
+        </h4>
+        {#if declared.length === 0}
+          <p class="text-[11px] text-ink-600 dark:text-night-dim">
+            None requested — this module runs read-only (it can read project
+            files and report back, but not write, run commands, or use the
+            network).
+          </p>
+        {:else}
+          <p class="text-[11px] text-ink-500 dark:text-night-mute leading-snug">
+            Grant only what you trust this module to do. Anything left
+            unchecked is denied — the agent is instructed never to exceed
+            these grants.
+          </p>
+          {#each declared as cap (cap)}
+            <label
+              class="flex items-start gap-2 rounded border px-2 py-1.5 cursor-pointer"
+              class:border-amber-300={capIsElevated(cap)}
+              class:dark:border-amber-800={capIsElevated(cap)}
+              class:bg-amber-50={capIsElevated(cap)}
+              class:dark:bg-amber-950={capIsElevated(cap)}
+              class:border-ink-200={!capIsElevated(cap)}
+              class:dark:border-night-line={!capIsElevated(cap)}
+            >
+              <input
+                type="checkbox"
+                class="accent-brand-pink shrink-0 mt-0.5"
+                checked={grantChecked[cap] === true}
+                onchange={(e) =>
+                  (grantChecked[cap] = (e.currentTarget as HTMLInputElement).checked)}
+              />
+              <span class="min-w-0">
+                <span class="block text-[12px] text-ink-800 dark:text-night-text">
+                  {capLabel(cap)}
+                </span>
+                <span class="block font-mono text-[10px] text-ink-500 dark:text-night-mute">
+                  {cap}
+                </span>
+              </span>
+            </label>
+          {/each}
+        {/if}
+      </div>
+
+      <!-- The exact instructions the agent will follow. The user can read
+           every line before consenting. -->
+      <div class="space-y-1">
+        <h4 class="text-[11px] font-semibold text-ink-900 dark:text-night-text">
+          Agent instructions (agent.md)
+        </h4>
+        <pre class="max-h-44 overflow-auto rounded border border-ink-200 dark:border-night-line bg-ink-50 dark:bg-night-bg p-2 text-[10px] leading-snug text-ink-700 dark:text-night-dim whitespace-pre-wrap break-words">{pendingImport.pkg.agent}</pre>
+      </div>
+
+      <p class="text-[10px] text-ink-500 dark:text-night-mute leading-snug">
+        Imported modules run inside your own interactive Claude Code session
+        and follow Pinta's trust rules — they can't edit outside this
+        project, run commands you didn't grant, or change how the agent
+        authenticates.
+      </p>
+
+      <div class="flex items-center justify-end gap-2 pt-1">
+        <button
+          type="button"
+          class="text-[12px] px-3 py-1.5 rounded text-ink-600 hover:text-ink-900 dark:text-night-mute dark:hover:text-night-text"
+          onclick={cancelImport}
+          disabled={importing}
+        >
+          Cancel
+        </button>
+        <button
+          type="button"
+          class="text-[12px] px-3 py-1.5 rounded bg-brand-pink text-white font-medium hover:bg-brand-pink-dark disabled:opacity-60 disabled:cursor-not-allowed"
+          onclick={confirmImport}
+          disabled={importing}
+        >
+          {importing ? "Installing…" : "Install module"}
+        </button>
+      </div>
+    </div>
+  </div>
+{/if}

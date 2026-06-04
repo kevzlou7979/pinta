@@ -1,9 +1,18 @@
 import { describe, expect, it } from "vitest";
-import type { AuditCategoryId, AuditCheck } from "@pinta/shared";
+import type {
+  AuditCategoryId,
+  AuditCategoryResult,
+  AuditCheck,
+  AuditDisposition,
+  AuditOverlay,
+  AuditRun,
+} from "@pinta/shared";
 import {
+  auditProgress,
   categoryDisplayName,
   composeAuditFixComment,
   computeCategoryScore,
+  mergeAuditRun,
   ratingFromScore,
   statusGlyph,
 } from "./audit-flow.js";
@@ -240,6 +249,307 @@ describe("composeAuditFixComment", () => {
     );
     expect(text).toContain("FAIL");
     expect(text).not.toContain("fail)");
+  });
+});
+
+describe("auditProgress", () => {
+  it("empty list → 0 actionable, 0 done, 100% (nothing to address reads as complete)", () => {
+    expect(auditProgress([], {})).toEqual({
+      actionable: 0,
+      done: 0,
+      percent: 100,
+    });
+  });
+
+  it("pass / info checks are excluded from the actionable set", () => {
+    expect(
+      auditProgress(
+        [
+          check({ status: "pass", id: "p1" }),
+          check({ status: "info", id: "i1" }),
+        ],
+        {},
+      ),
+    ).toEqual({ actionable: 0, done: 0, percent: 100 });
+  });
+
+  it("all actionable + no dispositions → defaults to open → 0%", () => {
+    expect(
+      auditProgress(
+        [
+          check({ status: "fail", id: "f1" }),
+          check({ status: "warn", id: "w1" }),
+        ],
+        {},
+      ),
+    ).toEqual({ actionable: 2, done: 0, percent: 0 });
+  });
+
+  it("resolved + wont-fix both count as done; open + fixing do not", () => {
+    const dispositions: Record<string, AuditDisposition> = {
+      f1: "resolved",
+      f2: "wont-fix",
+      f3: "fixing",
+      // f4 absent → open
+    };
+    expect(
+      auditProgress(
+        [
+          check({ status: "fail", id: "f1" }),
+          check({ status: "warn", id: "f2" }),
+          check({ status: "fail", id: "f3" }),
+          check({ status: "warn", id: "f4" }),
+        ],
+        dispositions,
+      ),
+    ).toEqual({ actionable: 4, done: 2, percent: 50 });
+  });
+
+  it("mix of actionable + non-actionable: only fail/warn drive the denominator", () => {
+    // 2 actionable (1 done) + 2 non-actionable ignored → 1/2 = 50%
+    expect(
+      auditProgress(
+        [
+          check({ status: "fail", id: "f1" }),
+          check({ status: "warn", id: "w1" }),
+          check({ status: "pass", id: "p1" }),
+          check({ status: "info", id: "i1" }),
+        ],
+        { f1: "resolved" },
+      ),
+    ).toEqual({ actionable: 2, done: 1, percent: 50 });
+  });
+
+  it("rounds the percent — 1 of 3 done = 33%", () => {
+    expect(
+      auditProgress(
+        [
+          check({ status: "fail", id: "f1" }),
+          check({ status: "fail", id: "f2" }),
+          check({ status: "fail", id: "f3" }),
+        ],
+        { f1: "resolved" },
+      ).percent,
+    ).toBe(33);
+  });
+});
+
+describe("mergeAuditRun", () => {
+  const emptyOverlay = (): AuditOverlay => ({
+    addedCategories: [],
+    addedChecks: {},
+    edits: {},
+    deleted: [],
+  });
+
+  function run(categories: AuditCategoryResult[]): AuditRun {
+    return {
+      runId: "agent-run-1",
+      startedAt: 1000,
+      completedAt: 2000,
+      categories,
+      overall: 0,
+      rating: "Poor",
+    };
+  }
+
+  it("null agent run + empty overlay → null", () => {
+    expect(mergeAuditRun(null, emptyOverlay())).toBeNull();
+  });
+
+  it("null agent run + added categories → synthetic run from overlay alone", () => {
+    const overlay = emptyOverlay();
+    overlay.addedCategories = [
+      {
+        id: "audit-flow-custom:abc" as AuditCategoryId,
+        name: "My Audit",
+        score: 100,
+        checks: [check({ status: "fail", id: "USER-1" })],
+      },
+    ];
+    const merged = mergeAuditRun(null, overlay);
+    expect(merged).not.toBeNull();
+    expect(merged?.categories).toHaveLength(1);
+    expect(merged?.categories[0].name).toBe("My Audit");
+    // single fail → score 0 → overall 0 → Poor
+    expect(merged?.categories[0].score).toBe(0);
+    expect(merged?.overall).toBe(0);
+    expect(merged?.rating).toBe("Poor");
+  });
+
+  it("deletes a category whose id is in `deleted`", () => {
+    const agentRun = run([
+      { id: "security", name: "Security", score: 50, checks: [check({ status: "fail", id: "s1" })] },
+      { id: "performance", name: "Performance", score: 50, checks: [check({ status: "fail", id: "p1" })] },
+    ]);
+    const overlay = emptyOverlay();
+    overlay.deleted = ["performance"];
+    const merged = mergeAuditRun(agentRun, overlay);
+    expect(merged?.categories.map((c) => c.id)).toEqual(["security"]);
+  });
+
+  it("drops deleted checks and recomputes the category score", () => {
+    const agentRun = run([
+      {
+        id: "security",
+        name: "Security",
+        score: 50,
+        checks: [
+          check({ status: "pass", id: "s1" }),
+          check({ status: "fail", id: "s2" }),
+        ],
+      },
+    ]);
+    const overlay = emptyOverlay();
+    overlay.deleted = ["s2"]; // drop the fail → only pass left → score 100
+    const merged = mergeAuditRun(agentRun, overlay);
+    expect(merged?.categories[0].checks.map((c) => c.id)).toEqual(["s1"]);
+    expect(merged?.categories[0].score).toBe(100);
+    expect(merged?.overall).toBe(100);
+  });
+
+  it("applies field edits to agent checks without mutating the input", () => {
+    const original = check({ status: "warn", id: "s1", label: "Old", description: "OldDesc" });
+    const agentRun = run([
+      { id: "security", name: "Security", score: 50, checks: [original] },
+    ]);
+    const overlay = emptyOverlay();
+    overlay.edits = { s1: { label: "New", fixHint: "Do this" } };
+    const merged = mergeAuditRun(agentRun, overlay);
+    const c = merged?.categories[0].checks[0];
+    expect(c?.label).toBe("New");
+    expect(c?.fixHint).toBe("Do this");
+    expect(c?.description).toBe("OldDesc"); // untouched field preserved
+    expect(original.label).toBe("Old"); // input not mutated
+  });
+
+  it("concats addedChecks onto a built-in category and recomputes score", () => {
+    const agentRun = run([
+      { id: "security", name: "Security", score: 100, checks: [check({ status: "pass", id: "s1" })] },
+    ]);
+    const overlay = emptyOverlay();
+    overlay.addedChecks = {
+      security: [check({ status: "fail", id: "USER-1", label: "User finding" })],
+    };
+    const merged = mergeAuditRun(agentRun, overlay);
+    expect(merged?.categories[0].checks.map((c) => c.id)).toEqual(["s1", "USER-1"]);
+    // 1 pass + 1 fail → 50
+    expect(merged?.categories[0].score).toBe(50);
+    expect(merged?.overall).toBe(50);
+  });
+
+  it("computes overall as the rounded average of category scores", () => {
+    const agentRun = run([
+      { id: "security", name: "Security", score: 0, checks: [check({ status: "pass", id: "s1" })] },
+      { id: "performance", name: "Performance", score: 0, checks: [check({ status: "fail", id: "p1" })] },
+    ]);
+    // security → 100, performance → 0, avg → 50
+    const merged = mergeAuditRun(agentRun, emptyOverlay());
+    expect(merged?.overall).toBe(50);
+    expect(merged?.rating).toBe("Needs work");
+  });
+
+  it("preserves runId and timing from the agent run", () => {
+    const agentRun = run([
+      { id: "security", name: "Security", score: 100, checks: [] },
+    ]);
+    const merged = mergeAuditRun(agentRun, emptyOverlay());
+    expect(merged?.runId).toBe("agent-run-1");
+    expect(merged?.startedAt).toBe(1000);
+    expect(merged?.completedAt).toBe(2000);
+  });
+
+  // ─── Agent-evaluated custom categories ──────────────────────────────
+  // After the re-run fix, the agent can return a custom category it
+  // evaluated. Its checks include the user's USER- ids (now graded) plus
+  // fresh agent findings. The same USER- check still lives in
+  // overlay.addedChecks, so the merge must NOT render it twice — the
+  // agent's evaluated copy wins.
+
+  const customId = "audit-flow-custom:abc" as AuditCategoryId;
+
+  it("dedupes a USER- check that the agent echoed back (evaluated copy wins, no duplicate)", () => {
+    const agentRun = run([
+      {
+        id: customId,
+        name: "Svelte Best Practices",
+        score: 0,
+        checks: [
+          // agent's evaluated copy of the user's check — same id, now pass
+          check({ status: "pass", id: "USER-1", label: "Follow svelte skills", value: "conforms" }),
+          // a fresh finding the agent added under the theme
+          check({ status: "fail", id: "sha1-new", label: "Legacy $: reactive" }),
+        ],
+      },
+    ]);
+    const overlay = emptyOverlay();
+    // The static, un-evaluated copy still sits in the overlay.
+    overlay.addedCategories = [
+      { id: customId, name: "Svelte Best Practices", score: 100, checks: [] },
+    ];
+    overlay.addedChecks = {
+      [customId]: [check({ status: "warn", id: "USER-1", label: "Follow svelte skills" })],
+    };
+    const merged = mergeAuditRun(agentRun, overlay);
+    // Only ONE category, and USER-1 appears exactly once with the agent's
+    // status (pass), not the overlay's stale warn.
+    expect(merged?.categories).toHaveLength(1);
+    const checks = merged?.categories[0].checks ?? [];
+    expect(checks.map((c) => c.id)).toEqual(["USER-1", "sha1-new"]);
+    expect(checks.find((c) => c.id === "USER-1")?.status).toBe("pass");
+    // 1 pass + 1 fail → 50
+    expect(merged?.categories[0].score).toBe(50);
+  });
+
+  it("prefers the overlay name for a custom category the user renamed after the run", () => {
+    const agentRun = run([
+      { id: customId, name: "Old Name", score: 100, checks: [check({ status: "pass", id: "USER-1" })] },
+    ]);
+    const overlay = emptyOverlay();
+    overlay.addedCategories = [
+      { id: customId, name: "Renamed By User", score: 100, checks: [] },
+    ];
+    const merged = mergeAuditRun(agentRun, overlay);
+    expect(merged?.categories).toHaveLength(1);
+    expect(merged?.categories[0].name).toBe("Renamed By User");
+  });
+
+  it("still renders a custom category the agent has not evaluated yet (never-run)", () => {
+    const agentRun = run([
+      { id: "security", name: "Security", score: 100, checks: [check({ status: "pass", id: "s1" })] },
+    ]);
+    const overlay = emptyOverlay();
+    overlay.addedCategories = [
+      { id: customId, name: "Brand New", score: 100, checks: [] },
+    ];
+    overlay.addedChecks = {
+      [customId]: [check({ status: "warn", id: "USER-1", label: "Todo" })],
+    };
+    const merged = mergeAuditRun(agentRun, overlay);
+    expect(merged?.categories.map((c) => c.id)).toEqual(["security", customId]);
+    expect(merged?.categories[1].checks.map((c) => c.id)).toEqual(["USER-1"]);
+  });
+
+  it("hides a deleted check inside an agent-evaluated custom category", () => {
+    const agentRun = run([
+      {
+        id: customId,
+        name: "Svelte Best Practices",
+        score: 0,
+        checks: [
+          check({ status: "pass", id: "USER-1" }),
+          check({ status: "fail", id: "sha1-new" }),
+        ],
+      },
+    ]);
+    const overlay = emptyOverlay();
+    overlay.addedCategories = [
+      { id: customId, name: "Svelte Best Practices", score: 100, checks: [] },
+    ];
+    overlay.deleted = ["sha1-new"]; // user hid the agent's finding
+    const merged = mergeAuditRun(agentRun, overlay);
+    expect(merged?.categories[0].checks.map((c) => c.id)).toEqual(["USER-1"]);
+    expect(merged?.categories[0].score).toBe(100); // only the pass remains
   });
 });
 

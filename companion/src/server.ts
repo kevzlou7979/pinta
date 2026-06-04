@@ -232,6 +232,51 @@ async function handle(
     return sendJson(res, 200, store.getActive());
   }
 
+  // ── Importable modules (Phase 19) ────────────────────────────────
+  // Installed third-party modules live under `.pinta/modules/<id>/`.
+  // Writes are already gated by the extension-origin / no-Origin CORS
+  // check above, so only the extension or the local agent can mutate
+  // them. The store validates the manifest + id (path-traversal guard)
+  // and records the user's capability consent.
+
+  if (method === "GET" && path === "/v1/modules") {
+    return sendJson(res, 200, await store.listInstalledModules());
+  }
+
+  if (method === "POST" && path === "/v1/modules") {
+    const body = await readJson<{
+      package?: unknown;
+      grantedCapabilities?: unknown;
+    }>(req);
+    const grants = Array.isArray(body.grantedCapabilities)
+      ? (body.grantedCapabilities as string[])
+      : [];
+    try {
+      const installed = await store.installModule(
+        body.package as never,
+        grants as never,
+      );
+      log(
+        `module installed: ${installed.manifest.id} (caps: ${installed.grantedCapabilities.join(", ") || "none"})`,
+      );
+      return sendJson(res, 201, installed);
+    } catch (err) {
+      return sendJson(res, 400, { error: (err as Error).message });
+    }
+  }
+
+  const moduleMatch = path.match(/^\/v1\/modules\/([^/]+)$/);
+  if (method === "DELETE" && moduleMatch) {
+    const id = decodeURIComponent(moduleMatch[1]!);
+    try {
+      await store.uninstallModule(id);
+    } catch (err) {
+      return sendJson(res, 400, { error: (err as Error).message });
+    }
+    log(`module uninstalled: ${id}`);
+    return sendJson(res, 200, { ok: true });
+  }
+
   if (method === "DELETE" && path === "/v1/test-docs") {
     // Wipe the entire .pinta/test-docs/ directory. Called when the
     // user hits "Clear catalog" in Test Pilot — keeps the on-disk

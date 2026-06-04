@@ -4,16 +4,23 @@ import type {
   AuditCategoryId,
   AuditCategoryResult,
   AuditCheck,
+  AuditCheckStatus,
+  AuditDisposition,
+  AuditOverlay,
   AuditRun,
   ClientMessage,
   ImportedSession,
   ServerMessage,
   Session,
   SessionModule,
+  InstalledModule,
+  ModulePackage,
+  ModuleCapability,
 } from "@pinta/shared";
 import {
   BUILTIN_MODULES,
   getModuleSpec,
+  manifestToSpec,
   moduleIsConfigured,
   type ModuleSpec,
 } from "./modules.js";
@@ -51,6 +58,7 @@ import {
   categoryDisplayName,
   composeAuditFixComment,
   computeCategoryScore,
+  mergeAuditRun,
   ratingFromScore,
 } from "./audit-flow.js";
 
@@ -366,6 +374,20 @@ class ExtensionState {
     >
   >({});
   /**
+   * Imported (third-party) modules installed in the active companion's
+   * project (`.pinta/modules/`). Phase 19. Fetched from
+   * `GET /v1/modules` on companion connect; merged with `BUILTIN_MODULES`
+   * everywhere the UI renders module specs (`manifestToSpec`). Companion-
+   * scoped — cleared when no companion is selected (standalone).
+   */
+  installedModules = $state<InstalledModule[]>([]);
+  /**
+   * Dedicated error banner for import / uninstall failures, shown in the
+   * Settings panel with a dismiss X (every error banner in the extension
+   * is dismissible — see the Annotate / AuditFlow pattern).
+   */
+  moduleError = $state<string | null>(null);
+  /**
    * Per-session opt-in checkboxes — module ids the user has ticked for
    * the current submit. In-memory only; cleared on each new session so
    * the user always has to consciously opt in (matches the existing
@@ -577,6 +599,7 @@ class ExtensionState {
     void this.loadGlobalChat();
     void this.loadAnnotateChats();
     void this.loadAuditRun();
+    void this.loadAuditDispositions();
     // Stage the legacy global catalog (if any) for the first companion
     // to claim. The actual per-project load happens inside connectTo.
     void this.readLegacyTestPilot();
@@ -2786,6 +2809,16 @@ class ExtensionState {
   /** Per-user category-selection preference. Survives panel reloads
    *  so users don't re-tick boxes every run. */
   private static readonly AUDIT_SELECTED_KEY = "pinta-audit-selected-categories";
+  /** Per-finding remediation dispositions, keyed by the check's stable
+   *  fingerprint id. Stored OUTSIDE the AuditRun so re-running an audit
+   *  doesn't wipe the user's progress — looked up by id at render
+   *  time. Mirrors Test Pilot's separate result map. */
+  private static readonly AUDIT_DISPOSITIONS_KEY = "pinta-audit-dispositions";
+  /** User-curated catalog overlay (Phase 15 "Slice 2"). Layered over
+   *  the raw agent run by mergeAuditRun so user edits survive re-runs.
+   *  Persisted separately from AUDIT_KEY (which now holds the raw agent
+   *  run, not the merged view). */
+  private static readonly AUDIT_OVERLAY_KEY = "pinta-audit-overlay";
 
   /** Hard ceiling on a single audit run. Security category alone is
    *  ~30s typical; full 5-category audit can run minutes. Generous so
@@ -2816,24 +2849,76 @@ class ExtensionState {
   private claimWarnings = new Map<string, ReturnType<typeof setTimeout>>();
 
   audit = $state<{
-    /** Most recent completed run, or null if the user hasn't run yet. */
+    /** Raw AGENT-generated run, recomputed each re-audit, or null if
+     *  the user hasn't run yet. The user-facing `currentRun` is DERIVED
+     *  from this + `overlay` via recomputeAuditRun(). */
+    agentRun: AuditRun | null;
+    /** User-curated catalog overlay (added / edited / deleted checks +
+     *  categories). Layered over `agentRun` by mergeAuditRun so edits
+     *  survive re-runs. */
+    overlay: AuditOverlay;
+    /** DERIVED view = mergeAuditRun(agentRun, overlay). Never assigned
+     *  directly outside recomputeAuditRun() — mutate `agentRun` /
+     *  `overlay` then call that helper. */
     currentRun: AuditRun | null;
-    /** In-flight run metadata. Cleared on completion / error / cancel. */
-    pending: { runId: string; startedAt: number } | null;
+    /** In-flight run metadata. Cleared on completion / error / cancel.
+     *  `partial` marks a single-category re-run (one category's ⋮ →
+     *  "Re-run category"): its result is spliced into the existing run
+     *  rather than replacing it, and the full-screen "Running audit…"
+     *  panel is suppressed so other category cards stay visible.
+     *  `categoryId` is the category being re-run (for the per-card
+     *  spinner). */
+    pending: {
+      runId: string;
+      startedAt: number;
+      partial?: boolean;
+      categoryId?: string;
+    } | null;
     /** Which categories the user wants the next run to cover. The
      *  picker in AuditFlowTab writes to this; runAudit reads from it.
      *  Defaults to ["security"] (the always-available v1 category).
      *  Persists to chrome.storage so the user's selection sticks. */
     selectedCategories: AuditCategoryId[];
+    /** Per-finding remediation dispositions, keyed by check.id (the
+     *  stable fingerprint). Persists independently of the AuditRun so
+     *  progress survives re-runs. An actionable check absent from this
+     *  map defaults to "open". */
+    dispositions: Record<string, AuditDisposition>;
+    /** Per-category in-flight "Suggest checks" requests, keyed by
+     *  category id. In-memory only (mirrors Test Pilot's
+     *  pendingSectionSuggest); the spinner on the kebab reads this. */
+    pendingAuditSuggest: Record<string, boolean>;
+    /** Per-category agent-returned check suggestions awaiting the user's
+     *  pick. In-memory only — ticked rows land as USER- checks via
+     *  addAuditCheck. Mirrors Test Pilot's sectionSuggestions. */
+    suggestions: Record<
+      string,
+      { label: string; description?: string; status?: AuditCheckStatus }[]
+    >;
     error: string | null;
   }>({
+    agentRun: null,
+    overlay: { addedCategories: [], addedChecks: {}, edits: {}, deleted: [] },
     currentRun: null,
     pending: null,
     selectedCategories: ["security"],
+    dispositions: {},
+    pendingAuditSuggest: {},
+    suggestions: {},
     error: null,
   });
 
   private auditTimer: ReturnType<typeof setTimeout> | null = null;
+
+  /** Recompute the DERIVED `currentRun` from the raw agent run + the
+   *  user overlay. Call after every mutation to either input. Snapshots
+   *  the reactive inputs so mergeAuditRun (a pure fn) sees plain data. */
+  private recomputeAuditRun(): void {
+    this.audit.currentRun = mergeAuditRun(
+      this.audit.agentRun ? $state.snapshot(this.audit.agentRun) : null,
+      $state.snapshot(this.audit.overlay),
+    );
+  }
 
   async loadAuditRun(): Promise<void> {
     try {
@@ -2842,11 +2927,38 @@ class ExtensionState {
       );
       const raw = stored?.[ExtensionState.AUDIT_KEY] as AuditRun | undefined;
       if (raw && typeof raw === "object" && Array.isArray(raw.categories)) {
-        this.audit.currentRun = raw;
+        this.audit.agentRun = raw;
       }
     } catch {
       // storage missing (test env) — defaults are fine
     }
+    // Restore the user-curated overlay (added / edited / deleted
+    // checks + categories). Defensive shape-check so a corrupt value
+    // doesn't crash the merge — fall back to the empty overlay.
+    try {
+      const stored = await chrome.storage?.local?.get(
+        ExtensionState.AUDIT_OVERLAY_KEY,
+      );
+      const raw = stored?.[ExtensionState.AUDIT_OVERLAY_KEY] as
+        | AuditOverlay
+        | undefined;
+      if (
+        raw &&
+        typeof raw === "object" &&
+        Array.isArray(raw.addedCategories) &&
+        Array.isArray(raw.deleted) &&
+        raw.addedChecks &&
+        typeof raw.addedChecks === "object" &&
+        raw.edits &&
+        typeof raw.edits === "object"
+      ) {
+        this.audit.overlay = raw;
+      }
+    } catch {
+      // storage missing — empty overlay default stands
+    }
+    // Derive the user-facing run from agentRun + overlay.
+    this.recomputeAuditRun();
     // Also restore the user's category-selection preference so the
     // empty-state checkboxes reflect what they picked last time.
     try {
@@ -2888,13 +3000,18 @@ class ExtensionState {
 
   private async saveAuditRun(): Promise<void> {
     try {
-      if (this.audit.currentRun) {
+      // AUDIT_KEY holds the RAW agent run (not the merged view); the
+      // overlay is stored separately so user edits persist independently.
+      if (this.audit.agentRun) {
         await chrome.storage?.local?.set({
-          [ExtensionState.AUDIT_KEY]: $state.snapshot(this.audit.currentRun),
+          [ExtensionState.AUDIT_KEY]: $state.snapshot(this.audit.agentRun),
         });
       } else {
         await chrome.storage?.local?.remove(ExtensionState.AUDIT_KEY);
       }
+      await chrome.storage?.local?.set({
+        [ExtensionState.AUDIT_OVERLAY_KEY]: $state.snapshot(this.audit.overlay),
+      });
     } catch (err) {
       if (ExtensionState.isQuotaExceeded(err)) {
         this.audit.error =
@@ -2902,6 +3019,56 @@ class ExtensionState {
           "Try clearing chat history or older Test Pilot catalogs.";
       }
     }
+  }
+
+  /** Hydrate the per-finding disposition map from chrome.storage.
+   *  Mirrors loadAuditRun — read one key, one value. Tolerates a
+   *  missing storage API (test env) by leaving the {} default. */
+  async loadAuditDispositions(): Promise<void> {
+    try {
+      const stored = await chrome.storage?.local?.get(
+        ExtensionState.AUDIT_DISPOSITIONS_KEY,
+      );
+      const raw = stored?.[ExtensionState.AUDIT_DISPOSITIONS_KEY] as
+        | Record<string, AuditDisposition>
+        | undefined;
+      if (raw && typeof raw === "object" && !Array.isArray(raw)) {
+        this.audit.dispositions = raw;
+      }
+    } catch {
+      // storage missing (test env) — defaults are fine
+    }
+  }
+
+  /** Persist the disposition map. Mirrors saveAuditRun — snapshot the
+   *  reactive map before handing it to chrome.storage. */
+  private async saveAuditDispositions(): Promise<void> {
+    try {
+      await chrome.storage?.local?.set({
+        [ExtensionState.AUDIT_DISPOSITIONS_KEY]: $state.snapshot(
+          this.audit.dispositions,
+        ),
+      });
+    } catch (err) {
+      if (ExtensionState.isQuotaExceeded(err)) {
+        this.audit.error =
+          "Browser storage is full — audit progress couldn't save. " +
+          "Try clearing chat history or older Test Pilot catalogs.";
+      }
+    }
+  }
+
+  /** Set (or clear) a finding's remediation disposition. Keyed by the
+   *  check's stable fingerprint id so it survives re-runs. Setting back
+   *  to "open" deletes the entry to keep the stored map lean (an absent
+   *  key already defaults to "open"). Persists after each change. */
+  setAuditDisposition(checkId: string, d: AuditDisposition): void {
+    if (d === "open") {
+      delete this.audit.dispositions[checkId];
+    } else {
+      this.audit.dispositions[checkId] = d;
+    }
+    void this.saveAuditDispositions();
   }
 
   /** Kick off an audit run. Reads `this.audit.selectedCategories`
@@ -2916,7 +3083,11 @@ class ExtensionState {
       return;
     }
     const cats = categories ?? this.audit.selectedCategories;
-    if (cats.length === 0) {
+    // Custom categories the user added — sent so the agent actually
+    // evaluates them (their effective checks come from the merged
+    // currentRun; overlay.addedCategories[*].checks is always []).
+    const customCategories = this.collectCustomCategoriesForQuery();
+    if (cats.length === 0 && customCategories.length === 0) {
       this.audit.error = "Pick at least one category before running the audit.";
       return;
     }
@@ -2930,7 +3101,9 @@ class ExtensionState {
       op: "audit",
       runId,
       categories: cats,
+      customCategories,
       scope: { kind: "project" }, // 15a: project scope only
+      partial: false,
     });
     this.send({
       type: "module.query.submit",
@@ -2939,6 +3112,77 @@ class ExtensionState {
       moduleSettings: {},
       queryComment,
     });
+  }
+
+  /** Re-run a single category (built-in or custom) from its ⋮ menu. The
+   *  result is spliced into the existing run (see applyAuditResult's
+   *  partial branch) so the other category cards stay put. */
+  async runAuditCategory(categoryId: string): Promise<void> {
+    if (this.audit.pending) return;
+    if (!this.client || this.connectionStatus !== "connected") {
+      this.audit.error =
+        "No companion connected. Start `pinta-companion .` in your project to run AuditFlow.";
+      return;
+    }
+    const isCustom = categoryId.startsWith("audit-flow-custom:");
+    const customCategories = isCustom
+      ? this.collectCustomCategoriesForQuery().filter((c) => c.id === categoryId)
+      : [];
+    const cats: AuditCategoryId[] = isCustom
+      ? []
+      : [categoryId as AuditCategoryId];
+    if (cats.length === 0 && customCategories.length === 0) {
+      // Custom category vanished from the merged view (e.g. deleted) —
+      // nothing to re-run.
+      return;
+    }
+    const runId = crypto.randomUUID();
+    const startedAt = Date.now();
+    this.audit.pending = { runId, startedAt, partial: true, categoryId };
+    this.audit.error = null;
+    this.armAuditTimeout();
+    const queryComment = JSON.stringify({
+      op: "audit",
+      runId,
+      categories: cats,
+      customCategories,
+      scope: { kind: "project" },
+      partial: true,
+    });
+    this.send({
+      type: "module.query.submit",
+      url: this.lastUrl ?? "",
+      moduleId: "audit-flow",
+      moduleSettings: {},
+      queryComment,
+    });
+  }
+
+  /** Snapshot the user's custom categories (with their effective merged
+   *  checks) into the lean shape the agent needs to evaluate them. */
+  private collectCustomCategoriesForQuery(): {
+    id: string;
+    name: string;
+    checks: {
+      id: string;
+      label: string;
+      description?: string;
+      status: AuditCheckStatus;
+    }[];
+  }[] {
+    const cats = this.audit.currentRun?.categories ?? [];
+    return cats
+      .filter((c) => c.id.startsWith("audit-flow-custom:"))
+      .map((c) => ({
+        id: c.id,
+        name: c.name,
+        checks: (c.checks ?? []).map((ck) => ({
+          id: ck.id,
+          label: ck.label,
+          description: ck.description,
+          status: ck.status,
+        })),
+      }));
   }
 
   /** User clicked Cancel on a stuck audit run. */
@@ -3067,6 +3311,41 @@ class ExtensionState {
       score: typeof c.score === "number" ? c.score : computeCategoryScore(c.checks ?? []),
       checks: Array.isArray(c.checks) ? c.checks : [],
     }));
+    // Single-category re-run (⋮ → "Re-run category"): splice the
+    // returned category(s) into the existing run by id rather than
+    // replacing it, so the untouched cards stay put. Preserve the
+    // existing run's id + startedAt so currentRun.runId is stable and
+    // AuditFlowTab's default-expansion $effect doesn't collapse every
+    // card. overall/rating are recomputed over the full merged set
+    // (payload.overall only covers the re-run subset).
+    if (this.audit.pending?.partial) {
+      const base = this.audit.agentRun;
+      const byId = new Map<string, AuditCategoryResult>(
+        (base?.categories ?? []).map((c) => [c.id, c]),
+      );
+      for (const c of categories) byId.set(c.id, c);
+      const mergedCats = [...byId.values()];
+      const mergedOverall =
+        mergedCats.length > 0
+          ? Math.round(
+              mergedCats.reduce((sum, c) => sum + c.score, 0) /
+                mergedCats.length,
+            )
+          : 0;
+      this.audit.agentRun = {
+        runId: base?.runId ?? this.audit.pending.runId,
+        startedAt: base?.startedAt ?? this.audit.pending.startedAt,
+        completedAt: Date.now(),
+        categories: mergedCats,
+        overall: mergedOverall,
+        rating: ratingFromScore(mergedOverall),
+      };
+      this.recomputeAuditRun();
+      this.audit.error = null;
+      void this.saveAuditRun();
+      return;
+    }
+
     const runId =
       typeof payload.runId === "string"
         ? payload.runId
@@ -3095,17 +3374,285 @@ class ExtensionState {
       overall,
       rating,
     };
-    this.audit.currentRun = run;
+    this.audit.agentRun = run;
+    this.recomputeAuditRun();
     this.audit.error = null;
     void this.saveAuditRun();
   }
 
-
   /** Wipe the audit run from in-memory + chrome.storage. The user
-   *  clicked Clear results on the AuditFlow tab. */
+   *  clicked Clear results on the AuditFlow tab. Full reset matching
+   *  today's "Clear" semantics: drops the agent run, the user overlay,
+   *  AND the dispositions. */
   clearAuditRun(): void {
-    this.audit.currentRun = null;
+    this.audit.agentRun = null;
+    this.audit.overlay = {
+      addedCategories: [],
+      addedChecks: {},
+      edits: {},
+      deleted: [],
+    };
+    this.audit.dispositions = {};
+    this.recomputeAuditRun();
     this.audit.error = null;
+    void this.saveAuditRun();
+    void this.saveAuditDispositions();
+  }
+
+  // ─── "Suggest checks" (Phase 15 "Slice 3") ─────────────────────────
+  // The user clicks "Suggest checks" on a category header; the agent
+  // inspects the project for that category's theme and proposes
+  // additional audit checks NOT already in the list. They render in an
+  // inline checklist under the header; ticked rows land as USER- checks
+  // via addAuditCheck (the same overlay path as the manual add-check
+  // form). Mirrors Test Pilot's requestSectionSuggestions /
+  // handleSuggestSync / addCheckedSuggestions trio.
+  //
+  // Routing key is the category id: op "audit-suggest" with a top-level
+  // `categoryId`, handled by handleAuditSuggestSync. Agent handler:
+  // SKILL.md §7.11.
+
+  /** Ask the agent for additional audit checks for one category. */
+  async requestAuditSuggestions(
+    categoryId: string,
+    categoryName: string,
+  ): Promise<void> {
+    if (this.audit.pendingAuditSuggest[categoryId]) return;
+    if (!this.client || this.connectionStatus !== "connected") {
+      this.audit.error =
+        "No companion connected. Start `pinta-companion .` in your project to suggest checks.";
+      return;
+    }
+    // Existing labels for this category, so the agent can avoid dupes.
+    const category = this.audit.currentRun?.categories.find(
+      (c) => c.id === categoryId,
+    );
+    const existing = (category?.checks ?? []).map((c) => c.label);
+    const queryComment = JSON.stringify({
+      op: "audit-suggest",
+      runId: crypto.randomUUID(),
+      categoryId,
+      categoryName,
+      existing,
+      count: 6,
+    });
+    this.audit.pendingAuditSuggest[categoryId] = true;
+    // Drop any stale prior suggestions so the panel doesn't flash old
+    // picks while the new request is in flight.
+    delete this.audit.suggestions[categoryId];
+    this.audit.error = null;
+    this.send({
+      type: "module.query.submit",
+      url: this.lastUrl ?? "",
+      moduleId: "audit-flow",
+      moduleSettings: {},
+      queryComment,
+    });
+  }
+
+  /** Handle an audit-suggest session.synced. Parses the agent's
+   *  structured suggestion list and stashes it for the inline checklist
+   *  keyed by categoryId. Mirrors handleSuggestSync. */
+  private handleAuditSuggestSync(session: Session, categoryId: string): void {
+    if (session.status === "done") {
+      // Empty-"done" guard first — same multi-agent-race hardening as
+      // handleAuditSync / handleTestPilotSync. Leave pending + let a
+      // real response land.
+      if ((session.appliedSummary ?? "").trim() === "") return;
+      delete this.audit.pendingAuditSuggest[categoryId];
+      let items: {
+        label: string;
+        description?: string;
+        status?: AuditCheckStatus;
+      }[] = [];
+      try {
+        const payload = JSON.parse(session.appliedSummary ?? "") as {
+          type?: string;
+          suggestions?: {
+            label?: string;
+            description?: string;
+            status?: AuditCheckStatus;
+          }[];
+        };
+        if (Array.isArray(payload.suggestions)) {
+          items = payload.suggestions
+            .map((s) => ({
+              label: (s.label ?? "").trim(),
+              description: s.description?.trim() || undefined,
+              status: s.status,
+            }))
+            .filter((s) => s.label.length > 0);
+        }
+      } catch {
+        // Malformed JSON envelope — leave items empty; the
+        // "no suggestions" branch below surfaces a retry hint.
+        items = [];
+      }
+      if (items.length === 0) {
+        this.audit.error = `No new check suggestions came back for "${categoryId}".`;
+        return;
+      }
+      this.audit.suggestions[categoryId] = items;
+    } else if (session.status === "error") {
+      delete this.audit.pendingAuditSuggest[categoryId];
+      this.audit.error = session.errorMessage ?? "Suggestion request failed.";
+    }
+  }
+
+  /** Add the ticked suggestions for a category as USER- checks, then
+   *  clear the inline panel. */
+  addAuditCheckedSuggestions(
+    categoryId: string,
+    picked: { label: string; description?: string; status?: AuditCheckStatus }[],
+  ): void {
+    for (const p of picked) {
+      this.addAuditCheck(categoryId, {
+        label: p.label,
+        description: p.description,
+        status: p.status,
+      });
+    }
+    delete this.audit.suggestions[categoryId];
+  }
+
+  /** Discard the inline suggestion panel without adding anything. */
+  dismissAuditSuggestions(categoryId: string): void {
+    delete this.audit.suggestions[categoryId];
+  }
+
+  // ─── Catalog editing (Phase 15 "Slice 2") ──────────────────────────
+  // Each method mutates `this.audit.overlay`, recomputes the derived
+  // `currentRun`, and persists. The overlay is durable across re-runs.
+
+  /** Add a user-authored check to a category. Defaults to status
+   *  "warn" so it's actionable (shows in progress + gets a disposition).
+   *  id is prefixed `USER-` so the UI + merge can distinguish it from
+   *  agent findings. */
+  addAuditCheck(
+    categoryId: string,
+    fields: { label: string; description?: string; status?: AuditCheckStatus },
+  ): void {
+    const check: AuditCheck = {
+      id: "USER-" + crypto.randomUUID(),
+      category: categoryId as AuditCategoryId,
+      status: fields.status ?? "warn",
+      label: fields.label,
+      description: fields.description,
+    };
+    const list = this.audit.overlay.addedChecks[categoryId] ?? [];
+    this.audit.overlay.addedChecks[categoryId] = [...list, check];
+    this.recomputeAuditRun();
+    void this.saveAuditRun();
+  }
+
+  /** Edit a check's fields. USER- checks (in addedChecks) are edited in
+   *  place; agent checks store an override entry in `overlay.edits` so
+   *  the edit re-applies after a re-run regenerates the raw check. */
+  editAuditCheck(
+    checkId: string,
+    patch: { label?: string; description?: string; fixHint?: string },
+  ): void {
+    if (checkId.startsWith("USER-")) {
+      for (const [cat, list] of Object.entries(this.audit.overlay.addedChecks)) {
+        const idx = list.findIndex((c) => c.id === checkId);
+        const target = idx !== -1 ? list[idx] : undefined;
+        if (target) {
+          const next = [...list];
+          next[idx] = {
+            ...target,
+            ...(patch.label !== undefined ? { label: patch.label } : {}),
+            ...(patch.description !== undefined
+              ? { description: patch.description }
+              : {}),
+            ...(patch.fixHint !== undefined ? { fixHint: patch.fixHint } : {}),
+          };
+          this.audit.overlay.addedChecks[cat] = next;
+          this.recomputeAuditRun();
+          void this.saveAuditRun();
+          return;
+        }
+      }
+      return;
+    }
+    this.audit.overlay.edits[checkId] = {
+      ...this.audit.overlay.edits[checkId],
+      ...patch,
+    };
+    this.recomputeAuditRun();
+    void this.saveAuditRun();
+  }
+
+  /** Delete a check. USER- checks are spliced out of addedChecks; agent
+   *  checks are pushed to `overlay.deleted` so the merge hides them.
+   *  Also clears any disposition + stale edit entry for the id. */
+  deleteAuditCheck(checkId: string): void {
+    if (checkId.startsWith("USER-")) {
+      for (const [cat, list] of Object.entries(this.audit.overlay.addedChecks)) {
+        const idx = list.findIndex((c) => c.id === checkId);
+        if (idx !== -1) {
+          this.audit.overlay.addedChecks[cat] = list.filter(
+            (c) => c.id !== checkId,
+          );
+          break;
+        }
+      }
+    } else if (!this.audit.overlay.deleted.includes(checkId)) {
+      this.audit.overlay.deleted.push(checkId);
+    }
+    delete this.audit.dispositions[checkId];
+    delete this.audit.overlay.edits[checkId];
+    this.recomputeAuditRun();
+    void this.saveAuditRun();
+    void this.saveAuditDispositions();
+  }
+
+  /** Add a user-authored custom category. id is prefixed
+   *  `audit-flow-custom:` so it sorts + renders as a custom audit. */
+  addAuditCategory(name: string): void {
+    const cat: AuditCategoryResult = {
+      id: ("audit-flow-custom:" + crypto.randomUUID()) as AuditCategoryId,
+      name,
+      score: 100,
+      checks: [],
+    };
+    this.audit.overlay.addedCategories = [
+      ...this.audit.overlay.addedCategories,
+      cat,
+    ];
+    this.recomputeAuditRun();
+    void this.saveAuditRun();
+  }
+
+  /** Rename a custom category in place. Built-in categories keep their
+   *  names — no-op when the id isn't a custom one we own. */
+  renameAuditCategory(categoryId: string, name: string): void {
+    const idx = this.audit.overlay.addedCategories.findIndex(
+      (c) => c.id === categoryId,
+    );
+    const target = idx !== -1 ? this.audit.overlay.addedCategories[idx] : undefined;
+    if (!target) return;
+    const next = [...this.audit.overlay.addedCategories];
+    next[idx] = { ...target, name };
+    this.audit.overlay.addedCategories = next;
+    this.recomputeAuditRun();
+    void this.saveAuditRun();
+  }
+
+  /** Delete a category. Custom categories are removed outright (with
+   *  their added checks); built-in (agent) categories are pushed to
+   *  `overlay.deleted` so the merge hides them. */
+  deleteAuditCategory(categoryId: string): void {
+    const isCustom = this.audit.overlay.addedCategories.some(
+      (c) => c.id === categoryId,
+    );
+    if (isCustom) {
+      this.audit.overlay.addedCategories =
+        this.audit.overlay.addedCategories.filter((c) => c.id !== categoryId);
+      delete this.audit.overlay.addedChecks[categoryId];
+    } else if (!this.audit.overlay.deleted.includes(categoryId)) {
+      this.audit.overlay.deleted.push(categoryId);
+    }
+    this.recomputeAuditRun();
     void this.saveAuditRun();
   }
 
@@ -3543,6 +4090,28 @@ class ExtensionState {
     }
   }
 
+  /** All module specs the UI should render — built-ins plus every
+   *  imported module, adapted from its manifest. Built-ins first so the
+   *  bundled integrations stay at the top of Settings. */
+  allModuleSpecs(): ModuleSpec[] {
+    return [
+      ...BUILTIN_MODULES,
+      ...this.installedModules.map((m) => manifestToSpec(m.manifest)),
+    ];
+  }
+
+  /** Resolve a spec by id across built-in + imported modules. */
+  specFor(id: string): ModuleSpec | null {
+    return (
+      getModuleSpec(id) ??
+      this.installedModules
+        .map((m) => m.manifest)
+        .filter((m) => m.id === id)
+        .map(manifestToSpec)[0] ??
+      null
+    );
+  }
+
   /** Initialize a missing module entry with defaults from its spec. */
   private ensureModuleEntry(spec: ModuleSpec): void {
     if (this.modules[spec.id]) return;
@@ -3554,7 +4123,7 @@ class ExtensionState {
   }
 
   setModuleEnabled(id: string, enabled: boolean): void {
-    const spec = getModuleSpec(id);
+    const spec = this.specFor(id);
     if (!spec) return;
     this.ensureModuleEntry(spec);
     this.modules[id]!.enabled = enabled;
@@ -3571,7 +4140,7 @@ class ExtensionState {
     key: string,
     value: string | boolean,
   ): void {
-    const spec = getModuleSpec(id);
+    const spec = this.specFor(id);
     if (!spec) return;
     this.ensureModuleEntry(spec);
     this.modules[id]!.settings[key] = value;
@@ -3592,7 +4161,7 @@ class ExtensionState {
 
   /** True iff the module is enabled AND every required setting is filled. */
   moduleReady(id: string): boolean {
-    const spec = getModuleSpec(id);
+    const spec = this.specFor(id);
     const entry = this.modules[id];
     if (!spec || !entry || !entry.enabled) return false;
     return moduleIsConfigured(spec, entry.settings);
@@ -3609,7 +4178,9 @@ class ExtensionState {
    *  empty array. */
   buildSessionModules(): SessionModule[] | undefined {
     const out: SessionModule[] = [];
-    for (const spec of BUILTIN_MODULES) {
+    // Built-ins + imported modules. Imported modules are per-submit in
+    // v1, so they ride on the same ticked-checkbox path as GitLab Issues.
+    for (const spec of this.allModuleSpecs()) {
       if (!this.tickedModules[spec.id]) continue;
       if (!this.moduleReady(spec.id)) continue;
       const settings = this.modules[spec.id]?.settings ?? {};
@@ -3631,6 +4202,103 @@ class ExtensionState {
    *  behavior). */
   resetTickedModules(): void {
     this.tickedModules = {};
+  }
+
+  // ─── Imported modules (Phase 19) ────────────────────────────────────
+
+  dismissModuleError(): void {
+    this.moduleError = null;
+  }
+
+  /** Pull installed third-party modules from the active companion. No-op
+   *  in standalone (no companion → no `.pinta/modules/`). Best-effort:
+   *  a fetch failure clears the list rather than throwing into the UI. */
+  async refreshInstalledModules(): Promise<void> {
+    const base = this.httpBase();
+    if (!base) {
+      this.installedModules = [];
+      return;
+    }
+    try {
+      const res = await ExtensionState.fetchWithTimeout(`${base}/v1/modules`, {
+        timeoutMs: 8_000,
+      });
+      if (!res.ok) {
+        // Older companion without the /v1/modules route → treat as none.
+        this.installedModules = [];
+        return;
+      }
+      const list = (await res.json()) as InstalledModule[];
+      this.installedModules = Array.isArray(list) ? list : [];
+    } catch {
+      // Network blip / companion down — leave whatever we had.
+    }
+  }
+
+  /**
+   * Install an imported module from a parsed `.pinta-module.json` bundle,
+   * granting exactly the capabilities the user approved in the consent
+   * dialog. Throws on failure so the caller can surface it; also mirrors
+   * the message into `moduleError` for the Settings banner.
+   */
+  async importModule(
+    pkg: ModulePackage,
+    grantedCapabilities: ModuleCapability[],
+  ): Promise<void> {
+    const base = this.httpBase();
+    if (!base) {
+      const msg = "Connect to a project companion before importing a module.";
+      this.moduleError = msg;
+      throw new Error(msg);
+    }
+    try {
+      const res = await ExtensionState.fetchWithTimeout(`${base}/v1/modules`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ package: pkg, grantedCapabilities }),
+        timeoutMs: 10_000,
+      });
+      if (!res.ok) {
+        const text = await res.text().catch(() => "");
+        let detail = text;
+        try {
+          detail = (JSON.parse(text) as { error?: string }).error ?? text;
+        } catch {
+          // non-JSON body — use raw text
+        }
+        throw new Error(detail || `HTTP ${res.status}`);
+      }
+      this.moduleError = null;
+      await this.refreshInstalledModules();
+    } catch (err) {
+      this.moduleError = `Import failed: ${(err as Error).message}`;
+      throw err;
+    }
+  }
+
+  /** Uninstall an imported module by id, then refresh + tidy local state. */
+  async uninstallModule(id: string): Promise<void> {
+    const base = this.httpBase();
+    if (!base) return;
+    try {
+      const res = await ExtensionState.fetchWithTimeout(
+        `${base}/v1/modules/${encodeURIComponent(id)}`,
+        { method: "DELETE", timeoutMs: 8_000 },
+      );
+      if (!res.ok) {
+        const text = await res.text().catch(() => "");
+        throw new Error(text || `HTTP ${res.status}`);
+      }
+      // Drop any local enable/ticked state for the removed module so it
+      // doesn't linger in `pinta-modules` storage or a pending submit.
+      delete this.modules[id];
+      delete this.tickedModules[id];
+      void this.saveModules();
+      this.moduleError = null;
+      await this.refreshInstalledModules();
+    } catch (err) {
+      this.moduleError = `Uninstall failed: ${(err as Error).message}`;
+    }
   }
 
   // ─── /Modules ───────────────────────────────────────────────────────
@@ -4042,6 +4710,9 @@ class ExtensionState {
     // entirely (catalogs are scoped per project — there's nothing to
     // show without one). loadTestPilot handles both branches.
     void this.loadTestPilot(companion);
+    // Imported modules live in the companion's `.pinta/modules/` — refresh
+    // them on every (re)connect, clear them when going companion-less.
+    void this.refreshInstalledModules();
     if (!companion) {
       this.connectionStatus = "disconnected";
       return;
@@ -4382,6 +5053,22 @@ class ExtensionState {
         const isAuditSession =
           msg.session.modules?.some((m) => m.id === "audit-flow") ?? false;
         if (isAuditSession) {
+          // Phase 15 "Slice 3" — "Suggest checks" rides the audit-flow
+          // module but carries op "audit-suggest" + a top-level
+          // categoryId. Route it to the inline suggestion checklist
+          // (handleAuditSuggestSync) instead of the audit-run handler.
+          // handleAuditSync also early-returns without audit.pending, so
+          // this is belt-and-suspenders, but route explicitly.
+          const op = ExtensionState.queryOp(msg.session);
+          if (op === "audit-suggest") {
+            const categoryId = ExtensionState.queryField(
+              msg.session,
+              "categoryId",
+            );
+            if (categoryId)
+              this.handleAuditSuggestSync(msg.session, categoryId);
+            return;
+          }
           this.handleAuditSync(msg.session);
           return;
         }
