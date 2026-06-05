@@ -1,6 +1,7 @@
 import type {
   Annotation,
   AnnotationTarget,
+  AuditCatalogExport,
   AuditCategoryId,
   AuditCategoryResult,
   AuditCheck,
@@ -16,6 +17,7 @@ import type {
   InstalledModule,
   ModulePackage,
   ModuleCapability,
+  ModuleBoard,
 } from "@pinta/shared";
 import {
   BUILTIN_MODULES,
@@ -51,6 +53,7 @@ import {
   composeTestDocMarkdown as composeTestDocMarkdownPure,
   composeTesterSheetMarkdown,
   composeTesterSheetDocx,
+  composeResultsDocx,
   nextUserTestId as nextUserTestIdPure,
   parseTestDocMarkdown,
 } from "./test-pilot-doc.js";
@@ -61,6 +64,15 @@ import {
   mergeAuditRun,
   ratingFromScore,
 } from "./audit-flow.js";
+import {
+  composeAuditCatalog,
+  mergeAuditOverlays,
+  normalizeAuditOverlay,
+} from "./audit-catalog-doc.js";
+import {
+  composeSettingsBundle,
+  type PintaSettingsBundle,
+} from "./pinta-settings.js";
 
 const SELECTED_KEY = "pinta-selected-companion";
 
@@ -600,6 +612,7 @@ class ExtensionState {
     void this.loadAnnotateChats();
     void this.loadAuditRun();
     void this.loadAuditDispositions();
+    void this.loadModuleBoards();
     // Stage the legacy global catalog (if any) for the first companion
     // to claim. The actual per-project load happens inside connectTo.
     void this.readLegacyTestPilot();
@@ -2826,6 +2839,15 @@ class ExtensionState {
    *  doesn't spin forever. Mirrors Test Pilot's generate-doc ceiling. */
   private static readonly AUDIT_TIMEOUT_MS = 600_000;
 
+  /** Persisted boards for imported interactive modules (Phase 19
+   *  interactive tabs), keyed by module id. One value holds the map so
+   *  a board survives panel reloads, mirroring AUDIT_KEY. */
+  private static readonly MODULE_BOARDS_KEY = "pinta-module-boards";
+  /** Hard ceiling on one interactive imported-module op (e.g. a
+   *  Workflow board refresh that runs `/tasks --today`). Same generous
+   *  bound as an audit run. */
+  private static readonly MODULE_OP_TIMEOUT_MS = 600_000;
+
   /** How long a session can sit in "submitted" status before we
    *  warn the user that no `/pinta` terminal is claiming it. Agents
    *  with SSE see new sessions instantly, but a busy agent can be
@@ -2909,6 +2931,31 @@ class ExtensionState {
   });
 
   private auditTimer: ReturnType<typeof setTimeout> | null = null;
+
+  /** Boards for imported INTERACTIVE modules (Phase 19 dynamic tabs),
+   *  keyed by module id. Each slot mirrors the audit slot: the agent's
+   *  returned board, an in-flight op marker, and the last error. Fully
+   *  generic — no module-specific fields — so any board-style plugin
+   *  reuses the same renderer (ModuleBoardTab). */
+  moduleBoards = $state<
+    Record<
+      string,
+      {
+        board: ModuleBoard | null;
+        pending: { runId: string; startedAt: number; op: string } | null;
+        error: string | null;
+        /** Phase 19 — the ephemeral query session's id, pinned from
+         *  `module.query.created`. Lets `reconcileModuleBoards()` recover a
+         *  run whose `session.synced(done)` was missed during a WS blip
+         *  (the companion only replays the active session on reconnect, not
+         *  ephemeral module-query sessions). Not persisted. */
+        pendingSessionId?: string | null;
+      }
+    >
+  >({});
+
+  /** Per-module op timers, keyed by module id. */
+  private moduleOpTimers = new Map<string, ReturnType<typeof setTimeout>>();
 
   /** Recompute the DERIVED `currentRun` from the raw agent run + the
    *  user overlay. Call after every mutation to either input. Snapshots
@@ -3102,6 +3149,7 @@ class ExtensionState {
       runId,
       categories: cats,
       customCategories,
+      userChecks: this.collectUserChecksForQuery(),
       scope: { kind: "project" }, // 15a: project scope only
       partial: false,
     });
@@ -3146,6 +3194,9 @@ class ExtensionState {
       runId,
       categories: cats,
       customCategories,
+      userChecks: this.collectUserChecksForQuery().filter(
+        (u) => u.categoryId === categoryId,
+      ),
       scope: { kind: "project" },
       partial: true,
     });
@@ -3185,6 +3236,43 @@ class ExtensionState {
       }));
   }
 
+  /** User-added checks WITHIN built-in categories (USER- ids), in the
+   *  lean shape the agent evaluates. Custom *categories* go via
+   *  collectCustomCategoriesForQuery; this covers checks the user added
+   *  (or accepted from "Suggest checks") onto Security / Performance /
+   *  etc. — sending them so a (re-)run actually EVALUATES them, giving
+   *  each a real status, description, where + fixHint, and unlocking
+   *  Fix-with-agent. The agent echoes them back inside the built-in
+   *  category's checks[] with the same id, and mergeAuditRun lets that
+   *  evaluated copy replace the user's placeholder. */
+  private collectUserChecksForQuery(): {
+    categoryId: string;
+    id: string;
+    label: string;
+    description?: string;
+  }[] {
+    const out: {
+      categoryId: string;
+      id: string;
+      label: string;
+      description?: string;
+    }[] = [];
+    for (const c of this.audit.currentRun?.categories ?? []) {
+      if (c.id.startsWith("audit-flow-custom:")) continue;
+      for (const ck of c.checks ?? []) {
+        if (typeof ck.id === "string" && ck.id.startsWith("USER-")) {
+          out.push({
+            categoryId: c.id,
+            id: ck.id,
+            label: ck.label,
+            description: ck.description,
+          });
+        }
+      }
+    }
+    return out;
+  }
+
   /** User clicked Cancel on a stuck audit run. */
   cancelAudit(): void {
     if (!this.audit.pending) return;
@@ -3208,6 +3296,225 @@ class ExtensionState {
     if (this.auditTimer) {
       clearTimeout(this.auditTimer);
       this.auditTimer = null;
+    }
+  }
+
+  // ─── Imported interactive modules — generic board ops (Phase 19) ─────
+  // Drives the DYNAMIC tabs declared by imported modules' manifests. All
+  // module-agnostic: the agent returns a ModuleBoard, the generic
+  // ModuleBoardTab renders it. Mirrors the audit op/sync lifecycle.
+
+  private ensureModuleBoard(moduleId: string): {
+    board: ModuleBoard | null;
+    pending: { runId: string; startedAt: number; op: string } | null;
+    error: string | null;
+    pendingSessionId?: string | null;
+  } {
+    if (!this.moduleBoards[moduleId]) {
+      this.moduleBoards[moduleId] = { board: null, pending: null, error: null };
+    }
+    return this.moduleBoards[moduleId]!;
+  }
+
+  /** Fire the tab's primary action: send the declared `op` to the agent
+   *  for an imported interactive module. The agent returns a ModuleBoard
+   *  via mark_session_done, routed back through handleModuleBoardSync. */
+  async runModuleOp(moduleId: string, op: string): Promise<void> {
+    const slot = this.ensureModuleBoard(moduleId);
+    if (slot.pending) return;
+    if (!this.client || this.connectionStatus !== "connected") {
+      slot.error =
+        "No companion connected. Start `pinta-companion .` in your project to use this module.";
+      return;
+    }
+    const runId = crypto.randomUUID();
+    const startedAt = Date.now();
+    slot.pending = { runId, startedAt, op };
+    slot.pendingSessionId = null; // pinned when module.query.created lands
+    slot.error = null;
+    this.armModuleTimeout(moduleId);
+    const settings = $state.snapshot(
+      this.modules[moduleId]?.settings ?? {},
+    ) as Record<string, string | boolean>;
+    const queryComment = JSON.stringify({ op, runId, settings });
+    this.send({
+      type: "module.query.submit",
+      url: this.lastUrl ?? "",
+      moduleId,
+      moduleSettings: settings,
+      queryComment,
+    });
+  }
+
+  cancelModuleOp(moduleId: string): void {
+    const slot = this.moduleBoards[moduleId];
+    if (!slot?.pending) return;
+    this.clearModuleTimeout(moduleId);
+    slot.pending = null;
+    slot.pendingSessionId = null;
+    slot.error = "Cancelled.";
+  }
+
+  private armModuleTimeout(moduleId: string): void {
+    this.clearModuleTimeout(moduleId);
+    this.moduleOpTimers.set(
+      moduleId,
+      setTimeout(() => {
+        const slot = this.moduleBoards[moduleId];
+        this.moduleOpTimers.delete(moduleId);
+        if (!slot?.pending) return;
+        slot.pending = null;
+        slot.pendingSessionId = null;
+        slot.error =
+          "Timed out waiting for the agent. Make sure `/pinta` is running for this project.";
+      }, ExtensionState.MODULE_OP_TIMEOUT_MS),
+    );
+  }
+
+  private clearModuleTimeout(moduleId: string): void {
+    const t = this.moduleOpTimers.get(moduleId);
+    if (t) {
+      clearTimeout(t);
+      this.moduleOpTimers.delete(moduleId);
+    }
+  }
+
+  /** Routed from onMessage when a session.synced for an imported
+   *  interactive module lands. Done → parse the ModuleBoard; error →
+   *  surface it. Lenient: requires only groups[] + cards[] arrays. */
+  private handleModuleBoardSync(session: Session, moduleId: string): void {
+    const slot = this.ensureModuleBoard(moduleId);
+    if (session.status === "done") {
+      const summary = session.appliedSummary ?? "";
+      // Empty "done" (multi-agent race) — keep pending + timer so a real
+      // response can still land. Mirrors handleAuditSync.
+      if (summary.trim() === "") return;
+      this.clearModuleTimeout(moduleId);
+      try {
+        const payload = JSON.parse(summary) as Partial<ModuleBoard> & {
+          [k: string]: unknown;
+        };
+        if (Array.isArray(payload.groups) && Array.isArray(payload.cards)) {
+          slot.board = {
+            moduleId,
+            generatedAt:
+              typeof payload.generatedAt === "number"
+                ? payload.generatedAt
+                : Date.now(),
+            title:
+              typeof payload.title === "string" ? payload.title : undefined,
+            groups: payload.groups as ModuleBoard["groups"],
+            cards: payload.cards as ModuleBoard["cards"],
+            featured: Array.isArray(payload.featured)
+              ? (payload.featured as string[])
+              : undefined,
+          };
+          void this.saveModuleBoards();
+        } else {
+          const preview = summary.slice(0, 200);
+          slot.error =
+            `This module returned an unrecognized response ` +
+            `(expected a board with groups + cards). ` +
+            `Restart \`/pinta\` so the module's agent.md is loaded.` +
+            (preview
+              ? ` Agent said: "${preview}${summary.length > 200 ? "…" : ""}"`
+              : "");
+        }
+      } catch (err) {
+        slot.error = `Couldn't parse the module response: ${(err as Error).message}`;
+      }
+      slot.pending = null;
+      slot.pendingSessionId = null;
+    } else if (session.status === "error") {
+      this.clearModuleTimeout(moduleId);
+      slot.error = session.errorMessage ?? "The module run failed.";
+      slot.pending = null;
+      slot.pendingSessionId = null;
+    } else if (session.status === "applying") {
+      slot.error = null;
+    }
+  }
+
+  /**
+   * On (re)connect, recover any imported-interactive module run whose
+   * `session.synced(done)` we may have missed while the socket was down.
+   * The companion replays only the *active* session on connect, never the
+   * ephemeral module-query sessions, so a multi-minute run that finishes
+   * during a WS blip would otherwise spin until MODULE_OP_TIMEOUT_MS.
+   *
+   * For each slot still `pending` with a pinned ephemeral session id,
+   * fetch that session over HTTP and, if it has reached a terminal state,
+   * route it through the normal handler (idempotent — same path the live
+   * broadcast would have taken). A still-running session is left alone;
+   * the timeout safety net still applies. Best-effort: any fetch error
+   * leaves the slot pending so a later reconnect (or the timeout) recovers.
+   */
+  private async reconcileModuleBoards(): Promise<void> {
+    const base = this.httpBase();
+    if (!base) return;
+    // Snapshot the entries up front — handleModuleBoardSync mutates
+    // this.moduleBoards as we go.
+    const pendingSlots = Object.entries(this.moduleBoards).filter(
+      ([, slot]) => slot.pending && slot.pendingSessionId,
+    );
+    for (const [moduleId, slot] of pendingSlots) {
+      const sessionId = slot.pendingSessionId;
+      if (!sessionId) continue;
+      try {
+        const res = await ExtensionState.fetchWithTimeout(
+          `${base}/v1/sessions/${encodeURIComponent(sessionId)}`,
+        );
+        if (!res.ok) continue;
+        const session = (await res.json()) as Session;
+        if (session.status === "done" || session.status === "error") {
+          this.handleModuleBoardSync(session, moduleId);
+        }
+      } catch {
+        // Companion unreachable / transient — keep pending; a later
+        // reconnect or the module-op timeout will recover it.
+      }
+    }
+  }
+
+  async loadModuleBoards(): Promise<void> {
+    try {
+      const stored = await chrome.storage?.local?.get(
+        ExtensionState.MODULE_BOARDS_KEY,
+      );
+      const raw = stored?.[ExtensionState.MODULE_BOARDS_KEY] as
+        | Record<string, ModuleBoard>
+        | undefined;
+      if (raw && typeof raw === "object") {
+        for (const [id, board] of Object.entries(raw)) {
+          if (
+            board &&
+            Array.isArray((board as ModuleBoard).groups) &&
+            Array.isArray((board as ModuleBoard).cards)
+          ) {
+            this.moduleBoards[id] = {
+              board: board as ModuleBoard,
+              pending: null,
+              error: null,
+            };
+          }
+        }
+      }
+    } catch {
+      // storage missing (test env) — defaults are fine
+    }
+  }
+
+  private async saveModuleBoards(): Promise<void> {
+    try {
+      const out: Record<string, ModuleBoard> = {};
+      for (const [id, slot] of Object.entries(this.moduleBoards)) {
+        if (slot.board) out[id] = $state.snapshot(slot.board) as ModuleBoard;
+      }
+      await chrome.storage?.local?.set({
+        [ExtensionState.MODULE_BOARDS_KEY]: out,
+      });
+    } catch {
+      // quota / storage missing — non-fatal
     }
   }
 
@@ -3397,6 +3704,103 @@ class ExtensionState {
     this.audit.error = null;
     void this.saveAuditRun();
     void this.saveAuditDispositions();
+  }
+
+  // ─── Catalog export / import (Phase 20 — backup & restore) ─────────
+  //
+  // AuditFlow's catalog (custom categories + checks + edits + hidden
+  // ids) lives only in chrome.storage, so a "clear session / cache"
+  // wipes it. Exporting it to a `*.pinta-audit.json` file makes the loss
+  // recoverable and ports the catalog across projects. CATALOG ONLY —
+  // no agent findings, no dispositions — so a re-import is a clean
+  // structural restore, not a stale run. See audit-catalog-doc.ts.
+
+  /** Snapshot the user's audit catalog (overlay + selected categories)
+   *  into a portable export envelope. Pure read — no state change. */
+  exportAuditCatalog(): AuditCatalogExport {
+    return composeAuditCatalog(
+      $state.snapshot(this.audit.overlay) as AuditOverlay,
+      [...this.audit.selectedCategories],
+      Date.now(),
+    );
+  }
+
+  /** Restore an exported audit catalog. "merge" (default) unions it onto
+   *  the current overlay — the safe additive restore; "replace" swaps it
+   *  in wholesale. Selected categories from the file are unioned into the
+   *  picker so restored custom categories are runnable. Recomputes the
+   *  merged view + persists. The agent run + dispositions are untouched. */
+  importAuditCatalog(
+    data: AuditCatalogExport,
+    mode: "merge" | "replace" = "merge",
+  ): void {
+    const incoming = normalizeAuditOverlay(data.overlay);
+    this.audit.overlay =
+      mode === "replace"
+        ? incoming
+        : mergeAuditOverlays(
+            $state.snapshot(this.audit.overlay) as AuditOverlay,
+            incoming,
+          );
+    this.recomputeAuditRun();
+    this.audit.error = null;
+    void this.saveAuditRun();
+    if (data.selectedCategories?.length) {
+      const sel = new Set<AuditCategoryId>([
+        ...this.audit.selectedCategories,
+        ...data.selectedCategories,
+      ]);
+      this.setAuditSelectedCategories([...sel]);
+    }
+  }
+
+  /** Gather everything the global settings bundle carries: the current
+   *  Test Pilot catalog (with results) + the audit catalog. Module config
+   *  and audit findings are intentionally excluded (see pinta-settings.ts
+   *  for the locked scope). */
+  exportSettingsBundle(): PintaSettingsBundle {
+    const catalogs: TestPilotCatalog[] = [];
+    if (this.testPilot.catalog) {
+      catalogs.push(
+        $state.snapshot(this.testPilot.catalog) as TestPilotCatalog,
+      );
+    }
+    let appVersion: string | undefined;
+    try {
+      appVersion = chrome.runtime?.getManifest?.().version;
+    } catch {
+      // manifest unavailable (test env) — version is optional metadata.
+    }
+    return composeSettingsBundle(
+      {
+        testPilot: catalogs,
+        auditCatalog: this.exportAuditCatalog(),
+        appVersion,
+      },
+      Date.now(),
+    );
+  }
+
+  /** Restore a global settings bundle. The audit catalog merges; the
+   *  Test Pilot catalog is adopted (single-catalog model) and synced to
+   *  disk via the normal edit path so it survives the next wipe too. */
+  async importSettingsBundle(bundle: PintaSettingsBundle): Promise<void> {
+    if (bundle.auditCatalog) {
+      this.importAuditCatalog(bundle.auditCatalog, "merge");
+    }
+    const tp = bundle.testPilot?.[0];
+    if (tp) {
+      // Anchor disk artifacts to any existing docId so re-import doesn't
+      // orphan the prior .pinta/test-docs/{docId}.md file.
+      if (this.testPilot.catalog?.docId) tp.docId = this.testPilot.catalog.docId;
+      this.testPilot.catalog = tp;
+      this.testPilot.pending = null;
+      this.testPilot.error = null;
+      // saveTestPilot + push structure .md; results sidecar separately.
+      // Both no-op gracefully in standalone (no companion → in-memory only).
+      this.commitCatalogEdit();
+      this.pushResultsToCompanion();
+    }
   }
 
   // ─── "Suggest checks" (Phase 15 "Slice 3") ─────────────────────────
@@ -4038,6 +4442,19 @@ class ExtensionState {
     return composeTesterSheetDocx(c);
   }
 
+  /**
+   * Render the **results** (sign-off report) as a DOCX byte array — the
+   * Word twin of `exportResults()`'s markdown, including Pass/Fail marks
+   * and per-row chat threads. Caller wraps in a Blob + triggers
+   * download. Returns `null` when there's no catalog.
+   */
+  exportResultsDocx(): Uint8Array | null {
+    const c = this.testPilot.catalog;
+    if (!c) return null;
+    const today = new Date().toISOString().slice(0, 10);
+    return composeResultsDocx($state.snapshot(c) as TestPilotCatalog, today);
+  }
+
   clearTestPilot(): void {
     this.clearTestPilotTimeout();
     this.testPilot.catalog = null;
@@ -4098,6 +4515,17 @@ class ExtensionState {
       ...BUILTIN_MODULES,
       ...this.installedModules.map((m) => manifestToSpec(m.manifest)),
     ];
+  }
+
+  /** Imported INTERACTIVE modules that declare a tab AND are enabled.
+   *  Drives the DYNAMIC side-panel tabs (App.svelte renders one per
+   *  entry, in install order). Built-in interactive tabs (Test Pilot /
+   *  AuditFlow) leave `tab` undefined and are excluded — they own
+   *  hardcoded tabs. "If the plugin doesn't declare a tab, no tab." */
+  interactiveTabSpecs(): ModuleSpec[] {
+    return this.allModuleSpecs().filter(
+      (s) => s.mode === "interactive" && !!s.tab && this.moduleReady(s.id),
+    );
   }
 
   /** Resolve a spec by id across built-in + imported modules. */
@@ -4729,6 +5157,12 @@ class ExtensionState {
         if (status === "disconnected" && this.creatingSession) {
           this.markCreatingSession(false);
         }
+        // On (re)connect, recover any imported-interactive module run
+        // whose done broadcast we missed while the socket was down. No-op
+        // on a fresh connect (nothing pending). See reconcileModuleBoards.
+        if (status === "connected") {
+          void this.reconcileModuleBoards();
+        }
       },
     });
     this.client.start();
@@ -4995,6 +5429,20 @@ class ExtensionState {
             }
           }
         }
+        // Phase 19 — pin the ephemeral session id for imported INTERACTIVE
+        // modules so reconcileModuleBoards() can recover a run whose
+        // session.synced(done) is missed during a WS blip. Only touch a
+        // slot that's actually waiting on this run.
+        const importedInteractive = this.installedModules.find(
+          (im) =>
+            im.manifest.id === msg.moduleId &&
+            im.manifest.mode === "interactive" &&
+            !!im.manifest.tab,
+        );
+        if (importedInteractive) {
+          const slot = this.moduleBoards[msg.moduleId];
+          if (slot?.pending) slot.pendingSessionId = msg.session.id;
+        }
         break;
       }
       case "session.created":
@@ -5070,6 +5518,24 @@ class ExtensionState {
             return;
           }
           this.handleAuditSync(msg.session);
+          return;
+        }
+        // Phase 19 — imported INTERACTIVE module sessions (a module the
+        // user installed whose manifest is interactive + declares a tab).
+        // Route the result into the generic board slot keyed by module id.
+        // Same early-return discipline as the audit / chat branches so the
+        // user's annotation draft is never overwritten by the ephemeral
+        // module-query session.
+        const importedInteractive = msg.session.modules?.find((m) =>
+          this.installedModules.some(
+            (im) =>
+              im.manifest.id === m.id &&
+              im.manifest.mode === "interactive" &&
+              !!im.manifest.tab,
+          ),
+        );
+        if (importedInteractive) {
+          this.handleModuleBoardSync(msg.session, importedInteractive.id);
           return;
         }
         const isInteractiveModuleSession =

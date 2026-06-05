@@ -26,6 +26,7 @@
   import { app } from "../lib/state.svelte.js";
   import { parseStep } from "../lib/step-md.js";
   import { auditProgress, statusGlyph } from "../lib/audit-flow.js";
+  import { parseAuditCatalog } from "../lib/audit-catalog-doc.js";
 
   // Active tab switch is passed down so Fix-with-agent can flip to
   // Annotate after composing the draft. Parent (App.svelte) owns the
@@ -149,12 +150,7 @@
     { value: "wont-fix", label: "Won't-fix" },
   ];
 
-  function dispositionLabel(d: AuditDisposition): string {
-    return DISPOSITIONS.find((o) => o.value === d)?.label ?? "Open";
-  }
-
-  // Collapsed-row dot tint per disposition so progress is visible at a
-  // glance without expanding the check.
+  // Dot tint per disposition — used in the kebab's "Mark as" items.
   function dispositionDotClass(d: AuditDisposition): string {
     switch (d) {
       case "fixing":
@@ -179,8 +175,10 @@
   }
 
   // ─── Category picker (empty state) ──────────────────────────────────
-  // Five categories. Security is live; the rest are wired but flagged
-  // "Soon" until their SKILL.md handlers land.
+  // All five categories are live — each has a SKILL.md handler (§7.11,
+  // Phase 15a/15b) that ships LLM static analysis. The `soon` flag is kept
+  // on the type for future categories but no built-in uses it now. The user
+  // picks any subset to run.
   type PickerCategory = {
     id: AuditCategoryId;
     label: string;
@@ -201,32 +199,28 @@
       label: "Performance",
       keywords: "bundle size · render · network",
       blurb:
-        "Bundle weight, render-blocking work, and network waterfalls. Coming in a later patch.",
-      soon: true,
+        "Bundle weight, render-blocking work, heavy deps, and lazy-loading gaps (static source analysis).",
     },
     {
       id: "accessibility",
       label: "Accessibility",
       keywords: "ARIA · contrast · keyboard",
       blurb:
-        "ARIA, color contrast, and keyboard navigation. Coming in a later patch.",
-      soon: true,
+        "Alt text, labels, ARIA misuse, heading order, focus-visible, and obvious contrast issues (static source analysis).",
     },
     {
       id: "mobile",
       label: "Mobile",
       keywords: "viewport · touch targets · responsive",
       blurb:
-        "Viewport config, touch-target sizing, and responsive breakpoints. Coming in a later patch.",
-      soon: true,
+        "Viewport config, fixed-width containers, touch-target sizing, hover-only interactions, and overflow risks (static source analysis).",
     },
     {
       id: "cross-browser",
       label: "Cross Browser",
       keywords: "caniuse · browserslist · polyfills",
       blurb:
-        "CSS / JS features unsupported in target browsers via caniuse + browserslist. Coming in a later patch — needs the browser-target picker UI.",
-      soon: true,
+        "CSS / JS features unsupported in your target browsers, missing prefixes, and unpolyfilled APIs — judged against the project's browserslist (static source analysis).",
     },
   ];
 
@@ -263,6 +257,46 @@
     }
   }
 
+  // ─── Catalog export / import (backup & restore) ─────────────────────
+  // The catalog (custom categories + checks + edits + selected cats)
+  // lives only in chrome.storage, so a session/cache clear loses it.
+  // Export writes a portable *.pinta-audit.json; import merges it back.
+  let catalogFileInput = $state<HTMLInputElement | null>(null);
+
+  function fileStamp(): string {
+    const d = new Date();
+    const p = (n: number) => String(n).padStart(2, "0");
+    return `${d.getFullYear()}${p(d.getMonth() + 1)}${p(d.getDate())}-${p(d.getHours())}${p(d.getMinutes())}`;
+  }
+
+  function exportCatalog(): void {
+    const blob = new Blob([JSON.stringify(app.exportAuditCatalog(), null, 2)], {
+      type: "application/json",
+    });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = `auditflow-catalog-${fileStamp()}.pinta-audit.json`;
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    URL.revokeObjectURL(url);
+  }
+
+  async function onCatalogFilePicked(e: Event): Promise<void> {
+    const input = e.currentTarget as HTMLInputElement;
+    const file = input.files?.[0];
+    input.value = ""; // allow re-picking the same file
+    if (!file) return;
+    const parsed = parseAuditCatalog(await file.text());
+    if (!parsed) {
+      app.audit.error =
+        "Couldn't read that file — it isn't a Pinta audit catalog (expected a *.pinta-audit.json export).";
+      return;
+    }
+    app.importAuditCatalog(parsed, "merge");
+  }
+
   function toggleCategory(id: string): void {
     expanded[id] = !(expanded[id] ?? false);
   }
@@ -283,6 +317,17 @@
   let categoryKebabOpen = $state<string | null>(null);
   function toggleCategoryKebab(id: string): void {
     categoryKebabOpen = categoryKebabOpen === id ? null : id;
+  }
+
+  // ─── Per-check kebab (Mark as · Edit · Delete) ──────────────────────
+  // Replaces the old in-body STATUS pill row + Edit/Delete button row.
+  // Disposition is set from inside this menu so remediation progress
+  // still has a data source. Shares the [data-audit-kebab-*] outside-
+  // click handler with the category kebab below.
+  let checkKebabOpen = $state<string | null>(null);
+  function toggleCheckKebab(id: string): void {
+    checkKebabOpen = checkKebabOpen === id ? null : id;
+    categoryKebabOpen = null;
   }
 
   // ─── Inline check editor ────────────────────────────────────────────
@@ -464,7 +509,10 @@
       const inKebab =
         target.closest("[data-audit-kebab-trigger]") ||
         target.closest("[data-audit-kebab-menu]");
-      if (!inKebab) categoryKebabOpen = null;
+      if (!inKebab) {
+        categoryKebabOpen = null;
+        checkKebabOpen = null;
+      }
     }
     document.addEventListener("click", onDocClick, true);
     return () => document.removeEventListener("click", onDocClick, true);
@@ -488,6 +536,36 @@
         with a draft pre-filled with the check details.
       </p>
     </div>
+    <!-- Catalog backup — export / import your custom categories + checks
+         so a session/cache clear doesn't lose them, and to port the
+         catalog across projects. Catalog only; not the findings. -->
+    <div class="shrink-0 inline-flex items-center gap-1">
+      <button
+        type="button"
+        class="inline-flex items-center gap-1 text-[11px] font-medium text-ink-600 dark:text-night-dim hover:text-ink-900 dark:hover:text-night-text rounded-md px-1.5 py-1 hover:bg-ink-100 dark:hover:bg-night-line"
+        onclick={exportCatalog}
+        title="Export your audit catalog (custom categories + checks) to a file"
+      >
+        <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
+        Export
+      </button>
+      <button
+        type="button"
+        class="inline-flex items-center gap-1 text-[11px] font-medium text-ink-600 dark:text-night-dim hover:text-ink-900 dark:hover:text-night-text rounded-md px-1.5 py-1 hover:bg-ink-100 dark:hover:bg-night-line"
+        onclick={() => catalogFileInput?.click()}
+        title="Import an audit catalog file (merges into your current catalog)"
+      >
+        <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" y1="3" x2="12" y2="15"/></svg>
+        Import
+      </button>
+      <input
+        bind:this={catalogFileInput}
+        type="file"
+        accept=".json,.pinta-audit.json,application/json"
+        class="hidden"
+        onchange={onCatalogFilePicked}
+      />
+    </div>
   </div>
 
   <!-- ─────────────────────────────────────────────────────────────────
@@ -502,46 +580,117 @@
     {@const checkOpen = openCheckId === check.id}
     {@const hasActions =
       check.status !== "pass" &&
-      (check.fixHint != null ||
+      (isActionable(check) ||
+        check.fixHint != null ||
         check.suggestedAnnotation != null ||
         check.where?.file != null)}
     <li>
-      <button
-        type="button"
-        class="w-full text-left flex items-start gap-2.5 px-3 py-2.5 hover:bg-ink-50 dark:hover:bg-night-alt transition-colors"
-        onclick={() => toggleCheck(check.id)}
-        aria-expanded={checkOpen}
-      >
-        <span class="shrink-0 mt-0.5 inline-flex items-center justify-center w-5 h-5 rounded border text-[10px] font-bold {statusBadgeClass(check.status)}" aria-label={check.status}>
-          {statusGlyph(check.status)}
-        </span>
-        <div class="min-w-0 flex-1">
-          <div class="flex items-start gap-1.5">
-            <div class="text-[12.5px] font-semibold text-ink-900 dark:text-night-text leading-snug">{check.label}</div>
-            {#if isUserCheck(check.id)}
-              <span class="shrink-0 mt-px inline-flex items-center rounded-sm bg-brand-pink/10 text-brand-pink dark:text-brand-pink-light text-[9px] font-semibold uppercase tracking-wide px-1 py-px" title="Check you added">added</span>
+      <!-- Header row — toggle button (flex-1) + a three-dots kebab that
+           holds the per-check actions (Mark as · Edit · Delete). The
+           kebab is a sibling of the toggle so we don't nest <button>s;
+           hover bg lives on the wrapper so the whole row highlights. -->
+      <div class="relative flex items-stretch hover:bg-ink-50 dark:hover:bg-night-alt transition-colors">
+        <button
+          type="button"
+          class="min-w-0 flex-1 text-left flex items-start gap-2.5 px-3 py-2.5"
+          onclick={() => toggleCheck(check.id)}
+          aria-expanded={checkOpen}
+        >
+          <span class="shrink-0 mt-0.5 inline-flex items-center justify-center w-5 h-5 rounded border text-[10px] font-bold {statusBadgeClass(check.status)}" aria-label={check.status}>
+            {statusGlyph(check.status)}
+          </span>
+          <div class="min-w-0 flex-1">
+            <div class="flex items-start gap-1.5">
+              <div class="text-[12.5px] font-semibold text-ink-900 dark:text-night-text leading-snug">{check.label}</div>
+              {#if isUserCheck(check.id)}
+                <span class="shrink-0 mt-px inline-flex items-center rounded-sm bg-brand-pink/10 text-brand-pink dark:text-brand-pink-light text-[9px] font-semibold uppercase tracking-wide px-1 py-px" title="Check you added">added</span>
+              {/if}
+            </div>
+            {#if check.value}
+              <div class="text-[11px] text-ink-600 dark:text-night-dim mt-0.5 tabular-nums">{check.value}</div>
+            {/if}
+            {#if check.where?.file}
+              <div class="text-[10.5px] text-ink-500 dark:text-night-mute mt-0.5 font-mono truncate" title={check.where.file}>
+                {check.where.file}{check.where.line ? `:${check.where.line}` : ""}
+              </div>
             {/if}
           </div>
-          {#if check.value}
-            <div class="text-[11px] text-ink-600 dark:text-night-dim mt-0.5 tabular-nums">{check.value}</div>
-          {/if}
-          {#if check.where?.file}
-            <div class="text-[10.5px] text-ink-500 dark:text-night-mute mt-0.5 font-mono truncate" title={check.where.file}>
-              {check.where.file}{check.where.line ? `:${check.where.line}` : ""}
+          <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" class="transition-transform shrink-0 text-ink-400 dark:text-night-mute mt-1" class:rotate-90={checkOpen} aria-hidden="true"><polyline points="9 18 15 12 9 6"/></svg>
+        </button>
+        <!-- Per-check kebab — Mark as (disposition) · Edit · Delete. -->
+        <div class="relative shrink-0 flex items-start pr-1.5 pt-2">
+          <button
+            type="button"
+            data-audit-kebab-trigger
+            class="w-7 h-7 inline-flex items-center justify-center rounded-full text-ink-500 dark:text-night-dim hover:bg-ink-100 dark:hover:bg-night-line hover:text-ink-900 dark:hover:text-night-text"
+            onclick={() => toggleCheckKebab(check.id)}
+            aria-haspopup="menu"
+            aria-expanded={checkKebabOpen === check.id}
+            aria-label="Check actions"
+            title="Check actions"
+          >
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
+              <circle cx="12" cy="5" r="1.6" />
+              <circle cx="12" cy="12" r="1.6" />
+              <circle cx="12" cy="19" r="1.6" />
+            </svg>
+          </button>
+          {#if checkKebabOpen === check.id}
+            <div
+              data-audit-kebab-menu
+              class="absolute z-30 right-1.5 top-9 bg-white dark:bg-night-card border border-ink-200 dark:border-night-line rounded-md shadow-lg py-1 min-w-[150px]"
+              role="menu"
+            >
+              <!-- Mark as (disposition) — moved here from the old inline
+                   STATUS segmented control. Actionable findings only; feeds
+                   the overall Remediation progress bar. -->
+              {#if isActionable(check)}
+                {@const active = dispositionOf(check)}
+                <div class="px-3 pt-1.5 pb-1 text-[9.5px] font-bold uppercase tracking-wider text-ink-400 dark:text-night-mute">
+                  Mark as
+                </div>
+                {#each DISPOSITIONS as opt (opt.value)}
+                  <button
+                    type="button"
+                    class="w-full flex items-center gap-2 px-3 py-1.5 text-[12px] hover:bg-ink-50 dark:hover:bg-night-alt {active === opt.value
+                      ? 'text-brand-pink dark:text-brand-pink-light font-semibold'
+                      : 'text-ink-700 dark:text-night-dim hover:text-ink-900 dark:hover:text-night-text'}"
+                    role="menuitemradio"
+                    aria-checked={active === opt.value}
+                    onclick={() => { app.setAuditDisposition(check.id, opt.value); checkKebabOpen = null; }}
+                    title={`Mark this finding ${opt.label}`}
+                  >
+                    <span class="w-1.5 h-1.5 rounded-full {dispositionDotClass(opt.value)}" aria-hidden="true"></span>
+                    {opt.label}
+                    {#if active === opt.value}
+                      <svg class="ml-auto" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="20 6 9 17 4 12"/></svg>
+                    {/if}
+                  </button>
+                {/each}
+                <div class="my-1 border-t border-ink-100 dark:border-night-line"></div>
+              {/if}
+              <button
+                type="button"
+                class="w-full flex items-center gap-2 px-3 py-1.5 text-[12px] text-ink-700 dark:text-night-dim hover:bg-ink-50 dark:hover:bg-night-alt hover:text-ink-900 dark:hover:text-night-text"
+                onclick={() => { startEditCheck(check); checkKebabOpen = null; }}
+                role="menuitem"
+              >
+                <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 20h9"/><path d="M16.5 3.5a2.121 2.121 0 0 1 3 3L7 19l-4 1 1-4 12.5-12.5z"/></svg>
+                Edit
+              </button>
+              <button
+                type="button"
+                class="w-full flex items-center gap-2 px-3 py-1.5 text-[12px] text-red-600 dark:text-red-400 hover:bg-red-50 dark:hover:bg-red-950/30"
+                onclick={() => { onDeleteCheck(check.id); checkKebabOpen = null; }}
+                role="menuitem"
+              >
+                <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="3 6 5 6 21 6"/><path d="M19 6l-1.5 14a2 2 0 0 1-2 1.5h-7a2 2 0 0 1-2-1.5L5 6"/><line x1="10" y1="11" x2="10" y2="17"/><line x1="14" y1="11" x2="14" y2="17"/></svg>
+                Delete
+              </button>
             </div>
           {/if}
         </div>
-        <!-- Disposition hint — tiny dot + 1-word chip so progress is
-             visible without expanding. Only for actionable findings. -->
-        {#if isActionable(check)}
-          {@const d = dispositionOf(check)}
-          <span class="shrink-0 mt-0.5 inline-flex items-center gap-1 text-[10px] text-ink-500 dark:text-night-mute tabular-nums" title={`Disposition: ${dispositionLabel(d)}`}>
-            <span class="w-1.5 h-1.5 rounded-full {dispositionDotClass(d)}" aria-hidden="true"></span>
-            {dispositionLabel(d)}
-          </span>
-        {/if}
-        <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" class="transition-transform shrink-0 text-ink-400 dark:text-night-mute mt-1" class:rotate-90={checkOpen} aria-hidden="true"><polyline points="9 18 15 12 9 6"/></svg>
-      </button>
+      </div>
 
       {#if checkOpen}
         <div class="px-3 pb-3 pt-1 space-y-2 bg-ink-50/50 dark:bg-night-alt/30">
@@ -580,6 +729,17 @@
               </div>
             </div>
           {:else}
+          {#if isUserCheck(check.id) && !check.description && !check.where?.file && !check.fixHint}
+            <div class="rounded border border-amber-300 bg-amber-50 dark:border-amber-800/50 dark:bg-amber-950/30 px-2.5 py-1.5 text-[11.5px] text-amber-800 dark:text-amber-200 leading-snug">
+              Not yet evaluated —
+              <button
+                type="button"
+                class="underline font-semibold hover:text-amber-900 dark:hover:text-amber-100"
+                onclick={() => app.runAuditCategory(check.category)}
+              >re-run the audit</button>
+              to evaluate this check (the agent fills in its status, details + Fix-with-agent).
+            </div>
+          {/if}
           {#if check.description}
             {@const blocks = parseStep(check.description)}
             <div class="text-[12px] text-ink-700 dark:text-night-dim leading-relaxed space-y-2">
@@ -619,100 +779,53 @@
             </div>
           {/if}
           {#if hasActions}
-            <div class="flex flex-wrap gap-1.5 pt-1">
-              <!-- Primary action — Fix with agent. Composes a prefilled
-                   annotation, switches to Annotate tab. After click the
-                   button confirms + disables so the user can't
-                   accidentally double-handoff (which would duplicate the
-                   draft annotation). -->
-              <button
-                type="button"
-                class="inline-flex items-center gap-1.5 rounded-md bg-brand-pink hover:bg-brand-magenta dark:hover:bg-brand-pink-light text-white text-[11px] font-semibold px-2.5 py-1 disabled:opacity-60 disabled:cursor-default"
-                onclick={() => handoffToAnnotate(check)}
-                disabled={handedOff[check.id]}
-                title={handedOff[check.id]
-                  ? "Already handed off — switch to Annotate to review the draft"
-                  : "Compose a Pinta annotation pre-filled with this check's details, open Annotate tab"}
-              >
-                {#if handedOff[check.id]}
-                  <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"/></svg>
-                  Drafted in Annotate
-                {:else}
-                  <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="M15 4V2"/><path d="M15 16v-2"/><path d="M8 9h2"/><path d="M20 9h2"/><path d="M17.8 11.8 19 13"/><path d="M15 9h.01"/><path d="M17.8 6.2 19 5"/><path d="m3 21 9-9"/><path d="M12.2 6.2 11 5"/></svg>
-                  Fix with agent
-                {/if}
-              </button>
-              <!-- Future handoffs (15e) — stubbed disabled so the surface
-                   area is visible but not actionable until those phases
-                   land. -->
-              <button
-                type="button"
-                class="inline-flex items-center gap-1.5 rounded-md border border-ink-300 dark:border-night-line bg-white dark:bg-night-card text-ink-500 dark:text-night-mute text-[11px] font-medium px-2.5 py-1 cursor-not-allowed opacity-60"
-                disabled
-                title="Discuss — routes to Chat (Phase 15e)"
-              >
-                <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg>
-                Discuss
-              </button>
-              <button
-                type="button"
-                class="inline-flex items-center gap-1.5 rounded-md border border-ink-300 dark:border-night-line bg-white dark:bg-night-card text-ink-500 dark:text-night-mute text-[11px] font-medium px-2.5 py-1 cursor-not-allowed opacity-60"
-                disabled
-                title="File as GitLab issue — Phase 15e"
-              >
-                <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="4" width="18" height="16" rx="2"/><line x1="8" y1="2" x2="8" y2="6"/><line x1="16" y1="2" x2="16" y2="6"/><line x1="3" y1="10" x2="21" y2="10"/></svg>
-                File issue
-              </button>
-            </div>
-          {/if}
-          <!-- Per-check disposition — segmented pill row. Only actionable
-               (fail/warn) findings get one; pass/info aren't part of
-               remediation progress. Active pill fills brand-pink; the
-               rest are muted outlines. -->
-          {#if isActionable(check)}
-            {@const active = dispositionOf(check)}
-            <div class="flex flex-wrap items-center gap-1.5 pt-1.5">
-              <span class="text-[10.5px] uppercase tracking-wide font-semibold text-ink-500 dark:text-night-mute mr-0.5">Status</span>
-              <div class="inline-flex rounded-md border border-ink-300 dark:border-night-line overflow-hidden">
-                {#each DISPOSITIONS as opt, oi (opt.value)}
-                  <button
-                    type="button"
-                    class="text-[11px] font-medium px-2 py-1 transition-colors {oi > 0 ? 'border-l border-ink-300 dark:border-night-line' : ''} {active === opt.value
-                      ? 'bg-brand-pink text-white font-semibold'
-                      : 'bg-white dark:bg-night-card text-ink-600 dark:text-night-dim hover:bg-ink-50 dark:hover:bg-night-alt'}"
-                    aria-pressed={active === opt.value}
-                    onclick={() => app.setAuditDisposition(check.id, opt.value)}
-                    title={`Mark this finding ${opt.label}`}
-                  >
-                    {opt.label}
-                  </button>
-                {/each}
+            <!-- Action group — compact icon-only segmented group, matching
+                 Test Pilot's row actions. Fix with agent is functional
+                 (composes a prefilled annotation + switches to Annotate,
+                 then confirms + disables so the user can't double-handoff).
+                 Discuss + File issue are Phase 15e stubs — shown disabled
+                 with a "coming soon" tooltip until Chat / GitLab land. -->
+            <div class="flex flex-wrap gap-2 pt-1">
+              <div class="inline-flex items-center shrink-0 rounded-md border border-ink-200 dark:border-night-line bg-white dark:bg-night-card divide-x divide-ink-200 dark:divide-night-line">
+                <button
+                  type="button"
+                  class="inline-flex items-center justify-center w-8 h-8 rounded-l-md hover:bg-ink-50 dark:hover:bg-night-alt disabled:cursor-default {handedOff[check.id]
+                    ? 'text-emerald-600 dark:text-emerald-400'
+                    : 'text-ink-700 dark:text-night-dim hover:text-brand-pink dark:hover:text-brand-pink-light'}"
+                  onclick={() => handoffToAnnotate(check)}
+                  disabled={handedOff[check.id]}
+                  title={handedOff[check.id]
+                    ? "Drafted in Annotate — switch to the Annotate tab to review the draft"
+                    : "Fix with agent — compose a Pinta annotation pre-filled with this check's details, open Annotate tab"}
+                  aria-label={handedOff[check.id] ? "Drafted in Annotate" : "Fix with agent"}
+                >
+                  {#if handedOff[check.id]}
+                    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="20 6 9 17 4 12"/></svg>
+                  {:else}
+                    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M15 4V2"/><path d="M15 16v-2"/><path d="M8 9h2"/><path d="M20 9h2"/><path d="M17.8 11.8 19 13"/><path d="M15 9h.01"/><path d="M17.8 6.2 19 5"/><path d="m3 21 9-9"/><path d="M12.2 6.2 11 5"/></svg>
+                  {/if}
+                </button>
+                <button
+                  type="button"
+                  class="inline-flex items-center justify-center w-8 h-8 text-ink-400 dark:text-night-mute opacity-60 cursor-not-allowed"
+                  disabled
+                  title="Discuss — coming soon (routes to Chat)"
+                  aria-label="Discuss (coming soon)"
+                >
+                  <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg>
+                </button>
+                <button
+                  type="button"
+                  class="inline-flex items-center justify-center w-8 h-8 rounded-r-md text-ink-400 dark:text-night-mute opacity-60 cursor-not-allowed"
+                  disabled
+                  title="File issue — coming soon (files a GitLab issue)"
+                  aria-label="File issue (coming soon)"
+                >
+                  <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="3" y="4" width="18" height="16" rx="2"/><line x1="8" y1="2" x2="8" y2="6"/><line x1="16" y1="2" x2="16" y2="6"/><line x1="3" y1="10" x2="21" y2="10"/></svg>
+                </button>
               </div>
             </div>
           {/if}
-
-          <!-- Edit / Delete — agent + user checks are both editable; the
-               overlay stores edits so they survive re-runs. -->
-          <div class="flex items-center gap-1.5 pt-1.5">
-            <button
-              type="button"
-              class="inline-flex items-center gap-1 rounded-md border border-ink-300 dark:border-night-line bg-white dark:bg-night-card text-ink-600 dark:text-night-dim text-[11px] font-medium px-2 py-1 hover:bg-ink-50 dark:hover:bg-night-alt hover:text-ink-900 dark:hover:text-night-text"
-              onclick={() => startEditCheck(check)}
-              title="Edit this check's label + description"
-            >
-              <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 20h9"/><path d="M16.5 3.5a2.121 2.121 0 0 1 3 3L7 19l-4 1 1-4 12.5-12.5z"/></svg>
-              Edit
-            </button>
-            <button
-              type="button"
-              class="inline-flex items-center gap-1 rounded-md border border-ink-300 dark:border-night-line bg-white dark:bg-night-card text-red-600 dark:text-red-400 text-[11px] font-medium px-2 py-1 hover:bg-red-50 dark:hover:bg-red-950/30"
-              onclick={() => onDeleteCheck(check.id)}
-              title="Delete this check"
-            >
-              <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="3 6 5 6 21 6"/><path d="M19 6l-1.5 14a2 2 0 0 1-2 1.5h-7a2 2 0 0 1-2-1.5L5 6"/><line x1="10" y1="11" x2="10" y2="17"/><line x1="14" y1="11" x2="14" y2="17"/></svg>
-              Delete
-            </button>
-          </div>
           {/if}
         </div>
       {/if}

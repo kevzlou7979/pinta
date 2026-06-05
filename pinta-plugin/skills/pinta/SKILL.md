@@ -1727,9 +1727,10 @@ The query comment shape:
 }
 ```
 
-Phase 15a ships only the `security` category. The categories array
-is general so 15b will add `performance`, `accessibility`, `mobile`,
-`cross-browser` without changing the wire contract.
+All five built-in categories are live: `security`, `performance`,
+`accessibility`, `mobile`, `cross-browser` (each has a check table
+below). They share one wire contract — the `categories` array just
+lists whichever the user toggled on.
 
 - **`categories`** — the built-in categories to run (tables below).
 - **`customCategories`** — user-defined categories to evaluate (see
@@ -1811,7 +1812,7 @@ read "4 pass" when the category defines 9 criteria.
   per-check explainer the user expands; an empty one reads as a broken row.
 
 So **Security always returns all 9 checks, Performance 8, Accessibility 9,
-Mobile 8** — a stable, comprehensive report every run. The per-category
+Mobile 8, Cross-Browser 8** — a stable, comprehensive report every run. The per-category
 `score` is computed only over pass/warn/fail (info excluded), so reporting
 clean checks as `pass` doesn't distort the number — a 100 then means "all
 9 verified clean," not "we looked at 4 things."
@@ -1933,6 +1934,36 @@ mobile-readiness signals.
 `fixHint` for mobile is often "use `max-width` instead of
 `width`" / "switch to PointerEvents which cover both mouse and
 touch" — short and concrete.
+
+### Per-category guidance — Cross-Browser (Phase 15b)
+
+LLM-only static analysis for v1 — no real multi-browser rendering
+(that's a later phase). **Derive the target browsers from the project
+itself**, in priority order: a `browserslist` field in `package.json`,
+a `.browserslistrc`, or a `browserslist` key in build config. If none
+exists, assume Autoprefixer's default (`> 0.5%, last 2 versions,
+Firefox ESR, not dead`) and emit one `info` check noting no explicit
+target was found. **Judge every finding against THAT target** — a
+feature unsupported only in browsers the project doesn't target is a
+`pass`, not a `warn`. Echo the resolved query in the relevant check's
+`value` so the user sees what you measured against.
+
+| Check label | Look for | Status rule |
+|---|---|---|
+| Browserslist target defined | `browserslist` config present (package.json / `.browserslistrc` / build config) | Present → `pass` (echo the resolved query in `value`); missing → `warn` (broad defaults — pin a target) |
+| Autoprefixer / PostCSS in build | Build runs autoprefixer (postcss config, Vite/webpack plugin) when source uses prefixable CSS | Present → `pass`; prefixable CSS but no autoprefixer → `warn` |
+| Modern CSS without `@supports` fallback | `:has()`, `subgrid`, `@container` queries, `color-mix()`, `aspect-ratio` used while the target includes browsers lacking them, no `@supports` guard | Per unguarded feature → `warn`; guarded or target supports it → `pass` |
+| Flexbox `gap` for old Safari | `gap` in a `display:flex` context while the target includes Safari < 14 | Per occurrence → `warn`; target excludes old Safari → `pass` |
+| JS syntax beyond target | `?.`, `??`, top-level `await`, logical-assignment, etc. in shipped source while the `tsconfig`/build target predates them with no transpile step covering it | Per feature class → `warn` |
+| Unpolyfilled runtime APIs | `IntersectionObserver`, `ResizeObserver`, `structuredClone`, `Array.prototype.flat`, `URLPattern`, etc. used with no polyfill while the target includes browsers lacking them | Per API → `warn` |
+| `-webkit-` only / Safari quirks | `backdrop-filter` without a `-webkit-` prefix, reliance on `<input type="date">` UI, `100vh` on iOS Safari without a `dvh` fallback | Per occurrence → `warn` |
+| Build target vs browserslist alignment | `tsconfig`/esbuild/Vite `target` much older than browserslist (over-polyfilling) or newer (shipping unsupported syntax) | Mismatch → `warn`; aligned → `pass` |
+
+`fixHint` should be concrete — *"add Autoprefixer (`npm i -D
+autoprefixer` + a `postcss.config.js`) so flex `gap` prefixes are
+emitted for your browserslist"* or *"wrap the `:has()` rule in
+`@supports selector(:has(*))` with a flat fallback so unsupported
+browsers still render"*.
 
 ### Scoring
 

@@ -838,7 +838,25 @@
     URL.revokeObjectURL(url);
   }
 
-  function downloadExport() {
+  /** Wrap a DOCX byte array in a Blob and download it. Slices into a
+   *  fresh ArrayBuffer because some browsers refuse Blob construction
+   *  from a SharedArrayBuffer-backed Uint8Array; the copy is cheap
+   *  relative to the OOXML zip's typical size. Shared by both DOCX
+   *  exports below. */
+  function downloadDocx(bytes: Uint8Array | null, filename: string): void {
+    if (!bytes) return;
+    const buf = bytes.slice().buffer;
+    downloadBlob(
+      new Blob([buf], {
+        type:
+          "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+      }),
+      filename,
+    );
+    exportMenuOpen = false;
+  }
+
+  function downloadResultsMd() {
     const md = app.exportResults();
     const ts = new Date().toISOString().slice(0, 10);
     downloadBlob(
@@ -846,6 +864,11 @@
       `${exportStem()}-results-${ts}.md`,
     );
     exportMenuOpen = false;
+  }
+
+  function downloadResultsDocx() {
+    const ts = new Date().toISOString().slice(0, 10);
+    downloadDocx(app.exportResultsDocx(), `${exportStem()}-results-${ts}.docx`);
   }
 
   function downloadTesterSheetMd() {
@@ -859,21 +882,8 @@
   }
 
   function downloadTesterSheetDocx() {
-    const bytes = app.exportTesterSheetDocx();
-    if (!bytes) return;
     const ts = new Date().toISOString().slice(0, 10);
-    // Slice into a fresh ArrayBuffer view because some browsers refuse
-    // Blob construction from a SharedArrayBuffer-backed Uint8Array.
-    // Copy is cheap relative to the OOXML zip's typical size.
-    const buf = bytes.slice().buffer;
-    downloadBlob(
-      new Blob([buf], {
-        type:
-          "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
-      }),
-      `${exportStem()}-tester-${ts}.docx`,
-    );
-    exportMenuOpen = false;
+    downloadDocx(app.exportTesterSheetDocx(), `${exportStem()}-tester-${ts}.docx`);
   }
 
   function clearCatalog() {
@@ -1060,7 +1070,7 @@
       or production secrets in any spec you import — use placeholders or test-tenant credentials.
     </div>
     <p class="text-[11px] text-ink-500 dark:text-night-mute italic leading-snug">
-      Tip: run the exported results through <code>pandoc results.md -o results.pdf</code> if you need a PDF version.
+      Tip: export Results or the Tester sheet as <code>.docx</code> to open straight in Word — or run the <code>.md</code> through <code>pandoc results.md -o results.pdf</code> for a PDF.
     </p>
   </section>
 {:else if viewing}
@@ -1528,7 +1538,7 @@
             type="button"
             class="inline-flex items-center justify-center gap-0.5 w-9 h-8 rounded-r-md text-ink-700 dark:text-night-dim hover:text-brand-pink dark:hover:text-brand-pink-light hover:bg-ink-50 dark:hover:bg-night-alt"
             onclick={() => (exportMenuOpen = !exportMenuOpen)}
-            title="Export this catalog — results MD, tester sheet MD, or tester sheet DOCX"
+            title="Export this catalog — Results or Tester sheet, as Markdown or Word (.docx)"
             aria-haspopup="menu"
             aria-expanded={exportMenuOpen}
             aria-label="Export catalog"
@@ -1537,37 +1547,45 @@
             <svg width="8" height="8" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="6 9 12 15 18 9"/></svg>
           </button>
           {#if exportMenuOpen}
+            <!-- Export popover — one block per artifact (Results / Tester
+                 sheet), each offering its format buttons (Markdown / Word).
+                 Grid layout makes the full matrix obvious at a glance,
+                 friendlier than a flat list as formats grow. -->
+            {#snippet fmtBtn(label: string, hint: string, onClick: () => void)}
+              <button
+                type="button"
+                class="flex-1 inline-flex items-center justify-center gap-1.5 rounded-md border border-ink-200 dark:border-night-line bg-white dark:bg-night-card px-2 py-1.5 text-[11.5px] font-semibold text-ink-700 dark:text-night-dim hover:border-brand-pink hover:text-brand-pink dark:hover:text-brand-pink-light hover:bg-brand-pink/5 transition-colors"
+                onclick={onClick}
+                role="menuitem"
+                title={hint}
+              >
+                <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/></svg>
+                {label}
+              </button>
+            {/snippet}
             <div
-              class="absolute right-0 top-full mt-1 z-40 w-64 rounded-md border border-ink-200 dark:border-night-line bg-white dark:bg-night-card shadow-lg overflow-hidden"
+              class="absolute right-0 top-full mt-1 z-40 w-72 rounded-md border border-ink-200 dark:border-night-line bg-white dark:bg-night-card shadow-lg overflow-hidden"
               role="menu"
             >
-              <button
-                type="button"
-                class="w-full text-left px-3 py-2 text-[12px] text-ink-800 dark:text-night-text hover:bg-ink-50 dark:hover:bg-night-alt border-b border-ink-100 dark:border-night-line"
-                onclick={downloadExport}
-                role="menuitem"
-              >
-                <div class="font-semibold">Results (.md)</div>
-                <div class="text-[10.5px] text-ink-500 dark:text-night-mute leading-snug mt-0.5">Sign-off report with Pass/Fail marks + per-row chat threads.</div>
-              </button>
-              <button
-                type="button"
-                class="w-full text-left px-3 py-2 text-[12px] text-ink-800 dark:text-night-text hover:bg-ink-50 dark:hover:bg-night-alt border-b border-ink-100 dark:border-night-line"
-                onclick={downloadTesterSheetMd}
-                role="menuitem"
-              >
-                <div class="font-semibold">Tester sheet (.md)</div>
-                <div class="text-[10.5px] text-ink-500 dark:text-night-mute leading-snug mt-0.5">Embeds the Help-generated steps per row, leaves Result blank for the tester. Re-importable in standalone mode.</div>
-              </button>
-              <button
-                type="button"
-                class="w-full text-left px-3 py-2 text-[12px] text-ink-800 dark:text-night-text hover:bg-ink-50 dark:hover:bg-night-alt"
-                onclick={downloadTesterSheetDocx}
-                role="menuitem"
-              >
-                <div class="font-semibold">Tester sheet (.docx)</div>
-                <div class="text-[10.5px] text-ink-500 dark:text-night-mute leading-snug mt-0.5">Same content as the tester MD, but opens directly in Word — no pandoc needed.</div>
-              </button>
+              <div class="px-3 pt-2 pb-1 text-[10px] font-bold uppercase tracking-wider text-ink-400 dark:text-night-mute">Export</div>
+
+              <div class="px-3 py-2 border-b border-ink-100 dark:border-night-line">
+                <div class="text-[12px] font-semibold text-ink-900 dark:text-night-text">Results</div>
+                <div class="text-[10.5px] text-ink-500 dark:text-night-mute leading-snug mt-0.5 mb-2">Sign-off report with Pass/Fail marks + per-row chat threads.</div>
+                <div class="flex items-center gap-1.5">
+                  {@render fmtBtn(".md", "Results as Markdown", downloadResultsMd)}
+                  {@render fmtBtn(".docx", "Results as Word — opens directly in Word, no pandoc needed", downloadResultsDocx)}
+                </div>
+              </div>
+
+              <div class="px-3 py-2">
+                <div class="text-[12px] font-semibold text-ink-900 dark:text-night-text">Tester sheet</div>
+                <div class="text-[10.5px] text-ink-500 dark:text-night-mute leading-snug mt-0.5 mb-2">Help-generated steps per row, Result left blank for the tester. Re-importable in standalone mode.</div>
+                <div class="flex items-center gap-1.5">
+                  {@render fmtBtn(".md", "Tester sheet as Markdown", downloadTesterSheetMd)}
+                  {@render fmtBtn(".docx", "Tester sheet as Word — opens directly in Word, no pandoc needed", downloadTesterSheetDocx)}
+                </div>
+              </div>
             </div>
           {/if}
         </div>

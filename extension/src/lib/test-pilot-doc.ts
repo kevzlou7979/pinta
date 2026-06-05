@@ -150,12 +150,39 @@ export function composeTesterSheetMarkdown(catalog: TestPilotCatalog): string {
 // already-bundled `fflate` for the zip layer; no new npm deps.
 // ─────────────────────────────────────────────────────────────────────
 
-/** Minimum text-escape for XML body content. Order matters — & first
- *  so the &amp; we just inserted doesn't double-escape on the next
- *  pass. Newline & tab pass through; the calling code splits paragraphs
- *  via separate <w:p> elements rather than embedded breaks. */
+/** Minimum text-escape for XML body content. We first DROP characters
+ *  that are illegal in XML 1.0, then escape the five XML metacharacters
+ *  (& first so the &amp; we insert doesn't double-escape). Tab, LF and
+ *  CR pass through; the calling code splits paragraphs via separate
+ *  <w:p> elements rather than embedded breaks.
+ *
+ *  The illegal-char strip is load-bearing, not cosmetic: a single bad
+ *  char (e.g. a form-feed or vertical-tab pasted into a test's
+ *  expected-result, or pulled in from agent-generated steps) makes
+ *  `word/document.xml` not well-formed. Word then renders only up to
+ *  that byte and silently drops the rest of the document — which is how
+ *  a tester-sheet export ends up truncated mid-section with later
+ *  sections missing entirely.
+ *
+ *  Iterating with for..of walks whole code points, so valid astral
+ *  characters (emoji, encoded as surrogate PAIRS) survive while LONE
+ *  surrogates — equally not well-formed — are dropped. */
 function xmlEscape(s: string): string {
-  return s
+  let clean = "";
+  for (const ch of s) {
+    const cp = ch.codePointAt(0)!;
+    // XML 1.0 Char ::= #x9 | #xA | #xD | [#x20-#xD7FF] |
+    //                  [#xE000-#xFFFD] | [#x10000-#x10FFFF]
+    const legal =
+      cp === 0x9 ||
+      cp === 0xa ||
+      cp === 0xd ||
+      (cp >= 0x20 && cp <= 0xd7ff) ||
+      (cp >= 0xe000 && cp <= 0xfffd) ||
+      (cp >= 0x10000 && cp <= 0x10ffff);
+    if (legal) clean += ch;
+  }
+  return clean
     .replace(/&/g, "&amp;")
     .replace(/</g, "&lt;")
     .replace(/>/g, "&gt;")
@@ -311,15 +338,25 @@ export function composeTesterSheetDocx(catalog: TestPilotCatalog): Uint8Array {
     }
   }
 
+  return wrapDocxBody(body);
+}
+
+/**
+ * Wrap an array of `<w:p>` / `<w:tbl>` body parts into a complete,
+ * minimum-viable DOCX zip (Uint8Array). Shared by every DOCX composer
+ * so the OOXML package boilerplate lives in exactly one place.
+ *
+ * Layout: `[Content_Types].xml` + a root rel pointing at
+ * `word/document.xml`. Word opens this and ignores the absence of
+ * optional theme/styles/setting parts.
+ */
+function wrapDocxBody(body: string[]): Uint8Array {
   const documentXml =
     `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>` +
     `<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">` +
     `<w:body>${body.join("")}</w:body>` +
     `</w:document>`;
 
-  // OOXML minimum-viable layout: Content_Types + a root rel pointing
-  // at word/document.xml. Word opens this and ignores the absence of
-  // optional theme/styles/setting parts.
   const contentTypes =
     `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>` +
     `<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">` +
@@ -339,6 +376,104 @@ export function composeTesterSheetDocx(catalog: TestPilotCatalog): Uint8Array {
     "_rels/.rels": strToU8(rootRels),
     "word/document.xml": strToU8(documentXml),
   });
+}
+
+/**
+ * Compose a hand-rolled DOCX of the **results** (sign-off report) — the
+ * DOCX twin of `ExtensionState.exportResults()`'s markdown. Mirrors that
+ * layout exactly so the two formats read the same in Word vs a markdown
+ * viewer: title, a meta by-line (run date + author + pass/fail/untested
+ * tally), description, then per-section heading + 4-col table with the
+ * Result column FILLED (✓ Pass / ✗ Fail / ⚠ Untested), followed by a
+ * "Conversations" block listing each row's chat thread.
+ *
+ * `today` is injected (not read from the clock) so this stays a pure,
+ * testable function — the state wrapper passes the formatted date.
+ */
+export function composeResultsDocx(
+  catalog: TestPilotCatalog,
+  today: string,
+): Uint8Array {
+  const body: string[] = [];
+
+  let pass = 0,
+    fail = 0,
+    untested = 0;
+  for (const s of catalog.sections) {
+    for (const t of s.tests) {
+      if (t.status === "pass") pass++;
+      else if (t.status === "fail") fail++;
+      else untested++;
+    }
+  }
+  const total = pass + fail + untested;
+
+  const title = catalog.title?.trim() || catalog.filename;
+  body.push(docxHeading(`Test Pilot results — ${title}`, 1));
+
+  const metaBits: string[] = [`Run on ${today}`];
+  if (catalog.author?.trim()) metaBits.push(`by ${catalog.author.trim()}`);
+  metaBits.push(`${pass}/${total} passed, ${fail} failed, ${untested} untested`);
+  body.push(
+    `<w:p>${docxRun(metaBits.join(", "), { sz: 22, color: "555555" })}</w:p>`,
+  );
+  if (catalog.description?.trim()) {
+    body.push(docxParagraph(catalog.description.trim(), { sz: 22, spaceAfter: 240 }));
+  }
+
+  for (const section of catalog.sections) {
+    body.push(docxHeading(section.title, 2));
+    const widths = [1200, 4200, 4200, 1400];
+    body.push(
+      `<w:tbl>` +
+        `<w:tblPr><w:tblW w:w="11000" w:type="dxa"/></w:tblPr>` +
+        `<w:tblGrid>${widths.map((w) => `<w:gridCol w:w="${w}"/>`).join("")}</w:tblGrid>` +
+        docxRow([
+          docxCell("ID", widths[0]!, { bold: true }),
+          docxCell("Test", widths[1]!, { bold: true }),
+          docxCell("Expected Result", widths[2]!, { bold: true }),
+          docxCell("Result", widths[3]!, { bold: true }),
+        ]) +
+        section.tests
+          .map((t: TestPilotTest) => {
+            const result =
+              t.status === "pass"
+                ? "✓ Pass"
+                : t.status === "fail"
+                  ? "✗ Fail"
+                  : "⚠ Untested";
+            return docxRow([
+              docxCell(t.id, widths[0]!),
+              docxCell(t.test.replace(/\n/g, " "), widths[1]!),
+              docxCell(t.expected.replace(/\n/g, " "), widths[2]!),
+              docxCell(result, widths[3]!),
+            ]);
+          })
+          .join("") +
+        `</w:tbl>`,
+    );
+
+    // Conversations block — only rows with a chat thread. Mirrors the
+    // markdown export's per-section "Conversations" appendix.
+    const withChat = section.tests.filter(
+      (t: TestPilotTest) => Array.isArray(t.chat) && t.chat.length > 0,
+    );
+    if (withChat.length > 0) {
+      body.push(docxHeading("Conversations", 3));
+      for (const t of withChat) {
+        body.push(docxHeading(`Conversation — ${t.id}`, 4));
+        for (const m of t.chat!) {
+          const who = m.role === "user" ? "tester: " : "agent: ";
+          const text = stripBasicMarkdown(m.text.replace(/\r?\n+/g, " ").trim());
+          body.push(
+            `<w:p>${docxRun(who, { bold: true, sz: 20 })}${docxRun(text, { sz: 20 })}</w:p>`,
+          );
+        }
+      }
+    }
+  }
+
+  return wrapDocxBody(body);
 }
 
 // ─────────────────────────────────────────────────────────────────────

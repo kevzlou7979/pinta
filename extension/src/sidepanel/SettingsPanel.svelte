@@ -21,6 +21,12 @@
     ModuleCapability,
     InstalledModule,
   } from "@pinta/shared";
+  import {
+    parseSettingsBundle,
+    summarizeBundle,
+    type PintaSettingsBundle,
+    type BundleSummary,
+  } from "../lib/pinta-settings.js";
 
   let revealedSecrets = $state<Record<string, boolean>>({});
 
@@ -130,6 +136,77 @@
   /** write/shell/network are the elevated ones we warn harder about. */
   function capIsElevated(c: ModuleCapability): boolean {
     return c !== "read-files";
+  }
+
+  // ── Backup & restore (global settings bundle) ────────────────────
+  // One `pinta-settings.json` carries Test Pilot catalogs (with results)
+  // + the AuditFlow catalog, so the user can recover after a cache wipe
+  // or move state between machines. Module config + secrets are NEVER
+  // exported. Import merges audit catalog + adopts the Test Pilot catalog.
+  let settingsFileInput = $state<HTMLInputElement | null>(null);
+  let pendingRestore = $state<{
+    bundle: PintaSettingsBundle;
+    summary: BundleSummary;
+    fileName: string;
+  } | null>(null);
+  let restoring = $state(false);
+  let backupError = $state<string | null>(null);
+
+  function fileStamp(): string {
+    const d = new Date();
+    const p = (n: number) => String(n).padStart(2, "0");
+    return `${d.getFullYear()}${p(d.getMonth() + 1)}${p(d.getDate())}-${p(d.getHours())}${p(d.getMinutes())}`;
+  }
+
+  function exportAllSettings() {
+    const bundle = app.exportSettingsBundle();
+    const blob = new Blob([JSON.stringify(bundle, null, 2)], {
+      type: "application/json",
+    });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = `pinta-settings-${fileStamp()}.json`;
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    URL.revokeObjectURL(url);
+  }
+
+  async function onSettingsFilePicked(e: Event) {
+    const input = e.currentTarget as HTMLInputElement;
+    const file = input.files?.[0];
+    input.value = ""; // allow re-picking the same file
+    if (!file) return;
+    backupError = null;
+    const bundle = parseSettingsBundle(await file.text());
+    if (!bundle) {
+      backupError =
+        "Couldn't read that file — it isn't a Pinta settings bundle (expected `$pintaSettings: \"1\"`).";
+      return;
+    }
+    pendingRestore = {
+      bundle,
+      summary: summarizeBundle(bundle),
+      fileName: file.name,
+    };
+  }
+
+  function cancelRestore() {
+    pendingRestore = null;
+  }
+
+  async function confirmRestore() {
+    if (!pendingRestore) return;
+    restoring = true;
+    try {
+      await app.importSettingsBundle(pendingRestore.bundle);
+      pendingRestore = null;
+    } catch (err) {
+      backupError = `Restore failed: ${(err as Error).message}`;
+    } finally {
+      restoring = false;
+    }
   }
 </script>
 
@@ -424,6 +501,63 @@
     {/if}
   </div>
 
+  <!-- Backup & restore — one bundle for Test Pilot (with results) + the
+       AuditFlow catalog. Recovers state after a cache clear; ports it
+       between machines. Module config + secrets are never exported. -->
+  <div class="space-y-2">
+    <h3 class="text-xs uppercase tracking-wide text-ink-500 dark:text-night-mute font-medium">
+      Backup &amp; restore
+    </h3>
+    <div class="rounded-md border border-ink-200 dark:border-night-line bg-white dark:bg-night-card p-3 space-y-2.5">
+      <p class="text-[12px] text-ink-600 dark:text-night-dim leading-snug">
+        Export your <strong>Test Pilot</strong> test cases (with results) and
+        <strong>AuditFlow</strong> categories to a single
+        <code class="font-mono text-[10.5px] bg-ink-100 dark:bg-night-alt px-1 rounded">pinta-settings.json</code>.
+        Re-import it after clearing your browser data, or to move your setup to
+        another machine. Module API keys are never included.
+      </p>
+      {#if backupError}
+        <div class="flex items-start gap-2 rounded-md border border-red-300 bg-red-50 dark:border-red-800/50 dark:bg-red-950/30 p-2 text-[11.5px] text-red-700 dark:text-red-300 leading-snug">
+          <p class="flex-1 min-w-0 break-words">{backupError}</p>
+          <button
+            type="button"
+            class="shrink-0 text-red-500 hover:text-red-700 dark:text-red-400 dark:hover:text-red-200 leading-none px-1"
+            onclick={() => (backupError = null)}
+            aria-label="Dismiss error"
+            title="Dismiss"
+          >✕</button>
+        </div>
+      {/if}
+      <div class="flex items-center gap-2">
+        <button
+          type="button"
+          class="flex-1 inline-flex items-center justify-center gap-1.5 rounded-md border border-ink-300 dark:border-night-line px-3 py-2 text-[12px] font-medium text-ink-700 dark:text-night-dim hover:border-brand-pink hover:text-brand-pink dark:hover:text-brand-pink-light"
+          onclick={exportAllSettings}
+          title="Download all your Pinta settings as one file"
+        >
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
+          Export all settings
+        </button>
+        <button
+          type="button"
+          class="flex-1 inline-flex items-center justify-center gap-1.5 rounded-md border border-ink-300 dark:border-night-line px-3 py-2 text-[12px] font-medium text-ink-700 dark:text-night-dim hover:border-brand-pink hover:text-brand-pink dark:hover:text-brand-pink-light"
+          onclick={() => settingsFileInput?.click()}
+          title="Import a pinta-settings.json file"
+        >
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" y1="3" x2="12" y2="15"/></svg>
+          Import settings…
+        </button>
+      </div>
+      <input
+        bind:this={settingsFileInput}
+        type="file"
+        accept=".json,application/json"
+        class="hidden"
+        onchange={onSettingsFilePicked}
+      />
+    </div>
+  </div>
+
   <div class="space-y-2">
     <h3 class="text-xs uppercase tracking-wide text-ink-500 dark:text-night-mute font-medium">
       Visual feedback
@@ -711,6 +845,85 @@
           disabled={importing}
         >
           {importing ? "Installing…" : "Install module"}
+        </button>
+      </div>
+    </div>
+  </div>
+{/if}
+
+<!-- ── Restore-from-bundle confirm dialog ────────────────────────────
+     Restoring is a state-merging operation: the audit catalog merges and
+     the Test Pilot catalog is adopted (replacing the current one + its
+     on-disk .md). Show exactly what's inside before applying. -->
+{#if pendingRestore}
+  {@const s = pendingRestore.summary}
+  <div
+    class="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-3"
+    role="dialog"
+    aria-modal="true"
+    aria-label="Confirm settings restore"
+  >
+    <div
+      class="w-full max-w-md max-h-[88vh] overflow-y-auto rounded-lg bg-white dark:bg-night-card border border-ink-200 dark:border-night-line shadow-xl p-4 space-y-3"
+    >
+      <div>
+        <h3 class="text-sm font-semibold text-ink-900 dark:text-night-text">
+          Restore from settings file?
+        </h3>
+        <p class="text-[11px] text-ink-500 dark:text-night-mute mt-0.5 font-mono break-all">
+          {pendingRestore.fileName}
+        </p>
+      </div>
+
+      <div class="space-y-1.5">
+        <h4 class="text-[11px] font-semibold text-ink-900 dark:text-night-text">
+          This file contains
+        </h4>
+        <ul class="text-[12px] text-ink-700 dark:text-night-dim space-y-1">
+          <li class="flex items-center gap-2">
+            <span class="w-1.5 h-1.5 rounded-full bg-brand-pink shrink-0" aria-hidden="true"></span>
+            {#if s.testPilotCatalogs > 0}
+              Test Pilot: {s.testPilotCatalogs} catalog{s.testPilotCatalogs === 1 ? "" : "s"},
+              {s.testPilotTests} test{s.testPilotTests === 1 ? "" : "s"} (with results)
+            {:else}
+              <span class="text-ink-500 dark:text-night-mute">No Test Pilot catalog</span>
+            {/if}
+          </li>
+          <li class="flex items-center gap-2">
+            <span class="w-1.5 h-1.5 rounded-full bg-brand-pink shrink-0" aria-hidden="true"></span>
+            {#if s.auditCustomCategories > 0 || s.auditCustomChecks > 0 || s.auditEdits > 0}
+              AuditFlow catalog: {s.auditCustomCategories} categor{s.auditCustomCategories === 1 ? "y" : "ies"},
+              {s.auditCustomChecks} check{s.auditCustomChecks === 1 ? "" : "s"}{s.auditEdits > 0 ? `, ${s.auditEdits} edit${s.auditEdits === 1 ? "" : "s"}` : ""}
+            {:else}
+              <span class="text-ink-500 dark:text-night-mute">No AuditFlow catalog edits</span>
+            {/if}
+          </li>
+        </ul>
+      </div>
+
+      <p class="text-[10px] text-ink-500 dark:text-night-mute leading-snug">
+        The AuditFlow catalog <strong>merges</strong> into your current one. The
+        Test Pilot catalog <strong>replaces</strong> the one loaded for this
+        project (its results sync to disk). Audit findings and module API keys
+        aren't part of this file.
+      </p>
+
+      <div class="flex items-center justify-end gap-2 pt-1">
+        <button
+          type="button"
+          class="text-[12px] px-3 py-1.5 rounded text-ink-600 hover:text-ink-900 dark:text-night-mute dark:hover:text-night-text"
+          onclick={cancelRestore}
+          disabled={restoring}
+        >
+          Cancel
+        </button>
+        <button
+          type="button"
+          class="text-[12px] px-3 py-1.5 rounded bg-brand-pink text-white font-medium hover:bg-brand-pink-dark disabled:opacity-60 disabled:cursor-not-allowed"
+          onclick={confirmRestore}
+          disabled={restoring}
+        >
+          {restoring ? "Restoring…" : "Restore"}
         </button>
       </div>
     </div>

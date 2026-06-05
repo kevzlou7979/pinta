@@ -26,12 +26,12 @@
   import { theme, toggleTheme } from "../lib/theme.svelte.js";
   import { matchAny, suggestPattern } from "../lib/url-patterns.js";
   import type { Companion } from "../lib/companions.js";
-  import StatusPill from "./StatusPill.svelte";
   import AnnotationCard from "./AnnotationCard.svelte";
   import SessionHistory from "./SessionHistory.svelte";
   import SettingsPanel from "./SettingsPanel.svelte";
   import TestPilotTab from "./TestPilotTab.svelte";
   import AuditFlowTab from "./AuditFlowTab.svelte";
+  import ModuleBoardTab from "./ModuleBoardTab.svelte";
   import ChatSheet from "./ChatSheet.svelte";
 
   // Phase 14 chat surfaces owned by App.svelte (Test Pilot tier owns
@@ -130,11 +130,19 @@
     }
   }
 
-  type SidePanelTab = "annotate" | "test-pilot" | "audit-flow";
+  // Built-in tab ids plus any imported interactive module id (those tabs
+  // are declared by the module manifest, so the id is dynamic — hence the
+  // open `(string & {})` arm). "If the plugin doesn't declare a tab, it
+  // never appears here."
+  type SidePanelTab =
+    | "annotate"
+    | "test-pilot"
+    | "audit-flow"
+    | (string & {});
   // Active tab in the main panel area. Persists across side-panel
   // re-opens via chrome.storage.local (`pinta-active-tab`). The
-  // "test-pilot" and "audit-flow" tabs are conditionally rendered —
-  // gated on the module being enabled in Settings.
+  // "test-pilot" / "audit-flow" tabs and every imported interactive tab
+  // are conditionally rendered — gated on the module being enabled.
   let activeTab = $state<SidePanelTab>("annotate");
 
   // Per-tab "busy" indicators. Drive the spinner that replaces the tab
@@ -323,6 +331,41 @@
   let associateError = $state<string | null>(null);
   let downloadMenuOpen = $state(false);
   let bundleBusy = $state(false);
+
+  // Header overflow menu (⋮) — collapses chat / history / settings /
+  // theme into one dropdown. `historyOpen` drives the embedded
+  // SessionHistory popover (trigger hidden, anchored to the ⋮ button);
+  // `historyCount` mirrors its session count back for the menu badge.
+  let headerMenuOpen = $state(false);
+  let headerMenuBtn = $state<HTMLButtonElement>();
+  let historyOpen = $state(false);
+  let historyCount = $state(0);
+
+  // Extension version, shown next to the title. Read once from the
+  // manifest; tolerate a missing chrome.runtime (non-extension preview).
+  const appVersion = (() => {
+    try {
+      return chrome.runtime?.getManifest?.().version ?? "";
+    } catch {
+      return ""; // not running as an extension — badge just hides.
+    }
+  })();
+
+  // Connection dot beside the title — colour + label per mode/status.
+  // Standalone is intentional local-only, so it reads neutral grey
+  // rather than "offline" red. Mirrors StatusPill's colour map.
+  const statusDot = $derived.by(() => {
+    if (app.appMode === "standalone")
+      return { cls: "bg-ink-400 dark:bg-night-mute", label: "Standalone — local only" };
+    switch (app.connectionStatus) {
+      case "connected":
+        return { cls: "bg-emerald-500", label: "Connected" };
+      case "connecting":
+        return { cls: "bg-amber-400 animate-pulse", label: "Connecting…" };
+      default:
+        return { cls: "bg-red-500", label: "Offline" };
+    }
+  });
 
   // Close a popover when the user presses outside it. Attach to the
   // element that wraps BOTH the trigger and the panel, so clicking the
@@ -559,13 +602,14 @@
 
     void loadSharePrefs();
     void loadFooterCollapsedPref();
-    // Restore the last-used tab. If Test Pilot / AuditFlow was active
-    // but the module has since been disabled, fall back to Annotate
-    // (the conditional render below handles the gate).
+    // Restore the last-used tab. Built-in ids (annotate / test-pilot /
+    // audit-flow) AND any imported interactive tab id restore directly;
+    // if that module has since been disabled the conditional render
+    // below falls back to Annotate via the final {:else}.
     try {
       const stored = await chrome.storage?.local?.get("pinta-active-tab");
       const raw = stored?.["pinta-active-tab"];
-      if (raw === "test-pilot" || raw === "annotate" || raw === "audit-flow") {
+      if (typeof raw === "string" && raw) {
         activeTab = raw;
       }
     } catch {
@@ -1383,7 +1427,17 @@
     <div class="flex items-center gap-2 min-w-0">
       <img src="/icons/icon-32.png" alt="" width="24" height="24" />
       <div class="min-w-0 relative" use:clickOutside={() => (projectMenuOpen = false)}>
-        <h1 class="font-semibold text-sm dark:text-night-text">Pinta</h1>
+        <div class="flex items-center gap-1.5">
+          <h1 class="font-semibold text-sm dark:text-night-text">Pinta</h1>
+          {#if appVersion}
+            <span class="text-[10px] font-medium text-ink-400 dark:text-night-mute tabular-nums" title="Pinta v{appVersion}">{appVersion}</span>
+          {/if}
+          <span
+            class="w-2 h-2 rounded-full shrink-0 {statusDot.cls}"
+            title={statusDot.label}
+            aria-label={statusDot.label}
+          ></span>
+        </div>
         {#if app.selectedCompanion}
           <button
             type="button"
@@ -1495,47 +1549,98 @@
         {/if}
       </div>
     </div>
-    <div class="flex items-center gap-1.5 shrink-0">
-      <!-- History + Settings live in the header so every module
-           (Annotate, Test Pilot, …) shares the same access point. -->
-      {#if app.moduleReady("chat") && !globalChatOpen}
-        <button
-          type="button"
-          class="w-7 h-7 inline-flex items-center justify-center rounded-full border border-ink-200 bg-white text-ink-600 hover:text-brand-pink hover:border-ink-400 dark:border-night-line dark:bg-night-alt dark:text-night-dim dark:hover:text-brand-pink-light dark:hover:border-night-line2 transition-colors"
-          onclick={() => (globalChatOpen = true)}
-          aria-label="Open global chat"
-          title="Ask Pinta anything"
-        >
-          <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M7.9 20A9 9 0 1 0 4 16.1L2 22Z"/><path d="M8 12h.01"/><path d="M12 12h.01"/><path d="M16 12h.01"/></svg>
-        </button>
-      {/if}
-      <SessionHistory />
+    <!-- Header overflow — chat / history / settings / theme + the
+         connection status, collapsed into one ⋮ dropdown so the header
+         stays tidy as modules add affordances. -->
+    <div class="relative shrink-0" use:clickOutside={() => (headerMenuOpen = false)}>
       <button
+        bind:this={headerMenuBtn}
         type="button"
-        class="w-7 h-7 inline-flex items-center justify-center rounded-full border border-ink-200 bg-white text-ink-600 hover:text-brand-pink hover:border-ink-400 dark:border-night-line dark:bg-night-alt dark:text-night-dim dark:hover:text-brand-pink-light dark:hover:border-night-line2 transition-colors"
-        onclick={() => (app.viewingSettings = !app.viewingSettings)}
-        title="Pinta settings — modules, integrations"
-        aria-label="Open settings"
-        aria-pressed={app.viewingSettings}
+        class="relative w-7 h-7 inline-flex items-center justify-center rounded-full border border-ink-200 bg-white text-ink-600 hover:text-brand-pink hover:border-ink-400 dark:border-night-line dark:bg-night-alt dark:text-night-dim dark:hover:text-brand-pink-light dark:hover:border-night-line2 transition-colors"
+        onclick={() => (headerMenuOpen = !headerMenuOpen)}
+        aria-haspopup="menu"
+        aria-expanded={headerMenuOpen}
+        aria-label="Menu"
+        title="Menu"
       >
-        <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>
-      </button>
-      <button
-        type="button"
-        class="w-7 h-7 inline-flex items-center justify-center rounded-full border border-ink-200 bg-white text-ink-600 hover:text-brand-pink hover:border-ink-400 dark:border-night-line dark:bg-night-alt dark:text-night-dim dark:hover:text-brand-pink-light dark:hover:border-night-line2 transition-colors"
-        onclick={toggleTheme}
-        aria-label={theme.value === "dark" ? "Switch to light mode" : "Switch to dark mode"}
-        title={theme.value === "dark" ? "Light mode" : "Dark mode"}
-      >
-        {#if theme.value === "dark"}
-          <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="4"/><path d="M12 2v2"/><path d="M12 20v2"/><path d="m4.93 4.93 1.41 1.41"/><path d="m17.66 17.66 1.41 1.41"/><path d="M2 12h2"/><path d="M20 12h2"/><path d="m6.34 17.66-1.41 1.41"/><path d="m19.07 4.93-1.41 1.41"/></svg>
-        {:else}
-          <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"/></svg>
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><circle cx="12" cy="5" r="1.6"/><circle cx="12" cy="12" r="1.6"/><circle cx="12" cy="19" r="1.6"/></svg>
+        {#if historyCount > 0}
+          <span class="absolute -top-1 -right-1 min-w-[14px] h-[14px] px-1 inline-flex items-center justify-center rounded-full bg-brand-pink text-white text-[9px] font-semibold leading-none dark:bg-brand-pink-light dark:text-night-bg" aria-hidden="true">
+            {historyCount > 99 ? "99+" : historyCount}
+          </span>
         {/if}
       </button>
-      {#if app.appMode !== "standalone"}
-        <StatusPill status={app.connectionStatus} />
+
+      {#if headerMenuOpen}
+        <div
+          class="absolute right-0 top-full mt-1 z-30 w-52 rounded-md border border-ink-200 bg-white shadow-lg dark:border-night-line dark:bg-night-card py-1"
+          role="menu"
+        >
+          {#if app.moduleReady("chat")}
+            <button
+              type="button"
+              class="w-full flex items-center gap-2.5 px-3 py-1.5 text-[12px] text-ink-700 dark:text-night-dim hover:bg-ink-50 dark:hover:bg-night-alt hover:text-ink-900 dark:hover:text-night-text"
+              role="menuitem"
+              onclick={() => { globalChatOpen = true; headerMenuOpen = false; }}
+            >
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M7.9 20A9 9 0 1 0 4 16.1L2 22Z"/><path d="M8 12h.01"/><path d="M12 12h.01"/><path d="M16 12h.01"/></svg>
+              Ask Pinta
+            </button>
+          {/if}
+          <button
+            type="button"
+            class="w-full flex items-center gap-2.5 px-3 py-1.5 text-[12px] text-ink-700 dark:text-night-dim hover:bg-ink-50 dark:hover:bg-night-alt hover:text-ink-900 dark:hover:text-night-text"
+            role="menuitem"
+            onclick={() => { historyOpen = true; headerMenuOpen = false; }}
+          >
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 12a9 9 0 1 0 3-6.7L3 8"/><path d="M3 3v5h5"/><path d="M12 7v5l3 2"/></svg>
+            Session history
+            {#if historyCount > 0}
+              <span class="ml-auto min-w-[16px] h-4 px-1 inline-flex items-center justify-center rounded-full bg-brand-pink text-white text-[9px] font-semibold leading-none dark:bg-brand-pink-light dark:text-night-bg">
+                {historyCount > 99 ? "99+" : historyCount}
+              </span>
+            {/if}
+          </button>
+          <button
+            type="button"
+            class="w-full flex items-center gap-2.5 px-3 py-1.5 text-[12px] {app.viewingSettings ? 'text-brand-pink dark:text-brand-pink-light font-medium' : 'text-ink-700 dark:text-night-dim'} hover:bg-ink-50 dark:hover:bg-night-alt"
+            role="menuitemcheckbox"
+            aria-checked={app.viewingSettings}
+            onclick={() => { app.viewingSettings = !app.viewingSettings; headerMenuOpen = false; }}
+          >
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>
+            Settings
+          </button>
+          <button
+            type="button"
+            class="w-full flex items-center gap-2.5 px-3 py-1.5 text-[12px] text-ink-700 dark:text-night-dim hover:bg-ink-50 dark:hover:bg-night-alt hover:text-ink-900 dark:hover:text-night-text"
+            role="menuitem"
+            onclick={toggleTheme}
+          >
+            {#if theme.value === "dark"}
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="4"/><path d="M12 2v2"/><path d="M12 20v2"/><path d="m4.93 4.93 1.41 1.41"/><path d="m17.66 17.66 1.41 1.41"/><path d="M2 12h2"/><path d="M20 12h2"/><path d="m6.34 17.66-1.41 1.41"/><path d="m19.07 4.93-1.41 1.41"/></svg>
+              Light mode
+            {:else}
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"/></svg>
+              Dark mode
+            {/if}
+          </button>
+          <div class="my-1 border-t border-ink-100 dark:border-night-line"></div>
+          <div class="px-3 py-1.5 flex items-center gap-2 text-[11px] text-ink-500 dark:text-night-mute">
+            <span class="w-2 h-2 rounded-full shrink-0 {statusDot.cls}"></span>
+            {statusDot.label}
+          </div>
+        </div>
       {/if}
+
+      <!-- Rich session-history popover, controlled from the menu item
+           above. Trigger hidden; positions under the ⋮ button. -->
+      <SessionHistory
+        bind:open={historyOpen}
+        bind:count={historyCount}
+        anchorEl={headerMenuBtn}
+        showTrigger={false}
+      />
     </div>
   </header>
 
@@ -1656,7 +1761,7 @@
       </div>
     {/if}
 
-    {#if !app.viewingSettings && !app.viewingImportedId && !showAssociatePrompt && app.moduleReady("test-pilot")}
+    {#if !app.viewingSettings && !app.viewingImportedId && !showAssociatePrompt && (app.moduleReady("test-pilot") || app.moduleReady("audit-flow") || app.interactiveTabSpecs().length > 0)}
       <nav class="sticky -top-4 z-20 bg-ink-50 dark:bg-night-bg flex items-center gap-1 border-b border-ink-200 dark:border-night-line -mx-4 px-4 pt-4 mb-1">
         <button
           type="button"
@@ -1687,6 +1792,7 @@
           {/if}
           Annotate
         </button>
+        {#if app.moduleReady("test-pilot")}
         <button
           type="button"
           class="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium border-b-2 -mb-px transition-colors"
@@ -1719,6 +1825,7 @@
           {/if}
           Test Pilot
         </button>
+        {/if}
         {#if app.moduleReady("audit-flow")}
           <button
             type="button"
@@ -1751,6 +1858,42 @@
             AuditFlow
           </button>
         {/if}
+        <!-- Phase 19 — DYNAMIC tabs: one per imported interactive module
+             that declares a `tab` in its manifest. Nothing is hardcoded;
+             id / label / icon all come from the plugin. -->
+        {#each app.interactiveTabSpecs() as s (s.id)}
+          <button
+            type="button"
+            class="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium border-b-2 -mb-px transition-colors"
+            class:border-brand-pink={activeTab === s.id}
+            class:text-brand-pink={activeTab === s.id}
+            class:dark:text-brand-pink-light={activeTab === s.id}
+            class:border-transparent={activeTab !== s.id}
+            class:text-ink-500={activeTab !== s.id}
+            class:dark:text-night-mute={activeTab !== s.id}
+            onclick={() => {
+              activeTab = s.id;
+              void chrome.storage?.local?.set({ "pinta-active-tab": s.id });
+            }}
+            title={s.tab?.name}
+          >
+            {#if app.moduleBoards[s.id]?.pending}
+              <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="animate-spin" aria-label={`${s.tab?.name} working`}>
+                <path d="M21 12a9 9 0 1 1-6.219-8.56" />
+              </svg>
+            {:else if s.tab?.icon}
+              <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                <path d={s.tab.icon} />
+              </svg>
+            {:else}
+              <!-- default board/kanban glyph when the plugin ships no icon -->
+              <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                <rect x="3" y="3" width="5" height="18" rx="1"/><rect x="9.5" y="3" width="5" height="11" rx="1"/><rect x="16" y="3" width="5" height="14" rx="1"/>
+              </svg>
+            {/if}
+            {s.tab?.name}
+          </button>
+        {/each}
       </nav>
     {/if}
 
@@ -1764,6 +1907,11 @@
           activeTab = "annotate";
           void chrome.storage?.local?.set({ "pinta-active-tab": "annotate" });
         }}
+      />
+    {:else if !app.viewingImportedId && !showAssociatePrompt && app.interactiveTabSpecs().some((s) => s.id === activeTab)}
+      <!-- Phase 19 — generic renderer for an imported interactive tab. -->
+      <ModuleBoardTab
+        spec={app.interactiveTabSpecs().find((s) => s.id === activeTab)!}
       />
     {:else if app.viewingImportedId}
       {@const imp = app.importedSessions.find((s) => s.id === app.viewingImportedId)}

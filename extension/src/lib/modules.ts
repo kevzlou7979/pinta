@@ -13,12 +13,13 @@ import type {
   ModuleSettingSpec,
   ModuleMode,
   ModuleManifest,
+  ModuleTab,
 } from "@pinta/shared";
 
 // Re-export the declarative shapes (now sourced from @pinta/shared so the
 // importable-module manifest can reference the exact same types) for
 // existing call sites that import them from this module.
-export type { ModuleSettingType, ModuleSettingSpec, ModuleMode };
+export type { ModuleSettingType, ModuleSettingSpec, ModuleMode, ModuleTab };
 
 export type ModuleSpec = {
   id: string;
@@ -42,6 +43,13 @@ export type ModuleSpec = {
    * the user may still want it for their own purposes.
    */
   recommendsScreenshot?: boolean;
+  /**
+   * Interactive modules: a declarative side-panel tab the extension
+   * renders dynamically. Carried straight through from the manifest by
+   * `manifestToSpec`. Bundled interactive modules (Test Pilot / AuditFlow)
+   * own hardcoded tabs and leave this undefined.
+   */
+  tab?: ModuleTab;
 };
 
 /**
@@ -221,6 +229,10 @@ export function manifestToSpec(m: ModuleManifest): ModuleSpec {
     sessionCheckboxHint: m.sessionCheckboxHint ?? "",
     settings: m.settings ?? [],
     recommendsScreenshot: m.recommendsScreenshot,
+    // Carry the declarative tab straight through so an imported
+    // interactive module renders its own side-panel tab with no
+    // bundled code (Phase 19 "interactive imported modules").
+    tab: m.tab,
   };
 }
 

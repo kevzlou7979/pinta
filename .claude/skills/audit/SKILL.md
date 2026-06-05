@@ -215,6 +215,46 @@ For each, write a finding (`P<n>`) with severity **high / medium / low**.
   multiple are queued without yielding.
 - Per-pixel reads of large bitmaps → must use OffscreenCanvas worker.
 
+### 3.7 Token economy (BYO-Claude cost)
+
+Pinta is **bring-your-own-Claude** running in the user's *interactive*
+Claude Code terminal, so every annotate / AuditFlow / Test Pilot / chat
+run spends the **user's own** Claude tokens. The agent-facing payload
+size IS a runtime cost — treat it like bundle size, but for tokens
+(~1 KB of text ≈ 250 tokens; images cost vision tokens). Write findings
+as `P<n>` with severity **high / medium / low**.
+
+- **Per-annotation payload caps** (`content/capture.ts`). The agent reads
+  `outerHTML` + `nearbyText` + comment for every annotation. Confirm the
+  caps are still enforced and **not raised**: `HTML_TRUNCATE` (2 KB),
+  `NEARBY_LEVELS` (3), `NEARBY_TEXT_MAX` (200). A raised or removed cap is
+  a token regression → **high**. (This overlaps §2.9's privacy angle —
+  here it's about cost: a 10 KB `outerHTML` is ~2.5 K tokens per pin.)
+- **Screenshots to the agent.** Any composited image that reaches the
+  agent must be **JPEG + downscaled**, never a full-page PNG — a 1–5 MB
+  PNG is enormous in vision tokens. Confirm `images[].dataUrl` is
+  `image/jpeg` post-resizer (state.svelte.ts notes "practically always
+  `image/jpeg`") and that the side panel doesn't ship a raw full-res
+  composite. Flag any path that hands the agent an un-resized image →
+  **high**.
+- **Audit-flow query bloat** (`state.svelte.ts` `collectCustomCategoriesForQuery`
+  / `collectUserChecksForQuery`). The query sent to the agent should
+  carry only the user's own checks (`label`/`description`/`id`) — it must
+  NOT re-embed the built-in category tables or fix hints the agent
+  already has from SKILL.md. Flag any duplication of static SKILL.md
+  content into the wire payload → **medium**.
+- **Always-on heavy fields.** A new payload field that's large and sent
+  on *every* request (vs lazy / opt-in) → **medium**. Prefer optional /
+  on-demand for anything sizeable.
+- **Unbounded growth.** Any text/HTML/list collected from the page
+  without a length or depth cap → **high** (both a token and a privacy
+  leak).
+
+> The SKILL.md *prompt* size (loaded into the agent's context every run)
+> is the other half of token cost, but it lives outside `extension/` —
+> `/staging` §4.8 gates it. This audit covers the extension-controlled
+> payloads only.
+
 ## 4. Output format
 
 Produce one `## Findings` section, then a per-finding block. Example:

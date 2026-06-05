@@ -24,6 +24,13 @@ export type AttachOptions = {
 // to refuse abuse.
 const MAX_WS_PAYLOAD = 50 * 1024 * 1024;
 
+// How far back a reconnecting client's "missed result" recovery looks.
+// Matches the extension's per-op pending timeout (MODULE_OP_TIMEOUT_MS,
+// 10 min): a result older than this is past the point any tab is still
+// waiting on it, so there's nothing to recover. Bounds replay so a
+// reconnect never re-pushes the whole session history.
+const RECONNECT_REPLAY_WINDOW_MS = 10 * 60 * 1000;
+
 /**
  * Reject WebSocket upgrade requests from cross-origin browser tabs.
  * Mirrors the HTTP-side Origin check in server.ts: localhost binding
@@ -42,6 +49,67 @@ function isAllowedWsOrigin(req: IncomingMessage): boolean {
   const origin = (req.headers.origin ?? "").toString();
   if (!origin) return true;
   return origin.startsWith("chrome-extension://");
+}
+
+/**
+ * Whether a store mutation should be pushed to extension WS clients.
+ *
+ *  - The active annotation draft always goes (the side panel mirrors it
+ *    live).
+ *  - ANY session carrying a module goes — it's a module-query session
+ *    whose result some side-panel surface is waiting on. This covers the
+ *    built-in interactive modules (Test Pilot, chat, audit-flow) AND every
+ *    IMPORTED interactive module (Phase 19). The earlier hardcoded
+ *    allow-list of the three built-in ids silently dropped imported
+ *    modules' ephemeral `done`, so their tab spun forever even after the
+ *    agent posted the board — the regression this function guards.
+ *  - Anything else (another tab's draft, an old non-module session) is
+ *    skipped.
+ *
+ * Exported so the gate is unit-testable without booting a real socket.
+ */
+export function shouldBroadcastSession(
+  session: Pick<Session, "id" | "modules">,
+  activeId: string | null,
+): boolean {
+  if (session.id === activeId) return true;
+  return (session.modules?.length ?? 0) > 0;
+}
+
+/**
+ * Pick the ephemeral module-query sessions a freshly (re)connecting client
+ * should be re-pushed, so a `done` / `error` that completed during a WS gap
+ * (companion restart, dropped socket) isn't lost — the gap that strands a
+ * module / audit / chat tab on its spinner forever.
+ *
+ * Rules:
+ *  - never the active annotation draft (already sent on connect),
+ *  - must carry a module (it's a module-query session some surface awaits),
+ *  - must be terminal (`done` / `error`) — nothing to recover otherwise,
+ *  - submitted within `windowMs` so we replay only recent work, never the
+ *    whole session history,
+ *  - deduped to the LATEST terminal session per module id, so a client that
+ *    ran the same module several times only gets the final result.
+ *
+ * Pure + exported for unit testing — no socket, store, or clock inside.
+ */
+export function selectReconnectReplaySessions(
+  sessions: Session[],
+  opts: { activeId: string | null; nowMs: number; windowMs: number },
+): Session[] {
+  const { activeId, nowMs, windowMs } = opts;
+  const recencyOf = (s: Session): number => s.submittedAt ?? s.startedAt ?? 0;
+  const latestByModule = new Map<string, Session>();
+  for (const s of sessions) {
+    if (s.id === activeId) continue;
+    if ((s.modules?.length ?? 0) === 0) continue;
+    if (s.status !== "done" && s.status !== "error") continue;
+    if (nowMs - recencyOf(s) > windowMs) continue;
+    const key = s.modules![0]!.id;
+    const prev = latestByModule.get(key);
+    if (!prev || recencyOf(s) > recencyOf(prev)) latestByModule.set(key, s);
+  }
+  return [...latestByModule.values()];
 }
 
 export function attachWebSocket(opts: AttachOptions): WebSocketServer {
@@ -64,30 +132,14 @@ export function attachWebSocket(opts: AttachOptions): WebSocketServer {
     },
   });
 
-  // Push every store mutation to all connected clients so the side panel
-  // sees agent-driven state changes (e.g. mark_session_applying via HTTP)
-  // in real time without re-fetching. We push the active annotation
-  // session AND every interactive-module session (test-pilot etc.) so
-  // ephemeral query sessions surface their results back to the
-  // extension. Skip only when the mutation is on some unrelated session
-  // (another tab's draft, an old completed session).
+  // Push store mutations to all connected clients so the side panel sees
+  // agent-driven state changes (e.g. mark_session_applying / done via
+  // HTTP) in real time without re-fetching. The gate (active draft + any
+  // module-query session) lives in shouldBroadcastSession.
   store.subscribe((session) => {
-    const isActive = session.id === store.getActive()?.id;
-    // Allow-list of module ids whose ephemeral sessions still need to
-    // reach the extension over WS. Test Pilot is the original
-    // interactive module; chat (Phase 14) added a second class of
-    // ephemeral session — global / annotate-batch threads ride
-    // `modules: [{ id: "chat" }]`, and the extension needs the status
-    // transitions to clear its pending spinner + apply the agent's
-    // reply. Without this id in the list, chat sessions would silently
-    // hang in "Agent is thinking…" forever.
-    const isInteractiveModule = session.modules?.some(
-      (m) =>
-        m.id === "test-pilot" ||
-        m.id === "chat" ||
-        m.id === "audit-flow",
-    );
-    if (!isActive && !isInteractiveModule) return;
+    if (!shouldBroadcastSession(session, store.getActive()?.id ?? null)) {
+      return;
+    }
     const payload = JSON.stringify({
       type: "session.synced",
       session,
@@ -124,6 +176,20 @@ export function attachWebSocket(opts: AttachOptions): WebSocketServer {
     // On connect, sync the active session if one exists
     const active = store.getActive();
     if (active) send({ type: "session.synced", session: active });
+
+    // Defense against a result lost to a WS gap (companion restart /
+    // reconnect): re-push recent terminal module-query sessions so a
+    // module / audit / chat tab recovers a `done` it missed while the
+    // socket was down, instead of spinning until its timeout. Bounded to
+    // the latest result per module within the window. See
+    // selectReconnectReplaySessions.
+    for (const session of selectReconnectReplaySessions(store.list(), {
+      activeId: active?.id ?? null,
+      nowMs: Date.now(),
+      windowMs: RECONNECT_REPLAY_WINDOW_MS,
+    })) {
+      send({ type: "session.synced", session });
+    }
 
     socket.on("message", async (raw) => {
       let msg: ClientMessage;

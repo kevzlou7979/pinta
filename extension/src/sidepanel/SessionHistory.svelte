@@ -2,6 +2,23 @@
   import { onMount, onDestroy } from "svelte";
   import { app } from "../lib/state.svelte.js";
 
+  // `open` is $bindable so the popover can be driven from outside (the
+  // header's ⋮ menu) while keeping its own trigger for standalone use.
+  // `anchorEl` is the element the fixed popover positions under — falls
+  // back to the built-in trigger. `showTrigger` hides the round icon
+  // button when the component is embedded in another menu.
+  let {
+    open = $bindable(false),
+    anchorEl = undefined,
+    showTrigger = true,
+    count = $bindable(0),
+  }: {
+    open?: boolean;
+    anchorEl?: HTMLElement;
+    showTrigger?: boolean;
+    count?: number;
+  } = $props();
+
   type Summary = {
     id: string;
     url: string;
@@ -17,7 +34,6 @@
   let summaries = $state<Summary[]>([]);
   let loading = $state(false);
   let error = $state<string | null>(null);
-  let open = $state(false);
   let rootEl: HTMLDivElement | undefined = $state();
   let triggerEl: HTMLButtonElement | undefined = $state();
   // Pixel offset from the viewport top to where the dropdown should
@@ -27,8 +43,9 @@
   // left edge when the side panel is narrower than the dropdown's width.
   let dropdownTop = $state(0);
   function recomputeDropdownTop() {
-    if (!triggerEl) return;
-    const r = triggerEl.getBoundingClientRect();
+    const ref = anchorEl ?? triggerEl;
+    if (!ref) return;
+    const r = ref.getBoundingClientRect();
     dropdownTop = Math.round(r.bottom + 4);
   }
 
@@ -198,46 +215,54 @@
 
   function toggle() {
     open = !open;
-    if (open) {
-      recomputeDropdownTop();
-      refresh();
-    }
   }
 
+  // Seed position + data on the open edge. Covers BOTH the built-in
+  // trigger (toggle just flips `open`) and external control via the
+  // header ⋮ menu (which sets `open` with no toggle() call).
   $effect(() => {
     if (!open) return;
+    recomputeDropdownTop();
+    refresh();
     const onResize = () => recomputeDropdownTop();
     window.addEventListener("resize", onResize);
     return () => window.removeEventListener("resize", onResize);
   });
 
   let totalCount = $derived(summaries.length + app.importedSessions.length);
+  // Mirror the count out to any bound parent (the header ⋮ menu uses it
+  // for its badge when the trigger is hidden).
+  $effect(() => {
+    count = totalCount;
+  });
 </script>
 
 <div class="relative" bind:this={rootEl}>
-  <button
-    type="button"
-    bind:this={triggerEl}
-    class="relative w-7 h-7 inline-flex items-center justify-center rounded-full border border-ink-200 bg-white text-ink-600 hover:text-brand-pink hover:border-ink-400 dark:border-night-line dark:bg-night-alt dark:text-night-dim dark:hover:text-brand-pink-light dark:hover:border-night-line2 transition-colors"
-    onclick={toggle}
-    aria-haspopup="dialog"
-    aria-expanded={open}
-    aria-label="Session history"
-    title={totalCount > 0 ? `Session history (${totalCount})` : "Session history"}
-  >
-    <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 12a9 9 0 1 0 3-6.7L3 8"/><path d="M3 3v5h5"/><path d="M12 7v5l3 2"/></svg>
-    {#if totalCount > 0}
-      <span
-        class="absolute -top-1 -right-1 min-w-[14px] h-[14px] px-1 inline-flex items-center justify-center rounded-full bg-brand-pink text-white text-[9px] font-semibold leading-none dark:bg-brand-pink-light dark:text-night-bg"
-        aria-hidden="true"
-      >
-        {totalCount > 99 ? "99+" : totalCount}
-      </span>
-    {/if}
-    {#if loading}
-      <span class="absolute -bottom-1 -right-1 w-1.5 h-1.5 rounded-full bg-ink-400 dark:bg-night-mute animate-pulse" aria-hidden="true"></span>
-    {/if}
-  </button>
+  {#if showTrigger}
+    <button
+      type="button"
+      bind:this={triggerEl}
+      class="relative w-7 h-7 inline-flex items-center justify-center rounded-full border border-ink-200 bg-white text-ink-600 hover:text-brand-pink hover:border-ink-400 dark:border-night-line dark:bg-night-alt dark:text-night-dim dark:hover:text-brand-pink-light dark:hover:border-night-line2 transition-colors"
+      onclick={toggle}
+      aria-haspopup="dialog"
+      aria-expanded={open}
+      aria-label="Session history"
+      title={totalCount > 0 ? `Session history (${totalCount})` : "Session history"}
+    >
+      <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 12a9 9 0 1 0 3-6.7L3 8"/><path d="M3 3v5h5"/><path d="M12 7v5l3 2"/></svg>
+      {#if totalCount > 0}
+        <span
+          class="absolute -top-1 -right-1 min-w-[14px] h-[14px] px-1 inline-flex items-center justify-center rounded-full bg-brand-pink text-white text-[9px] font-semibold leading-none dark:bg-brand-pink-light dark:text-night-bg"
+          aria-hidden="true"
+        >
+          {totalCount > 99 ? "99+" : totalCount}
+        </span>
+      {/if}
+      {#if loading}
+        <span class="absolute -bottom-1 -right-1 w-1.5 h-1.5 rounded-full bg-ink-400 dark:bg-night-mute animate-pulse" aria-hidden="true"></span>
+      {/if}
+    </button>
+  {/if}
 
   {#if open}
     <div

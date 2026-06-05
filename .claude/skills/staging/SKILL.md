@@ -27,7 +27,16 @@ are red, no point spec-checking if the security audit caught a P0):
    would move it into Anthropic's banned third-party-tool lane (the
    crackdown that cut off OpenClaw, Apr 2026). A change here is an
    account-ban risk for every user, so it gates the release.
-5. **`/spec`** — gaps between `spec/SPEC.md` and shipped code.
+5. **Browser-extension store-policy compliance** — verify the manifest
+   stays Chrome-Web-Store-shippable: MV3, no remotely hosted code, CSP
+   unloosened, permissions not creeping past the justified baseline,
+   privacy disclosure intact. A regression here means CWS review
+   rejects the upload (or pulls the live listing), so it gates too.
+6. **Token economy** — flag a branch diff that inflates the tokens each
+   agent run spends (raised payload caps, new always-on heavy field, raw
+   PNG to the agent, materially larger SKILL.md, new unbounded loop).
+   Pinta is BYO-Claude, so this is the user's own per-run cost.
+7. **`/spec`** — gaps between `spec/SPEC.md` and shipped code.
 
 Each sub-skill produces its own report. `/staging`'s job is to:
 - Invoke them in sequence via the **Skill** tool.
@@ -352,6 +361,172 @@ grep -lE "bring-your-own-Claude|Anthropic compliance" README.md docs/index.html
 - The user pasting *their own* key into *their own* Claude Code or
   `.npmrc` outside Pinta — Pinta never sees it; out of scope.
 
+## 4.7 Browser-extension store-policy compliance (Chrome Web Store)
+
+Pinta ships through the Chrome Web Store, whose **Developer Program
+Policies** gate publication and can pull a *live* listing on review.
+The §4.6 check guards the *Anthropic* lane; this one guards the
+*store* lane. The failure mode is different but just as fatal: a
+manifest change that trips CWS review means the release can't ship
+(or an existing listing gets suspended). Source of truth: the
+manifest at `extension/manifest.config.ts`, the privacy disclosure at
+`docs/privacy.html`, and Chrome's policies
+(https://developer.chrome.com/docs/webstore/program-policies/).
+Report hits under `[ext-policy]`.
+
+### 4.7.1 The hard rules (regressions here are 🔴)
+
+| # | Rule | A violation looks like |
+|---|---|---|
+| 1 | **Manifest V3 only** | `manifest_version` drops below 3, or a deprecated MV2 key (`background.scripts`, `browser_action`, `page_action`) appears |
+| 2 | **No remotely hosted code** | `eval(` / `new Function(` / `import("http…")` / a remote `<script src>`/`<link href>` in any packaged HTML — MV3 forbids executing code not in the package |
+| 3 | **CSP not loosened** | a `content_security_policy` entry adding `unsafe-eval`, `unsafe-inline`, or a remote `script-src` origin |
+| 4 | **Single purpose preserved** | the manifest `description` / `name` no longer matches the annotate-and-hand-to-agent purpose, signalling scope creep a reviewer flags |
+
+### 4.7.2 Scope creep — permissions diff (🟠 unless justified)
+
+CWS review time and rejection risk scale with permission breadth.
+The known, justified set is the baseline; **anything beyond it is a
+new ask a reviewer will question** and must be deliberate:
+
+- `permissions`: `sidePanel`, `tabs`, `activeTab`, `scripting`, `storage`
+- `host_permissions`: `<all_urls>` (needed — Pinta annotates *any*
+  app the user is building; this is the single most-scrutinised line,
+  so a *narrowing* is good, a *widening* is impossible)
+- `content_scripts[].matches`: `<all_urls>`
+
+A **newly added** permission (e.g. `webRequest`, `cookies`,
+`<all_urls>` creeping into a second declaration, `declarativeNetRequest`,
+`downloads`, `nativeMessaging`) not in this list → 🟠 `[ext-policy]`
+with the note "new permission `<x>` — needs a store-listing
+justification + may extend review." Removing one is always fine.
+
+### 4.7.3 Privacy disclosure (🟠 if data flow undisclosed)
+
+Pinta reads page DOM/content and captures screenshots, then ships
+them over the localhost companion socket to the user's own agent.
+That is **user-data handling** under CWS even though it never leaves
+the user's machine — the store listing's privacy practices + a
+reachable privacy policy must disclose it. The repo's policy lives at
+`docs/privacy.html`. If that file is gone or no longer describes what
+Pinta reads/transmits, that's 🟠 `[ext-policy]`.
+
+### 4.7.4 Bash spot-check
+
+```bash
+# 1 — MV3, no MV2 leftovers. Expect the first to print 3, rest "(clean)".
+grep -E "manifest_version" extension/manifest.config.ts
+grep -nE "background\.scripts|browser_action|page_action|\"persistent\"" extension/manifest.config.ts || echo "  (clean)"
+
+# 2 — no remotely hosted / dynamic code in PACKAGED source (exclude tests &
+#     AuditFlow's own checklist prose, which name eval() as a finding to detect).
+grep -rniE "\beval\(|new Function|\bimport\((['\"])https?:|<script[^>]+src=(['\"])https?:|<link[^>]+href=(['\"])https?:" \
+  extension/src 2>/dev/null \
+  | grep -vE "\.test\.|audit-flow|label:|description:|finding" \
+  || echo "  (clean)"
+
+# 3 — CSP not loosened (no override at all is the current, correct state).
+grep -niE "content_security_policy|unsafe-eval|unsafe-inline" extension/manifest.config.ts \
+  || echo "  (clean — MV3 default CSP)"
+
+# 4 — permission set unchanged from the §4.7.2 baseline. Eyeball the diff.
+grep -nE "^  permissions:|host_permissions:|matches:" extension/manifest.config.ts
+
+# 5 — privacy disclosure still present.
+test -f docs/privacy.html && echo "  privacy.html present" || echo "  MISSING privacy.html — 🟠"
+```
+
+### 4.7.5 Severity
+
+- Any **real** hit on **1, 2, or 3** (MV3 downgrade / remote code /
+  loosened CSP) → **🔴 `[ext-policy]`** — these are automatic CWS
+  rejections. Block the release until removed or proven a false
+  positive.
+- **New permission** beyond the §4.7.2 baseline, or a **missing /
+  stale privacy disclosure** → **🟠 `[ext-policy]`** — shippable only
+  if the user knowingly accepts the added review risk and updates the
+  store listing's justification + privacy fields.
+- **Single-purpose drift** in the description that's cosmetic (a
+  reworded but still-accurate tagline) → 🟡; a description that now
+  advertises an unrelated capability → 🟠.
+
+### 4.7.6 What NOT to flag
+
+- The existing `<all_urls>` host permission and `<all_urls>` content-
+  script match — they are the *justified baseline*, not a finding.
+  Pinta genuinely must run on any page the user is building.
+- `eval` / `new Function` strings inside `*.test.ts` or the AuditFlow
+  checklist (`audit-flow.*`) — those *describe* the anti-pattern as a
+  security finding to detect; they don't execute it.
+- The localhost companion socket (`ws://127.0.0.1:…`) — connecting to
+  localhost is permitted under MV3 and is the BYO-Claude design, not a
+  remote-code or remote-host violation.
+- `@crxjs/vite-plugin` HMR / dev-server injection in a *dev* build —
+  only the production `extension/dist` build is what ships; flag dev-
+  only CSP relaxation only if it leaks into the packaged manifest.
+
+## 4.8 Token economy (BYO-Claude cost)
+
+Pinta is **bring-your-own-Claude** in the user's *interactive* terminal,
+so every annotate / AuditFlow / Test Pilot / chat run spends the user's
+own Claude tokens (see the `feedback-token-economy` memory). Token cost
+is a first-class product cost — a release that quietly inflates it makes
+Pinta expensive and slow to run for every user. `/audit` §3.7 already
+audits the *extension's* agent-facing payloads; this step is the
+**release-diff gate** — it flags when *this branch* raises token cost
+across the whole repo (extension + skill + companion), including the
+SKILL.md prompt size that `/audit` deliberately leaves out. Report hits
+under `[token]`.
+
+### 4.8.1 What raises token cost (flag in the branch diff)
+
+| # | Regression | Severity |
+|---|---|---|
+| 1 | A per-page payload **cap raised or removed** (`HTML_TRUNCATE`, `NEARBY_LEVELS`, `NEARBY_TEXT_MAX` in `content/capture.ts`) | 🟠 (🔴 if removed entirely → unbounded) |
+| 2 | A **new always-on heavy field** added to a wire payload / annotation / audit query (vs lazy / opt-in) | 🟠 |
+| 3 | A **raw full-res / PNG image** path to the agent (should be JPEG + downscaled) | 🟠 |
+| 4 | **SKILL.md grew materially** — it's loaded into the agent's context on *every* run, so its line count is a per-invocation tax (baseline ~2285 lines at 2026-06-04). A large jump from duplicated tables/prose (vs reusing existing sections) | 🟡 (🟠 if it balloons, e.g. +20%) |
+| 5 | A **new unbounded agent loop** or many round-trips where one tightly-scoped turn would do (ties to the §4.6 bounded-loop check) | 🟠 |
+
+### 4.8.2 Bash spot-check
+
+```bash
+# 1 — caps unchanged from baseline. Expect: 2000 / 3 / 200. A higher
+#     number (or a missing line) is a regression — eyeball the diff.
+grep -nE "HTML_TRUNCATE|NEARBY_LEVELS|NEARBY_TEXT_MAX" extension/src/content/capture.ts
+
+# 1b — did THIS branch touch those caps? Any hit here → inspect closely.
+git diff main...HEAD -- extension/src/content/capture.ts \
+  | grep -E "^\+.*(HTML_TRUNCATE|NEARBY_LEVELS|NEARBY_TEXT_MAX)" || echo "  (caps untouched)"
+
+# 4 — SKILL.md prompt-size delta vs main. A big +N is a per-run token tax.
+base=$(git show main:skill/pinta/SKILL.md 2>/dev/null | wc -l); head=$(wc -l < skill/pinta/SKILL.md)
+echo "SKILL.md: main=$base  branch=$head  delta=$((head - base)) lines"
+
+# 3 — no new raw-PNG / un-resized image path to the agent in the diff.
+git diff main...HEAD -- extension/src \
+  | grep -E "^\+.*(toDataURL\(.image/png|image/png)" || echo "  (no new PNG-to-agent path)"
+
+# 5 — no new unbounded loop language re-introduced (mirrors §4.6 check 3).
+grep -c "Loop indefinitely. Don't stop on your own" skill/pinta/SKILL.md   # MUST be 0
+```
+
+### 4.8.3 Severity + what NOT to flag
+
+- Treat the table's severities as written; **a removed cap (unbounded
+  page-text collection) is 🔴** — it's both a token blowup and a privacy
+  leak.
+- **Don't** flag the existing `<all_urls>` / screenshot / outerHTML
+  capture *baseline* — only a diff that makes them bigger. A feature that
+  *reduces* payload (tighter cap, lazy field, JPEG downscale) is the goal,
+  not a finding.
+- **Don't** flag SKILL.md growth that's genuinely new capability with no
+  cheaper encoding — note it 🟡 so the user is aware of the per-run cost,
+  but it's shippable. The target is "no *gratuitous* bloat," not "never
+  add instructions."
+- A dev-only / test-only payload (fixtures, `*.test.ts`) never reaches a
+  real agent run — out of scope.
+
 ## 5. Run `/spec`
 
 Independent of audit — invoke unconditionally (you want to know about
@@ -366,9 +541,9 @@ Capture verbatim.
 
 ## 6. Roll up
 
-Merge findings from steps 2, 3, 4, 4.5, 4.6, and 5 into a single
-severity-grouped table. Drop duplicates (audit and spec both flagging
-the same issue gets listed once, with attributions in parens):
+Merge findings from steps 2, 3, 4, 4.5, 4.6, 4.7, 4.8, and 5 into a
+single severity-grouped table. Drop duplicates (audit and spec both
+flagging the same issue gets listed once, with attributions in parens):
 
 ```
 🔴 CRITICAL — must fix before deploy
@@ -377,6 +552,8 @@ the same issue gets listed once, with attributions in parens):
   • [supply-chain] <critical CVE in dep>
   • [keybindings] <missing binding-site or unguarded form-field intercept>
   • [compliance]  <credential proxy / Agent-SDK / headless claude path — Anthropic ban risk>
+  • [ext-policy]  <MV3 downgrade / remote code / loosened CSP — CWS auto-reject>
+  • [token]       <a payload cap removed entirely — unbounded page-text to the agent>
   • [spec]        <finding>
   • [audit + spec] <finding flagged by both>
 
@@ -386,10 +563,14 @@ the same issue gets listed once, with attributions in parens):
   • [supply-chain] <high CVE in dep>
   • [keybindings] <Settings/docs mismatch with implementation>
   • [compliance]  <bounded-loop / compliance-declaration regression in SKILL.md>
+  • [ext-policy]  <new permission past baseline / missing privacy disclosure>
+  • [token]       <raised cap / new always-on heavy field / raw PNG to agent / new unbounded loop>
   • [spec]        <finding>
 
 🟡 NICE TO FIX — defer if pressed for time
   • [keybindings] <docs page lagging Settings copy>
+  • [ext-policy]  <cosmetic single-purpose description drift>
+  • [token]       <materially larger SKILL.md — per-run prompt tax>
   • [spec]        <finding>
 ```
 
@@ -407,7 +588,11 @@ Pick exactly one based on the merged severity:
 - **🛑 HOLD** — any of: 🔴 architectural drift, 🟠 wire-protocol
   mismatch, audit P0 security finding, **any 🔴 `[compliance]` finding
   (credential proxying / Agent-SDK / headless `claude` path — moves
-  Pinta into Anthropic's banned third-party-tool lane)**, missing
+  Pinta into Anthropic's banned third-party-tool lane)**, **any 🔴
+  `[ext-policy]` finding (MV3 downgrade / remotely hosted code /
+  loosened CSP — an automatic Chrome Web Store rejection)**, **any 🔴
+  `[token]` finding (a removed payload cap — unbounded page-text to the
+  agent, both a token blowup and a privacy leak)**, missing
   release artifact (unbumped version, `## Unreleased` heading still
   present, etc.).
 

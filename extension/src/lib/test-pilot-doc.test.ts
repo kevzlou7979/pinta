@@ -1,5 +1,7 @@
 import { describe, expect, it } from "vitest";
+import { unzipSync, strFromU8 } from "fflate";
 import {
+  composeResultsDocx,
   composeTestDocMarkdown,
   composeTesterSheetDocx,
   composeTesterSheetMarkdown,
@@ -7,6 +9,13 @@ import {
   parseTestDocMarkdown,
 } from "./test-pilot-doc.js";
 import type { TestPilotCatalog } from "./state.svelte.js";
+
+/** Pull `word/document.xml` text out of a composed DOCX zip so a test
+ *  can assert on the rendered content, not just the PK header. */
+function docxText(bytes: Uint8Array): string {
+  const files = unzipSync(bytes);
+  return strFromU8(files["word/document.xml"]!);
+}
 
 // Hand-rolled minimal catalog shape so we don't have to boot the
 // whole state class. The pure helpers only touch the fields they
@@ -328,5 +337,111 @@ describe("composeTesterSheetDocx", () => {
     expect(bytes[1]).toBe(0x4b);
     expect(bytes[2]).toBe(0x03);
     expect(bytes[3]).toBe(0x04);
+  });
+
+  it("strips illegal XML control chars so later sections aren't truncated", () => {
+    // A form-feed / vertical-tab in an early section's text used to leak
+    // into document.xml, making it not well-formed — Word rendered up to
+    // that byte and silently dropped every later section. Build the bad
+    // chars via fromCharCode so no source-level escape is involved.
+    const ff = String.fromCharCode(0x0c); // form-feed
+    const vt = String.fromCharCode(0x0b); // vertical tab
+    const cat = makeCatalog({
+      title: "Multi",
+      sections: [
+        {
+          title: "Section One",
+          tests: [
+            {
+              id: "S1-1",
+              test: `tab${vt}order`,
+              expected: `reflow${ff}works`,
+              status: "untested",
+            },
+          ],
+        },
+        { title: "Section Two", tests: [{ id: "S2-1", test: "a", expected: "b", status: "untested" }] },
+        { title: "Section Three", tests: [{ id: "S3-1", test: "c", expected: "d", status: "untested" }] },
+      ],
+    });
+    const xml = docxText(composeTesterSheetDocx(cat));
+    // No illegal control char survived into the OOXML.
+    const illegal = [...xml].filter((c) => {
+      const n = c.charCodeAt(0);
+      return n < 0x20 && n !== 0x09 && n !== 0x0a && n !== 0x0d;
+    });
+    expect(illegal).toHaveLength(0);
+    // Every section is present — the bad chars must not truncate the doc.
+    expect(xml).toContain("Section One");
+    expect(xml).toContain("Section Two");
+    expect(xml).toContain("Section Three");
+  });
+
+  it("keeps valid astral characters (emoji) intact", () => {
+    const cat = makeCatalog({
+      title: "Emoji",
+      sections: [
+        { title: "S", tests: [{ id: "E-1", test: "rocket 🚀 ok", expected: "✓", status: "untested" }] },
+      ],
+    });
+    const xml = docxText(composeTesterSheetDocx(cat));
+    expect(xml).toContain("🚀");
+    expect(xml).toContain("✓");
+  });
+});
+
+describe("composeResultsDocx", () => {
+  const cat = makeCatalog({
+    title: "Checkout UAT",
+    author: "QA",
+    sections: [
+      {
+        title: "1.1 Cart",
+        tests: [
+          { id: "C-1", test: "Add item", expected: "Cart shows 1", status: "pass" },
+          {
+            id: "C-2",
+            test: "Remove item",
+            expected: "Cart empties",
+            status: "fail",
+            chat: [
+              { id: "m1", role: "user", text: "Why did this fail?" },
+              { id: "m2", role: "agent", text: "The **remove** button is a no-op." },
+            ],
+          },
+          { id: "C-3", test: "Apply coupon", expected: "10% off", status: "untested" },
+        ],
+      },
+    ],
+  });
+
+  it("produces a valid .docx zip (PK header)", () => {
+    const bytes = composeResultsDocx(cat, "2026-06-04");
+    expect(bytes.length).toBeGreaterThan(200);
+    expect([bytes[0], bytes[1], bytes[2], bytes[3]]).toEqual([0x50, 0x4b, 0x03, 0x04]);
+  });
+
+  it("renders the results title, meta tally, and filled Result marks", () => {
+    const xml = docxText(composeResultsDocx(cat, "2026-06-04"));
+    expect(xml).toContain("Test Pilot results — Checkout UAT");
+    expect(xml).toContain("Run on 2026-06-04");
+    expect(xml).toContain("by QA");
+    expect(xml).toContain("1/3 passed, 1 failed, 1 untested");
+    // Result column is FILLED (unlike the tester sheet) — all three glyphs.
+    expect(xml).toContain("✓ Pass");
+    expect(xml).toContain("✗ Fail");
+    expect(xml).toContain("⚠ Untested");
+  });
+
+  it("includes a Conversations block only for rows with a chat thread", () => {
+    const xml = docxText(composeResultsDocx(cat, "2026-06-04"));
+    expect(xml).toContain("Conversation — C-2");
+    expect(xml).toContain("tester: ");
+    expect(xml).toContain("agent: ");
+    // Markdown emphasis in chat text is stripped for clean Word prose.
+    expect(xml).toContain("The remove button is a no-op.");
+    expect(xml).not.toContain("**remove**");
+    // Rows without chat don't spawn a conversation heading.
+    expect(xml).not.toContain("Conversation — C-1");
   });
 });

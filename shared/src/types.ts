@@ -249,12 +249,98 @@ export type ModuleSettingSpec = {
 };
 
 /**
- * How a module surfaces in the side panel. v1 of importable modules
- * (Phase 19) honors only `"per-submit"`; `"interactive"` / `"inquiry"`
- * (which own a tab or light up cross-cutting surfaces) stay reserved for
- * the bundled modules until the imported-module UI story is built out.
+ * How a module surfaces in the side panel. `"per-submit"` renders a
+ * footer checkbox; `"interactive"` owns a side-panel tab; `"inquiry"`
+ * lights up cross-cutting surfaces. Imported modules may be
+ * `"interactive"` when their manifest declares a `tab` (see `ModuleTab`)
+ * — the extension renders that tab dynamically from the manifest, so no
+ * bundled code is needed. An interactive imported module with no `tab`
+ * declared surfaces nothing (and should not be `"interactive"`).
  */
 export type ModuleMode = "per-submit" | "interactive" | "inquiry";
+
+/**
+ * Declares that an interactive module owns a side-panel tab. When present
+ * (with `mode: "interactive"`), Pinta renders the tab DYNAMICALLY from
+ * these fields — the plugin sends id/name/icon/action, Pinta does not
+ * hardcode them. Absent => the module gets no tab (per-submit surface
+ * only). This is what lets an imported `.pinta-module.json` own a tab
+ * without any bundled extension code.
+ */
+export type ModuleTab = {
+  /** Stable tab id. Defaults to the module id when omitted. */
+  id?: string;
+  /** Tab label shown in the side-panel nav. */
+  name: string;
+  /** Optional inline SVG path data (the `d` of a 24x24 stroke icon). */
+  icon?: string;
+  /** Label of the empty-state primary button (e.g. "Start Today Tasks"). */
+  actionLabel?: string;
+  /** One-line hint shown under the primary button. */
+  actionHint?: string;
+  /** The `op` string sent to the agent when the primary button is
+   *  clicked (e.g. "workflow-list"). The module's agent.md handles it
+   *  and returns a `ModuleBoard`. */
+  op?: string;
+  /** Label for the per-card action button (e.g. "Open"). Defaults to
+   *  "Open" when a card has a `url`. */
+  cardActionLabel?: string;
+};
+
+/* ──────────────────────────────────────────────────────────────────────
+ * Generic interactive-board payload (data-driven tab rendering)
+ *
+ * An interactive module's agent returns one of these via
+ * `mark_session_done(JSON.stringify(board))`. The extension's generic
+ * board tab renders it directly — columns from `groups`, cards bucketed
+ * by `card.group`. Nothing here is plugin-specific, so any board-style
+ * module (tasks, PRs, tickets, …) reuses the same renderer.
+ * ──────────────────────────────────────────────────────────────────── */
+
+export type ModuleBoardGroup = {
+  /** Stable column id; cards reference it via `card.group`. */
+  id: string;
+  /** Column header label. */
+  name: string;
+  /** Optional accent color (hex) for the column + its cards' stage dot. */
+  color?: string;
+};
+
+export type ModuleBoardCard = {
+  /** Stable id (e.g. the task iid as a string). */
+  id: string;
+  title: string;
+  /** id of the `ModuleBoardGroup` this card belongs to. */
+  group: string;
+  /** Short status/label rendered as a pill. */
+  badge?: string;
+  /** Secondary line (assignee, domain, …). */
+  subtitle?: string;
+  /** Small chips (e.g. "you", "blocked", domain). */
+  tags?: string[];
+  /** Highlight this card (e.g. assigned to the current user). */
+  highlight?: boolean;
+  /** External link opened by the per-card action. */
+  url?: string;
+  /** Key/value detail shown when the card is expanded. */
+  meta?: Record<string, string>;
+};
+
+export type ModuleBoard = {
+  /** Echoes the module id so the extension routes the result. */
+  moduleId: string;
+  /** ms epoch the board was generated. */
+  generatedAt: number;
+  /** Optional headline above the board. */
+  title?: string;
+  /** Ordered columns. */
+  groups: ModuleBoardGroup[];
+  /** All cards; each keyed into a column by `group`. */
+  cards: ModuleBoardCard[];
+  /** Optional ids of cards to feature in a "primary" list view (e.g.
+   *  today's pickups) shown above/instead of the full board. */
+  featured?: string[];
+};
 
 /* ──────────────────────────────────────────────────────────────────────
  * Importable modules (Phase 19)
@@ -313,6 +399,10 @@ export type ModuleManifest = {
   sessionCheckboxHint: string;
   settings?: ModuleSettingSpec[];
   recommendsScreenshot?: boolean;
+  /** Interactive modules: declares a side-panel tab Pinta renders
+   *  dynamically. Only meaningful when `mode === "interactive"`. Absent
+   *  => no tab. */
+  tab?: ModuleTab;
   /** Capabilities the module *declares* it needs. Absent / empty = the
    *  module is read-only (read + emit, like an audit). The user grants a
    *  subset at import; the skill never exceeds the grant. */
@@ -540,6 +630,26 @@ export type AuditOverlay = {
   edits: Record<string, { label?: string; description?: string; fixHint?: string }>;
   /** Ids of checks AND categories the user hid. */
   deleted: string[];
+};
+
+/**
+ * Portable, self-describing export of the user's audit CATALOG — the
+ * AuditOverlay (custom categories + checks + field edits + hidden ids)
+ * plus the picker's selected-categories preference. Catalog ONLY: no
+ * agent findings, no dispositions — so it re-imports cleanly into any
+ * project and survives a chrome.storage / cache wipe (the pain point
+ * this exists to solve). Written to / read from a `*.pinta-audit.json`
+ * file by the AuditFlow tab, and embedded in the global settings bundle.
+ */
+export type AuditCatalogExport = {
+  /** Format discriminator + version, mirrors `$pintaModule`. */
+  $pintaAuditCatalog: "1";
+  /** ms epoch the file was produced. */
+  exportedAt: number;
+  /** The user-curated overlay (the reusable part of the catalog). */
+  overlay: AuditOverlay;
+  /** Which categories the picker had selected at export time. */
+  selectedCategories: AuditCategoryId[];
 };
 
 export type AuditCategoryResult = {
