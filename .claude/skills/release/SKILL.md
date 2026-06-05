@@ -97,6 +97,16 @@ ask them to amend, OR ask them to paste a corrected version.
   The plugin is fetched from GitHub as-is (no build on the user's machine),
   so `pinta-plugin/skills/pinta/SKILL.md` must be committed and current. The
   npm flavor re-vendors automatically in `npm run build` (see Step 5).
+- **Pin the install-skill docs to the new version** (run AFTER the bumps
+  above, since it reads `companion/package.json`):
+
+  ```bash
+  node scripts/pin-docs-version.mjs
+  ```
+
+  Rewrites `npx pinta-companion@<version> install-skill` in README +
+  `docs/` to the new version. (`npx` may cache an older bundle that lacks
+  the subcommand, so the docs must pin the current version.)
 - Edit `CHANGELOG.md`: insert the new section at the top, immediately
   after the H1 + intro paragraph. Preserve existing entries.
 
@@ -135,7 +145,8 @@ If yes:
 ```bash
 git add companion/package.json extension/package.json CHANGELOG.md \
   pinta-plugin/.claude-plugin/plugin.json .claude-plugin/marketplace.json \
-  pinta-plugin/skills/pinta
+  pinta-plugin/skills/pinta \
+  README.md docs/index.html docs/docs.html
 git commit -m "v$VERSION: $SUMMARY
 
 Co-Authored-By: Claude Opus 4.7 (1M context) <noreply@anthropic.com>"
@@ -209,7 +220,7 @@ npx pinta-companion .
 ### 3. Connect Claude Code (pick one)
 
 - **MCP:** \`claude mcp add pinta -- npx -y -p pinta-companion pinta-mcp\`
-- **\`/pinta\` skill:** \`npx pinta-companion install-skill\` then restart Claude Code
+- **\`/pinta\` skill:** \`npx pinta-companion@$VERSION install-skill\` then restart Claude Code
 - **Plugin:** \`/plugin marketplace add kevzlou7979/pinta\` then \`/plugin install pinta@pinta\` (command is \`/pinta:pinta\`)
 
 ## Full changelog
