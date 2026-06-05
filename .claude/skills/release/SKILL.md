@@ -22,6 +22,9 @@ AskUserQuestion.
 3. Check `gh auth status` shows kevzlou7979 logged in. If not, stop.
 4. Read current version from `companion/package.json` and
    `extension/package.json`. They must match. If they drift, stop.
+   Also note `pinta-plugin/.claude-plugin/plugin.json` and
+   `.claude-plugin/marketplace.json` (`plugins[0].version`) — these get
+   bumped in Step 4 and should track the same number.
 
 If any pre-flight fails, surface the actual error — don't paper over it.
 
@@ -81,6 +84,19 @@ ask them to amend, OR ask them to paste a corrected version.
 
 - Edit `companion/package.json`: bump `"version"` to new value.
 - Edit `extension/package.json`: bump `"version"` to new value.
+- Edit `pinta-plugin/.claude-plugin/plugin.json`: bump `"version"`.
+- Edit `.claude-plugin/marketplace.json`: bump `plugins[0].version`.
+  (Plugin updates only reach users when this version changes — bumping it
+  is what makes `/plugin` offer the new release.)
+- **Re-sync the plugin's bundled skill** so it ships the current `/pinta`:
+
+  ```bash
+  bash scripts/sync-plugin.sh
+  ```
+
+  The plugin is fetched from GitHub as-is (no build on the user's machine),
+  so `pinta-plugin/skills/pinta/SKILL.md` must be committed and current. The
+  npm flavor re-vendors automatically in `npm run build` (see Step 5).
 - Edit `CHANGELOG.md`: insert the new section at the top, immediately
   after the H1 + intro paragraph. Preserve existing entries.
 
@@ -117,7 +133,9 @@ AskUserQuestion: "Ready to commit + push v$VERSION? Recommended: yes."
 If yes:
 
 ```bash
-git add companion/package.json extension/package.json CHANGELOG.md
+git add companion/package.json extension/package.json CHANGELOG.md \
+  pinta-plugin/.claude-plugin/plugin.json .claude-plugin/marketplace.json \
+  pinta-plugin/skills/pinta
 git commit -m "v$VERSION: $SUMMARY
 
 Co-Authored-By: Claude Opus 4.7 (1M context) <noreply@anthropic.com>"
@@ -187,6 +205,12 @@ mode → Load unpacked.
 \`\`\`bash
 npx pinta-companion .
 \`\`\`
+
+### 3. Connect Claude Code (pick one)
+
+- **MCP:** \`claude mcp add pinta -- npx -y -p pinta-companion pinta-mcp\`
+- **\`/pinta\` skill:** \`npx pinta-companion install-skill\` then restart Claude Code
+- **Plugin:** \`/plugin marketplace add kevzlou7979/pinta\` then \`/plugin install pinta@pinta\` (command is \`/pinta:pinta\`)
 
 ## Full changelog
 

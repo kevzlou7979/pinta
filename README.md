@@ -321,9 +321,9 @@ PRs welcome — see [Contributing](#contributing).
 
 ## Quickstart
 
-**Two steps.** Node 20+, Chrome (or any Chromium-based browser), and a
-coding agent — Claude Code is the reference; Cursor / Cline / Continue / Zed
-work via MCP.
+Prerequisites: **Node 20+**, **Chrome** (or any Chromium-based browser), and
+a coding agent. Steps 1–2 capture annotations; step 3 connects your agent so
+it can act on them.
 
 ### 1. Install the Chrome extension
 
@@ -336,18 +336,23 @@ work via MCP.
 npx pinta-companion .
 ```
 
-Then in Claude Code:
+### 3. Connect your agent
 
+There are two ways to wire an agent to the companion. **Pick one.**
+
+#### Option A — MCP (recommended; no clone, works with every agent)
+
+The companion ships an MCP server (`pinta-mcp`). The agent picks up sessions
+through Pinta's MCP **tools** — there is **no `/pinta` slash command** on this
+path.
+
+**Claude Code:**
+
+```bash
+claude mcp add pinta -- npx -y -p pinta-companion pinta-mcp
 ```
-/pinta
-```
 
-That's it. Annotate, hit **Send to agent**, and Claude Code picks up
-the session and edits the source files. No clone, no build, no token
-to copy.
-
-For Cursor / Cline / Continue / Zed, drop this into your agent's MCP
-config:
+**Cursor / Cline / Continue / Zed** — drop this into your agent's MCP config:
 
 ```json
 {
@@ -359,6 +364,43 @@ config:
   }
 }
 ```
+
+#### Option B — the `/pinta` skill (Claude Code)
+
+The slash command is a Claude Code **skill** — it is **not** installed by
+`npx pinta-companion`. Install it once, **no clone required**, either way:
+
+**B1 — npm installer (one command):**
+
+```bash
+npx pinta-companion install-skill      # writes ~/.claude/skills/pinta/
+```
+
+Then **fully restart Claude Code** (skills load at startup — `/clear` is not
+enough), type `/`, and confirm `pinta` is in the list. Run `/pinta`.
+
+**B2 — Claude Code plugin (auto-updates):**
+
+```text
+/plugin marketplace add kevzlou7979/pinta
+/plugin install pinta@pinta
+```
+
+Installs immediately (no restart). Note: plugin skills are namespaced, so the
+command is **`/pinta:pinta`** rather than `/pinta`. Updates come through
+`/plugin` when a new version is published.
+
+> **Hacking on Pinta itself?** Clone the repo and run
+> `bash scripts/install-skill.sh` (Git Bash on Windows) — it points the skill
+> at your local companion so `node ~/.claude/skills/pinta/start-companion.js .`
+> runs your working tree instead of the published bundle.
+
+---
+
+Either way: annotate the page, hit **Send to agent**, and — from your
+project root — run `/pinta` (Option B) or just ask your agent to pick up the
+Pinta session (Option A). It edits the matching source files; HMR shows the
+result.
 
 > **Hacking on Pinta itself?** See [Development](#development) below for
 > the source build (`git clone` → `npm install` → `npm run build`,

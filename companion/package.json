@@ -27,7 +27,8 @@
   },
   "files": [
     "dist/cli.cjs",
-    "dist/mcp-stdio.cjs"
+    "dist/mcp-stdio.cjs",
+    "dist/skill"
   ],
   "engines": {
     "node": ">=20"

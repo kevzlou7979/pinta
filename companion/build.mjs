@@ -6,7 +6,7 @@
 //          node built-ins)
 
 import { build } from "esbuild";
-import { rmSync, mkdirSync, readFileSync } from "node:fs";
+import { rmSync, mkdirSync, readFileSync, copyFileSync } from "node:fs";
 
 const outdir = "dist";
 rmSync(outdir, { recursive: true, force: true });
@@ -50,3 +50,18 @@ await Promise.all([
 ]);
 
 console.log(`\nbundled → ${outdir}/cli.cjs, ${outdir}/mcp-stdio.cjs`);
+
+// Vendor the skill files into the package so `pinta-companion install-skill`
+// can drop them into ~/.claude/skills/pinta/ with no repo checkout. The skill
+// is the single source of truth at ../skill/pinta — we only copy the two files
+// the runtime needs (SKILL.md + the companion-discovery helper). The
+// start-companion.js the installer writes is generated, not vendored, because
+// the npm-installed flavor must call `npx pinta-companion` rather than a
+// hardcoded repo path.
+const skillSrc = new URL("../skill/pinta/", import.meta.url);
+const skillOut = `${outdir}/skill`;
+mkdirSync(skillOut, { recursive: true });
+for (const f of ["SKILL.md", "find-companion.js"]) {
+  copyFileSync(new URL(f, skillSrc), `${skillOut}/${f}`);
+}
+console.log(`vendored skill → ${skillOut}/{SKILL.md, find-companion.js}`);

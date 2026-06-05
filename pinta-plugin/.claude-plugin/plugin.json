@@ -1,0 +1,13 @@
+{
+  "name": "pinta",
+  "description": "Annotate your running app visually and turn UI changes into source edits — the /pinta workflow for the Pinta Chrome extension and companion.",
+  "version": "0.4.0",
+  "author": {
+    "name": "kevzlou7979",
+    "url": "https://github.com/kevzlou7979/pinta"
+  },
+  "homepage": "https://github.com/kevzlou7979/pinta#readme",
+  "repository": "https://github.com/kevzlou7979/pinta",
+  "license": "MIT",
+  "keywords": ["pinta", "annotation", "ui-edit", "chrome-extension", "claude-code"]
+}

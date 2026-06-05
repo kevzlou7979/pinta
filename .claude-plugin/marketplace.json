@@ -1,0 +1,16 @@
+{
+  "name": "pinta",
+  "owner": {
+    "name": "kevzlou7979",
+    "url": "https://github.com/kevzlou7979/pinta"
+  },
+  "description": "Pinta — visual annotation workflow for Claude Code. Install the /pinta skill without cloning the repo.",
+  "plugins": [
+    {
+      "name": "pinta",
+      "source": "./pinta-plugin",
+      "description": "Annotate your running app visually and turn UI changes into source edits.",
+      "version": "0.4.0"
+    }
+  ]
+}
