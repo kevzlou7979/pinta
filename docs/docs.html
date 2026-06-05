@@ -444,10 +444,9 @@
       </p>
 
       <h3>2. Start the companion in your project</h3>
-      <pre><code># Once a versioned npm release exists:
-npx pinta-companion .
+      <pre><code>npx pinta-companion .
 
-# While on the unreleased build (from a Pinta clone):
+# Or, if you cloned the repo for Pinta dev:
 node ~/.claude/skills/pinta/start-companion.js .</code></pre>
       <p>
         The companion binds the first free port in <code>7878-7898</code> and
@@ -455,7 +454,25 @@ node ~/.claude/skills/pinta/start-companion.js .</code></pre>
         extension + agent skill can find it.
       </p>
 
-      <h3>3. Run <code>/pinta</code> in Claude Code</h3>
+      <h3>3. Install the <code>/pinta</code> skill</h3>
+      <p>
+        The <code>/pinta</code> slash command is a Claude Code skill — it is
+        <strong>not</strong> installed by <code>npx pinta-companion</code>.
+        Install it once (no clone needed), then <strong>fully restart Claude
+        Code</strong> (skills load at startup; <code>/clear</code> is not
+        enough):
+      </p>
+      <pre><code>npx pinta-companion@0.5.0 install-skill</code></pre>
+      <p>
+        The <code>@0.5.0</code> is deliberate — <code>npx</code> may have an
+        older <code>pinta-companion</code> cached, and the
+        <code>install-skill</code> subcommand only exists in 0.5.0+. Prefer a
+        plugin? <code>/plugin marketplace add kevzlou7979/pinta</code> then
+        <code>/plugin install pinta@pinta</code> (invoked as
+        <code>/pinta:pinta</code>, auto-updates).
+      </p>
+
+      <h3>4. Run <code>/pinta</code> in Claude Code</h3>
       <p>
         Open a Claude Code terminal in your project root and type
         <code>/pinta</code>. The skill discovers the companion via the
@@ -466,7 +483,7 @@ node ~/.claude/skills/pinta/start-companion.js .</code></pre>
 Open the Pinta Chrome extension, annotate the page you want
 changed, and hit Submit. I'll wait."</code></pre>
 
-      <h3>4. Open the side panel</h3>
+      <h3>5. Open the side panel</h3>
       <p>
         Click the Pinta icon in your Chrome toolbar (or pin it first). The
         side panel opens on the right; the project picker at the top should

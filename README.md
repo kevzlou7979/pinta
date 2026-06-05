@@ -373,7 +373,7 @@ The slash command is a Claude Code **skill** — it is **not** installed by
 **B1 — npm installer (one command):**
 
 ```bash
-npx pinta-companion install-skill      # writes ~/.claude/skills/pinta/
+npx pinta-companion@0.5.0 install-skill   # writes ~/.claude/skills/pinta/
 ```
 
 Then **fully restart Claude Code** (skills load at startup — `/clear` is not
