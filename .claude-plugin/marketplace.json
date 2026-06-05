@@ -10,7 +10,7 @@
       "name": "pinta",
       "source": "./pinta-plugin",
       "description": "Annotate your running app visually and turn UI changes into source edits.",
-      "version": "0.4.0"
+      "version": "0.5.0"
     }
   ]
 }

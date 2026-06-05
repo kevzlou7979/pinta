@@ -4,6 +4,40 @@ Notable changes shipped on top of the original V1 pipeline. Newest first.
 For the architectural design behind each item, see
 [`spec/SPEC.md`](spec/SPEC.md).
 
+## 0.5.0 — 2026-06-05
+
+### Added
+
+- **No-checkout `/pinta` install.** Two ways to install the Claude Code
+  skill without cloning the repo:
+  - `npx pinta-companion install-skill` — copies the skill into
+    `~/.claude/skills/pinta/` and writes an npx-based companion launcher.
+    Restart Claude Code, then run `/pinta`.
+  - **Claude Code plugin** — `/plugin marketplace add kevzlou7979/pinta`
+    then `/plugin install pinta@pinta`. Installs immediately and
+    auto-updates; invoked as `/pinta:pinta` (plugin skills are namespaced).
+
+### Changed
+
+- **`pinta-companion` ships the skill.** The published package now bundles
+  `SKILL.md` + `find-companion.js` (`dist/skill/`) and gains the
+  `install-skill` subcommand. Companion discovery in the skill is
+  plugin-aware (`$CLAUDE_PLUGIN_ROOT` fallback) so a single `SKILL.md`
+  works across personal-skill, npm, and plugin installs; start hints now
+  lead with `npx pinta-companion .`.
+- **README Quickstart rewritten.** MCP vs. `/pinta`-skill connection paths
+  are now explicit, and the no-clone install is the documented default.
+
+### Fixed
+
+- **Chat (Just Ask / global) no longer edits source files.** A session
+  carrying a single `kind:"query"` annotation is inquiry-only: the `chat`
+  module routes to the chat handler and never edits source, regardless of
+  the `autoApply` flag the companion sets on interactive sessions.
+  Previously the `chat` module had no top-level dispatch gate, so a
+  "Just Ask" session could fall through to the apply-edits flow and modify
+  the codebase unprompted.
+
 ## 0.4.0 — 2026-06-03
 
 ### Added
