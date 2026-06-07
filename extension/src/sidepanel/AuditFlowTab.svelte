@@ -313,6 +313,31 @@
     }
   }
 
+  // ─── Discuss (inline per-finding chat) + File issue (Phase 15e) ─────
+  // Which findings have their Discuss thread expanded, + the in-progress
+  // draft per finding. Opens automatically once there are messages.
+  let discussOpen = $state<Record<string, boolean>>({});
+  let discussDraft = $state<Record<string, string>>({});
+
+  function checkChat(check: AuditCheck) {
+    return app.audit.checkChats[check.id] ?? [];
+  }
+  function toggleDiscuss(check: AuditCheck): void {
+    discussOpen[check.id] = !(
+      discussOpen[check.id] ?? checkChat(check).length > 0
+    );
+  }
+  function sendDiscuss(check: AuditCheck): void {
+    const text = (discussDraft[check.id] ?? "").trim();
+    if (!text) return;
+    discussDraft[check.id] = "";
+    discussOpen[check.id] = true;
+    void app.sendAuditCheckChat(check, text);
+  }
+  function fileIssue(check: AuditCheck): void {
+    void app.fileAuditCheckAsIssue(check);
+  }
+
   // ─── Category kebab (Add check · Suggest checks · Rename · Delete) ───
   let categoryKebabOpen = $state<string | null>(null);
   function toggleCategoryKebab(id: string): void {
@@ -538,26 +563,30 @@
     </div>
     <!-- Catalog backup — export / import your custom categories + checks
          so a session/cache clear doesn't lose them, and to port the
-         catalog across projects. Catalog only; not the findings. -->
-    <div class="shrink-0 inline-flex items-center gap-1">
-      <button
-        type="button"
-        class="inline-flex items-center gap-1 text-[11px] font-medium text-ink-600 dark:text-night-dim hover:text-ink-900 dark:hover:text-night-text rounded-md px-1.5 py-1 hover:bg-ink-100 dark:hover:bg-night-line"
-        onclick={exportCatalog}
-        title="Export your audit catalog (custom categories + checks) to a file"
-      >
-        <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
-        Export
-      </button>
-      <button
-        type="button"
-        class="inline-flex items-center gap-1 text-[11px] font-medium text-ink-600 dark:text-night-dim hover:text-ink-900 dark:hover:text-night-text rounded-md px-1.5 py-1 hover:bg-ink-100 dark:hover:bg-night-line"
-        onclick={() => catalogFileInput?.click()}
-        title="Import an audit catalog file (merges into your current catalog)"
-      >
-        <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" y1="3" x2="12" y2="15"/></svg>
-        Import
-      </button>
+         catalog across projects. Catalog only; not the findings.
+         Compact icon-only segmented group, matching Test Pilot's header
+         actions. Labels live in title + aria-label since it's icon-only. -->
+    <div class="shrink-0 flex items-center">
+      <div class="inline-flex items-center rounded-md border border-ink-200 dark:border-night-line bg-white dark:bg-night-card divide-x divide-ink-200 dark:divide-night-line">
+        <button
+          type="button"
+          class="inline-flex items-center justify-center w-8 h-8 rounded-l-md text-ink-700 dark:text-night-dim hover:text-brand-pink dark:hover:text-brand-pink-light hover:bg-ink-50 dark:hover:bg-night-alt"
+          onclick={() => catalogFileInput?.click()}
+          title="Import an audit catalog file (merges into your current catalog)"
+          aria-label="Import audit catalog"
+        >
+          <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" y1="3" x2="12" y2="15"/></svg>
+        </button>
+        <button
+          type="button"
+          class="inline-flex items-center justify-center w-8 h-8 rounded-r-md text-ink-700 dark:text-night-dim hover:text-brand-pink dark:hover:text-brand-pink-light hover:bg-ink-50 dark:hover:bg-night-alt"
+          onclick={exportCatalog}
+          title="Export your audit catalog (custom categories + checks) to a file"
+          aria-label="Export audit catalog"
+        >
+          <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
+        </button>
+      </div>
       <input
         bind:this={catalogFileInput}
         type="file"
@@ -779,51 +808,168 @@
             </div>
           {/if}
           {#if hasActions}
-            <!-- Action group — compact icon-only segmented group, matching
-                 Test Pilot's row actions. Fix with agent is functional
-                 (composes a prefilled annotation + switches to Annotate,
-                 then confirms + disables so the user can't double-handoff).
-                 Discuss + File issue are Phase 15e stubs — shown disabled
-                 with a "coming soon" tooltip until Chat / GitLab land. -->
-            <div class="flex flex-wrap gap-2 pt-1">
-              <div class="inline-flex items-center shrink-0 rounded-md border border-ink-200 dark:border-night-line bg-white dark:bg-night-card divide-x divide-ink-200 dark:divide-night-line">
+            {@const chat = checkChat(check)}
+            {@const filed = app.audit.filedIssues[check.id]}
+            {@const chatPending = app.audit.pendingCheckChat[check.id]}
+            {@const issuePending = app.audit.pendingFileIssue[check.id]}
+            <div class="space-y-2 pt-1">
+              <div class="flex flex-wrap items-center gap-2">
+                <!-- PRIMARY — Fix with agent. Icon + label; composes a
+                     prefilled annotation + switches to Annotate. Confirms +
+                     disables after click so the user can't double-handoff. -->
                 <button
                   type="button"
-                  class="inline-flex items-center justify-center w-8 h-8 rounded-l-md hover:bg-ink-50 dark:hover:bg-night-alt disabled:cursor-default {handedOff[check.id]
-                    ? 'text-emerald-600 dark:text-emerald-400'
-                    : 'text-ink-700 dark:text-night-dim hover:text-brand-pink dark:hover:text-brand-pink-light'}"
+                  class="inline-flex items-center gap-1.5 rounded-md bg-brand-pink hover:bg-brand-magenta dark:hover:bg-brand-pink-light text-white text-[11px] font-semibold px-2.5 py-1 disabled:opacity-60 disabled:cursor-default"
                   onclick={() => handoffToAnnotate(check)}
                   disabled={handedOff[check.id]}
                   title={handedOff[check.id]
-                    ? "Drafted in Annotate — switch to the Annotate tab to review the draft"
-                    : "Fix with agent — compose a Pinta annotation pre-filled with this check's details, open Annotate tab"}
-                  aria-label={handedOff[check.id] ? "Drafted in Annotate" : "Fix with agent"}
+                    ? "Drafted in Annotate — switch to the Annotate tab to review"
+                    : "Fix with agent — compose a Pinta annotation pre-filled with this check's details"}
                 >
                   {#if handedOff[check.id]}
-                    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="20 6 9 17 4 12"/></svg>
+                    <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="20 6 9 17 4 12"/></svg>
+                    Drafted
                   {:else}
-                    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M15 4V2"/><path d="M15 16v-2"/><path d="M8 9h2"/><path d="M20 9h2"/><path d="M17.8 11.8 19 13"/><path d="M15 9h.01"/><path d="M17.8 6.2 19 5"/><path d="m3 21 9-9"/><path d="M12.2 6.2 11 5"/></svg>
+                    <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M15 4V2"/><path d="M15 16v-2"/><path d="M8 9h2"/><path d="M20 9h2"/><path d="M17.8 11.8 19 13"/><path d="M15 9h.01"/><path d="M17.8 6.2 19 5"/><path d="m3 21 9-9"/><path d="M12.2 6.2 11 5"/></svg>
+                    Fix
                   {/if}
                 </button>
-                <button
-                  type="button"
-                  class="inline-flex items-center justify-center w-8 h-8 text-ink-400 dark:text-night-mute opacity-60 cursor-not-allowed"
-                  disabled
-                  title="Discuss — coming soon (routes to Chat)"
-                  aria-label="Discuss (coming soon)"
-                >
-                  <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg>
-                </button>
-                <button
-                  type="button"
-                  class="inline-flex items-center justify-center w-8 h-8 rounded-r-md text-ink-400 dark:text-night-mute opacity-60 cursor-not-allowed"
-                  disabled
-                  title="File issue — coming soon (files a GitLab issue)"
-                  aria-label="File issue (coming soon)"
-                >
-                  <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="3" y="4" width="18" height="16" rx="2"/><line x1="8" y1="2" x2="8" y2="6"/><line x1="16" y1="2" x2="16" y2="6"/><line x1="3" y1="10" x2="21" y2="10"/></svg>
-                </button>
+                <!-- SECONDARY — icon buttons. Discuss (per-finding chat) +
+                     File issue (GitLab via glab, else local .pinta/tasks.md). -->
+                <div class="inline-flex items-center shrink-0 rounded-md border border-ink-200 dark:border-night-line bg-white dark:bg-night-card divide-x divide-ink-200 dark:divide-night-line">
+                  <button
+                    type="button"
+                    class="relative inline-flex items-center justify-center w-8 h-8 rounded-l-md hover:bg-ink-50 dark:hover:bg-night-alt {discussOpen[check.id]
+                      ? 'text-brand-pink dark:text-brand-pink-light'
+                      : 'text-ink-700 dark:text-night-dim hover:text-brand-pink dark:hover:text-brand-pink-light'}"
+                    onclick={() => toggleDiscuss(check)}
+                    aria-label="Discuss this finding"
+                    aria-expanded={discussOpen[check.id] ?? false}
+                    title="Discuss — ask the agent about this finding"
+                  >
+                    {#if chatPending}
+                      <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" class="animate-spin" aria-hidden="true"><path d="M21 12a9 9 0 1 1-6.219-8.56"/></svg>
+                    {:else}
+                      <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg>
+                    {/if}
+                    {#if chat.length > 0}
+                      <span class="absolute -top-1 -right-1 min-w-[14px] h-[14px] px-1 inline-flex items-center justify-center rounded-full bg-brand-pink text-white text-[9px] font-semibold leading-none dark:bg-brand-pink-light dark:text-night-bg" aria-hidden="true">{chat.length}</span>
+                    {/if}
+                  </button>
+                  <button
+                    type="button"
+                    class="inline-flex items-center justify-center w-8 h-8 rounded-r-md hover:bg-ink-50 dark:hover:bg-night-alt disabled:cursor-default {filed
+                      ? 'text-emerald-600 dark:text-emerald-400'
+                      : 'text-ink-700 dark:text-night-dim hover:text-brand-pink dark:hover:text-brand-pink-light'}"
+                    onclick={() => fileIssue(check)}
+                    disabled={issuePending || !!filed}
+                    aria-label={filed ? "Issue filed" : "File issue"}
+                    title={filed
+                      ? filed.target === "gitlab"
+                        ? "GitLab issue filed" + (filed.url ? ` — ${filed.url}` : "")
+                        : `Added to ${filed.path ?? ".pinta/tasks.md"}`
+                      : "File issue — opens a GitLab issue via glab, or adds to .pinta/tasks.md"}
+                  >
+                    {#if issuePending}
+                      <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" class="animate-spin" aria-hidden="true"><path d="M21 12a9 9 0 1 1-6.219-8.56"/></svg>
+                    {:else if filed}
+                      <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="20 6 9 17 4 12"/></svg>
+                    {:else}
+                      <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="3" y="4" width="18" height="16" rx="2"/><line x1="8" y1="2" x2="8" y2="6"/><line x1="16" y1="2" x2="16" y2="6"/><line x1="3" y1="10" x2="21" y2="10"/></svg>
+                    {/if}
+                  </button>
+                </div>
+                {#if filed}
+                  {#if filed.target === "gitlab" && filed.url}
+                    <a href={filed.url} target="_blank" rel="noopener noreferrer" class="text-[11px] text-emerald-700 dark:text-emerald-400 hover:underline inline-flex items-center gap-1" title={filed.url}>
+                      <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"/><polyline points="15 3 21 3 21 9"/><line x1="10" y1="14" x2="21" y2="3"/></svg>
+                      Issue filed
+                    </a>
+                  {:else}
+                    <span class="text-[11px] text-emerald-700 dark:text-emerald-400" title={filed.path ?? ".pinta/tasks.md"}>Added to tasks</span>
+                  {/if}
+                {/if}
               </div>
+
+              <!-- Inline Discuss thread — appears when opened or once it has
+                   messages. Mirrors Test Pilot's per-row chat surface. -->
+              {#if discussOpen[check.id] || chat.length > 0}
+                <div class="rounded-md border border-ink-200 dark:border-night-line bg-white dark:bg-night-card p-2 space-y-2">
+                  {#if chat.length > 0}
+                    <div class="space-y-2 max-h-64 overflow-y-auto">
+                      {#each chat as msg (msg.id)}
+                        {#if msg.role === "user"}
+                          <div class="flex justify-end">
+                            <div class="max-w-[85%] rounded-lg rounded-br-sm bg-brand-pink text-white px-2.5 py-1.5 text-[12px] leading-snug whitespace-pre-wrap break-words">{msg.text}</div>
+                          </div>
+                        {:else}
+                          <div class="flex justify-start">
+                            <div class="max-w-[90%] rounded-lg rounded-bl-sm bg-ink-50 dark:bg-night-alt text-ink-800 dark:text-night-text px-2.5 py-1.5 text-[12px] leading-relaxed space-y-1.5">
+                              {#each parseStep(msg.text) as block, bi (bi)}
+                                {#if block.kind === "text"}
+                                  <p>
+                                    {#each block.parts as part, pi (pi)}
+                                      {#if part.kind === "code"}
+                                        <code class="font-mono text-[11px] bg-white dark:bg-night-card text-brand-pink dark:text-brand-pink-light px-1 py-0.5 rounded">{part.value}</code>
+                                      {:else if part.kind === "bold"}
+                                        <strong class="font-semibold">{part.value}</strong>
+                                      {:else}
+                                        <span>{part.value}</span>
+                                      {/if}
+                                    {/each}
+                                  </p>
+                                {:else if block.kind === "code"}
+                                  <pre class="rounded border border-ink-200 dark:border-night-line bg-white dark:bg-night-card px-2 py-1.5 text-[11px] font-mono overflow-x-auto">{block.body}</pre>
+                                {:else if block.kind === "note"}
+                                  <div class="border-l-2 border-ink-300 dark:border-night-line pl-2 text-[11.5px] text-ink-600 dark:text-night-dim">
+                                    {#each block.parts as part, pi (pi)}
+                                      {#if part.kind === "code"}
+                                        <code class="font-mono text-[11px]">{part.value}</code>
+                                      {:else}
+                                        <span>{part.value}</span>
+                                      {/if}
+                                    {/each}
+                                  </div>
+                                {/if}
+                              {/each}
+                            </div>
+                          </div>
+                        {/if}
+                      {/each}
+                    </div>
+                  {/if}
+                  {#if chatPending}
+                    <div class="flex items-center gap-1.5 text-[11px] text-ink-500 dark:text-night-mute px-1">
+                      <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" class="animate-spin" aria-hidden="true"><path d="M21 12a9 9 0 1 1-6.219-8.56"/></svg>
+                      Agent is thinking…
+                    </div>
+                  {/if}
+                  <div class="flex items-end gap-1.5">
+                    <textarea
+                      bind:value={discussDraft[check.id]}
+                      rows="1"
+                      placeholder="Ask the agent about this finding…"
+                      class="flex-1 resize-y rounded-md border border-ink-300 dark:border-night-line bg-white dark:bg-night-bg px-2 py-1.5 text-[12px] text-ink-900 dark:text-night-text focus:outline-none focus:ring-1 focus:ring-brand-pink"
+                      onkeydown={(e) => {
+                        if (e.key === "Enter" && !e.shiftKey) {
+                          e.preventDefault();
+                          sendDiscuss(check);
+                        }
+                      }}
+                    ></textarea>
+                    <button
+                      type="button"
+                      class="shrink-0 inline-flex items-center justify-center rounded-md bg-brand-pink hover:bg-brand-magenta dark:hover:bg-brand-pink-light text-white px-2.5 py-1.5 disabled:opacity-50"
+                      onclick={() => sendDiscuss(check)}
+                      disabled={chatPending || !(discussDraft[check.id] ?? "").trim()}
+                      aria-label="Send"
+                      title="Send (Enter)"
+                    >
+                      <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><line x1="22" y1="2" x2="11" y2="13"/><polygon points="22 2 15 22 11 13 2 9 22 2"/></svg>
+                    </button>
+                  </div>
+                </div>
+              {/if}
             </div>
           {/if}
           {/if}

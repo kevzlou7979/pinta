@@ -1706,7 +1706,14 @@ handle it via this section. Skip §7 entirely (no source edits during
 the audit). Skip §7.9 (other modules — interactive ones own the
 session lifecycle). Same operating rules as Test Pilot apply.
 
-The query comment shape:
+**Dispatch by `op`** — read the query comment's `op` first:
+- `"audit"` — run the audit (the category tables in this section).
+- `"audit-suggest"` — propose extra checks for one category.
+- `"audit-discuss"` — chat about one finding (read-only).
+- `"audit-file-issue"` — file one finding as a GitLab issue or a local
+  `.pinta/tasks.md` task.
+
+The query comment shape (for `op: "audit"`):
 
 ```json
 {
@@ -2128,6 +2135,121 @@ Submit via `mark_session_done(id, JSON.stringify(payload))`. If you
 can't find anything new worth adding, return an empty `suggestions`
 array — the extension surfaces a "no new suggestions" hint.
 
+### `op: "audit-discuss"` — discuss one finding (chat)
+
+The user clicked **Discuss** on an audit finding. Answer their question
+about THIS finding in context — like Test Pilot's per-row chat
+(§7.10.3a), scoped to one audit check. **Read-only:** explain, weigh
+risk, suggest approaches, point at code — do NOT edit files, run tests,
+or `git`.
+
+Query comment shape:
+
+```json
+{
+  "op": "audit-discuss",
+  "runId": "uuid",
+  "checkId": "<stable fingerprint>",
+  "prompt": "how risky is this really?",
+  "context": {
+    "kind": "audit-check",
+    "category": "security",
+    "label": "WebSecurityConfig disables CSRF for /api/**",
+    "description": "…",
+    "fixHint": "…",
+    "status": "fail",
+    "where": { "file": "src/main/java/...", "line": 42 },
+    "detailedResponses": false
+  },
+  "history": [
+    { "role": "user",  "text": "earlier question" },
+    { "role": "agent", "text": "earlier reply" }
+  ]
+}
+```
+
+- **Ground the answer in the project** — read `context.where.file` (and
+  closely related code) before answering. Bounded read.
+- Keep it tight unless `context.detailedResponses` is `true`. Markdown
+  renders through the same pipeline as findings (code spans, fenced
+  blocks, `Note:` lines).
+
+Return:
+
+```json
+{ "type": "audit-discussion", "checkId": "<same id>", "reply": "<markdown>" }
+```
+
+Submit via `mark_session_done(id, JSON.stringify(payload))`. Echo the
+same `checkId` so the reply lands on the right finding's thread.
+
+### `op: "audit-file-issue"` — file one finding as an issue / task
+
+The user clicked **File issue** on a finding. Turn it into a tracked
+item: a **GitLab issue via `glab`** when GitLab is configured, otherwise
+the **local fallback** — append it to `.pinta/tasks.md`. This is the one
+audit op allowed to run `glab` and write a file (only `.pinta/tasks.md`);
+it still **never edits project source**.
+
+Query comment shape:
+
+```json
+{
+  "op": "audit-file-issue",
+  "runId": "uuid",
+  "checkId": "<stable fingerprint>",
+  "finding": {
+    "category": "security",
+    "label": "…",
+    "description": "…",
+    "fixHint": "…",
+    "status": "fail",
+    "value": "…",
+    "where": { "file": "src/...", "line": 42 }
+  },
+  "gitlab": { "projectId": "group/repo", "labels": "audit,security" },
+  "fallbackToLocal": true
+}
+```
+
+Compose the item:
+
+- **Title:** `[Audit/<category>] <label>` (concise).
+- **Body (markdown):** the finding's status + category, the
+  `description`, the `fixHint` (as "Suggested fix"), and a
+  `Source: <file>:<line>` line when `finding.where.file` is present.
+
+Pick the target:
+
+1. **GitLab** — if `gitlab` is non-null AND `glab` is installed AND
+   `glab auth status` succeeds, run (reuse §7.9's gitlab-issues flow):
+   ```bash
+   glab issue create --title "<title>" --description "<body>" \
+     [--repo <gitlab.projectId>] [--label "<gitlab.labels>"] --no-editor
+   ```
+   `--no-editor` prints the new issue URL on stdout — capture it. On
+   success return:
+   ```json
+   { "type": "audit-issue-filed", "checkId": "<id>", "target": "gitlab", "url": "<issue url>", "title": "<title>" }
+   ```
+2. **Local fallback** — otherwise (no `gitlab`, or `glab` missing /
+   unauthenticated, or the create failed) AND `fallbackToLocal` is
+   `true`: append a checklist item to `.pinta/tasks.md` (create the file
+   with a `# Pinta tasks` heading if absent). **De-dupe by `checkId`** —
+   if a line already carries this `checkId` marker, leave it and report
+   success. Line format:
+   ```markdown
+   - [ ] **<title>** — <one-line summary> · `<file>:<line>` <!-- pinta:audit <checkId> -->
+   ```
+   Return:
+   ```json
+   { "type": "audit-issue-filed", "checkId": "<id>", "target": "local", "path": ".pinta/tasks.md", "title": "<title>" }
+   ```
+
+If neither path is possible (no `gitlab` AND `fallbackToLocal` is
+`false`), `mark_session_error` with a one-line reason. **Token-lean:**
+read only what you need to compose the body; don't re-audit.
+
 ### `audit-flow` operating rules
 
 - **No source edits.** Audits are read-only. Don't touch any file.
@@ -2135,6 +2257,9 @@ array — the extension surfaces a "no new suggestions" hint.
   individual findings into Annotate via Fix-with-agent if they want
   to act on them — those edits happen in a separate session, not in
   the audit run.
+  - **Exceptions (per-finding ops only):** `audit-file-issue` may run
+    `glab` and write **`.pinta/tasks.md`** (never project source);
+    `audit-discuss` is read-only chat. Everything else here still holds.
 - **`npm audit` is the ONLY shell command** allowed in the security
   audit (read-only, fast, well-understood). 15b adds more (axe-core,
   Lighthouse, doiuse) — those land with explicit guidance per

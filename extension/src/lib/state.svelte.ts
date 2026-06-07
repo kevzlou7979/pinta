@@ -612,6 +612,8 @@ class ExtensionState {
     void this.loadAnnotateChats();
     void this.loadAuditRun();
     void this.loadAuditDispositions();
+    void this.loadAuditCheckChats();
+    void this.loadAuditFiledIssues();
     void this.loadModuleBoards();
     // Stage the legacy global catalog (if any) for the first companion
     // to claim. The actual per-project load happens inside connectTo.
@@ -2833,6 +2835,20 @@ class ExtensionState {
    *  run, not the merged view). */
   private static readonly AUDIT_OVERLAY_KEY = "pinta-audit-overlay";
 
+  /** Per-finding Discuss chat threads (Phase 15e), keyed by check.id. */
+  private static readonly AUDIT_CHECK_CHATS_KEY = "pinta-audit-check-chats";
+
+  /** Findings filed as an issue/task (GitLab or local), keyed by check.id. */
+  private static readonly AUDIT_FILED_ISSUES_KEY = "pinta-audit-filed-issues";
+
+  /** Per-finding op timers (Discuss / File-issue), keyed by
+   *  `${op}:${checkId}` so a stuck agent reply clears its spinner. */
+  private auditOpTimers = new Map<string, ReturnType<typeof setTimeout>>();
+
+  /** Per-finding op timeout (Discuss / File-issue). Shorter than a full
+   *  audit run — these are single-finding round-trips. */
+  private static readonly AUDIT_OP_TIMEOUT_MS = 120_000;
+
   /** Hard ceiling on a single audit run. Security category alone is
    *  ~30s typical; full 5-category audit can run minutes. Generous so
    *  legitimate slow runs aren't killed, bounded so a wedged agent
@@ -2917,6 +2933,29 @@ class ExtensionState {
       string,
       { label: string; description?: string; status?: AuditCheckStatus }[]
     >;
+    /** Per-finding "Discuss" chat threads (Phase 15e), keyed by check.id.
+     *  Persists independently of the run (like dispositions) so threads
+     *  survive re-audits + chrome reloads. */
+    checkChats: Record<string, ChatMessage[]>;
+    /** In-flight Discuss sends, keyed by check.id — drives the thread
+     *  spinner. In-memory only. */
+    pendingCheckChat: Record<string, boolean>;
+    /** Findings filed as an issue/task, keyed by check.id. `target`
+     *  records where it landed — a GitLab issue via `glab`, or the local
+     *  `.pinta/tasks.md` fallback. Persisted so the ✓ + link survive a
+     *  reload. */
+    filedIssues: Record<
+      string,
+      {
+        target: "gitlab" | "local";
+        url?: string;
+        path?: string;
+        title?: string;
+        at: number;
+      }
+    >;
+    /** In-flight File-issue sends, keyed by check.id. In-memory only. */
+    pendingFileIssue: Record<string, boolean>;
     error: string | null;
   }>({
     agentRun: null,
@@ -2927,6 +2966,10 @@ class ExtensionState {
     dispositions: {},
     pendingAuditSuggest: {},
     suggestions: {},
+    checkChats: {},
+    pendingCheckChat: {},
+    filedIssues: {},
+    pendingFileIssue: {},
     error: null,
   });
 
@@ -3116,6 +3159,289 @@ class ExtensionState {
       this.audit.dispositions[checkId] = d;
     }
     void this.saveAuditDispositions();
+  }
+
+  // ─── Per-finding Discuss (chat) + File issue (Phase 15e) ───────────
+  //
+  // Discuss reuses the Chat module's per-row pattern (op "audit-discuss",
+  // context.kind "audit-check"). File issue rides op "audit-file-issue":
+  // the agent files a GitLab issue via `glab` when the gitlab-issues
+  // module is configured, else appends the finding to .pinta/tasks.md.
+  // Both run in the user's interactive Claude Code terminal (the
+  // companion never shells out) — same compliance lane as the rest.
+
+  private async loadAuditCheckChats(): Promise<void> {
+    try {
+      const stored = await chrome.storage?.local?.get(
+        ExtensionState.AUDIT_CHECK_CHATS_KEY,
+      );
+      const raw = stored?.[ExtensionState.AUDIT_CHECK_CHATS_KEY] as
+        | Record<string, ChatMessage[]>
+        | undefined;
+      if (raw && typeof raw === "object" && !Array.isArray(raw)) {
+        this.audit.checkChats = raw;
+      }
+    } catch {
+      // storage missing (test env) — defaults are fine
+    }
+  }
+
+  private async saveAuditCheckChats(): Promise<void> {
+    try {
+      await chrome.storage?.local?.set({
+        [ExtensionState.AUDIT_CHECK_CHATS_KEY]: $state.snapshot(
+          this.audit.checkChats,
+        ),
+      });
+    } catch (err) {
+      if (ExtensionState.isQuotaExceeded(err)) {
+        this.audit.error =
+          "Browser storage is full — the Discuss thread couldn't save. " +
+          "Try clearing chat history or older Test Pilot catalogs.";
+      }
+    }
+  }
+
+  private async loadAuditFiledIssues(): Promise<void> {
+    try {
+      const stored = await chrome.storage?.local?.get(
+        ExtensionState.AUDIT_FILED_ISSUES_KEY,
+      );
+      const raw = stored?.[ExtensionState.AUDIT_FILED_ISSUES_KEY] as
+        | (typeof this.audit)["filedIssues"]
+        | undefined;
+      if (raw && typeof raw === "object" && !Array.isArray(raw)) {
+        this.audit.filedIssues = raw;
+      }
+    } catch {
+      // storage missing (test env) — defaults are fine
+    }
+  }
+
+  private async saveAuditFiledIssues(): Promise<void> {
+    try {
+      await chrome.storage?.local?.set({
+        [ExtensionState.AUDIT_FILED_ISSUES_KEY]: $state.snapshot(
+          this.audit.filedIssues,
+        ),
+      });
+    } catch (err) {
+      if (ExtensionState.isQuotaExceeded(err)) {
+        this.audit.error =
+          "Browser storage is full — the filed-issue record couldn't save.";
+      }
+    }
+  }
+
+  /** Arm a per-finding op timeout so a stuck agent clears the spinner. */
+  private armAuditOpTimer(
+    op: string,
+    checkId: string,
+    pendingMap: Record<string, boolean>,
+  ): void {
+    const key = `${op}:${checkId}`;
+    this.clearAuditOpTimer(op, checkId);
+    const t = setTimeout(() => {
+      this.auditOpTimers.delete(key);
+      if (!pendingMap[checkId]) return;
+      delete pendingMap[checkId];
+      this.audit.error =
+        "Timed out waiting for the agent. Make sure `/pinta` is running " +
+        "in a Claude Code terminal for this project, then try again.";
+    }, ExtensionState.AUDIT_OP_TIMEOUT_MS);
+    this.auditOpTimers.set(key, t);
+  }
+
+  private clearAuditOpTimer(op: string, checkId: string): void {
+    const key = `${op}:${checkId}`;
+    const t = this.auditOpTimers.get(key);
+    if (t) {
+      clearTimeout(t);
+      this.auditOpTimers.delete(key);
+    }
+  }
+
+  /** Send a Discuss message about one finding. Mirrors Test Pilot's
+   *  per-row `sendChatMessage` — optimistic append, fire over WS, reply
+   *  lands via session.synced → handleAuditCheckChatSync. */
+  async sendAuditCheckChat(check: AuditCheck, prompt: string): Promise<void> {
+    const text = prompt.trim();
+    if (!text) return;
+    if (this.audit.pendingCheckChat[check.id]) return;
+    if (!this.client || this.connectionStatus !== "connected") {
+      this.audit.error =
+        "No companion connected. Start `pinta-companion .` in your project to use Discuss.";
+      return;
+    }
+    const userMsg: ChatMessage = {
+      id: crypto.randomUUID(),
+      role: "user",
+      text,
+      at: Date.now(),
+    };
+    this.audit.checkChats[check.id] = [
+      ...(this.audit.checkChats[check.id] ?? []),
+      userMsg,
+    ];
+    this.audit.error = null;
+    void this.saveAuditCheckChats();
+
+    const history = (this.audit.checkChats[check.id] ?? []).slice(
+      -ExtensionState.CHAT_HISTORY_CAP,
+    );
+    const detailedResponses =
+      this.modules["chat"]?.settings?.detailed_responses === true;
+    const queryComment = JSON.stringify({
+      op: "audit-discuss",
+      runId: this.audit.currentRun?.runId,
+      checkId: check.id,
+      prompt: text,
+      context: {
+        kind: "audit-check",
+        category: check.category,
+        label: check.label,
+        description: check.description,
+        fixHint: check.fixHint,
+        status: check.status,
+        where: check.where,
+        detailedResponses,
+      },
+      history: history.map((m) => ({ role: m.role, text: m.text })),
+    });
+    this.audit.pendingCheckChat[check.id] = true;
+    this.armAuditOpTimer("audit-discuss", check.id, this.audit.pendingCheckChat);
+    this.send({
+      type: "module.query.submit",
+      url: this.lastUrl ?? "",
+      moduleId: "audit-flow",
+      moduleSettings: this.modules["audit-flow"]?.settings ?? {},
+      queryComment,
+    });
+  }
+
+  private applyAuditCheckChatResult(
+    payload: { [k: string]: unknown },
+    fallbackCheckId?: string,
+  ): void {
+    const cid =
+      (typeof payload.checkId === "string" ? payload.checkId : null) ??
+      fallbackCheckId ??
+      null;
+    const reply =
+      typeof payload.reply === "string"
+        ? repairReplacementChars(repairMojibake(payload.reply))
+        : "";
+    if (!cid || !reply) return;
+    const thread = this.audit.checkChats[cid] ?? [];
+    const lastUser = [...thread].reverse().find((m) => m.role === "user");
+    const now = Date.now();
+    const agentMsg: ChatMessage = {
+      id: crypto.randomUUID(),
+      role: "agent",
+      text: reply,
+      at: now,
+      elapsedMs: lastUser ? now - lastUser.at : undefined,
+      tokens: extractTokens(payload),
+    };
+    this.audit.checkChats[cid] = [...thread, agentMsg];
+    this.audit.error = null;
+    void this.saveAuditCheckChats();
+  }
+
+  private handleAuditCheckChatSync(session: Session, checkId: string): void {
+    const hadPending = !!this.audit.pendingCheckChat[checkId];
+    if (session.status === "done") {
+      this.clearAuditOpTimer("audit-discuss", checkId);
+      const { payload, replyText } = parseAgentChatReply(
+        session.appliedSummary ?? "",
+      );
+      if (payload) this.applyAuditCheckChatResult(payload, checkId);
+      else if (replyText) this.applyAuditCheckChatResult({ reply: replyText }, checkId);
+      else this.audit.error = "Agent returned an empty response.";
+      if (hadPending) delete this.audit.pendingCheckChat[checkId];
+    } else if (session.status === "error") {
+      this.clearAuditOpTimer("audit-discuss", checkId);
+      this.audit.error =
+        session.errorMessage ?? "Discuss failed for this finding.";
+      if (hadPending) delete this.audit.pendingCheckChat[checkId];
+    }
+  }
+
+  /** File one finding as an issue. The agent files a GitLab issue via
+   *  `glab` when the gitlab-issues module is configured, else appends it
+   *  to `.pinta/tasks.md` (the local fallback). */
+  async fileAuditCheckAsIssue(check: AuditCheck): Promise<void> {
+    if (this.audit.pendingFileIssue[check.id]) return;
+    if (!this.client || this.connectionStatus !== "connected") {
+      this.audit.error =
+        "No companion connected. Start `pinta-companion .` in your project to file an issue.";
+      return;
+    }
+    const gl = this.modules["gitlab-issues"];
+    const gitlab = gl?.enabled
+      ? {
+          projectId: (gl.settings?.project_id as string) || undefined,
+          labels: (gl.settings?.labels as string) || undefined,
+        }
+      : null;
+    const queryComment = JSON.stringify({
+      op: "audit-file-issue",
+      runId: this.audit.currentRun?.runId,
+      checkId: check.id,
+      finding: {
+        category: check.category,
+        label: check.label,
+        description: check.description,
+        fixHint: check.fixHint,
+        status: check.status,
+        value: check.value,
+        where: check.where,
+      },
+      gitlab,
+      fallbackToLocal: true,
+    });
+    this.audit.error = null;
+    this.audit.pendingFileIssue[check.id] = true;
+    this.armAuditOpTimer("audit-file-issue", check.id, this.audit.pendingFileIssue);
+    this.send({
+      type: "module.query.submit",
+      url: this.lastUrl ?? "",
+      moduleId: "audit-flow",
+      moduleSettings: this.modules["audit-flow"]?.settings ?? {},
+      queryComment,
+    });
+  }
+
+  private handleAuditFileIssueSync(session: Session, checkId: string): void {
+    const hadPending = !!this.audit.pendingFileIssue[checkId];
+    if (session.status === "done") {
+      this.clearAuditOpTimer("audit-file-issue", checkId);
+      let payload: { [k: string]: unknown } | null = null;
+      try {
+        payload = JSON.parse(session.appliedSummary ?? "");
+      } catch {
+        payload = null;
+      }
+      if (payload && payload.type === "audit-issue-filed") {
+        this.audit.filedIssues[checkId] = {
+          target: payload.target === "gitlab" ? "gitlab" : "local",
+          url: typeof payload.url === "string" ? payload.url : undefined,
+          path: typeof payload.path === "string" ? payload.path : undefined,
+          title: typeof payload.title === "string" ? payload.title : undefined,
+          at: Date.now(),
+        };
+        this.audit.error = null;
+        void this.saveAuditFiledIssues();
+      } else {
+        this.audit.error =
+          "Couldn't file this finding — the agent didn't confirm where it landed.";
+      }
+      if (hadPending) delete this.audit.pendingFileIssue[checkId];
+    } else if (session.status === "error") {
+      this.clearAuditOpTimer("audit-file-issue", checkId);
+      this.audit.error = session.errorMessage ?? "Filing this finding failed.";
+      if (hadPending) delete this.audit.pendingFileIssue[checkId];
+    }
   }
 
   /** Kick off an audit run. Reads `this.audit.selectedCategories`
@@ -3700,10 +4026,16 @@ class ExtensionState {
       deleted: [],
     };
     this.audit.dispositions = {};
+    this.audit.checkChats = {};
+    this.audit.filedIssues = {};
+    this.audit.pendingCheckChat = {};
+    this.audit.pendingFileIssue = {};
     this.recomputeAuditRun();
     this.audit.error = null;
     void this.saveAuditRun();
     void this.saveAuditDispositions();
+    void this.saveAuditCheckChats();
+    void this.saveAuditFiledIssues();
   }
 
   // ─── Catalog export / import (Phase 20 — backup & restore) ─────────
@@ -5515,6 +5847,19 @@ class ExtensionState {
             );
             if (categoryId)
               this.handleAuditSuggestSync(msg.session, categoryId);
+            return;
+          }
+          // Phase 15e — per-finding Discuss (chat) + File issue, routed by
+          // checkId via their own pending maps (like Test Pilot's per-row
+          // chat). Bypass the singleton audit-run handler.
+          if (op === "audit-discuss") {
+            const checkId = ExtensionState.queryField(msg.session, "checkId");
+            if (checkId) this.handleAuditCheckChatSync(msg.session, checkId);
+            return;
+          }
+          if (op === "audit-file-issue") {
+            const checkId = ExtensionState.queryField(msg.session, "checkId");
+            if (checkId) this.handleAuditFileIssueSync(msg.session, checkId);
             return;
           }
           this.handleAuditSync(msg.session);
