@@ -566,7 +566,30 @@
          catalog across projects. Catalog only; not the findings.
          Compact icon-only segmented group, matching Test Pilot's header
          actions. Labels live in title + aria-label since it's icon-only. -->
-    <div class="shrink-0 flex items-center">
+    <div class="shrink-0 flex items-center gap-1.5">
+      {#if hasRun}
+        <!-- Re-run the whole audit — mirrors the "Re-run" text link in the
+             score card, surfaced as a header icon so it's reachable without
+             scrolling. Disabled while disconnected or a run is in flight. -->
+        <button
+          type="button"
+          class="inline-flex items-center justify-center w-8 h-8 rounded-md border border-ink-200 dark:border-night-line bg-white dark:bg-night-card text-ink-700 dark:text-night-dim hover:text-brand-pink dark:hover:text-brand-pink-light hover:bg-ink-50 dark:hover:bg-night-alt disabled:opacity-50 disabled:cursor-not-allowed"
+          onclick={runAudit}
+          disabled={app.connectionStatus !== "connected" || auditBusy}
+          title={app.connectionStatus !== "connected"
+            ? "Connect a companion to re-run"
+            : auditBusy
+              ? "Audit running…"
+              : "Re-run the audit"}
+          aria-label="Re-run the audit"
+        >
+          {#if running}
+            <svg class="animate-spin" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21 12a9 9 0 1 1-6.219-8.56"/></svg>
+          {:else}
+            <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="23 4 23 10 17 10"/><polyline points="1 20 1 14 7 14"/><path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"/></svg>
+          {/if}
+        </button>
+      {/if}
       <div class="inline-flex items-center rounded-md border border-ink-200 dark:border-night-line bg-white dark:bg-night-card divide-x divide-ink-200 dark:divide-night-line">
         <button
           type="button"

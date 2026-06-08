@@ -2397,12 +2397,17 @@
               {#if anyBatchDone}
                 <button
                   type="button"
-                  class="rounded border border-ink-300 dark:border-night-line bg-white dark:bg-night-card text-ink-700 dark:text-night-text text-[11px] px-2 py-0.5 hover:bg-ink-50 dark:hover:bg-night-line disabled:opacity-50"
+                  class="inline-flex items-center gap-1 rounded border border-ink-300 dark:border-night-line bg-white dark:bg-night-card text-ink-700 dark:text-night-text text-[11px] px-2 py-0.5 hover:bg-ink-50 dark:hover:bg-night-line disabled:opacity-50"
                   onclick={reloadActiveTab}
                   disabled={reloadingAt !== null || activeTabId == null}
                   title="Reload the page to see the applied changes"
                 >
-                  {reloadingAt ? "↻…" : "Reload"}
+                  {#if reloadingAt}
+                    <svg class="animate-spin" width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21 12a9 9 0 1 1-6.219-8.56"/></svg>
+                    Reloading…
+                  {:else}
+                    Reload
+                  {/if}
                 </button>
               {/if}
               <button
