@@ -36,7 +36,7 @@
 
   // Phase 14 chat surfaces owned by App.svelte (Test Pilot tier owns
   // its own sheet inside TestPilotTab.svelte):
-  // - globalChatOpen — header chat icon → ChatSheet with context.kind = "global"
+  // - globalChatOpen — global "Ask Pinta" FAB → ChatSheet with context.kind = "global"
   // - annotateJustAsk — Annotate submit footer checkbox; when ticked,
   //   Submit re-labels to "Ask agent" and opens the chat with
   //   context.kind = "annotate-batch" instead of submitting source edits.
@@ -153,7 +153,12 @@
   // (single or bulk) pending.
   const annotateBusy = $derived(
     app.session?.status === "submitted" ||
-      app.session?.status === "applying",
+      app.session?.status === "applying" ||
+      // Phase 20 — a detached batch still applying in the background also
+      // keeps the tab spinner alive, even though the current draft is idle.
+      app.inFlightBatches.some(
+        (b) => b.status === "submitted" || b.status === "applying",
+      ),
   );
   const testPilotBusy = $derived(
     app.testPilot.pending !== null ||
@@ -330,6 +335,10 @@
   let associatedAt = $state<number | null>(null);
   let associateError = $state<string | null>(null);
   let downloadMenuOpen = $state(false);
+  // Separate open-state for the Annotate list-header export popover, so
+  // its dropdown toggles independently of the footer's downloadDropdown
+  // (both render the shared `downloadMenuItems` snippet).
+  let annHeaderDownloadOpen = $state(false);
   let bundleBusy = $state(false);
 
   // Header overflow menu (⋮) — collapses chat / history / settings /
@@ -784,6 +793,55 @@
   const sessionPending = $derived(
     app.session?.status === "submitted" || app.session?.status === "applying",
   );
+  // Phase 20 — async batches. Tray rows for batches the user submitted
+  // earlier that are still applying (or just finished). Oldest first, so
+  // the tray reads in submit order. Each row carries its own progress
+  // (done / total annotations) and a short page label so the user can
+  // tell which page that batch was about while annotating elsewhere.
+  function shortPagePath(url: string): string {
+    try {
+      const u = new URL(url);
+      const path = (u.pathname + u.hash).replace(/\/$/, "");
+      return path.length > 28 ? "…" + path.slice(-27) : path || "/";
+    } catch {
+      return url.length > 28 ? "…" + url.slice(-27) : url;
+    }
+  }
+  // Active (still being processed) batches rank above terminal ones; within
+  // each rank the freshest submission floats to the top. So an unprocessed
+  // batch always sits directly beneath the live draft, and a just-finished
+  // one sinks below anything the agent is still working on.
+  const batchRank = (status: string) =>
+    status === "done" || status === "error" ? 1 : 0;
+  const inFlightRows = $derived.by(() =>
+    [...app.inFlightBatches]
+      .sort(
+        (a, b) =>
+          batchRank(a.status) - batchRank(b.status) ||
+          (b.submittedAt ?? 0) - (a.submittedAt ?? 0),
+      )
+      .map((b) => {
+        const total = b.annotations.length;
+        const done = b.annotations.filter(
+          (a) => a.status === "done" || a.status === "error",
+        ).length;
+        return {
+          id: b.id,
+          status: b.status,
+          total,
+          done,
+          page: shortPagePath(b.url),
+          errorMessage: b.errorMessage,
+          // Full annotation list so the group card can expand to the
+          // original AnnotationCard items, read-only.
+          annotations: b.annotations,
+        };
+      }),
+  );
+  // Phase 20 — which submitted-batch group cards are expanded in the
+  // content list. Keyed by batch id; collapsed by default so the tray
+  // stays compact and the live draft above it owns the viewport.
+  let expandedBatches = $state<Record<string, boolean>>({});
   // Drawing-kind annotations carry only stroke coords + comment — no DOM
   // selector, no outerHTML. Without a screenshot the agent has nothing to
   // act on, so we auto-enable capture as soon as one lands in the session
@@ -1395,6 +1453,7 @@
         // Text-only mode — let the agent work from selector + outerHTML
         // + nearbyText alone. Cheaper and faster.
         app.submit("", autoApplyEnabled);
+        afterSubmit();
         return;
       }
 
@@ -1412,13 +1471,80 @@
         annotations,
       );
       app.submit(composited, autoApplyEnabled);
+      afterSubmit();
     } catch (err) {
       app.lastError = `screenshot failed: ${(err as Error).message}`;
     } finally {
       capturing = false;
     }
   }
+
+  // Phase 20 — async batches. The submitted batch has detached into the
+  // in-flight tray and a fresh draft is spinning up, so wipe the page's
+  // pin badges: they belonged to the batch the agent now owns, and leaving
+  // them on-screen would mix with pins the user adds to the new draft.
+  function afterSubmit() {
+    if (activeTabId != null) {
+      chrome.tabs
+        .sendMessage(activeTabId, { type: "annotated.clear" })
+        .catch(() => {});
+    }
+  }
 </script>
+
+<!-- Small info icon with the option's description as a hover tooltip.
+     Used in Submit options so each row stays a single tidy line. -->
+{#snippet infoTip(text: string)}
+  <span
+    class="inline-flex items-center justify-center shrink-0 text-ink-400 dark:text-night-mute hover:text-ink-600 dark:hover:text-night-text cursor-help align-text-bottom"
+    title={text}
+    aria-label={text}
+    role="img"
+  >
+    <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="10"/><line x1="12" y1="16" x2="12" y2="12"/><line x1="12" y1="8" x2="12.01" y2="8"/></svg>
+  </span>
+{/snippet}
+
+<!-- Shared annotation export menu items — top-level so both the footer
+     `downloadDropdown` (opens upward) and the Annotate list-header
+     segmented group's export popover (opens downward) can render it. -->
+{#snippet downloadMenuItems()}
+  <button
+    type="button"
+    class="w-full text-left px-3 py-2 text-xs text-ink-800 dark:text-night-text hover:bg-ink-50 dark:hover:bg-night-line disabled:opacity-50"
+    disabled={bundleBusy}
+    onclick={() => downloadBundle("md")}
+  >
+    <span class="font-medium">
+      {bundleBusy ? "Capturing screenshot…" : "Markdown + screenshot"}
+    </span>
+    <span class="block text-[10px] text-ink-500 dark:text-night-mute">.zip — most context for agents</span>
+  </button>
+  <button
+    type="button"
+    class="w-full text-left px-3 py-2 text-xs text-ink-800 dark:text-night-text hover:bg-ink-50 dark:hover:bg-night-line border-t border-ink-200 dark:border-night-line"
+    onclick={() => downloadAs("md")}
+  >
+    <span class="font-medium">Markdown</span>
+    <span class="block text-[10px] text-ink-500 dark:text-night-mute">.md — text only</span>
+  </button>
+  <button
+    type="button"
+    class="w-full text-left px-3 py-2 text-xs text-ink-800 dark:text-night-text hover:bg-ink-50 dark:hover:bg-night-line border-t border-ink-200 dark:border-night-line"
+    onclick={() => downloadAs("txt")}
+  >
+    <span class="font-medium">Plain text</span>
+    <span class="block text-[10px] text-ink-500 dark:text-night-mute">.txt — text only</span>
+  </button>
+  <button
+    type="button"
+    class="w-full text-left px-3 py-2 text-xs text-ink-800 dark:text-night-text hover:bg-ink-50 dark:hover:bg-night-line border-t border-ink-200 dark:border-night-line"
+    onclick={openPintaExportForm}
+  >
+    <span class="font-medium">Share file (.pinta)</span>
+    <span class="block text-[10px] text-ink-500 dark:text-night-mute">re-importable by a teammate</span>
+  </button>
+{/snippet}
 
 <div class="flex flex-col h-full">
   <header
@@ -1576,17 +1702,6 @@
           class="absolute right-0 top-full mt-1 z-30 w-52 rounded-md border border-ink-200 bg-white shadow-lg dark:border-night-line dark:bg-night-card py-1"
           role="menu"
         >
-          {#if app.moduleReady("chat")}
-            <button
-              type="button"
-              class="w-full flex items-center gap-2.5 px-3 py-1.5 text-[12px] text-ink-700 dark:text-night-dim hover:bg-ink-50 dark:hover:bg-night-alt hover:text-ink-900 dark:hover:text-night-text"
-              role="menuitem"
-              onclick={() => { globalChatOpen = true; headerMenuOpen = false; }}
-            >
-              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M7.9 20A9 9 0 1 0 4 16.1L2 22Z"/><path d="M8 12h.01"/><path d="M12 12h.01"/><path d="M16 12h.01"/></svg>
-              Ask Pinta
-            </button>
-          {/if}
           <button
             type="button"
             class="w-full flex items-center gap-2.5 px-3 py-1.5 text-[12px] text-ink-700 dark:text-night-dim hover:bg-ink-50 dark:hover:bg-night-alt hover:text-ink-900 dark:hover:text-night-text"
@@ -1652,7 +1767,7 @@
        this flex column. -->
   <div class="flex-1 relative flex flex-col min-h-0">
 
-  <main class="flex-1 overflow-y-auto p-4 space-y-4">
+  <main class="flex-1 min-h-0 overflow-y-auto p-4 space-y-4">
     {#if showAssociatePrompt && app.selectedCompanion}
       {@const sel = app.selectedCompanion}
       {@const suggestedPattern = suggestPattern(pageUrl)}
@@ -2032,13 +2147,17 @@
         <div class="flex items-center gap-1.5">
           <button
             type="button"
-            class="inline-flex items-center gap-1 rounded-full border border-ink-200 bg-white text-ink-600 hover:text-brand-pink hover:border-ink-400 dark:border-night-line dark:bg-night-alt dark:text-night-dim dark:hover:text-brand-pink-light dark:hover:border-night-line2 text-[11px] font-medium h-7 px-2.5 transition-colors disabled:opacity-50"
+            class="inline-flex items-center justify-center w-8 h-8 rounded-md border border-ink-200 bg-white text-ink-700 hover:text-brand-pink hover:bg-ink-50 dark:border-night-line dark:bg-night-card dark:text-night-dim dark:hover:text-brand-pink-light dark:hover:bg-night-alt transition-colors disabled:opacity-50"
             onclick={() => importFileInput?.click()}
             disabled={importBusy}
-            title="Import a .pinta or .md file shared by a teammate"
+            title={importBusy ? "Importing…" : "Import a .pinta or .md file shared by a teammate"}
+            aria-label="Import a .pinta or .md file shared by a teammate"
           >
-            <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" y1="3" x2="12" y2="15"/></svg>
-            <span>{importBusy ? "Importing…" : "Import"}</span>
+            {#if importBusy}
+              <svg class="animate-spin" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21 12a9 9 0 1 1-6.219-8.56"/></svg>
+            {:else}
+              <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" y1="3" x2="12" y2="15"/></svg>
+            {/if}
           </button>
         </div>
       </div>
@@ -2142,16 +2261,56 @@
           Annotations ({annotationsHere.length}{annotations.length !== annotationsHere.length ? ` / ${annotations.length}` : ""})
         </h2>
         {#if canEditAnnotations && annotations.length > 0}
-          <button
-            type="button"
-            class="inline-flex items-center gap-1 rounded-md border border-ink-200 bg-transparent text-ink-500 hover:text-red-600 hover:border-red-300 hover:bg-red-50 dark:border-night-line dark:text-night-dim dark:hover:text-red-400 dark:hover:border-red-900 dark:hover:bg-red-950/30 text-[11px] font-medium px-2 py-1 transition-colors"
-            onclick={clearAllAnnotations}
-            aria-label="Clear all annotations"
-            title="Remove every annotation in this batch"
-          >
-            <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 6h18"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6"/><path d="M8 6V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/></svg>
-            Clear
-          </button>
+          <!-- Header action group — Copy · Export · Clear, mirroring Test
+               Pilot's segmented icon toolbar. Icon-only; labels live in
+               title + aria-label. Export reuses the shared
+               `downloadMenuItems` snippet (popover opens downward here). -->
+          <div class="inline-flex items-center shrink-0 rounded-md border border-ink-200 dark:border-night-line bg-white dark:bg-night-card divide-x divide-ink-200 dark:divide-night-line">
+            <button
+              type="button"
+              class="inline-flex items-center justify-center w-8 h-8 rounded-l-md text-ink-700 dark:text-night-dim hover:text-brand-pink dark:hover:text-brand-pink-light hover:bg-ink-50 dark:hover:bg-night-alt"
+              onclick={copyToClipboard}
+              title="Copy annotations as markdown — paste into claude.ai web, ChatGPT, or another agent"
+              aria-label="Copy annotations to clipboard"
+            >
+              {#if copiedAt}
+                <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="20 6 9 17 4 12"/></svg>
+              {:else}
+                <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>
+              {/if}
+            </button>
+            <div class="relative" use:clickOutside={() => (annHeaderDownloadOpen = false)}>
+              <button
+                type="button"
+                class="inline-flex items-center justify-center gap-0.5 w-9 h-8 text-ink-700 dark:text-night-dim hover:text-brand-pink dark:hover:text-brand-pink-light hover:bg-ink-50 dark:hover:bg-night-alt"
+                onclick={() => (annHeaderDownloadOpen = !annHeaderDownloadOpen)}
+                title="Download annotations as a file an agent can read"
+                aria-haspopup="menu"
+                aria-expanded={annHeaderDownloadOpen}
+                aria-label="Export annotations"
+              >
+                <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
+                <svg width="8" height="8" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="6 9 12 15 18 9"/></svg>
+              </button>
+              {#if annHeaderDownloadOpen}
+                <div
+                  class="absolute right-0 top-full mt-1 w-56 z-30 rounded-md border border-ink-300 bg-white shadow-lg dark:border-night-line dark:bg-night-alt overflow-hidden"
+                  role="menu"
+                >
+                  {@render downloadMenuItems()}
+                </div>
+              {/if}
+            </div>
+            <button
+              type="button"
+              class="inline-flex items-center justify-center w-8 h-8 rounded-r-md text-ink-700 dark:text-night-dim hover:text-red-600 dark:hover:text-red-400 hover:bg-ink-50 dark:hover:bg-night-alt"
+              onclick={clearAllAnnotations}
+              aria-label="Clear all annotations"
+              title="Remove every annotation in this batch"
+            >
+              <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 6h18"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6"/><path d="M8 6V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/></svg>
+            </button>
+          </div>
         {/if}
       </div>
       {#if otherPages.length > 0}
@@ -2212,6 +2371,126 @@
         </ul>
       {/if}
     </section>
+
+    <!-- Phase 20 — submitted batches, in-content. Batches the user already
+         sent that are still applying in the background (or just finished),
+         shown below the live draft as collapsed group cards. Each card
+         expands to the original AnnotationCard items, read-only, so the
+         batch is browsable without leaving the Annotate tab. The live draft
+         above stays fully editable while earlier work lands. Connected only. -->
+    {#if app.appMode === "connected" && inFlightRows.length > 0}
+      <section class="space-y-2">
+        <h2 class="text-xs uppercase tracking-wide text-ink-500 dark:text-night-mute font-medium">
+          Submitted ({inFlightRows.length})
+        </h2>
+        <ul class="space-y-2" aria-label="Submitted batches">
+          {#each inFlightRows as row (row.id)}
+            {@const open = !!expandedBatches[row.id]}
+            <li
+              class="rounded-md border {row.status === 'error'
+                ? 'border-rose-300 bg-rose-50 dark:border-rose-800/50 dark:bg-rose-950/30'
+                : row.status === 'done'
+                  ? 'border-emerald-300 bg-emerald-50 dark:border-emerald-800/50 dark:bg-emerald-950/30'
+                  : 'border-ink-200 bg-ink-50 dark:border-night-line dark:bg-night-alt'}"
+            >
+              <div class="flex items-center gap-2 px-2.5 py-1.5">
+                <!-- collapsible header — toggles the original cards below -->
+                <button
+                  type="button"
+                  class="flex-1 min-w-0 flex items-center gap-2 text-left"
+                  onclick={() => (expandedBatches[row.id] = !open)}
+                  aria-expanded={open}
+                  title={open ? "Hide annotations" : "Show annotations"}
+                >
+                  <!-- status glyph -->
+                  {#if row.status === "submitted" || row.status === "applying"}
+                    <span
+                      class="shrink-0 inline-block w-3 h-3 rounded-full border-2 border-brand-pink/70 border-t-transparent animate-spin"
+                      aria-hidden="true"
+                    ></span>
+                  {:else if row.status === "done"}
+                    <svg class="shrink-0 text-emerald-600 dark:text-emerald-400" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="20 6 9 17 4 12"/></svg>
+                  {:else}
+                    <svg class="shrink-0 text-rose-600 dark:text-rose-400" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
+                  {/if}
+
+                  <!-- label + progress -->
+                  <span class="flex-1 min-w-0">
+                    <span class="flex items-center gap-1.5">
+                      <span class="font-medium text-[11px] text-ink-700 dark:text-night-text">
+                        {row.total} {row.total === 1 ? "annotation" : "annotations"}
+                      </span>
+                      <span class="text-ink-400 dark:text-night-mute truncate font-mono text-[10px]" title={row.page}>
+                        {row.page}
+                      </span>
+                    </span>
+                    <span class="block text-[10.5px] text-ink-500 dark:text-night-mute truncate">
+                      {#if row.status === "submitted"}
+                        Waiting for agent…
+                      {:else if row.status === "applying"}
+                        Applying {row.done}/{row.total}…
+                      {:else if row.status === "done"}
+                        Done — reload to see changes
+                      {:else}
+                        {row.errorMessage ?? "Some changes failed"}
+                      {/if}
+                    </span>
+                  </span>
+
+                  <!-- expand chevron -->
+                  <svg class="shrink-0 text-ink-400 dark:text-night-mute" class:rotate-180={open} width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="6 9 12 15 18 9"/></svg>
+                </button>
+
+                <!-- per-batch actions (siblings of the toggle, never nested) -->
+                {#if row.status === "done"}
+                  <button
+                    type="button"
+                    class="shrink-0 rounded border border-ink-300 dark:border-night-line bg-white dark:bg-night-card text-ink-700 dark:text-night-text text-[11px] px-2 py-0.5 hover:bg-ink-50 dark:hover:bg-night-line disabled:opacity-50"
+                    onclick={reloadActiveTab}
+                    disabled={reloadingAt !== null || activeTabId == null}
+                    title="Reload the page to see this batch's changes"
+                  >
+                    {reloadingAt ? "↻…" : "Reload"}
+                  </button>
+                {/if}
+                {#if row.status === "done" || row.status === "error"}
+                  <button
+                    type="button"
+                    class="shrink-0 inline-flex items-center justify-center w-5 h-5 rounded text-ink-500 dark:text-night-mute hover:text-ink-900 dark:hover:text-night-text hover:bg-ink-100 dark:hover:bg-night-line"
+                    onclick={() => app.dismissBatch(row.id)}
+                    title="Dismiss"
+                    aria-label="Dismiss batch"
+                  >
+                    <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
+                  </button>
+                {/if}
+              </div>
+
+              <!-- expanded: the original card-based annotations, read-only -->
+              {#if open}
+                {#if row.annotations.length === 0}
+                  <p class="px-2.5 pb-2.5 pt-0.5 text-[11px] italic text-ink-500 dark:text-night-mute border-t border-ink-200/70 dark:border-night-line">
+                    No annotations in this batch.
+                  </p>
+                {:else}
+                  <ul class="px-2.5 pb-2.5 pt-2 space-y-2 border-t border-ink-200/70 dark:border-night-line">
+                    {#each row.annotations as annotation, i (`${annotation.id}:${i}`)}
+                      <AnnotationCard
+                        {annotation}
+                        canEdit={false}
+                        pending={(row.status === "submitted" || row.status === "applying") && annotation.status !== "done" && annotation.status !== "error"}
+                        onremove={() => {}}
+                        onsave={() => {}}
+                      />
+                    {/each}
+                  </ul>
+                {/if}
+              {/if}
+            </li>
+          {/each}
+        </ul>
+      </section>
+    {/if}
     {/if}
 
     {#if app.lastError}
@@ -2234,7 +2513,7 @@
   </main>
 
   <footer
-    class="border-t border-ink-200 p-3 bg-white dark:border-night-line dark:bg-night-card space-y-2"
+    class="shrink-0 border-t border-ink-200 p-3 bg-white dark:border-night-line dark:bg-night-card space-y-2"
     class:hidden={showAssociatePrompt ||
       app.viewingSettings ||
       (activeTab !== "annotate" && !app.viewingImportedId)}
@@ -2444,12 +2723,9 @@
           class="mt-0.5 accent-brand-pink"
           bind:checked={autoApplyEnabled}
         />
-        <span class="flex-1 leading-snug">
+        <span class="flex-1 leading-snug inline-flex items-center gap-1.5">
           Auto-apply (no agent confirmation)
-          <span class="block text-[11px] text-ink-500 dark:text-night-mute">
-            Skip the agent's "reply 'go' to apply" step. Plan is still shown
-            briefly. Off by default — turn on for fast iteration.
-          </span>
+          {@render infoTip("Skip the agent's \"reply 'go' to apply\" step. Plan is still shown briefly. Off by default — turn on for fast iteration.")}
         </span>
       </label>
       <label
@@ -2463,26 +2739,18 @@
           bind:checked={includeScreenshot}
           disabled={screenshotLocked}
         />
-        <span class="flex-1 leading-snug">
+        <span class="flex-1 leading-snug inline-flex items-center gap-1.5">
           Include full-page screenshot
           {#if screenshotLocked}
             <span class="text-brand-pink dark:text-brand-pink-light font-medium">(required)</span>
           {/if}
-          <span class="block text-[11px] text-ink-500 dark:text-night-mute">
-            {#if hasDrawingAnnotation}
-              A drawing is in this batch — the agent has no DOM target for
-              freehand / arrow / circle / rect / pin annotations, so the
-              screenshot is the only context it has.
-            {:else if screenshotRequiredByModule}
-              Required because a module below needs the screenshot embedded
-              in its output (e.g. GitLab issues attach it to every body).
-              Untick the module to unlock this.
-            {:else}
-              Adds visual context for the agent. ~1.5–2k extra vision tokens
-              per submit. Off by default — selectors + nearby text are usually
-              enough.
-            {/if}
-          </span>
+          {@render infoTip(
+            hasDrawingAnnotation
+              ? "A drawing is in this batch — the agent has no DOM target for freehand / arrow / circle / rect / pin annotations, so the screenshot is the only context it has."
+              : screenshotRequiredByModule
+                ? "Required because a module below needs the screenshot embedded in its output (e.g. GitLab issues attach it to every body). Untick the module to unlock this."
+                : "Adds visual context for the agent. ~1.5–2k extra vision tokens per submit. Off by default — selectors + nearby text are usually enough.",
+          )}
         </span>
       </label>
       {#if app.moduleReady("chat")}
@@ -2500,14 +2768,12 @@
           <span class="flex-1 leading-snug">
             <span class="inline-flex items-center gap-1.5 flex-wrap">
               💬 Just Ask
+              {@render infoTip("Don't touch source files — discuss this batch with the agent first. Submit re-labels to \"Ask agent\" and opens the chat. Untick to go back to the normal source-edit flow.")}
               {#if annotateJustAsk}
                 <span class="inline-flex items-center text-[10px] uppercase tracking-wide font-semibold text-brand-pink dark:text-brand-pink-light bg-brand-pink/10 dark:bg-brand-pink-light/10 border border-brand-pink/40 dark:border-brand-pink-light/40 rounded-full px-1.5 py-0.5">
                   Chat only
                 </span>
               {/if}
-            </span>
-            <span class="block text-[11px] text-ink-500 dark:text-night-mute">
-              Don't touch source files — discuss this batch with the agent first. Submit re-labels to "Ask agent" and opens the chat. Untick to go back to the normal source-edit flow.
             </span>
           </span>
         </label>
@@ -2532,14 +2798,12 @@
             <span class="flex-1 leading-snug">
               <span class="inline-flex items-center gap-1.5 flex-wrap">
                 {moduleSpec.sessionCheckboxLabel}
+                {@render infoTip(moduleSpec.sessionCheckboxHint)}
                 {#if ticked}
                   <span class="inline-flex items-center text-[10px] uppercase tracking-wide font-semibold text-emerald-700 dark:text-emerald-300 bg-emerald-100 dark:bg-emerald-950/50 border border-emerald-300 dark:border-emerald-800/50 rounded-full px-1.5 py-0.5" title="This module will run on the next submit">
                     Will run
                   </span>
                 {/if}
-              </span>
-              <span class="block text-[11px] text-ink-500 dark:text-night-mute">
-                {moduleSpec.sessionCheckboxHint}
               </span>
             </span>
           </label>
@@ -2566,41 +2830,7 @@
             class="absolute right-0 bottom-full mb-1 w-56 z-30 rounded-md border border-ink-300 bg-white shadow-lg dark:border-night-line dark:bg-night-alt overflow-hidden"
             role="menu"
           >
-            <button
-              type="button"
-              class="w-full text-left px-3 py-2 text-xs text-ink-800 dark:text-night-text hover:bg-ink-50 dark:hover:bg-night-line disabled:opacity-50"
-              disabled={bundleBusy}
-              onclick={() => downloadBundle("md")}
-            >
-              <span class="font-medium">
-                {bundleBusy ? "Capturing screenshot…" : "Markdown + screenshot"}
-              </span>
-              <span class="block text-[10px] text-ink-500 dark:text-night-mute">.zip — most context for agents</span>
-            </button>
-            <button
-              type="button"
-              class="w-full text-left px-3 py-2 text-xs text-ink-800 dark:text-night-text hover:bg-ink-50 dark:hover:bg-night-line border-t border-ink-200 dark:border-night-line"
-              onclick={() => downloadAs("md")}
-            >
-              <span class="font-medium">Markdown</span>
-              <span class="block text-[10px] text-ink-500 dark:text-night-mute">.md — text only</span>
-            </button>
-            <button
-              type="button"
-              class="w-full text-left px-3 py-2 text-xs text-ink-800 dark:text-night-text hover:bg-ink-50 dark:hover:bg-night-line border-t border-ink-200 dark:border-night-line"
-              onclick={() => downloadAs("txt")}
-            >
-              <span class="font-medium">Plain text</span>
-              <span class="block text-[10px] text-ink-500 dark:text-night-mute">.txt — text only</span>
-            </button>
-            <button
-              type="button"
-              class="w-full text-left px-3 py-2 text-xs text-ink-800 dark:text-night-text hover:bg-ink-50 dark:hover:bg-night-line border-t border-ink-200 dark:border-night-line"
-              onclick={openPintaExportForm}
-            >
-              <span class="font-medium">Share file (.pinta)</span>
-              <span class="block text-[10px] text-ink-500 dark:text-night-mute">re-importable by a teammate</span>
-            </button>
+            {@render downloadMenuItems()}
           </div>
         {/if}
       </div>
@@ -2808,6 +3038,22 @@
         onClose={() => (annotateChatOpen = false)}
         onSend={(prompt) => void app.sendAnnotateChatMessage(batchId, prompt)}
       />
+    {/if}
+
+    <!-- Global "Ask Pinta" FAB — floats bottom-right of the panel body so
+         the agent Q&A is reachable from every module/tab instead of being
+         buried in the header ⋮ menu. Hidden while the global sheet is open
+         (the sheet covers this corner). -->
+    {#if app.moduleReady("chat") && !globalChatOpen}
+      <button
+        type="button"
+        class="absolute bottom-4 right-4 z-20 w-12 h-12 inline-flex items-center justify-center rounded-full bg-brand-pink text-white shadow-lg hover:bg-brand-magenta dark:bg-brand-pink-light dark:text-night-bg dark:hover:bg-brand-pink transition-colors"
+        onclick={() => (globalChatOpen = true)}
+        aria-label="Ask Pinta"
+        title="Ask Pinta"
+      >
+        <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M7.9 20A9 9 0 1 0 4 16.1L2 22Z"/><path d="M8 12h.01"/><path d="M12 12h.01"/><path d="M16 12h.01"/></svg>
+      </button>
     {/if}
   </div>
 </div>

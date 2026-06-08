@@ -2443,6 +2443,16 @@ loop**:
 - **`--polling` (fallback):** re-enter `/v1/sessions/poll` for the next
   session.
 
+**Batches queue — process them one at a time, oldest first.** The user can
+keep annotating and submit a new batch while you're still applying the
+previous one, so more than one session may be in `submitted` at once. This
+is expected, not an error. Finish the batch you're on (apply → mark done),
+then take the **oldest** remaining `submitted` session next — `--push`
+backlog and `--polling` already hand them to you oldest-first. Never try to
+apply two batches in parallel; one human-reviewed batch at a time keeps the
+flow interactive. Each carries its own `id` — keep status updates
+(`/status`, per-annotation `/status`) keyed to the batch you're working.
+
 **Idle timeout — stop after ~30 minutes of no new submissions.** When the
 stream / poll has been quiet for roughly 30 minutes, stop waiting and tell
 the user: *"No submissions for a while, so I've paused to stay within

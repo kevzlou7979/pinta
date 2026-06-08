@@ -353,6 +353,18 @@ function newDraft(url: string): Session {
 
 class ExtensionState {
   session = $state<Session | null>(null);
+  /**
+   * Phase 20 — async batches. Annotation batches the user already
+   * submitted that the agent is still applying (status submitted /
+   * applying) or has just finished (done / error, shown briefly in the
+   * footer tray until dismissed). The active *editable* draft stays in
+   * `this.session`; these are detached, agent-owned copies updated by id
+   * from `session.synced`. Lets the user keep annotating — even on other
+   * pages — while earlier batches apply in the background. Connected mode
+   * only (standalone has no agent to apply anything). In-memory: a panel
+   * reload drops the tray, but the companion still applies the work.
+   */
+  inFlightBatches = $state<Session[]>([]);
   mode = $state<ExtensionMode>("idle");
   selectedAnnotationId = $state<string | null>(null);
   connectionStatus = $state<WsClientStatus>("disconnected");
@@ -5622,6 +5634,38 @@ class ExtensionState {
       autoApply,
       modules,
     });
+    // Phase 20 — async batches. Detach the just-submitted session into the
+    // in-flight tray and immediately spin up a fresh draft so the user can
+    // keep annotating (even after navigating to another page) while the
+    // agent applies this one. The companion keeps the submitted session
+    // alive — store.submit() does NOT clear `activeId`, and createSession()
+    // only echoes back an existing *drafting* active session, so the
+    // session.create below mints a brand-new draft rather than resurrecting
+    // the one we just sent. The authoritative submitted/applying/done
+    // status arrives via session.synced and is routed back here by id.
+    const detached = this.session;
+    if (detached) {
+      detached.status = "submitted";
+      detached.submittedAt = Date.now();
+      this.inFlightBatches = [...this.inFlightBatches, detached];
+    }
+    this.session = null;
+    this.markCreatingSession(true);
+    this.send({
+      type: "session.create",
+      url: this.lastUrl ?? detached?.url ?? "",
+    });
+  }
+
+  /**
+   * Phase 20 — drop a finished (done / error) batch from the in-flight
+   * tray. Called by the tray's dismiss (×) button. No companion call —
+   * the session already reached a terminal state server-side; this just
+   * stops showing it. Also clears any lingering claim-warning timer.
+   */
+  dismissBatch(id: string): void {
+    this.clearClaimWarning(id);
+    this.inFlightBatches = this.inFlightBatches.filter((b) => b.id !== id);
   }
 
   /**
@@ -5940,14 +5984,42 @@ class ExtensionState {
           this.handleTestPilotSync(msg.session);
           return;
         }
+        // Phase 20 — async batches. Route the regular annotation session
+        // by id. A session already sitting in the in-flight tray (the user
+        // submitted it earlier and has since moved on to a fresh draft)
+        // updates its tray row in place — it must NOT clobber the current
+        // draft. This is the path that flips each detached batch
+        // submitted → applying → done and flows per-annotation status into
+        // the tray progress.
+        const incoming = msg.session;
+        const flightIdx = this.inFlightBatches.findIndex(
+          (b) => b.id === incoming.id,
+        );
+        if (flightIdx !== -1) {
+          this.inFlightBatches[flightIdx] = incoming;
+          // Reassign so Svelte tracks the array mutation.
+          this.inFlightBatches = [...this.inFlightBatches];
+          break;
+        }
         const previousSessionId = this.session?.id ?? null;
-        this.session = msg.session;
+        // A terminal-status (done / error) broadcast for a session that's
+        // neither the current draft nor a tracked in-flight batch is stale
+        // — e.g. a late echo for a batch the user already dismissed. Ignore
+        // it so it can't resurrect as a phantom "done" draft and strand the
+        // footer in the all-done state.
+        if (
+          incoming.id !== previousSessionId &&
+          (incoming.status === "done" || incoming.status === "error")
+        ) {
+          break;
+        }
+        this.session = incoming;
         this.markCreatingSession(false);
         this.lastError = null;
         // A new session started → drop ticked module checkboxes so the
         // user has to consciously opt in for the next submit. Mirrors
         // how autoApply / includeScreenshot behave per-batch.
-        if (msg.session.id !== previousSessionId) {
+        if (incoming.id !== previousSessionId) {
           this.resetTickedModules();
         }
         break;

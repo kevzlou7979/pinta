@@ -30,6 +30,24 @@
 
   let revealedSecrets = $state<Record<string, boolean>>({});
 
+  // Which module cards are expanded to show their description + settings.
+  // Default (undefined) is computed per-card: collapsed normally, but
+  // auto-open when a module is enabled yet not configured so its required
+  // fields are never hidden behind the chevron.
+  let expandedModules = $state<Record<string, boolean>>({});
+  function moduleOpen(spec: ModuleSpec, enabled: boolean, ready: boolean): boolean {
+    const explicit = expandedModules[spec.id];
+    if (explicit !== undefined) return explicit;
+    return enabled && !ready;
+  }
+  function toggleModule(spec: ModuleSpec, current: boolean) {
+    expandedModules[spec.id] = !current;
+  }
+
+  // The keyboard-shortcuts reference is a tall static block — collapsed by
+  // default so it doesn't dominate the settings scroll.
+  let showShortcuts = $state(false);
+
   // All module specs to render — built-ins first, then imported.
   const specs = $derived(app.allModuleSpecs());
   // Quick lookup: which specs are imported (vs bundled), keyed by id.
@@ -258,91 +276,81 @@
       {@const enabled = entry?.enabled ?? false}
       {@const ready = enabled && isReady(spec)}
       {@const installed = importedById.get(spec.id)}
+      {@const open = moduleOpen(spec, enabled, ready)}
       <div
-        class="rounded-md border bg-white dark:bg-night-card p-3 space-y-2"
+        class="rounded-md border bg-white dark:bg-night-card overflow-hidden"
         class:border-ink-200={!enabled || ready}
         class:dark:border-night-line={!enabled || ready}
         class:border-amber-400={enabled && !ready}
         class:dark:border-amber-700={enabled && !ready}
       >
-        <div class="flex items-start gap-2">
-          <div class="min-w-0 flex-1">
-            <div class="flex items-center gap-1.5 flex-wrap">
-              <!-- Module icon — colored when enabled, grey when off. Same
-                   visual identity as the Test Pilot tab/section flask so
-                   the user can recognize a module at a glance. -->
-              <span
-                class="inline-flex shrink-0"
-                class:text-brand-pink={enabled}
-                class:dark:text-brand-pink-light={enabled}
-                class:text-ink-400={!enabled}
-                class:dark:text-night-mute={!enabled}
-                aria-hidden="true"
-              >
-                {#if spec.id === "test-pilot"}
-                  <!-- Flask -->
-                  <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-                    <path d="M9 3h6" />
-                    <path d="M10 3v6.5L4.4 18.7A1.6 1.6 0 0 0 5.8 21h12.4a1.6 1.6 0 0 0 1.4-2.3L14 9.5V3" />
-                    <path d="M7.5 14.5h9" opacity="0.55" />
-                  </svg>
-                {:else if spec.id === "gitlab-issues"}
-                  <!-- Ticket / issue tag -->
-                  <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-                    <path d="M20.59 13.41 13.42 20.58a2 2 0 0 1-2.83 0L2 12V2h10l8.59 8.59a2 2 0 0 1 0 2.82z" />
-                    <line x1="7" y1="7" x2="7.01" y2="7" />
-                  </svg>
-                {:else}
-                  <!-- Generic puzzle-piece fallback for future modules -->
-                  <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-                    <path d="M19.439 7.85c-.049.322.059.648.289.878l1.568 1.568c.47.47.706 1.087.706 1.704s-.235 1.233-.706 1.704l-1.611 1.611a.98.98 0 0 1-.837.276c-.47-.07-.802-.48-.872-.95-.04-.275-.21-.498-.456-.605l-.039-.018a1 1 0 0 0-1.137.227l-1.488 1.488A2.41 2.41 0 0 1 12 17.474V20a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h6a2 2 0 0 1 2 2v2.526c0 .626.42 1.083 1.057 1.083.275 0 .507-.107.694-.295l1.488-1.488a1 1 0 0 1 1.137-.227l.039.018c.246.107.416.33.456.605.07.47.402.88.872.95a.98.98 0 0 0 .837-.276l1.611-1.611c.47-.47.706-1.087.706-1.704s-.235-1.233-.706-1.704L19.728 1.85a.98.98 0 0 0-.276.837z" />
-                  </svg>
-                {/if}
-              </span>
-              <span class="text-sm font-semibold text-ink-900 dark:text-night-text">
-                {spec.name}
-              </span>
-              {#if enabled && !ready}
-                <span class="inline-flex items-center text-[10px] uppercase tracking-wide font-semibold text-amber-700 dark:text-amber-300 bg-amber-100 dark:bg-amber-950/50 border border-amber-300 dark:border-amber-800/50 rounded-full px-1.5 py-0.5">
-                  Needs setup
-                </span>
-              {:else if enabled && ready}
-                <span class="inline-flex items-center text-[10px] uppercase tracking-wide font-semibold text-emerald-700 dark:text-emerald-300 bg-emerald-100 dark:bg-emerald-950/50 border border-emerald-300 dark:border-emerald-800/50 rounded-full px-1.5 py-0.5">
-                  Ready
-                </span>
+        <!-- Compact header — icon + name + status, always one tidy line.
+             The chevron expands the description + settings on demand so the
+             list stays scannable. Toggle stays outside the expander button
+             (nested interactive controls aren't allowed). -->
+        <div class="flex items-center gap-2 p-3">
+          <button
+            type="button"
+            class="min-w-0 flex-1 flex items-center gap-1.5 text-left group"
+            onclick={() => toggleModule(spec, open)}
+            aria-expanded={open}
+            aria-label={open ? `Collapse ${spec.name}` : `Expand ${spec.name}`}
+          >
+            <svg
+              width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"
+              class="shrink-0 text-ink-400 dark:text-night-mute transition-transform"
+              class:rotate-90={open}
+              aria-hidden="true"
+            ><polyline points="9 18 15 12 9 6" /></svg>
+            <!-- Module icon — colored when enabled, grey when off. Same
+                 visual identity as the Test Pilot tab/section flask so
+                 the user can recognize a module at a glance. -->
+            <span
+              class="inline-flex shrink-0"
+              class:text-brand-pink={enabled}
+              class:dark:text-brand-pink-light={enabled}
+              class:text-ink-400={!enabled}
+              class:dark:text-night-mute={!enabled}
+              aria-hidden="true"
+            >
+              {#if spec.id === "test-pilot"}
+                <!-- Flask -->
+                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                  <path d="M9 3h6" />
+                  <path d="M10 3v6.5L4.4 18.7A1.6 1.6 0 0 0 5.8 21h12.4a1.6 1.6 0 0 0 1.4-2.3L14 9.5V3" />
+                  <path d="M7.5 14.5h9" opacity="0.55" />
+                </svg>
+              {:else if spec.id === "gitlab-issues"}
+                <!-- Ticket / issue tag -->
+                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                  <path d="M20.59 13.41 13.42 20.58a2 2 0 0 1-2.83 0L2 12V2h10l8.59 8.59a2 2 0 0 1 0 2.82z" />
+                  <line x1="7" y1="7" x2="7.01" y2="7" />
+                </svg>
+              {:else}
+                <!-- Generic puzzle-piece fallback for future modules -->
+                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                  <path d="M19.439 7.85c-.049.322.059.648.289.878l1.568 1.568c.47.47.706 1.087.706 1.704s-.235 1.233-.706 1.704l-1.611 1.611a.98.98 0 0 1-.837.276c-.47-.07-.802-.48-.872-.95-.04-.275-.21-.498-.456-.605l-.039-.018a1 1 0 0 0-1.137.227l-1.488 1.488A2.41 2.41 0 0 1 12 17.474V20a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h6a2 2 0 0 1 2 2v2.526c0 .626.42 1.083 1.057 1.083.275 0 .507-.107.694-.295l1.488-1.488a1 1 0 0 1 1.137-.227l.039.018c.246.107.416.33.456.605.07.47.402.88.872.95a.98.98 0 0 0 .837-.276l1.611-1.611c.47-.47.706-1.087.706-1.704s-.235-1.233-.706-1.704L19.728 1.85a.98.98 0 0 0-.276.837z" />
+                </svg>
               {/if}
-            </div>
-            <p class="text-[12px] text-ink-700 dark:text-night-dim mt-0.5">
-              {spec.description}
-            </p>
+            </span>
+            <span class="text-sm font-semibold text-ink-900 dark:text-night-text truncate">
+              {spec.name}
+            </span>
             {#if installed}
-              <!-- Imported module — show who shipped it + the capabilities
-                   the user granted at import, and a way to remove it. -->
-              <div class="mt-1.5 flex items-center gap-1.5 flex-wrap">
-                <span class="inline-flex items-center text-[10px] uppercase tracking-wide font-semibold text-indigo-700 dark:text-indigo-300 bg-indigo-100 dark:bg-indigo-950/50 border border-indigo-300 dark:border-indigo-800/50 rounded-full px-1.5 py-0.5">
-                  Imported
-                </span>
-                <span class="text-[10px] text-ink-500 dark:text-night-mute">
-                  v{installed.manifest.version}{installed.manifest.author
-                    ? ` · ${installed.manifest.author}`
-                    : ""}
-                </span>
-              </div>
-              <div class="mt-1 flex items-center gap-1 flex-wrap">
-                {#if installed.grantedCapabilities.length === 0}
-                  <span class="text-[10px] text-ink-500 dark:text-night-mute italic">
-                    Read-only (no extra capabilities granted)
-                  </span>
-                {:else}
-                  {#each installed.grantedCapabilities as cap (cap)}
-                    <span class="inline-flex items-center font-mono text-[10px] text-ink-700 dark:text-night-dim bg-ink-100 dark:bg-night-bg border border-ink-200 dark:border-night-line rounded px-1 py-0.5">
-                      {cap}
-                    </span>
-                  {/each}
-                {/if}
-              </div>
+              <span class="inline-flex shrink-0 items-center text-[10px] uppercase tracking-wide font-semibold text-indigo-700 dark:text-indigo-300 bg-indigo-100 dark:bg-indigo-950/50 border border-indigo-300 dark:border-indigo-800/50 rounded-full px-1.5 py-0.5">
+                Imported
+              </span>
             {/if}
-          </div>
+            {#if enabled && !ready}
+              <span class="inline-flex shrink-0 items-center text-[10px] uppercase tracking-wide font-semibold text-amber-700 dark:text-amber-300 bg-amber-100 dark:bg-amber-950/50 border border-amber-300 dark:border-amber-800/50 rounded-full px-1.5 py-0.5">
+                Needs setup
+              </span>
+            {:else if enabled && ready}
+              <span class="inline-flex shrink-0 items-center text-[10px] uppercase tracking-wide font-semibold text-emerald-700 dark:text-emerald-300 bg-emerald-100 dark:bg-emerald-950/50 border border-emerald-300 dark:border-emerald-800/50 rounded-full px-1.5 py-0.5">
+                Ready
+              </span>
+            {/if}
+          </button>
           <label class="shrink-0 inline-flex items-center cursor-pointer">
             <input
               type="checkbox"
@@ -362,6 +370,36 @@
             </span>
           </label>
         </div>
+
+        {#if open}
+        <div class="px-3 pb-3 space-y-2 border-t border-ink-100 dark:border-night-line pt-2">
+          <p class="text-[12px] text-ink-700 dark:text-night-dim">
+            {spec.description}
+          </p>
+          {#if installed}
+            <!-- Imported module — show who shipped it + the capabilities
+                 the user granted at import, and a way to remove it. -->
+            <div class="flex items-center gap-1.5 flex-wrap">
+              <span class="text-[10px] text-ink-500 dark:text-night-mute">
+                v{installed.manifest.version}{installed.manifest.author
+                  ? ` · ${installed.manifest.author}`
+                  : ""}
+              </span>
+            </div>
+            <div class="flex items-center gap-1 flex-wrap">
+              {#if installed.grantedCapabilities.length === 0}
+                <span class="text-[10px] text-ink-500 dark:text-night-mute italic">
+                  Read-only (no extra capabilities granted)
+                </span>
+              {:else}
+                {#each installed.grantedCapabilities as cap (cap)}
+                  <span class="inline-flex items-center font-mono text-[10px] text-ink-700 dark:text-night-dim bg-ink-100 dark:bg-night-bg border border-ink-200 dark:border-night-line rounded px-1 py-0.5">
+                    {cap}
+                  </span>
+                {/each}
+              {/if}
+            </div>
+          {/if}
 
         {#if enabled}
           <div class="space-y-2 pt-2 border-t border-ink-100 dark:border-night-line">
@@ -468,6 +506,8 @@
               Uninstall
             </button>
           </div>
+        {/if}
+        </div>
         {/if}
       </div>
     {/each}
@@ -654,9 +694,21 @@
        when the shortcut applies, so they don't try Alt+S inside a
        textarea and wonder why nothing happens. -->
   <div class="space-y-2">
-    <h3 class="text-xs uppercase tracking-wide text-ink-500 dark:text-night-mute font-medium">
+    <button
+      type="button"
+      class="w-full flex items-center gap-1.5 text-xs uppercase tracking-wide text-ink-500 dark:text-night-mute font-medium hover:text-ink-700 dark:hover:text-night-dim transition-colors"
+      onclick={() => (showShortcuts = !showShortcuts)}
+      aria-expanded={showShortcuts}
+    >
+      <svg
+        width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"
+        class="shrink-0 transition-transform"
+        class:rotate-90={showShortcuts}
+        aria-hidden="true"
+      ><polyline points="9 18 15 12 9 6" /></svg>
       Keyboard shortcuts
-    </h3>
+    </button>
+    {#if showShortcuts}
     <div class="rounded-md border border-ink-200 dark:border-night-line bg-white dark:bg-night-card p-3 space-y-3">
       <div>
         <p class="text-[11px] font-semibold text-ink-900 dark:text-night-text mb-1.5">
@@ -731,6 +783,7 @@
         typing into form fields on your app never triggers them.
       </p>
     </div>
+    {/if}
   </div>
 </section>
 
