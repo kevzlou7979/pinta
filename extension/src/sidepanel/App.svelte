@@ -222,7 +222,9 @@
   let includeScreenshot = $state(false);
   let copiedAt = $state<number | null>(null);
   let autoReloadEnabled = $state(true);
-  let autoApplyEnabled = $state(false);
+  // Default ON — most users want the agent to apply edits without a
+  // confirmation round-trip. Untick per-submit to just file/draft instead.
+  let autoApplyEnabled = $state(true);
   let hmrDetected = $state<boolean | null>(null);
   let reloadingAt = $state<number | null>(null);
   let lastHandledSessionId = $state<string | null>(null);
@@ -2979,11 +2981,17 @@
     <!-- Global "Ask Pinta" FAB — floats bottom-right of the panel body so
          the agent Q&A is reachable from every module/tab instead of being
          buried in the header ⋮ menu. Hidden while the global sheet is open
-         (the sheet covers this corner). -->
+         (the sheet covers this corner). When the Annotate footer is visible
+         it sits higher (bottom-20) so it clears the pinned "Send to agent"
+         button; otherwise it drops to the panel's bottom-right corner. -->
     {#if app.moduleReady("chat") && !globalChatOpen}
+      {@const footerVisible =
+        !showAssociatePrompt &&
+        !app.viewingSettings &&
+        (activeTab === "annotate" || !!app.viewingImportedId)}
       <button
         type="button"
-        class="absolute bottom-4 right-4 z-20 w-12 h-12 inline-flex items-center justify-center rounded-full bg-brand-pink text-white shadow-lg hover:bg-brand-magenta dark:bg-brand-pink-light dark:text-night-bg dark:hover:bg-brand-pink transition-colors"
+        class="absolute {footerVisible ? 'bottom-20' : 'bottom-5'} right-5 z-20 w-12 h-12 inline-flex items-center justify-center rounded-full bg-brand-pink text-white shadow-lg hover:bg-brand-magenta dark:bg-brand-pink-light dark:text-night-bg dark:hover:bg-brand-pink transition-colors"
         onclick={() => (globalChatOpen = true)}
         aria-label="Ask Pinta"
         title="Ask Pinta"
