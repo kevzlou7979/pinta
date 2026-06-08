@@ -813,35 +813,41 @@
   // one sinks below anything the agent is still working on.
   const batchRank = (status: string) =>
     status === "done" || status === "error" ? 1 : 0;
-  const inFlightRows = $derived.by(() =>
+  // Flat, stacked list of every submitted-batch annotation — no per-batch
+  // grouping. Each item carries its parent batch status so the card can
+  // show the right pending/done state. Ordered active-first, newest-first.
+  const inFlightAnnotations = $derived.by(() =>
     [...app.inFlightBatches]
       .sort(
         (a, b) =>
           batchRank(a.status) - batchRank(b.status) ||
           (b.submittedAt ?? 0) - (a.submittedAt ?? 0),
       )
-      .map((b) => {
-        const total = b.annotations.length;
-        const done = b.annotations.filter(
-          (a) => a.status === "done" || a.status === "error",
-        ).length;
-        return {
-          id: b.id,
-          status: b.status,
-          total,
-          done,
-          page: shortPagePath(b.url),
-          errorMessage: b.errorMessage,
-          // Full annotation list so the group card can expand to the
-          // original AnnotationCard items, read-only.
-          annotations: b.annotations,
-        };
-      }),
+      .flatMap((b) =>
+        b.annotations.map((annotation) => ({
+          annotation,
+          batchStatus: b.status,
+        })),
+      ),
   );
-  // Phase 20 — which submitted-batch group cards are expanded in the
-  // content list. Keyed by batch id; collapsed by default so the tray
-  // stays compact and the live draft above it owns the viewport.
-  let expandedBatches = $state<Record<string, boolean>>({});
+  const anyBatchDone = $derived(
+    app.inFlightBatches.some((b) => b.status === "done"),
+  );
+  const anyBatchTerminal = $derived(
+    app.inFlightBatches.some(
+      (b) => b.status === "done" || b.status === "error",
+    ),
+  );
+  // Clear every finished (done / error) batch from the stack at once.
+  // Active batches are left running. Snapshot ids first so we don't mutate
+  // the array we're iterating.
+  function dismissFinishedBatches(): void {
+    for (const id of app.inFlightBatches
+      .filter((b) => b.status === "done" || b.status === "error")
+      .map((b) => b.id)) {
+      app.dismissBatch(id);
+    }
+  }
   // Drawing-kind annotations carry only stroke coords + comment — no DOM
   // selector, no outerHTML. Without a screenshot the agent has nothing to
   // act on, so we auto-enable capture as soon as one lands in the session
@@ -2372,121 +2378,51 @@
       {/if}
     </section>
 
-    <!-- Phase 20 — submitted batches, in-content. Batches the user already
-         sent that are still applying in the background (or just finished),
-         shown below the live draft as collapsed group cards. Each card
-         expands to the original AnnotationCard items, read-only, so the
-         batch is browsable without leaving the Annotate tab. The live draft
+    <!-- Phase 20 — submitted annotations, in-content. Annotations the user
+         already sent that the agent is still applying (or just finished),
+         stacked below the live draft as their original read-only cards — no
+         per-batch grouping, just one continuous list ordered active-first.
+         Each card shows its own status (spinner → ✓ / ✕). The live draft
          above stays fully editable while earlier work lands. Connected only. -->
-    {#if app.appMode === "connected" && inFlightRows.length > 0}
+    {#if app.appMode === "connected" && inFlightAnnotations.length > 0}
       <section class="space-y-2">
-        <h2 class="text-xs uppercase tracking-wide text-ink-500 dark:text-night-mute font-medium">
-          Submitted ({inFlightRows.length})
-        </h2>
-        <ul class="space-y-2" aria-label="Submitted batches">
-          {#each inFlightRows as row (row.id)}
-            {@const open = !!expandedBatches[row.id]}
-            <li
-              class="rounded-md border {row.status === 'error'
-                ? 'border-rose-300 bg-rose-50 dark:border-rose-800/50 dark:bg-rose-950/30'
-                : row.status === 'done'
-                  ? 'border-emerald-300 bg-emerald-50 dark:border-emerald-800/50 dark:bg-emerald-950/30'
-                  : 'border-ink-200 bg-ink-50 dark:border-night-line dark:bg-night-alt'}"
-            >
-              <div class="flex items-center gap-2 px-2.5 py-1.5">
-                <!-- collapsible header — toggles the original cards below -->
+        <div class="flex items-center justify-between gap-2">
+          <h2 class="text-xs uppercase tracking-wide text-ink-500 dark:text-night-mute font-medium">
+            Submitted ({inFlightAnnotations.length})
+          </h2>
+          {#if anyBatchTerminal}
+            <div class="inline-flex items-center gap-1.5 shrink-0">
+              {#if anyBatchDone}
                 <button
                   type="button"
-                  class="flex-1 min-w-0 flex items-center gap-2 text-left"
-                  onclick={() => (expandedBatches[row.id] = !open)}
-                  aria-expanded={open}
-                  title={open ? "Hide annotations" : "Show annotations"}
+                  class="rounded border border-ink-300 dark:border-night-line bg-white dark:bg-night-card text-ink-700 dark:text-night-text text-[11px] px-2 py-0.5 hover:bg-ink-50 dark:hover:bg-night-line disabled:opacity-50"
+                  onclick={reloadActiveTab}
+                  disabled={reloadingAt !== null || activeTabId == null}
+                  title="Reload the page to see the applied changes"
                 >
-                  <!-- status glyph -->
-                  {#if row.status === "submitted" || row.status === "applying"}
-                    <span
-                      class="shrink-0 inline-block w-3 h-3 rounded-full border-2 border-brand-pink/70 border-t-transparent animate-spin"
-                      aria-hidden="true"
-                    ></span>
-                  {:else if row.status === "done"}
-                    <svg class="shrink-0 text-emerald-600 dark:text-emerald-400" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="20 6 9 17 4 12"/></svg>
-                  {:else}
-                    <svg class="shrink-0 text-rose-600 dark:text-rose-400" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
-                  {/if}
-
-                  <!-- label + progress -->
-                  <span class="flex-1 min-w-0">
-                    <span class="flex items-center gap-1.5">
-                      <span class="font-medium text-[11px] text-ink-700 dark:text-night-text">
-                        {row.total} {row.total === 1 ? "annotation" : "annotations"}
-                      </span>
-                      <span class="text-ink-400 dark:text-night-mute truncate font-mono text-[10px]" title={row.page}>
-                        {row.page}
-                      </span>
-                    </span>
-                    <span class="block text-[10.5px] text-ink-500 dark:text-night-mute truncate">
-                      {#if row.status === "submitted"}
-                        Waiting for agent…
-                      {:else if row.status === "applying"}
-                        Applying {row.done}/{row.total}…
-                      {:else if row.status === "done"}
-                        Done — reload to see changes
-                      {:else}
-                        {row.errorMessage ?? "Some changes failed"}
-                      {/if}
-                    </span>
-                  </span>
-
-                  <!-- expand chevron -->
-                  <svg class="shrink-0 text-ink-400 dark:text-night-mute" class:rotate-180={open} width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="6 9 12 15 18 9"/></svg>
+                  {reloadingAt ? "↻…" : "Reload"}
                 </button>
-
-                <!-- per-batch actions (siblings of the toggle, never nested) -->
-                {#if row.status === "done"}
-                  <button
-                    type="button"
-                    class="shrink-0 rounded border border-ink-300 dark:border-night-line bg-white dark:bg-night-card text-ink-700 dark:text-night-text text-[11px] px-2 py-0.5 hover:bg-ink-50 dark:hover:bg-night-line disabled:opacity-50"
-                    onclick={reloadActiveTab}
-                    disabled={reloadingAt !== null || activeTabId == null}
-                    title="Reload the page to see this batch's changes"
-                  >
-                    {reloadingAt ? "↻…" : "Reload"}
-                  </button>
-                {/if}
-                {#if row.status === "done" || row.status === "error"}
-                  <button
-                    type="button"
-                    class="shrink-0 inline-flex items-center justify-center w-5 h-5 rounded text-ink-500 dark:text-night-mute hover:text-ink-900 dark:hover:text-night-text hover:bg-ink-100 dark:hover:bg-night-line"
-                    onclick={() => app.dismissBatch(row.id)}
-                    title="Dismiss"
-                    aria-label="Dismiss batch"
-                  >
-                    <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
-                  </button>
-                {/if}
-              </div>
-
-              <!-- expanded: the original card-based annotations, read-only -->
-              {#if open}
-                {#if row.annotations.length === 0}
-                  <p class="px-2.5 pb-2.5 pt-0.5 text-[11px] italic text-ink-500 dark:text-night-mute border-t border-ink-200/70 dark:border-night-line">
-                    No annotations in this batch.
-                  </p>
-                {:else}
-                  <ul class="px-2.5 pb-2.5 pt-2 space-y-2 border-t border-ink-200/70 dark:border-night-line">
-                    {#each row.annotations as annotation, i (`${annotation.id}:${i}`)}
-                      <AnnotationCard
-                        {annotation}
-                        canEdit={false}
-                        pending={(row.status === "submitted" || row.status === "applying") && annotation.status !== "done" && annotation.status !== "error"}
-                        onremove={() => {}}
-                        onsave={() => {}}
-                      />
-                    {/each}
-                  </ul>
-                {/if}
               {/if}
-            </li>
+              <button
+                type="button"
+                class="rounded border border-ink-300 dark:border-night-line bg-white dark:bg-night-card text-ink-700 dark:text-night-text text-[11px] px-2 py-0.5 hover:bg-ink-50 dark:hover:bg-night-line"
+                onclick={dismissFinishedBatches}
+                title="Clear finished annotations from this list"
+              >
+                Clear done
+              </button>
+            </div>
+          {/if}
+        </div>
+        <ul class="space-y-2" aria-label="Submitted annotations">
+          {#each inFlightAnnotations as item, i (`${item.annotation.id}:${i}`)}
+            <AnnotationCard
+              annotation={item.annotation}
+              canEdit={false}
+              pending={(item.batchStatus === "submitted" || item.batchStatus === "applying") && item.annotation.status !== "done" && item.annotation.status !== "error"}
+              onremove={() => {}}
+              onsave={() => {}}
+            />
           {/each}
         </ul>
       </section>

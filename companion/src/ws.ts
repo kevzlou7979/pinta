@@ -63,17 +63,25 @@ function isAllowedWsOrigin(req: IncomingMessage): boolean {
  *    allow-list of the three built-in ids silently dropped imported
  *    modules' ephemeral `done`, so their tab spun forever even after the
  *    agent posted the board — the regression this function guards.
- *  - Anything else (another tab's draft, an old non-module session) is
- *    skipped.
+ *  - Phase 20 — async annotation batches. Once a plain (module-less)
+ *    batch is submitted, the extension detaches it from the active draft
+ *    and mints a fresh one, so the batch is no longer `activeId`. The
+ *    side-panel tray still mirrors its progress, so its
+ *    submitted/applying/done/error updates MUST go out — otherwise the
+ *    agent's HTTP status writes never reach the panel and the batch is
+ *    stranded on "Waiting for agent…" forever. A still-`drafting`
+ *    non-active session is some OTHER tab's live draft — not ours to push.
+ *  - Anything else (another tab's draft) is skipped.
  *
  * Exported so the gate is unit-testable without booting a real socket.
  */
 export function shouldBroadcastSession(
-  session: Pick<Session, "id" | "modules">,
+  session: Pick<Session, "id" | "modules" | "status">,
   activeId: string | null,
 ): boolean {
   if (session.id === activeId) return true;
-  return (session.modules?.length ?? 0) > 0;
+  if ((session.modules?.length ?? 0) > 0) return true;
+  return session.status !== "drafting";
 }
 
 /**

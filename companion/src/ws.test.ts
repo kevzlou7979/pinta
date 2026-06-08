@@ -1,8 +1,12 @@
 import { describe, expect, it } from "vitest";
+import { mkdtemp, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import {
   shouldBroadcastSession,
   selectReconnectReplaySessions,
 } from "./ws.js";
+import { SessionStore } from "./store.js";
 import type { Session, SessionStatus } from "@pinta/shared";
 
 /** Minimal Session for the replay selector — only the fields it reads. */
@@ -31,8 +35,13 @@ function sess(input: {
  * audit-flow) silently dropped its ephemeral `done` — so the module's
  * side-panel tab spun forever even though the agent had posted its result.
  */
-function session(input: Partial<Session>): Pick<Session, "id" | "modules"> {
-  return { id: "s-1", modules: undefined, ...input } as Session;
+function session(
+  input: Partial<Session>,
+): Pick<Session, "id" | "modules" | "status"> {
+  // Default to a `drafting` status — that's the "some other tab's live
+  // draft" case the gate must skip. Phase 20 in-flight batches override it
+  // with submitted/applying/done/error.
+  return { id: "s-1", modules: undefined, status: "drafting", ...input } as Session;
 }
 
 describe("shouldBroadcastSession", () => {
@@ -42,11 +51,22 @@ describe("shouldBroadcastSession", () => {
     );
   });
 
-  it("skips a non-active session that carries no modules", () => {
-    // Another tab's draft / an old completed annotation session.
+  it("skips a non-active, module-less session that is still drafting", () => {
+    // Another tab's live draft — not ours to push.
     expect(shouldBroadcastSession(session({ id: "other" }), "active")).toBe(
       false,
     );
+  });
+
+  it("broadcasts a non-active, module-less batch once it leaves drafting", () => {
+    // Phase 20 — a submitted annotation batch is detached from the active
+    // draft, so its applying/done updates must still reach the side-panel
+    // tray. Each non-drafting status broadcasts.
+    for (const status of ["submitted", "applying", "done", "error"] as const) {
+      expect(
+        shouldBroadcastSession(session({ id: "batch", status }), "active"),
+      ).toBe(true);
+    }
   });
 
   it("broadcasts a built-in interactive-module session when not active", () => {
@@ -92,6 +112,61 @@ describe("shouldBroadcastSession", () => {
       ),
     ).toBe(true);
     expect(shouldBroadcastSession(session({ id: "other" }), null)).toBe(false);
+  });
+});
+
+/**
+ * End-to-end of the regression: a submitted annotation batch that the agent
+ * later resolves must reach the side panel. Wires the REAL SessionStore
+ * through the same gate `attachWebSocket` uses, then replays the exact
+ * extension flow (submit detaches the batch, a fresh draft becomes active)
+ * and the agent's HTTP status writes. Asserts the gate lets the batch's
+ * applying/done updates through so the panel can flip its card to done.
+ */
+describe("submitted-batch status reaches the panel (Phase 20 regression)", () => {
+  it("broadcasts applying/done for a detached annotation batch", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "pinta-ws-"));
+    try {
+      const store = new SessionStore(dir);
+      // Mimic attachWebSocket's gate-wrapped subscriber: record every
+      // session id that would actually be pushed to WS clients.
+      const broadcast: string[] = [];
+      store.subscribe((s) => {
+        if (shouldBroadcastSession(s, store.getActive()?.id ?? null)) {
+          broadcast.push(`${s.id}:${s.status}`);
+        }
+      });
+
+      // 1. User draws an annotation and submits → batch detaches.
+      const draft = store.createSession({ url: "http://localhost:5173/" });
+      store.addAnnotation(draft.id, {
+        id: "ann-1",
+        kind: "select",
+        comment: "make it dark",
+        selector: "#x",
+        url: "http://localhost:5173/",
+        status: "pending",
+      } as never);
+      await store.submit(draft.id, undefined, true);
+
+      // 2. Extension mints a fresh draft → active moves off the batch.
+      const fresh = store.createSession({ url: "http://localhost:5173/" });
+      expect(store.getActive()?.id).toBe(fresh.id);
+      expect(fresh.id).not.toBe(draft.id);
+
+      // 3. Agent claims + applies the batch over HTTP.
+      broadcast.length = 0;
+      await store.setStatus(draft.id, "applying");
+      await store.setAnnotationStatus(draft.id, "ann-1", "done");
+
+      // The detached batch's updates must be delivered — both the applying
+      // transition and the auto-rolled done. Without the gate fix these
+      // were dropped (not active, no modules) and the card spun forever.
+      expect(broadcast).toContain(`${draft.id}:applying`);
+      expect(broadcast).toContain(`${draft.id}:done`);
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
   });
 });
 
