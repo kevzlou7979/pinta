@@ -1554,9 +1554,9 @@
   </button>
 {/snippet}
 
-<div class="flex flex-col h-full">
+<div class="flex flex-col h-full overflow-hidden">
   <header
-    class="px-4 py-3 border-b border-ink-200 bg-white dark:border-night-line dark:bg-night-card flex items-center justify-between"
+    class="shrink-0 px-4 py-3 border-b border-ink-200 bg-white dark:border-night-line dark:bg-night-card flex items-center justify-between"
   >
     <div class="flex items-center gap-2 min-w-0">
       <img src="/icons/icon-32.png" alt="" width="24" height="24" />
@@ -1683,10 +1683,26 @@
         {/if}
       </div>
     </div>
-    <!-- Header overflow — chat / history / settings / theme + the
-         connection status, collapsed into one ⋮ dropdown so the header
-         stays tidy as modules add affordances. -->
-    <div class="relative shrink-0" use:clickOutside={() => (headerMenuOpen = false)}>
+    <!-- Header right-side actions — a quick Settings gear (so Settings is
+         one click from any tab) next to the ⋮ overflow dropdown (history /
+         settings / theme + connection status). -->
+    <div class="flex items-center gap-1.5 shrink-0">
+      <button
+        type="button"
+        class={[
+          "w-7 h-7 inline-flex items-center justify-center rounded-full border transition-colors",
+          app.viewingSettings
+            ? "border-brand-pink text-brand-pink bg-brand-pink/5 dark:border-brand-pink-light dark:text-brand-pink-light"
+            : "border-ink-200 bg-white text-ink-600 hover:text-brand-pink hover:border-ink-400 dark:border-night-line dark:bg-night-alt dark:text-night-dim dark:hover:text-brand-pink-light dark:hover:border-night-line2",
+        ].join(" ")}
+        onclick={() => (app.viewingSettings = !app.viewingSettings)}
+        aria-pressed={app.viewingSettings}
+        aria-label="Settings"
+        title="Settings"
+      >
+        <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>
+      </button>
+      <div class="relative" use:clickOutside={() => (headerMenuOpen = false)}>
       <button
         bind:this={headerMenuBtn}
         type="button"
@@ -1764,6 +1780,7 @@
         anchorEl={headerMenuBtn}
         showTrigger={false}
       />
+      </div>
     </div>
   </header>
 
