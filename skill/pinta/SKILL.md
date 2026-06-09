@@ -1748,6 +1748,17 @@ lists whichever the user toggled on.
   splices your result into the existing run (so don't worry that your
   response omits the others). When `false`/absent, it's a full run.
 
+> **EVERY run re-scans from the live code — NEVER reuse a prior count.**
+> This is load-bearing, and matters MOST on a re-run: the user re-runs
+> precisely because they just fixed something and want to see it clear.
+> For every check, every run (full OR `partial`), recompute the status by
+> actually reading the current files right now. Do NOT carry over the
+> previous run's `value`/`status`, do NOT echo an example number from the
+> check's seed/description, and do NOT report from memory. A check that
+> was `warn` last time may now be `pass` — grep/read to confirm before you
+> say so. Reporting a stale finding the user already fixed is the single
+> worst failure mode of this tool; a re-run that doesn't re-scan is a bug.
+
 ### Per-category guidance — Security (Phase 15a)
 
 Inspect the project's source for these classes of finding. Each
@@ -2003,8 +2014,10 @@ For each `customCategories[]` entry:
 
 1. **Evaluate every provided `check` as a criterion.** Treat the check's
    `label` + `description` as the rule to verify. Inspect the relevant
-   source, then return that check **with its EXACT same `id`** and a
-   recomputed `status` (`pass` / `warn` / `fail` / `info`) plus `value`,
+   source **live, this run** (see the "EVERY run re-scans" rule above —
+   never reuse the prior run's count or echo an example number from the
+   check's seed/description), then return that check **with its EXACT same
+   `id`** and a recomputed `status` (`pass` / `warn` / `fail` / `info`) plus `value`,
    `where`, and `fixHint` — and when the recomputed status is
    `warn`/`fail`, `where` + `fixHint` are **REQUIRED** (see the rule
    above), since a re-evaluated user check that comes back without them
