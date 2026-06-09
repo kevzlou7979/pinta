@@ -857,51 +857,53 @@
                     Fix
                   {/if}
                 </button>
-                <!-- SECONDARY — icon buttons. Discuss (per-finding chat) +
-                     File issue (GitLab via glab, else local .pinta/tasks.md). -->
-                <div class="inline-flex items-center shrink-0 rounded-md border border-ink-200 dark:border-night-line bg-white dark:bg-night-card divide-x divide-ink-200 dark:divide-night-line">
-                  <button
-                    type="button"
-                    class="relative inline-flex items-center justify-center w-8 h-8 rounded-l-md hover:bg-ink-50 dark:hover:bg-night-alt {discussOpen[check.id]
-                      ? 'text-brand-pink dark:text-brand-pink-light'
-                      : 'text-ink-700 dark:text-night-dim hover:text-brand-pink dark:hover:text-brand-pink-light'}"
-                    onclick={() => toggleDiscuss(check)}
-                    aria-label="Discuss this finding"
-                    aria-expanded={discussOpen[check.id] ?? false}
-                    title="Discuss — ask the agent about this finding"
-                  >
-                    {#if chatPending}
-                      <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" class="animate-spin" aria-hidden="true"><path d="M21 12a9 9 0 1 1-6.219-8.56"/></svg>
-                    {:else}
-                      <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg>
-                    {/if}
-                    {#if chat.length > 0}
-                      <span class="absolute -top-1 -right-1 min-w-[14px] h-[14px] px-1 inline-flex items-center justify-center rounded-full bg-brand-pink text-white text-[9px] font-semibold leading-none dark:bg-brand-pink-light dark:text-night-bg" aria-hidden="true">{chat.length}</span>
-                    {/if}
-                  </button>
-                  <button
-                    type="button"
-                    class="inline-flex items-center justify-center w-8 h-8 rounded-r-md hover:bg-ink-50 dark:hover:bg-night-alt disabled:cursor-default {filed
-                      ? 'text-emerald-600 dark:text-emerald-400'
-                      : 'text-ink-700 dark:text-night-dim hover:text-brand-pink dark:hover:text-brand-pink-light'}"
-                    onclick={() => fileIssue(check)}
-                    disabled={issuePending || !!filed}
-                    aria-label={filed ? "Issue filed" : "File issue"}
-                    title={filed
-                      ? filed.target === "gitlab"
-                        ? "GitLab issue filed" + (filed.url ? ` — ${filed.url}` : "")
-                        : `Added to ${filed.path ?? ".pinta/tasks.md"}`
-                      : "File issue — opens a GitLab issue via glab, or adds to .pinta/tasks.md"}
-                  >
-                    {#if issuePending}
-                      <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" class="animate-spin" aria-hidden="true"><path d="M21 12a9 9 0 1 1-6.219-8.56"/></svg>
-                    {:else if filed}
-                      <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="20 6 9 17 4 12"/></svg>
-                    {:else}
-                      <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="3" y="4" width="18" height="16" rx="2"/><line x1="8" y1="2" x2="8" y2="6"/><line x1="16" y1="2" x2="16" y2="6"/><line x1="3" y1="10" x2="21" y2="10"/></svg>
-                    {/if}
-                  </button>
-                </div>
+                <!-- SECONDARY — text buttons. Discuss (per-finding chat) +
+                     File issue (GitLab via glab, else local .pinta/tasks.md).
+                     Both need a connected companion + a running /pinta agent
+                     to do the work; the agent's reply lands via session.synced. -->
+                <button
+                  type="button"
+                  class="inline-flex items-center gap-1.5 rounded-md border border-ink-200 dark:border-night-line bg-white dark:bg-night-card text-[11px] font-medium px-2.5 py-1 hover:bg-ink-50 dark:hover:bg-night-alt {discussOpen[check.id]
+                    ? 'text-brand-pink dark:text-brand-pink-light'
+                    : 'text-ink-700 dark:text-night-dim hover:text-brand-pink dark:hover:text-brand-pink-light'}"
+                  onclick={() => toggleDiscuss(check)}
+                  aria-expanded={discussOpen[check.id] ?? false}
+                  title="Discuss — ask the agent about this finding"
+                >
+                  {#if chatPending}
+                    <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" class="animate-spin" aria-hidden="true"><path d="M21 12a9 9 0 1 1-6.219-8.56"/></svg>
+                  {:else}
+                    <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg>
+                  {/if}
+                  Discuss
+                  {#if chat.length > 0}
+                    <span class="ml-0.5 min-w-[16px] h-4 px-1 inline-flex items-center justify-center rounded-full bg-brand-pink text-white text-[9px] font-semibold leading-none dark:bg-brand-pink-light dark:text-night-bg" aria-hidden="true">{chat.length}</span>
+                  {/if}
+                </button>
+                <button
+                  type="button"
+                  class="inline-flex items-center gap-1.5 rounded-md border border-ink-200 dark:border-night-line bg-white dark:bg-night-card text-[11px] font-medium px-2.5 py-1 hover:bg-ink-50 dark:hover:bg-night-alt disabled:opacity-60 disabled:cursor-default {filed
+                    ? 'text-emerald-600 dark:text-emerald-400'
+                    : 'text-ink-700 dark:text-night-dim hover:text-brand-pink dark:hover:text-brand-pink-light'}"
+                  onclick={() => fileIssue(check)}
+                  disabled={issuePending || !!filed}
+                  title={filed
+                    ? filed.target === "gitlab"
+                      ? "GitLab issue filed" + (filed.url ? ` — ${filed.url}` : "")
+                      : `Added to ${filed.path ?? ".pinta/tasks.md"}`
+                    : "File issue — opens a GitLab issue via glab, or adds to .pinta/tasks.md (needs a running /pinta agent)"}
+                >
+                  {#if issuePending}
+                    <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" class="animate-spin" aria-hidden="true"><path d="M21 12a9 9 0 1 1-6.219-8.56"/></svg>
+                    Filing…
+                  {:else if filed}
+                    <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="20 6 9 17 4 12"/></svg>
+                    Filed
+                  {:else}
+                    <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="3" y="4" width="18" height="16" rx="2"/><line x1="8" y1="2" x2="8" y2="6"/><line x1="16" y1="2" x2="16" y2="6"/><line x1="3" y1="10" x2="21" y2="10"/></svg>
+                    File issue
+                  {/if}
+                </button>
                 {#if filed}
                   {#if filed.target === "gitlab" && filed.url}
                     <a href={filed.url} target="_blank" rel="noopener noreferrer" class="text-[11px] text-emerald-700 dark:text-emerald-400 hover:underline inline-flex items-center gap-1" title={filed.url}>

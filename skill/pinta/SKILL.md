@@ -2246,6 +2246,14 @@ Pick the target:
    { "type": "audit-issue-filed", "checkId": "<id>", "target": "local", "path": ".pinta/tasks.md", "title": "<title>" }
    ```
 
+**Submit** that result object — for either target — as the session
+summary: `mark_session_done({id, summary: JSON.stringify(payload)})`. This
+is REQUIRED, not optional: the extension parses the summary and only flips
+the finding's **File issue** button to **Filed** when it sees
+`type: "audit-issue-filed"`. If you file the issue but don't mark the
+session done with this exact JSON, the button spins until it times out even
+though the issue exists — so always close the loop with `mark_session_done`.
+
 If neither path is possible (no `gitlab` AND `fallbackToLocal` is
 `false`), `mark_session_error` with a one-line reason. **Token-lean:**
 read only what you need to compose the body; don't re-audit.
