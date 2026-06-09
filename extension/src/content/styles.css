@@ -1,9 +1,12 @@
 .canvas {
   position: fixed;
-  top: 0;
-  left: 0;
-  width: 100vw;
-  height: 100vh;
+  /* Size to the viewport *content box* via insets, NOT width:100vw /
+     height:100vh. 100vw includes the vertical scrollbar's width, so on any
+     page with a scrollbar this surface ran ~15px wider than the content
+     area; the host (all:initial → overflow:visible) didn't clip it, so the
+     page gained a draggable/swipeable horizontal-scroll sliver. inset:0
+     stops at the scrollbar edge and also sidesteps the iOS 100vh trap. */
+  inset: 0;
   z-index: 0;
 }
 .hl {

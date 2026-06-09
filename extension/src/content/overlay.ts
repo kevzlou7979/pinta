@@ -6,8 +6,14 @@ const HOST_TAG = "pinta-overlay-host";
 
 if (!document.querySelector(HOST_TAG)) {
   const host = document.createElement(HOST_TAG);
+  // overflow:hidden is a belt-and-suspenders guard — `all: initial` resets
+  // overflow to visible, so without this any inner layer that ever exceeds
+  // the viewport (e.g. the old width:100vw .canvas) would spill out and add
+  // a horizontal-scroll sliver to the host page. Everything inside is
+  // pointer-events:none + viewport-relative, so clipping at the viewport
+  // edge never affects annotation placement.
   host.style.cssText =
-    "all: initial; position: fixed; inset: 0; z-index: 2147483647; pointer-events: none;";
+    "all: initial; position: fixed; inset: 0; z-index: 2147483647; pointer-events: none; overflow: hidden;";
 
   const shadow = host.attachShadow({ mode: "open" });
 
