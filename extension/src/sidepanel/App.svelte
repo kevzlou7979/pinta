@@ -1793,6 +1793,28 @@
   <div class="flex-1 relative flex flex-col min-h-0">
 
   <main class="flex-1 min-h-0 overflow-y-auto p-4 space-y-4">
+    <!-- Soft "still waiting for an agent" notice (Phase 18a). A long queue
+         isn't a failure, so it's an amber warning, not a red error —
+         dismissible like every banner. Shown across tabs since the waiting
+         session belongs to whichever surface the user just submitted. -->
+    {#if app.claimNotice}
+      <div
+        class="flex items-start gap-2 text-xs text-amber-800 border border-amber-300 bg-amber-50 dark:text-amber-200 dark:border-amber-700/40 dark:bg-amber-950/40 rounded-md p-2"
+        role="status"
+      >
+        <svg class="shrink-0 mt-0.5" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/></svg>
+        <p class="flex-1 min-w-0 break-words">{app.claimNotice.text}</p>
+        <button
+          type="button"
+          class="shrink-0 text-amber-600 hover:text-amber-800 dark:text-amber-400 dark:hover:text-amber-200 leading-none px-1"
+          onclick={() => (app.claimNotice = null)}
+          aria-label="Dismiss"
+          title="Dismiss"
+        >
+          ✕
+        </button>
+      </div>
+    {/if}
     {#if showAssociatePrompt && app.selectedCompanion}
       {@const sel = app.selectedCompanion}
       {@const suggestedPattern = suggestPattern(pageUrl)}

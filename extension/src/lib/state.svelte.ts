@@ -370,6 +370,14 @@ class ExtensionState {
   connectionStatus = $state<WsClientStatus>("disconnected");
   lastError = $state<string | null>(null);
 
+  /** Phase 18a — soft "still waiting for an agent" notice. Distinct from
+   *  `lastError` / the per-surface error slots: a long-queue hint is NOT a
+   *  failure, so it renders as an amber warning, not a red error. Keyed by
+   *  the waiting session's id so a later claim/clear for that session can
+   *  retire it. One at a time — the user waits on one submission at a
+   *  time per surface. */
+  claimNotice = $state<{ sessionId: string; text: string } | null>(null);
+
   /** All running companions, refreshed via rescan(). */
   companions = $state<Companion[]>([]);
   /** Which companion this side panel is connected to. */
@@ -3480,6 +3488,7 @@ class ExtensionState {
     const startedAt = Date.now();
     this.audit.pending = { runId, startedAt };
     this.audit.error = null;
+    this.claimNotice = null;
     this.armAuditTimeout();
     const url = this.lastUrl ?? "";
     const queryComment = JSON.stringify({
@@ -3616,6 +3625,7 @@ class ExtensionState {
     if (!this.audit.pending) return;
     this.clearAuditTimeout();
     this.audit.pending = null;
+    this.claimNotice = null;
     this.audit.error = "Audit cancelled.";
   }
 
@@ -3914,14 +3924,12 @@ class ExtensionState {
       this.audit.error = session.errorMessage ?? "Audit run failed.";
       this.audit.pending = null;
     } else if (session.status === "applying") {
-      // A claim landed — the agent is now running this audit. Retract
-      // any stale "no agent claiming" warning that the 10s claim-timer
-      // fired in the race window (the timer's audit branch guards only
-      // on `audit.pending`, which stays true for the whole run, so it
-      // can surface even after a slightly-slow claim — see
-      // armClaimWarning). The only error that can be present this early
-      // in the lifecycle is that warning; parse / run-failure errors
-      // are set on `done` / `error`, which come later.
+      // A claim landed — the agent is now running this audit. The soft
+      // "still waiting for an agent" notice already retires via
+      // clearClaimWarning (fired at the top of the session.synced switch
+      // when the session leaves `submitted`). Defensively clear any early
+      // audit.error too; parse / run-failure errors are set on `done` /
+      // `error`, which come later.
       this.audit.error = null;
     }
   }
@@ -4509,22 +4517,24 @@ class ExtensionState {
   ): string {
     const flagHint = {
       annotate:
-        "Run `/pinta` in your project's Claude Code terminal (or `/pinta --annotate` if you've set up role routing in Phase 18a).",
+        "If none is running, start `/pinta` (or `/pinta --annotate`) in this project's Claude Code terminal.",
       "test-pilot":
-        "No `/pinta` terminal is claiming Test Pilot sessions. Start one with `/pinta --test-pilot` or `/pinta` (no flag = generalist).",
+        "If none is running, start `/pinta --test-pilot` (or `/pinta`, no flag = generalist) in this project's terminal.",
       audit:
-        "No `/pinta` terminal is claiming AuditFlow sessions. Start one with `/pinta --audit` or `/pinta` (no flag = generalist).",
+        "If none is running, start `/pinta --audit` (or `/pinta`, no flag = generalist) in this project's terminal.",
       chat:
-        "No `/pinta` terminal is claiming chat sessions. Start one with `/pinta --chat` or `/pinta` (no flag = generalist).",
+        "If none is running, start `/pinta --chat` (or `/pinta`, no flag = generalist) in this project's terminal.",
     }[kind];
     const secs = ExtensionState.CLAIM_WARNING_MS / 1000;
     const waited =
       secs >= 60
         ? `${Math.round(secs / 60)}min`
         : `${secs}s`;
+    // Reassuring, not alarming — a long queue is expected when the agent
+    // is busy. Renders as a warning, not an error (see claimNotice).
     return (
-      `Session has been waiting ${waited} with no agent claiming. ` +
-      `Either no \`/pinta\` is running in this project, or your role flags don't cover this session. ` +
+      `Still waiting for an agent to pick this up (~${waited}). ` +
+      `If your \`/pinta\` terminal is busy this is normal — it'll start once it's free. ` +
       flagHint
     );
   }
@@ -4543,13 +4553,17 @@ class ExtensionState {
       // Only fire if the session is still our concern AND still in
       // submitted state. Re-check from current state to avoid surfacing
       // a stale warning after the user already cancelled / cleared.
-      const msg = ExtensionState.composeClaimWarning(kind);
+      const text = ExtensionState.composeClaimWarning(kind);
+      // Route to the soft `claimNotice` (amber warning), never the red
+      // error slots — a long queue isn't a failure. Each kind only warns
+      // if its surface is still actually waiting.
+      const notice = { sessionId: session.id, text };
       switch (kind) {
         case "audit":
-          if (this.audit.pending) this.audit.error = msg;
+          if (this.audit.pending) this.claimNotice = notice;
           break;
         case "test-pilot":
-          if (this.testPilot.pending) this.testPilot.error = msg;
+          if (this.testPilot.pending) this.claimNotice = notice;
           break;
         case "chat":
           // Either global pending OR an annotate-batch pending counts
@@ -4558,13 +4572,13 @@ class ExtensionState {
             this.chat.pendingGlobal ||
             Object.keys(this.chat.pendingAnnotateBatch).length > 0
           ) {
-            this.chat.error = msg;
+            this.claimNotice = notice;
           }
           break;
         case "annotate":
         default:
           if (this.session?.id === session.id && this.session.status === "submitted") {
-            this.lastError = msg;
+            this.claimNotice = notice;
           }
           break;
       }
@@ -4580,6 +4594,12 @@ class ExtensionState {
     if (timer) {
       clearTimeout(timer);
       this.claimWarnings.delete(sessionId);
+    }
+    // Retire an already-shown notice once this session is claimed/cleared,
+    // but only if it owns the current notice (don't clobber another
+    // surface's still-valid hint).
+    if (this.claimNotice?.sessionId === sessionId) {
+      this.claimNotice = null;
     }
   }
 
