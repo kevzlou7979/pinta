@@ -2499,9 +2499,10 @@
         app.addTestPilotSectionWithTests(title, items, chatSection);
       }
     }}
+    imagesEnabled={true}
     onClose={() => { chatOpen = false; chatDraft = ""; chatTestId = null; }}
-    onSend={(prompt) => {
-      if (chatTestId) void app.sendChatMessage(chatTestId, prompt);
+    onSend={(prompt, images) => {
+      if (chatTestId) void app.sendChatMessage(chatTestId, prompt, images);
     }}
   />
 {/if}

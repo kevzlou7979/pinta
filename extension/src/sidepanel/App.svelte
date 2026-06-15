@@ -840,6 +840,23 @@
       (b) => b.status === "done" || b.status === "error",
     ),
   );
+  // A batch still in "submitted" hasn't been claimed by any agent yet —
+  // if no `/pinta` is running it sits here spinning forever. Surface a
+  // Cancel escape hatch for exactly those (an "applying" batch is being
+  // worked on, so it's left alone).
+  const anyBatchWaiting = $derived(
+    app.inFlightBatches.some((b) => b.status === "submitted"),
+  );
+  // Drop every unclaimed (still-"submitted") batch from the tray. Local
+  // only — there's no session.cancel wire; the orphaned companion session
+  // is harmless (a late agent claim just yields an ignored stale echo).
+  function cancelWaitingBatches(): void {
+    for (const id of app.inFlightBatches
+      .filter((b) => b.status === "submitted")
+      .map((b) => b.id)) {
+      app.dismissBatch(id);
+    }
+  }
   // Clear every finished (done / error) batch from the stack at once.
   // Active batches are left running. Snapshot ids first so we don't mutate
   // the array we're iterating.
@@ -2431,8 +2448,21 @@
           <h2 class="text-xs uppercase tracking-wide text-ink-500 dark:text-night-mute font-medium">
             Submitted ({inFlightAnnotations.length})
           </h2>
-          {#if anyBatchTerminal}
+          {#if anyBatchTerminal || anyBatchWaiting}
             <div class="inline-flex items-center gap-1.5 shrink-0">
+              {#if anyBatchWaiting}
+                <!-- Escape hatch for a submission no agent ever claimed —
+                     without this a stuck "submitted" card spins with no way
+                     out. Removes the unclaimed batch(es) from the tray. -->
+                <button
+                  type="button"
+                  class="inline-flex items-center gap-1 rounded border border-ink-300 dark:border-night-line bg-white dark:bg-night-card text-ink-700 dark:text-night-text text-[11px] px-2 py-0.5 hover:bg-ink-50 dark:hover:bg-night-line"
+                  onclick={cancelWaitingBatches}
+                  title="No agent has picked this up — cancel the waiting submission(s) and clear them from this list"
+                >
+                  Cancel
+                </button>
+              {/if}
               {#if anyBatchDone}
                 <button
                   type="button"
@@ -3017,8 +3047,9 @@
           `pinta-annotate-chat-${batchId.slice(0, 8)}-${new Date().toISOString().slice(0, 10)}.md`,
         )}
         redactionSummary={app.chat.annotateRedactions[batchId]}
+        imagesEnabled={true}
         onClose={() => (annotateChatOpen = false)}
-        onSend={(prompt) => void app.sendAnnotateChatMessage(batchId, prompt)}
+        onSend={(prompt, images) => void app.sendAnnotateChatMessage(batchId, prompt, images)}
       />
     {/if}
 

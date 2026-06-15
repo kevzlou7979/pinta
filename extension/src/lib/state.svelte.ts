@@ -565,6 +565,18 @@ class ExtensionState {
    *  legitimate multi-minute scan isn't killed early. */
   private static readonly TEST_PILOT_GENERATE_TIMEOUT_MS = 600_000;
 
+  /** Extra grace AFTER an op's normal threshold before we treat a wait
+   *  as truly stuck and show a red error. A busy / slow `/pinta` agent
+   *  is NOT a failure — BYO-Claude work legitimately runs for minutes —
+   *  so the normal threshold now only flips us to an amber "still
+   *  working" notice (keeping the spinner alive); the red give-up waits
+   *  this much longer. See `armAgentWait`. */
+  private static readonly AGENT_GIVEUP_GRACE_MS = 600_000; // +10 min
+  /** Synthetic `claimNotice.sessionId` tag for the shared slow-agent
+   *  amber notice, so it never collides with a real Phase-18a unclaimed
+   *  session warning and `retireAgentWaitNotice` can recognise its own. */
+  private static readonly AGENT_WAIT_KEY = "__agent-wait__";
+
   private client: WsClient | null = null;
   private creatingSession = false;
   /** Timer that recovers a stuck `creatingSession = true` if the
@@ -1095,15 +1107,19 @@ class ExtensionState {
 
   private armDetailTimeout(testId: string): void {
     this.clearDetailTimer(testId);
-    const t = setTimeout(() => {
-      if (!this.testPilot.pendingDetails[testId]) return;
-      delete this.testPilot.pendingDetails[testId];
-      this.detailTimers.delete(testId);
-      this.testPilot.error =
-        `Timed out waiting for the agent to get steps for ${testId}. ` +
-        `Make sure \`/pinta\` is running in a Claude Code terminal for this project, then try again.`;
-    }, ExtensionState.TEST_PILOT_TIMEOUT_MS);
-    this.detailTimers.set(testId, t);
+    this.armAgentWait({
+      softMs: ExtensionState.TEST_PILOT_TIMEOUT_MS,
+      what: `get steps for ${testId}`,
+      setHandle: (t) => this.detailTimers.set(testId, t),
+      stillPending: () => !!this.testPilot.pendingDetails[testId],
+      giveUp: () => {
+        delete this.testPilot.pendingDetails[testId];
+        this.detailTimers.delete(testId);
+        this.testPilot.error = ExtensionState.slowWaitGiveUp(
+          `get steps for ${testId}`,
+        );
+      },
+    });
   }
 
   private clearDetailTimer(testId: string): void {
@@ -1112,6 +1128,7 @@ class ExtensionState {
       clearTimeout(t);
       this.detailTimers.delete(testId);
     }
+    this.retireAgentWaitNotice();
   }
 
   /** User clicked Cancel on a stuck Test Pilot spinner. */
@@ -1132,29 +1149,110 @@ class ExtensionState {
     this.clearTestPilotTimeout();
     const pending = this.testPilot.pending;
     if (!pending) return;
-    const ms =
+    const softMs =
       pending.kind === "doc-generate"
         ? ExtensionState.TEST_PILOT_GENERATE_TIMEOUT_MS
         : ExtensionState.TEST_PILOT_TIMEOUT_MS;
-    this.testPilotTimer = setTimeout(() => {
-      if (!this.testPilot.pending) return;
-      const what =
-        this.testPilot.pending.kind === "doc-parse"
-          ? "parse the test doc"
-          : this.testPilot.pending.kind === "doc-generate"
-            ? "generate the test spec"
-            : "get the test steps";
-      this.testPilot.pending = null;
-      this.testPilot.error =
-        `Timed out waiting for the agent to ${what}. ` +
-        `Make sure \`/pinta\` is running in a Claude Code terminal for this project, then try again.`;
-    }, ms);
+    const what =
+      pending.kind === "doc-parse"
+        ? "parse the test doc"
+        : pending.kind === "doc-generate"
+          ? "generate the test spec"
+          : "get the test steps";
+    this.armAgentWait({
+      softMs,
+      what,
+      setHandle: (t) => {
+        this.testPilotTimer = t;
+      },
+      stillPending: () => !!this.testPilot.pending,
+      giveUp: () => {
+        if (!this.testPilot.pending) return;
+        this.testPilot.pending = null;
+        this.testPilot.error = ExtensionState.slowWaitGiveUp(what);
+      },
+    });
   }
 
   private clearTestPilotTimeout(): void {
     if (this.testPilotTimer) {
       clearTimeout(this.testPilotTimer);
       this.testPilotTimer = null;
+    }
+    this.retireAgentWaitNotice();
+  }
+
+  // ─── Slow-agent-aware waits (shared across all modules) ─────────────
+  //
+  // A slow or busy `/pinta` agent is NOT a failure: bring-your-own-Claude
+  // work can legitimately take minutes, and the agent is often actively
+  // applying changes when the old single-stage timers fired a red error.
+  // So EVERY wait on an agent is now two-stage:
+  //   • soft (the op's normal threshold): keep the spinner alive and
+  //     surface an amber "still working" notice via `claimNotice` — the
+  //     same banner Phase 18a renders across tabs. We tear nothing down;
+  //     the user can Cancel anytime.
+  //   • hard (soft + AGENT_GIVEUP_GRACE_MS): only now treat it as stuck —
+  //     run `giveUp()`, which clears the pending spinner and sets the
+  //     surface's red error.
+  // The eventual `session.synced` cancels the timer (via the caller's
+  // clear*()) and retires the amber notice before either stage matters.
+
+  private static slowWaitNotice(what: string): string {
+    return (
+      `Still working — the agent is taking a while to ${what}. ` +
+      `A busy \`/pinta\` terminal is normal, so this keeps waiting. ` +
+      `Cancel and retry if your terminal looks idle.`
+    );
+  }
+
+  private static slowWaitGiveUp(what: string): string {
+    return (
+      `Gave up waiting for the agent to ${what}. ` +
+      `Make sure \`/pinta\` is running in a Claude Code terminal for this ` +
+      `project, then try again.`
+    );
+  }
+
+  /**
+   * Arm a two-stage, slow-agent-aware timer. `setHandle` stores the
+   * currently-live timer into the caller's own slot (a field or a Map
+   * entry) so the caller's existing clear*() cancels whichever stage is
+   * active. `stillPending` is re-checked at fire time so a response that
+   * already landed makes both stages no-ops. `what` names the operation
+   * for the amber + red copy; `giveUp` does the hard teardown.
+   */
+  private armAgentWait(opts: {
+    softMs: number;
+    what: string;
+    setHandle: (t: ReturnType<typeof setTimeout>) => void;
+    stillPending: () => boolean;
+    giveUp: () => void;
+  }): void {
+    const { softMs, what, setHandle, stillPending, giveUp } = opts;
+    const soft = setTimeout(() => {
+      if (!stillPending()) return;
+      // Soft stage — reassure, do NOT tear anything down.
+      this.claimNotice = {
+        sessionId: ExtensionState.AGENT_WAIT_KEY,
+        text: ExtensionState.slowWaitNotice(what),
+      };
+      const hard = setTimeout(() => {
+        if (!stillPending()) return;
+        this.retireAgentWaitNotice();
+        giveUp();
+      }, ExtensionState.AGENT_GIVEUP_GRACE_MS);
+      setHandle(hard);
+    }, softMs);
+    setHandle(soft);
+  }
+
+  /** Retire the shared slow-agent amber notice. Scoped by the synthetic
+   *  key so it never clobbers a real Phase-18a unclaimed-session warning.
+   *  Called from every clear*() so success / cancel paths drop it. */
+  private retireAgentWaitNotice(): void {
+    if (this.claimNotice?.sessionId === ExtensionState.AGENT_WAIT_KEY) {
+      this.claimNotice = null;
     }
   }
 
@@ -1255,9 +1353,15 @@ class ExtensionState {
    * (don't double-submit). The pending UI keys off
    * `testPilot.pendingChats[testId]` for per-row spinner state.
    */
-  async sendChatMessage(testId: string, prompt: string): Promise<void> {
+  async sendChatMessage(
+    testId: string,
+    prompt: string,
+    images: ChatImage[] = [],
+  ): Promise<void> {
     const text = prompt.trim();
-    if (!text) return;
+    // Allow image-only sends — a pasted screenshot + Send ("is this
+    // right?") is a valid ask. Bail only when both fields are empty.
+    if (!text && images.length === 0) return;
     const catalog = this.testPilot.catalog;
     if (!catalog) return;
     if (this.testPilot.pendingChats[testId]) return;
@@ -1288,6 +1392,7 @@ class ExtensionState {
       role: "user",
       text,
       at: Date.now(),
+      ...(images.length > 0 ? { images } : {}),
     };
     test.chat = [...(test.chat ?? []), userMsg];
     this.testPilot.error = null;
@@ -1317,7 +1422,14 @@ class ExtensionState {
         steps: test.detail?.steps,
         detailedResponses,
       },
-      history: history.map((m) => ({ role: m.role, text: m.text })),
+      // History strips images to bounded `[N image]` placeholders; the
+      // agent re-receives only the latest attachments via top-level
+      // `images`. Mirrors sendGlobalChatMessage.
+      history: history.map((m) => ({
+        role: m.role,
+        text: m.text + (m.images?.length ? ` [${m.images.length} image]` : ""),
+      })),
+      ...(images.length > 0 ? { images } : {}),
     });
     const settings = this.modules["test-pilot"]?.settings ?? {};
     this.testPilot.pendingChats[testId] = { askedAt: Date.now() };
@@ -1465,9 +1577,10 @@ class ExtensionState {
   async sendSectionChatMessage(
     sectionTitle: string,
     prompt: string,
+    images: ChatImage[] = [],
   ): Promise<void> {
     const text = prompt.trim();
-    if (!text) return;
+    if (!text && images.length === 0) return;
     const catalog = this.testPilot.catalog;
     if (!catalog) return;
     if (this.testPilot.pendingSectionChats[sectionTitle]) return;
@@ -1484,6 +1597,7 @@ class ExtensionState {
       role: "user",
       text,
       at: Date.now(),
+      ...(images.length > 0 ? { images } : {}),
     };
     section.chat = [...(section.chat ?? []), userMsg];
     this.testPilot.error = null;
@@ -1511,7 +1625,11 @@ class ExtensionState {
         })),
         detailedResponses,
       },
-      history: history.map((m) => ({ role: m.role, text: m.text })),
+      history: history.map((m) => ({
+        role: m.role,
+        text: m.text + (m.images?.length ? ` [${m.images.length} image]` : ""),
+      })),
+      ...(images.length > 0 ? { images } : {}),
     });
     const settings = this.modules["test-pilot"]?.settings ?? {};
     this.testPilot.pendingSectionChats[sectionTitle] = { askedAt: Date.now() };
@@ -1538,15 +1656,19 @@ class ExtensionState {
 
   private armSectionChatTimeout(sectionTitle: string): void {
     this.clearSectionChatTimer(sectionTitle);
-    const t = setTimeout(() => {
-      if (!this.testPilot.pendingSectionChats[sectionTitle]) return;
-      delete this.testPilot.pendingSectionChats[sectionTitle];
-      this.sectionChatTimers.delete(sectionTitle);
-      this.testPilot.error =
-        `Timed out waiting for the agent to answer for "${sectionTitle}". ` +
-        `Make sure \`/pinta\` is running in a Claude Code terminal for this project, then try again.`;
-    }, ExtensionState.TEST_PILOT_TIMEOUT_MS);
-    this.sectionChatTimers.set(sectionTitle, t);
+    this.armAgentWait({
+      softMs: ExtensionState.TEST_PILOT_TIMEOUT_MS,
+      what: `answer for "${sectionTitle}"`,
+      setHandle: (t) => this.sectionChatTimers.set(sectionTitle, t),
+      stillPending: () => !!this.testPilot.pendingSectionChats[sectionTitle],
+      giveUp: () => {
+        delete this.testPilot.pendingSectionChats[sectionTitle];
+        this.sectionChatTimers.delete(sectionTitle);
+        this.testPilot.error = ExtensionState.slowWaitGiveUp(
+          `answer for "${sectionTitle}"`,
+        );
+      },
+    });
   }
 
   private clearSectionChatTimer(sectionTitle: string): void {
@@ -1555,6 +1677,7 @@ class ExtensionState {
       clearTimeout(t);
       this.sectionChatTimers.delete(sectionTitle);
     }
+    this.retireAgentWaitNotice();
   }
 
   /** Routed from `onMessage` when a `session.synced` with `op: "chat"`
@@ -1646,15 +1769,19 @@ class ExtensionState {
 
   private armChatTimeout(testId: string): void {
     this.clearChatTimer(testId);
-    const t = setTimeout(() => {
-      if (!this.testPilot.pendingChats[testId]) return;
-      delete this.testPilot.pendingChats[testId];
-      this.chatTimers.delete(testId);
-      this.testPilot.error =
-        `Timed out waiting for the agent to answer for ${testId}. ` +
-        `Make sure \`/pinta\` is running in a Claude Code terminal for this project, then try again.`;
-    }, ExtensionState.TEST_PILOT_TIMEOUT_MS);
-    this.chatTimers.set(testId, t);
+    this.armAgentWait({
+      softMs: ExtensionState.TEST_PILOT_TIMEOUT_MS,
+      what: `answer for ${testId}`,
+      setHandle: (t) => this.chatTimers.set(testId, t),
+      stillPending: () => !!this.testPilot.pendingChats[testId],
+      giveUp: () => {
+        delete this.testPilot.pendingChats[testId];
+        this.chatTimers.delete(testId);
+        this.testPilot.error = ExtensionState.slowWaitGiveUp(
+          `answer for ${testId}`,
+        );
+      },
+    });
   }
 
   private clearChatTimer(testId: string): void {
@@ -1663,6 +1790,7 @@ class ExtensionState {
       clearTimeout(t);
       this.chatTimers.delete(testId);
     }
+    this.retireAgentWaitNotice();
   }
 
   /** Apply a `test-pilot-chat` payload from the agent. Appends the
@@ -1960,9 +2088,10 @@ class ExtensionState {
   async sendAnnotateChatMessage(
     batchId: string,
     prompt: string,
+    images: ChatImage[] = [],
   ): Promise<void> {
     const text = prompt.trim();
-    if (!text) return;
+    if (!text && images.length === 0) return;
     if (this.chat.pendingAnnotateBatch[batchId]) return;
     if (!this.client || this.connectionStatus !== "connected") {
       this.chat.error =
@@ -1974,6 +2103,7 @@ class ExtensionState {
       role: "user",
       text,
       at: Date.now(),
+      ...(images.length > 0 ? { images } : {}),
     };
     const existing = this.chat.annotateBatch[batchId] ?? [];
     this.chat.annotateBatch[batchId] = [...existing, userMsg];
@@ -2038,7 +2168,13 @@ class ExtensionState {
         detailedResponses,
         ...(injectionMarkers.length > 0 ? { injectionMarkers } : {}),
       },
-      history: history.map((m) => ({ role: m.role, text: m.text })),
+      history: history.map((m) => ({
+        role: m.role,
+        text: m.text + (m.images?.length ? ` [${m.images.length} image]` : ""),
+      })),
+      // User-pasted reference images (screenshots). Not page-captured,
+      // so the PII/injection scrubbing above doesn't apply to them.
+      ...(images.length > 0 ? { images } : {}),
     });
     // Phase 14.5 — stash a redaction summary for the UI badge. Counted
     // from the final serialized payload so the numbers reflect what
@@ -3261,15 +3397,17 @@ class ExtensionState {
   ): void {
     const key = `${op}:${checkId}`;
     this.clearAuditOpTimer(op, checkId);
-    const t = setTimeout(() => {
-      this.auditOpTimers.delete(key);
-      if (!pendingMap[checkId]) return;
-      delete pendingMap[checkId];
-      this.audit.error =
-        "Timed out waiting for the agent. Make sure `/pinta` is running " +
-        "in a Claude Code terminal for this project, then try again.";
-    }, ExtensionState.AUDIT_OP_TIMEOUT_MS);
-    this.auditOpTimers.set(key, t);
+    this.armAgentWait({
+      softMs: ExtensionState.AUDIT_OP_TIMEOUT_MS,
+      what: "respond",
+      setHandle: (t) => this.auditOpTimers.set(key, t),
+      stillPending: () => !!pendingMap[checkId],
+      giveUp: () => {
+        this.auditOpTimers.delete(key);
+        delete pendingMap[checkId];
+        this.audit.error = ExtensionState.slowWaitGiveUp("respond");
+      },
+    });
   }
 
   private clearAuditOpTimer(op: string, checkId: string): void {
@@ -3279,14 +3417,19 @@ class ExtensionState {
       clearTimeout(t);
       this.auditOpTimers.delete(key);
     }
+    this.retireAgentWaitNotice();
   }
 
   /** Send a Discuss message about one finding. Mirrors Test Pilot's
    *  per-row `sendChatMessage` — optimistic append, fire over WS, reply
    *  lands via session.synced → handleAuditCheckChatSync. */
-  async sendAuditCheckChat(check: AuditCheck, prompt: string): Promise<void> {
+  async sendAuditCheckChat(
+    check: AuditCheck,
+    prompt: string,
+    images: ChatImage[] = [],
+  ): Promise<void> {
     const text = prompt.trim();
-    if (!text) return;
+    if (!text && images.length === 0) return;
     if (this.audit.pendingCheckChat[check.id]) return;
     if (!this.client || this.connectionStatus !== "connected") {
       this.audit.error =
@@ -3298,6 +3441,7 @@ class ExtensionState {
       role: "user",
       text,
       at: Date.now(),
+      ...(images.length > 0 ? { images } : {}),
     };
     this.audit.checkChats[check.id] = [
       ...(this.audit.checkChats[check.id] ?? []),
@@ -3326,7 +3470,11 @@ class ExtensionState {
         where: check.where,
         detailedResponses,
       },
-      history: history.map((m) => ({ role: m.role, text: m.text })),
+      history: history.map((m) => ({
+        role: m.role,
+        text: m.text + (m.images?.length ? ` [${m.images.length} image]` : ""),
+      })),
+      ...(images.length > 0 ? { images } : {}),
     });
     this.audit.pendingCheckChat[check.id] = true;
     this.armAuditOpTimer("audit-discuss", check.id, this.audit.pendingCheckChat);
@@ -3631,13 +3779,19 @@ class ExtensionState {
 
   private armAuditTimeout(): void {
     this.clearAuditTimeout();
-    this.auditTimer = setTimeout(() => {
-      if (!this.audit.pending) return;
-      this.audit.pending = null;
-      this.audit.error =
-        "Timed out waiting for the audit to finish. " +
-        "Make sure `/pinta` is running in a Claude Code terminal for this project.";
-    }, ExtensionState.AUDIT_TIMEOUT_MS);
+    this.armAgentWait({
+      softMs: ExtensionState.AUDIT_TIMEOUT_MS,
+      what: "finish the audit",
+      setHandle: (t) => {
+        this.auditTimer = t;
+      },
+      stillPending: () => !!this.audit.pending,
+      giveUp: () => {
+        if (!this.audit.pending) return;
+        this.audit.pending = null;
+        this.audit.error = ExtensionState.slowWaitGiveUp("finish the audit");
+      },
+    });
   }
 
   private clearAuditTimeout(): void {
@@ -3645,6 +3799,7 @@ class ExtensionState {
       clearTimeout(this.auditTimer);
       this.auditTimer = null;
     }
+    this.retireAgentWaitNotice();
   }
 
   // ─── Imported interactive modules — generic board ops (Phase 19) ─────
@@ -3705,18 +3860,20 @@ class ExtensionState {
 
   private armModuleTimeout(moduleId: string): void {
     this.clearModuleTimeout(moduleId);
-    this.moduleOpTimers.set(
-      moduleId,
-      setTimeout(() => {
+    this.armAgentWait({
+      softMs: ExtensionState.MODULE_OP_TIMEOUT_MS,
+      what: "respond",
+      setHandle: (t) => this.moduleOpTimers.set(moduleId, t),
+      stillPending: () => !!this.moduleBoards[moduleId]?.pending,
+      giveUp: () => {
         const slot = this.moduleBoards[moduleId];
         this.moduleOpTimers.delete(moduleId);
         if (!slot?.pending) return;
         slot.pending = null;
         slot.pendingSessionId = null;
-        slot.error =
-          "Timed out waiting for the agent. Make sure `/pinta` is running for this project.";
-      }, ExtensionState.MODULE_OP_TIMEOUT_MS),
-    );
+        slot.error = ExtensionState.slowWaitGiveUp("respond");
+      },
+    });
   }
 
   private clearModuleTimeout(moduleId: string): void {
@@ -3725,6 +3882,7 @@ class ExtensionState {
       clearTimeout(t);
       this.moduleOpTimers.delete(moduleId);
     }
+    this.retireAgentWaitNotice();
   }
 
   /** Routed from onMessage when a session.synced for an imported
@@ -3820,6 +3978,65 @@ class ExtensionState {
       } catch {
         // Companion unreachable / transient — keep pending; a later
         // reconnect or the module-op timeout will recover it.
+      }
+    }
+  }
+
+  /**
+   * On (re)connect, recover any in-flight annotation batch whose
+   * `session.synced(applying|done|error)` we missed while the socket was
+   * down. The companion replays only the active draft + terminal *module*
+   * sessions on connect (ws.ts `selectReconnectReplaySessions`), never
+   * plain annotation batches — so a batch the agent finished during a WS
+   * blip would otherwise sit "submitted" forever in the tray with a stale
+   * "still waiting for an agent" claim notice that never retires. Mirrors
+   * reconcileModuleBoards.
+   *
+   * For each tracked batch, fetch its current session over HTTP; if the
+   * server's status is ahead of what we hold, update the tray row in place
+   * (idempotent — same shape the live `session.synced` broadcast carries)
+   * and retire the claim warning once it leaves "submitted". Best-effort:
+   * any fetch error (or a 404 for a session the companion has forgotten)
+   * leaves the row as-is for a later reconnect / live broadcast / manual
+   * dismiss to resolve.
+   */
+  private async reconcileInFlightBatches(): Promise<void> {
+    const base = this.httpBase();
+    if (!base) return;
+    // Snapshot ids up front — the array is mutated as we apply updates and
+    // the user may dismiss a row while an await is in flight.
+    const ids = this.inFlightBatches.map((b) => b.id);
+    for (const id of ids) {
+      try {
+        const res = await ExtensionState.fetchWithTimeout(
+          `${base}/v1/sessions/${encodeURIComponent(id)}`,
+        );
+        if (!res.ok) {
+          // 404 → the companion has no record of this batch (finished and
+          // pruned, or a store reset). It can't progress, so retire any
+          // stale "still waiting for an agent" notice for it; leave the
+          // tray row so the user still sees it existed and can dismiss it.
+          if (res.status === 404) this.clearClaimWarning(id);
+          continue;
+        }
+        const session = (await res.json()) as Session;
+        const idx = this.inFlightBatches.findIndex((b) => b.id === id);
+        if (idx === -1) continue; // dismissed mid-fetch
+        // The companion store only moves status forward, so any change is
+        // an advance worth applying. Skip a no-op to avoid a needless
+        // reactive churn.
+        if (session.status === this.inFlightBatches[idx]!.status) continue;
+        this.inFlightBatches[idx] = session;
+        this.inFlightBatches = [...this.inFlightBatches];
+        // Leaving "submitted" retires the stale claim-warning notice —
+        // same effect as the live session.synced path's top-of-switch
+        // clearClaimWarning(msg.session.id).
+        if (session.status !== "submitted") {
+          this.clearClaimWarning(id);
+        }
+      } catch {
+        // Companion unreachable / transient — keep the row; a later
+        // reconnect or live broadcast recovers it.
       }
     }
   }
@@ -4576,11 +4793,24 @@ class ExtensionState {
           }
           break;
         case "annotate":
-        default:
-          if (this.session?.id === session.id && this.session.status === "submitted") {
+        default: {
+          // Phase 20 — on submit the session DETACHES into inFlightBatches
+          // and `this.session` becomes a fresh draft, so the old
+          // `this.session?.id === session.id` check never matched a
+          // detached batch — the "still waiting for an agent" notice
+          // silently never fired (a submitted card just spun forever).
+          // Honor either the live draft OR a still-submitted tray batch.
+          const liveDraftWaiting =
+            this.session?.id === session.id &&
+            this.session.status === "submitted";
+          const detachedWaiting = this.inFlightBatches.some(
+            (b) => b.id === session.id && b.status === "submitted",
+          );
+          if (liveDraftWaiting || detachedWaiting) {
             this.claimNotice = notice;
           }
           break;
+        }
       }
     }, ExtensionState.CLAIM_WARNING_MS);
     this.claimWarnings.set(session.id, timer);
@@ -5521,11 +5751,14 @@ class ExtensionState {
         if (status === "disconnected" && this.creatingSession) {
           this.markCreatingSession(false);
         }
-        // On (re)connect, recover any imported-interactive module run
-        // whose done broadcast we missed while the socket was down. No-op
-        // on a fresh connect (nothing pending). See reconcileModuleBoards.
+        // On (re)connect, recover any imported-interactive module run OR
+        // in-flight annotation batch whose done broadcast we missed while
+        // the socket was down — the companion never replays plain batches
+        // on reconnect, so without this they strand "submitted" with a
+        // stale claim notice. No-op on a fresh connect (nothing pending).
         if (status === "connected") {
           void this.reconcileModuleBoards();
+          void this.reconcileInFlightBatches();
         }
       },
     });

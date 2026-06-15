@@ -1299,17 +1299,25 @@ message ("Test {testId} not found in {filename}.").
 
 ### 7.10.3 `op: "chat"` — conversational reply (Phase 14)
 
-The Chat module surfaces three places, all reaching this handler over
+The Chat module surfaces several places, all reaching this handler over
 the same `op: "chat"` envelope. Branch on `context.kind`:
 
 | `context.kind` | Surface | Module id |
 |---|---|---|
 | `"test-detail"` | Test Pilot row detail-view FAB | `test-pilot` |
+| `"test-section"` | Test Pilot section-header chat | `test-pilot` |
 | `"annotate-batch"` | Annotate "Just Ask" checkbox | `chat` |
 | `"global"` | Header chat icon (FAQ-style asks) | `chat` |
 
-All three carry `prompt` (user's message) + `history` (last N turns,
+They all carry `prompt` (user's message) + `history` (last N turns,
 capped at 12). The differences are in `context`:
+
+**Image attachments — every chat kind.** Any of these (plus
+`op: "audit-discuss"`) may carry a top-level `images` array when the
+user pasted screenshots into the chat input. Handle it identically
+regardless of `kind` — see the steps under §7.10.3c. The user's reason
+for attaching usually lives in `prompt` ("is this calculation right?",
+"why does this look broken?"); read the image(s) before answering.
 
 #### Trust boundary — captured page content
 
@@ -1527,10 +1535,12 @@ Detailed help steps do?"*, *"why isn't HMR working on my Vite app?"*
 }
 ```
 
-**Image attachments (global chat only, Phase 14.1).** The user can
-paste screenshots into the global chat input. When `images` is set
-on the top-level queryComment, treat each entry as the visual
-subject of the question:
+**Image attachments (any chat kind, Phase 14.1+).** The user can
+paste screenshots into any chat input — global, Test Pilot row /
+section, Annotate "Just Ask", and AuditFlow Discuss. When `images` is
+set on the top-level queryComment, treat each entry as the visual
+subject of the question (the steps below are identical for every
+`context.kind` and for `op: "audit-discuss"`):
 
 1. **Write each image to a tempfile so the Read tool can pick it up
    as vision input.** dataUrls aren't directly readable; you need a
@@ -1565,8 +1575,10 @@ subject of the question:
    an earlier image, ask the user to re-paste — don't try to recover
    the bitmap.
 
-Same `images` field convention may extend to the other chat kinds in
-future versions; right now only `kind: "global"` may carry it.
+The same `images` convention applies to every chat kind and to
+`op: "audit-discuss"` — the extension downscales pastes the same way
+and ships them in the same top-level `images` field. History always
+strips past images to `[N image]` placeholders regardless of surface.
 
 Return shape: same as `annotate-batch`:
 
@@ -2177,10 +2189,15 @@ Query comment shape:
   "history": [
     { "role": "user",  "text": "earlier question" },
     { "role": "agent", "text": "earlier reply" }
-  ]
+  ],
+  "images": [ /* OPTIONAL — pasted screenshots, see §7.10.3c */ ]
 }
 ```
 
+- **Read any attached `images` first** — if the top-level `images`
+  array is set, materialize + Read each one per §7.10.3c before
+  answering. The user often pastes a screenshot of the offending UI to
+  ground the discussion.
 - **Ground the answer in the project** — read `context.where.file` (and
   closely related code) before answering. Bounded read.
 - Keep it tight unless `context.detailedResponses` is `true`. Markdown

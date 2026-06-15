@@ -21,12 +21,12 @@
     AuditCategoryId,
     AuditCheck,
     AuditCheckStatus,
-    AuditDisposition,
   } from "@pinta/shared";
   import { app } from "../lib/state.svelte.js";
   import { parseStep } from "../lib/step-md.js";
   import { auditProgress, statusGlyph } from "../lib/audit-flow.js";
   import { parseAuditCatalog } from "../lib/audit-catalog-doc.js";
+  import ChatSheet from "./ChatSheet.svelte";
 
   // Active tab switch is passed down so Fix-with-agent can flip to
   // Annotate after composing the draft. Parent (App.svelte) owns the
@@ -133,36 +133,6 @@
   // disposition the user works through. pass / info don't.
   function isActionable(check: AuditCheck): boolean {
     return check.status === "fail" || check.status === "warn";
-  }
-
-  // Effective disposition for a check — absent from the map means the
-  // user hasn't touched it yet, which reads as "open". Only meaningful
-  // for actionable checks.
-  function dispositionOf(check: AuditCheck): AuditDisposition {
-    return app.audit.dispositions[check.id] ?? "open";
-  }
-
-  // The segmented-control options, in display order.
-  const DISPOSITIONS: { value: AuditDisposition; label: string }[] = [
-    { value: "open", label: "Open" },
-    { value: "fixing", label: "Fixing" },
-    { value: "resolved", label: "Resolved" },
-    { value: "wont-fix", label: "Won't-fix" },
-  ];
-
-  // Dot tint per disposition — used in the kebab's "Mark as" items.
-  function dispositionDotClass(d: AuditDisposition): string {
-    switch (d) {
-      case "fixing":
-        return "bg-amber-500";
-      case "resolved":
-        return "bg-emerald-500";
-      case "wont-fix":
-        return "bg-ink-400 dark:bg-night-mute";
-      case "open":
-      default:
-        return "bg-ink-300 dark:bg-night-line";
-    }
   }
 
   // USER- checks (overlay additions) get an "added" chip; custom
@@ -313,26 +283,38 @@
     }
   }
 
-  // ─── Discuss (inline per-finding chat) + File issue (Phase 15e) ─────
-  // Which findings have their Discuss thread expanded, + the in-progress
-  // draft per finding. Opens automatically once there are messages.
-  let discussOpen = $state<Record<string, boolean>>({});
-  let discussDraft = $state<Record<string, string>>({});
+  // ─── Discuss (per-finding chat via the shared ChatSheet) + File issue ─
+  // Discuss opens the shared bottom-sheet chat — the SAME component Test
+  // Pilot uses — keyed to a finding, instead of a bespoke inline thread.
+  // One chat UI across modules (reusability). Threads + pending state
+  // live in app.audit (checkChats / pendingCheckChat).
+  let chatCheckId = $state<string | null>(null);
+  let chatOpen = $state(false);
 
   function checkChat(check: AuditCheck) {
     return app.audit.checkChats[check.id] ?? [];
   }
-  function toggleDiscuss(check: AuditCheck): void {
-    discussOpen[check.id] = !(
-      discussOpen[check.id] ?? checkChat(check).length > 0
-    );
+  /** The finding the chat sheet is bound to, looked up fresh from the
+   *  current run so re-audits don't leave us holding a stale object. */
+  function findChatCheck(): AuditCheck | null {
+    if (!chatCheckId || !app.audit.currentRun) return null;
+    for (const cat of app.audit.currentRun.categories) {
+      const found = cat.checks.find((c) => c.id === chatCheckId);
+      if (found) return found;
+    }
+    return null;
   }
-  function sendDiscuss(check: AuditCheck): void {
-    const text = (discussDraft[check.id] ?? "").trim();
-    if (!text) return;
-    discussDraft[check.id] = "";
-    discussOpen[check.id] = true;
-    void app.sendAuditCheckChat(check, text);
+  /** Category name for the chat sheet's secondary context line. */
+  function chatCategoryName(): string {
+    if (!chatCheckId || !app.audit.currentRun) return "";
+    const cat = app.audit.currentRun.categories.find((c) =>
+      c.checks.some((ch) => ch.id === chatCheckId),
+    );
+    return cat?.name ?? "";
+  }
+  function openDiscuss(check: AuditCheck): void {
+    chatCheckId = check.id;
+    chatOpen = true;
   }
   function fileIssue(check: AuditCheck): void {
     void app.fileAuditCheckAsIssue(check);
@@ -387,10 +369,13 @@
     editingCheckId = null;
   }
   function onDeleteCheck(checkId: string): void {
-    if (confirm("Delete this check?")) {
-      if (openCheckId === checkId) openCheckId = null;
-      app.deleteAuditCheck(checkId);
-    }
+    // No window.confirm here — JS dialogs are unreliable inside the Chrome
+    // side panel (they can be silently suppressed, which is why Delete
+    // "did nothing"). The kebab → Delete (red) is already a deliberate
+    // action; deleting a built-in just hides it via overlay.deleted, and
+    // re-running the category brings it back.
+    if (openCheckId === checkId) openCheckId = null;
+    app.deleteAuditCheck(checkId);
   }
 
   // ─── Add check (per-category, via kebab) ────────────────────────────
@@ -623,9 +608,9 @@
   <!-- ─────────────────────────────────────────────────────────────────
        Per-check row snippet. Defined at the top level of <section> so the
        final results view can render it — an inspectable row (expandable
-       body, disposition control, Fix-with-agent, Edit/Delete) instead of
+       body, kebab actions Fix/Discuss/File issue, Edit/Delete) instead of
        duplicating ~200 lines inline. Closes over the module-scope helpers
-       (openCheckId, toggleCheck, handoffToAnnotate, dispositionOf,
+       (openCheckId, toggleCheck, handoffToAnnotate, openDiscuss, fileIssue,
        statusBadgeClass, statusGlyph, parseStep, editingCheckId, …).
        ──────────────────────────────────────────────────────────────── -->
   {#snippet checkRow(check: AuditCheck)}
@@ -693,32 +678,68 @@
               class="absolute z-30 right-1.5 top-9 bg-white dark:bg-night-card border border-ink-200 dark:border-night-line rounded-md shadow-lg py-1 min-w-[150px]"
               role="menu"
             >
-              <!-- Mark as (disposition) — moved here from the old inline
-                   STATUS segmented control. Actionable findings only; feeds
-                   the overall Remediation progress bar. -->
-              {#if isActionable(check)}
-                {@const active = dispositionOf(check)}
+              <!-- Per-finding actions — quick access without expanding the
+                   row. Mirrors the in-body buttons (Fix / Discuss / File
+                   issue). Actionable findings only. -->
+              {#if hasActions}
+                {@const filed = app.audit.filedIssues[check.id]}
+                {@const issuePending = app.audit.pendingFileIssue[check.id]}
+                {@const chatCount = checkChat(check).length}
                 <div class="px-3 pt-1.5 pb-1 text-[9.5px] font-bold uppercase tracking-wider text-ink-400 dark:text-night-mute">
-                  Mark as
+                  Actions
                 </div>
-                {#each DISPOSITIONS as opt (opt.value)}
-                  <button
-                    type="button"
-                    class="w-full flex items-center gap-2 px-3 py-1.5 text-[12px] hover:bg-ink-50 dark:hover:bg-night-alt {active === opt.value
-                      ? 'text-brand-pink dark:text-brand-pink-light font-semibold'
-                      : 'text-ink-700 dark:text-night-dim hover:text-ink-900 dark:hover:text-night-text'}"
-                    role="menuitemradio"
-                    aria-checked={active === opt.value}
-                    onclick={() => { app.setAuditDisposition(check.id, opt.value); checkKebabOpen = null; }}
-                    title={`Mark this finding ${opt.label}`}
-                  >
-                    <span class="w-1.5 h-1.5 rounded-full {dispositionDotClass(opt.value)}" aria-hidden="true"></span>
-                    {opt.label}
-                    {#if active === opt.value}
-                      <svg class="ml-auto" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="20 6 9 17 4 12"/></svg>
-                    {/if}
-                  </button>
-                {/each}
+                <button
+                  type="button"
+                  class="w-full flex items-center gap-2 px-3 py-1.5 text-[12px] text-ink-700 dark:text-night-dim hover:bg-ink-50 dark:hover:bg-night-alt hover:text-ink-900 dark:hover:text-night-text disabled:opacity-50 disabled:cursor-default"
+                  onclick={() => { handoffToAnnotate(check); checkKebabOpen = null; }}
+                  disabled={handedOff[check.id]}
+                  role="menuitem"
+                  title="Fix with agent — compose a Pinta annotation pre-filled with this finding"
+                >
+                  {#if handedOff[check.id]}
+                    <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="20 6 9 17 4 12"/></svg>
+                    Drafted in Annotate
+                  {:else}
+                    <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M15 4V2"/><path d="M15 16v-2"/><path d="M8 9h2"/><path d="M20 9h2"/><path d="M17.8 11.8 19 13"/><path d="M15 9h.01"/><path d="M17.8 6.2 19 5"/><path d="m3 21 9-9"/><path d="M12.2 6.2 11 5"/></svg>
+                    Fix with agent
+                  {/if}
+                </button>
+                <button
+                  type="button"
+                  class="w-full flex items-center gap-2 px-3 py-1.5 text-[12px] text-ink-700 dark:text-night-dim hover:bg-ink-50 dark:hover:bg-night-alt hover:text-ink-900 dark:hover:text-night-text"
+                  onclick={() => { openDiscuss(check); checkKebabOpen = null; }}
+                  role="menuitem"
+                  title="Discuss — ask the agent about this finding"
+                >
+                  <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg>
+                  Discuss
+                  {#if chatCount > 0}
+                    <span class="ml-auto min-w-[16px] h-4 px-1 inline-flex items-center justify-center rounded-full bg-brand-pink text-white text-[9px] font-semibold leading-none dark:bg-brand-pink-light dark:text-night-bg" aria-hidden="true">{chatCount}</span>
+                  {/if}
+                </button>
+                <button
+                  type="button"
+                  class="w-full flex items-center gap-2 px-3 py-1.5 text-[12px] hover:bg-ink-50 dark:hover:bg-night-alt disabled:cursor-default {filed
+                    ? 'text-emerald-600 dark:text-emerald-400'
+                    : 'text-ink-700 dark:text-night-dim hover:text-ink-900 dark:hover:text-night-text'}"
+                  onclick={() => { fileIssue(check); checkKebabOpen = null; }}
+                  disabled={issuePending || !!filed}
+                  role="menuitem"
+                  title={filed
+                    ? "Issue already filed"
+                    : "File issue — opens a GitLab issue via glab, or adds to .pinta/tasks.md"}
+                >
+                  {#if issuePending}
+                    <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="animate-spin" aria-hidden="true"><path d="M21 12a9 9 0 1 1-6.219-8.56"/></svg>
+                    Filing…
+                  {:else if filed}
+                    <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="20 6 9 17 4 12"/></svg>
+                    Filed
+                  {:else}
+                    <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="3" y="4" width="18" height="16" rx="2"/><line x1="8" y1="2" x2="8" y2="6"/><line x1="16" y1="2" x2="16" y2="6"/><line x1="3" y1="10" x2="21" y2="10"/></svg>
+                    File issue
+                  {/if}
+                </button>
                 <div class="my-1 border-t border-ink-100 dark:border-night-line"></div>
               {/if}
               <button
@@ -863,11 +884,11 @@
                      to do the work; the agent's reply lands via session.synced. -->
                 <button
                   type="button"
-                  class="inline-flex items-center gap-1.5 rounded-md border border-ink-200 dark:border-night-line bg-white dark:bg-night-card text-[11px] font-medium px-2.5 py-1 hover:bg-ink-50 dark:hover:bg-night-alt {discussOpen[check.id]
+                  class="inline-flex items-center gap-1.5 rounded-md border border-ink-200 dark:border-night-line bg-white dark:bg-night-card text-[11px] font-medium px-2.5 py-1 hover:bg-ink-50 dark:hover:bg-night-alt {chatOpen && chatCheckId === check.id
                     ? 'text-brand-pink dark:text-brand-pink-light'
                     : 'text-ink-700 dark:text-night-dim hover:text-brand-pink dark:hover:text-brand-pink-light'}"
-                  onclick={() => toggleDiscuss(check)}
-                  aria-expanded={discussOpen[check.id] ?? false}
+                  onclick={() => openDiscuss(check)}
+                  aria-haspopup="dialog"
                   title="Discuss — ask the agent about this finding"
                 >
                   {#if chatPending}
@@ -915,86 +936,6 @@
                   {/if}
                 {/if}
               </div>
-
-              <!-- Inline Discuss thread — appears when opened or once it has
-                   messages. Mirrors Test Pilot's per-row chat surface. -->
-              {#if discussOpen[check.id] || chat.length > 0}
-                <div class="rounded-md border border-ink-200 dark:border-night-line bg-white dark:bg-night-card p-2 space-y-2">
-                  {#if chat.length > 0}
-                    <div class="space-y-2 max-h-64 overflow-y-auto">
-                      {#each chat as msg (msg.id)}
-                        {#if msg.role === "user"}
-                          <div class="flex justify-end">
-                            <div class="max-w-[85%] rounded-lg rounded-br-sm bg-brand-pink text-white px-2.5 py-1.5 text-[12px] leading-snug whitespace-pre-wrap break-words">{msg.text}</div>
-                          </div>
-                        {:else}
-                          <div class="flex justify-start">
-                            <div class="max-w-[90%] rounded-lg rounded-bl-sm bg-ink-50 dark:bg-night-alt text-ink-800 dark:text-night-text px-2.5 py-1.5 text-[12px] leading-relaxed space-y-1.5">
-                              {#each parseStep(msg.text) as block, bi (bi)}
-                                {#if block.kind === "text"}
-                                  <p>
-                                    {#each block.parts as part, pi (pi)}
-                                      {#if part.kind === "code"}
-                                        <code class="font-mono text-[11px] bg-white dark:bg-night-card text-brand-pink dark:text-brand-pink-light px-1 py-0.5 rounded">{part.value}</code>
-                                      {:else if part.kind === "bold"}
-                                        <strong class="font-semibold">{part.value}</strong>
-                                      {:else}
-                                        <span>{part.value}</span>
-                                      {/if}
-                                    {/each}
-                                  </p>
-                                {:else if block.kind === "code"}
-                                  <pre class="rounded border border-ink-200 dark:border-night-line bg-white dark:bg-night-card px-2 py-1.5 text-[11px] font-mono overflow-x-auto">{block.body}</pre>
-                                {:else if block.kind === "note"}
-                                  <div class="border-l-2 border-ink-300 dark:border-night-line pl-2 text-[11.5px] text-ink-600 dark:text-night-dim">
-                                    {#each block.parts as part, pi (pi)}
-                                      {#if part.kind === "code"}
-                                        <code class="font-mono text-[11px]">{part.value}</code>
-                                      {:else}
-                                        <span>{part.value}</span>
-                                      {/if}
-                                    {/each}
-                                  </div>
-                                {/if}
-                              {/each}
-                            </div>
-                          </div>
-                        {/if}
-                      {/each}
-                    </div>
-                  {/if}
-                  {#if chatPending}
-                    <div class="flex items-center gap-1.5 text-[11px] text-ink-500 dark:text-night-mute px-1">
-                      <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" class="animate-spin" aria-hidden="true"><path d="M21 12a9 9 0 1 1-6.219-8.56"/></svg>
-                      Agent is thinking…
-                    </div>
-                  {/if}
-                  <div class="flex items-end gap-1.5">
-                    <textarea
-                      bind:value={discussDraft[check.id]}
-                      rows="1"
-                      placeholder="Ask the agent about this finding…"
-                      class="flex-1 resize-y rounded-md border border-ink-300 dark:border-night-line bg-white dark:bg-night-bg px-2 py-1.5 text-[12px] text-ink-900 dark:text-night-text focus:outline-none focus:ring-1 focus:ring-brand-pink"
-                      onkeydown={(e) => {
-                        if (e.key === "Enter" && !e.shiftKey) {
-                          e.preventDefault();
-                          sendDiscuss(check);
-                        }
-                      }}
-                    ></textarea>
-                    <button
-                      type="button"
-                      class="shrink-0 inline-flex items-center justify-center rounded-md bg-brand-pink hover:bg-brand-magenta dark:hover:bg-brand-pink-light text-white px-2.5 py-1.5 disabled:opacity-50"
-                      onclick={() => sendDiscuss(check)}
-                      disabled={chatPending || !(discussDraft[check.id] ?? "").trim()}
-                      aria-label="Send"
-                      title="Send (Enter)"
-                    >
-                      <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><line x1="22" y1="2" x2="11" y2="13"/><polygon points="22 2 15 22 11 13 2 9 22 2"/></svg>
-                    </button>
-                  </div>
-                </div>
-              {/if}
             </div>
           {/if}
           {/if}
@@ -1004,9 +945,11 @@
   {/snippet}
 
   <!-- RUN CONTROLS / IN-FLIGHT -->
-  {#if running}
-    <!-- Single "Starting audit…" loader while the agent works. The full
-         results land at once via the final mark_session_done. -->
+  {#if running && !hasRun}
+    <!-- First-ever run: full "Starting audit…" loader. On a re-run we keep
+         the previous results visible and spin the score donuts instead
+         (see the RESULTS block), so this only fires when there's nothing
+         to show yet. The full results land at once via mark_session_done. -->
     <div class="rounded-lg border border-brand-pink/30 bg-brand-pink/5 dark:bg-brand-pink/10 p-4 space-y-2">
       <div class="flex items-center gap-2">
         <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="animate-spin text-brand-pink dark:text-brand-pink-light" aria-hidden="true">
@@ -1137,58 +1080,100 @@
   {/if}
 
   <!-- RESULTS -->
-  {#if hasRun && !running}
+  {#if hasRun}
     {@const run = app.audit.currentRun}
     {#if run}
-      <!-- Overall score card — circular ring + rating + run actions -->
+      <!-- Overall score card — circular ring + rating + run actions. On a
+           full re-run the donut becomes an indeterminate spinner and the
+           actions collapse to a single Cancel, mirroring the per-category
+           cards below. -->
       <div class="rounded-lg border border-ink-200 dark:border-night-line bg-white dark:bg-night-card p-4 flex items-center gap-4">
         <div class="relative shrink-0">
-          <svg width="64" height="64" viewBox="0 0 64 64" aria-hidden="true">
-            <circle
-              cx="32"
-              cy="32"
-              r="27"
-              fill="none"
-              class="stroke-ink-200 dark:stroke-night-line"
-              stroke-width="6"
-            />
-            <circle
-              cx="32"
-              cy="32"
-              r="27"
-              fill="none"
-              stroke-width="6"
-              stroke-linecap="round"
-              class={scoreRingColor(run.overall)}
-              stroke-dasharray={`${(run.overall / 100) * 169.6} 169.6`}
-              transform="rotate(-90 32 32)"
-            />
-          </svg>
-          <div class="absolute inset-0 inline-flex items-center justify-center">
-            <span class="text-[18px] font-bold tabular-nums {scoreColor(run.overall)}">{Math.round(run.overall)}</span>
-          </div>
+          {#if running}
+            <svg width="64" height="64" viewBox="0 0 64 64" class="animate-spin" aria-hidden="true">
+              <circle
+                cx="32"
+                cy="32"
+                r="27"
+                fill="none"
+                class="stroke-ink-200 dark:stroke-night-line"
+                stroke-width="6"
+              />
+              <circle
+                cx="32"
+                cy="32"
+                r="27"
+                fill="none"
+                stroke-width="6"
+                stroke-linecap="round"
+                class="stroke-brand-pink dark:stroke-brand-pink-light"
+                stroke-dasharray="42 169.6"
+                transform="rotate(-90 32 32)"
+              />
+            </svg>
+            <span class="sr-only">Re-running audit…</span>
+          {:else}
+            <svg width="64" height="64" viewBox="0 0 64 64" aria-hidden="true">
+              <circle
+                cx="32"
+                cy="32"
+                r="27"
+                fill="none"
+                class="stroke-ink-200 dark:stroke-night-line"
+                stroke-width="6"
+              />
+              <circle
+                cx="32"
+                cy="32"
+                r="27"
+                fill="none"
+                stroke-width="6"
+                stroke-linecap="round"
+                class={scoreRingColor(run.overall)}
+                stroke-dasharray={`${(run.overall / 100) * 169.6} 169.6`}
+                transform="rotate(-90 32 32)"
+              />
+            </svg>
+            <div class="absolute inset-0 inline-flex items-center justify-center">
+              <span class="text-[18px] font-bold tabular-nums {scoreColor(run.overall)}">{Math.round(run.overall)}</span>
+            </div>
+          {/if}
         </div>
         <div class="min-w-0 flex-1">
-          <div class="text-[14px] font-bold text-ink-900 dark:text-night-text">{run.rating}</div>
-          <div class="text-[11.5px] text-ink-500 dark:text-night-mute mt-0.5">
-            {run.categories.length} categor{run.categories.length === 1 ? "y" : "ies"} audited
-          </div>
-          <div class="flex items-center gap-3 mt-2">
-            <button
-              type="button"
-              class="text-[11.5px] font-medium text-brand-pink dark:text-brand-pink-light hover:underline disabled:opacity-50"
-              onclick={runAudit}
-              disabled={app.connectionStatus !== "connected"}
-              title={app.connectionStatus !== "connected"
-                ? "Connect a companion to re-run"
-                : "Re-run the audit"}
-            >Re-run</button>
-            <button
-              type="button"
-              class="text-[11.5px] font-medium text-ink-500 dark:text-night-mute hover:text-red-600 dark:hover:text-red-400"
-              onclick={clearAudit}
-            >Clear results</button>
-          </div>
+          {#if running}
+            <div class="text-[14px] font-bold text-ink-900 dark:text-night-text">Re-running audit…</div>
+            <div class="text-[11.5px] text-ink-500 dark:text-night-mute mt-0.5 leading-snug">
+              The agent is re-inspecting your project. Results refresh when it finishes.
+            </div>
+            <div class="flex items-center gap-3 mt-2">
+              <button
+                type="button"
+                class="text-[11.5px] font-medium text-ink-600 dark:text-night-dim hover:text-red-600 dark:hover:text-red-400 underline"
+                onclick={cancelAudit}
+              >Cancel</button>
+            </div>
+          {:else}
+            <div class="text-[14px] font-bold text-ink-900 dark:text-night-text">{run.rating}</div>
+            <div class="text-[11.5px] text-ink-500 dark:text-night-mute mt-0.5">
+              {run.categories.length} categor{run.categories.length === 1 ? "y" : "ies"} audited
+            </div>
+            <div class="flex items-center gap-3 mt-2">
+              <button
+                type="button"
+                class="text-[11.5px] font-medium text-brand-pink dark:text-brand-pink-light hover:underline disabled:opacity-50"
+                onclick={runAudit}
+                disabled={app.connectionStatus !== "connected"}
+                title={app.connectionStatus !== "connected"
+                  ? "Connect a companion to re-run"
+                  : "Re-run the audit"}
+              >Re-run</button>
+              <button
+                type="button"
+                class="text-[11.5px] font-medium text-ink-500 dark:text-night-mute hover:text-red-600 dark:hover:text-red-400"
+                onclick={clearAudit}
+              >Clear results</button>
+            </div>
+          {/if}
         </div>
       </div>
 
@@ -1213,15 +1198,15 @@
       <!-- Per-category cards -->
       {#each run.categories as category (category.id)}
         {@const tally = categoryTally(category.checks)}
-        {@const isOpen = expanded[category.id] ?? false}
+        {@const reRunning = reRunningCategory === category.id}
+        {@const catBusy = reRunning || running}
+        {@const isOpen = (expanded[category.id] ?? false) && !catBusy}
         {@const catProgress = auditProgress(
           category.checks,
           app.audit.dispositions,
         )}
         {@const isCustom = isCustomCategory(category.id)}
         {@const suggesting = !!app.audit.pendingAuditSuggest[category.id]}
-        {@const reRunning = reRunningCategory === category.id}
-        {@const kebabBusy = suggesting || reRunning}
         {@const pickedSuggestions = app.audit.suggestions[category.id]}
         <div class="relative rounded-lg border border-ink-200 dark:border-night-line bg-white dark:bg-night-card overflow-visible">
           {#if renamingCategory === category.id}
@@ -1256,30 +1241,58 @@
             aria-expanded={isOpen}
           >
             <div class="relative shrink-0">
-              <svg width="36" height="36" viewBox="0 0 36 36" aria-hidden="true">
-                <circle
-                  cx="18"
-                  cy="18"
-                  r="15"
-                  fill="none"
-                  class="stroke-ink-200 dark:stroke-night-line"
-                  stroke-width="3.5"
-                />
-                <circle
-                  cx="18"
-                  cy="18"
-                  r="15"
-                  fill="none"
-                  stroke-width="3.5"
-                  stroke-linecap="round"
-                  class={scoreRingColor(category.score)}
-                  stroke-dasharray={`${(category.score / 100) * 94.25} 94.25`}
-                  transform="rotate(-90 18 18)"
-                />
-              </svg>
-              <div class="absolute inset-0 inline-flex items-center justify-center">
-                <span class="text-[10px] font-bold tabular-nums {scoreColor(category.score)}">{Math.round(category.score)}</span>
-              </div>
+              {#if catBusy}
+                <!-- Re-running (this category or a full re-run): the score
+                     donut becomes an indeterminate spinning progress ring
+                     until fresh results land. -->
+                <svg width="36" height="36" viewBox="0 0 36 36" class="animate-spin" aria-hidden="true">
+                  <circle
+                    cx="18"
+                    cy="18"
+                    r="15"
+                    fill="none"
+                    class="stroke-ink-200 dark:stroke-night-line"
+                    stroke-width="3.5"
+                  />
+                  <circle
+                    cx="18"
+                    cy="18"
+                    r="15"
+                    fill="none"
+                    stroke-width="3.5"
+                    stroke-linecap="round"
+                    class="stroke-brand-pink dark:stroke-brand-pink-light"
+                    stroke-dasharray="24 94.25"
+                    transform="rotate(-90 18 18)"
+                  />
+                </svg>
+                <span class="sr-only">Re-running this category…</span>
+              {:else}
+                <svg width="36" height="36" viewBox="0 0 36 36" aria-hidden="true">
+                  <circle
+                    cx="18"
+                    cy="18"
+                    r="15"
+                    fill="none"
+                    class="stroke-ink-200 dark:stroke-night-line"
+                    stroke-width="3.5"
+                  />
+                  <circle
+                    cx="18"
+                    cy="18"
+                    r="15"
+                    fill="none"
+                    stroke-width="3.5"
+                    stroke-linecap="round"
+                    class={scoreRingColor(category.score)}
+                    stroke-dasharray={`${(category.score / 100) * 94.25} 94.25`}
+                    transform="rotate(-90 18 18)"
+                  />
+                </svg>
+                <div class="absolute inset-0 inline-flex items-center justify-center">
+                  <span class="text-[10px] font-bold tabular-nums {scoreColor(category.score)}">{Math.round(category.score)}</span>
+                </div>
+              {/if}
             </div>
             <div class="min-w-0 flex-1">
               <div class="flex items-center gap-1.5">
@@ -1315,12 +1328,12 @@
             type="button"
             data-audit-kebab-trigger
             class="absolute top-2 right-2 w-7 h-7 inline-flex items-center justify-center rounded-full hover:bg-ink-100 dark:hover:bg-night-line"
-            class:text-brand-pink={kebabBusy}
-            class:dark:text-brand-pink-light={kebabBusy}
-            class:text-ink-500={!kebabBusy}
-            class:dark:text-night-dim={!kebabBusy}
-            class:hover:text-ink-900={!kebabBusy}
-            class:dark:hover:text-night-text={!kebabBusy}
+            class:text-brand-pink={suggesting}
+            class:dark:text-brand-pink-light={suggesting}
+            class:text-ink-500={!suggesting}
+            class:dark:text-night-dim={!suggesting}
+            class:hover:text-ink-900={!suggesting}
+            class:dark:hover:text-night-text={!suggesting}
             onclick={() => toggleCategoryKebab(category.id)}
             aria-haspopup="menu"
             aria-expanded={categoryKebabOpen === category.id}
@@ -1331,7 +1344,9 @@
                 ? "Suggesting checks…"
                 : "Category actions"}
           >
-            {#if kebabBusy}
+            {#if suggesting}
+              <!-- Spinner only for "Suggest checks" — a re-run already shows
+                   its progress on the score donut, so no second loader here. -->
               <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="animate-spin" aria-hidden="true"><path d="M21 12a9 9 0 1 1-6.219-8.56"/></svg>
             {:else}
               <svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
@@ -1533,3 +1548,27 @@
     {/if}
   {/if}
 </section>
+
+<!-- Per-finding Discuss chat — the shared bottom-sheet surface (same
+     component Test Pilot uses). Rendered at top level so it overlays the
+     whole tab regardless of which finding row opened it. Threads persist
+     in app.audit.checkChats keyed by check.id. -->
+{#if chatCheckId}
+  {@const chatCheck = findChatCheck()}
+  <ChatSheet
+    open={chatOpen && !!chatCheck}
+    contextHeader="Discussing finding"
+    contextLabel={chatCheck?.label ?? ""}
+    contextSubLabel={chatCategoryName()}
+    messages={chatCheck ? checkChat(chatCheck) : []}
+    pending={!!app.audit.pendingCheckChat[chatCheckId]}
+    error={app.audit.error}
+    placeholder="Ask the agent about this finding…"
+    greeting={`Ask me anything about "${chatCheck?.label ?? "this finding"}" — what it means, why it matters, or how to fix it.`}
+    imagesEnabled={true}
+    onClose={() => { chatOpen = false; chatCheckId = null; }}
+    onSend={(prompt, images) => {
+      if (chatCheck) void app.sendAuditCheckChat(chatCheck, prompt, images);
+    }}
+  />
+{/if}
