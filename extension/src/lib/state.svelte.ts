@@ -3982,6 +3982,23 @@ class ExtensionState {
     }
   }
 
+  /** Heartbeat that re-fetches in-flight batch status over HTTP while any
+   *  batch is pending. Recovers a HALF-OPEN WebSocket — the companion was
+   *  restarted (or the socket silently died) so it never sent a close
+   *  frame: the extension still shows "connected", the live done-broadcast
+   *  never lands, and no reconnect ever fires the connect-time reconcile,
+   *  so the submitted card spins forever. The HTTP poll is a fresh
+   *  connection that bypasses the dead socket. Self-stops when idle. */
+  private static readonly RECONCILE_HEARTBEAT_MS = 25_000;
+  private reconcileHeartbeat: ReturnType<typeof setInterval> | null = null;
+  /** Re-entrancy guard so an overlapping heartbeat + connect-time sweep
+   *  don't stack concurrent fetch loops. */
+  private reconcileRunning = false;
+  /** Batch ids the companion 404'd (forgotten / store reset) — skip in the
+   *  heartbeat so it doesn't poll a dead session forever. Cleared on a
+   *  fresh reconnect so each gets one more chance. */
+  private reconciledOrphans = new Set<string>();
+
   /**
    * On (re)connect, recover any in-flight annotation batch whose
    * `session.synced(applying|done|error)` we missed while the socket was
@@ -4003,41 +4020,88 @@ class ExtensionState {
   private async reconcileInFlightBatches(): Promise<void> {
     const base = this.httpBase();
     if (!base) return;
-    // Snapshot ids up front — the array is mutated as we apply updates and
-    // the user may dismiss a row while an await is in flight.
-    const ids = this.inFlightBatches.map((b) => b.id);
-    for (const id of ids) {
-      try {
-        const res = await ExtensionState.fetchWithTimeout(
-          `${base}/v1/sessions/${encodeURIComponent(id)}`,
-        );
-        if (!res.ok) {
-          // 404 → the companion has no record of this batch (finished and
-          // pruned, or a store reset). It can't progress, so retire any
-          // stale "still waiting for an agent" notice for it; leave the
-          // tray row so the user still sees it existed and can dismiss it.
-          if (res.status === 404) this.clearClaimWarning(id);
-          continue;
+    if (this.reconcileRunning) return;
+    this.reconcileRunning = true;
+    try {
+      // Snapshot ids up front — the array is mutated as we apply updates and
+      // the user may dismiss a row while an await is in flight.
+      const ids = this.inFlightBatches.map((b) => b.id);
+      for (const id of ids) {
+        // A batch the companion already 404'd can't progress through this
+        // process; skip it so the heartbeat doesn't poll it forever. A real
+        // reconnect clears the orphan set and gives it one more chance.
+        if (this.reconciledOrphans.has(id)) continue;
+        try {
+          const res = await ExtensionState.fetchWithTimeout(
+            `${base}/v1/sessions/${encodeURIComponent(id)}`,
+          );
+          if (!res.ok) {
+            // 404 → the companion has no record of this batch (finished and
+            // pruned, or a store reset). It can't progress, so retire any
+            // stale "still waiting for an agent" notice, stop re-polling it,
+            // and leave the tray row so the user still sees it existed and
+            // can dismiss it.
+            if (res.status === 404) {
+              this.reconciledOrphans.add(id);
+              this.clearClaimWarning(id);
+            }
+            continue;
+          }
+          const session = (await res.json()) as Session;
+          const idx = this.inFlightBatches.findIndex((b) => b.id === id);
+          if (idx === -1) continue; // dismissed mid-fetch
+          // The companion store only moves status forward, so any change is
+          // an advance worth applying. Skip a no-op to avoid a needless
+          // reactive churn.
+          if (session.status === this.inFlightBatches[idx]!.status) continue;
+          this.inFlightBatches[idx] = session;
+          this.inFlightBatches = [...this.inFlightBatches];
+          // Leaving "submitted" retires the stale claim-warning notice —
+          // same effect as the live session.synced path's top-of-switch
+          // clearClaimWarning(msg.session.id).
+          if (session.status !== "submitted") {
+            this.clearClaimWarning(id);
+          }
+        } catch {
+          // Companion unreachable / transient — keep the row; a later
+          // reconnect or live broadcast recovers it.
         }
-        const session = (await res.json()) as Session;
-        const idx = this.inFlightBatches.findIndex((b) => b.id === id);
-        if (idx === -1) continue; // dismissed mid-fetch
-        // The companion store only moves status forward, so any change is
-        // an advance worth applying. Skip a no-op to avoid a needless
-        // reactive churn.
-        if (session.status === this.inFlightBatches[idx]!.status) continue;
-        this.inFlightBatches[idx] = session;
-        this.inFlightBatches = [...this.inFlightBatches];
-        // Leaving "submitted" retires the stale claim-warning notice —
-        // same effect as the live session.synced path's top-of-switch
-        // clearClaimWarning(msg.session.id).
-        if (session.status !== "submitted") {
-          this.clearClaimWarning(id);
-        }
-      } catch {
-        // Companion unreachable / transient — keep the row; a later
-        // reconnect or live broadcast recovers it.
       }
+    } finally {
+      this.reconcileRunning = false;
+    }
+  }
+
+  /** True while some in-flight annotation batch is still waiting on the
+   *  agent (submitted/applying) and the companion hasn't 404'd it. Drives
+   *  the reconcile-heartbeat lifecycle — when this goes false the heartbeat
+   *  self-stops on its next tick. */
+  private hasReconcilableBatches(): boolean {
+    return this.inFlightBatches.some(
+      (b) =>
+        (b.status === "submitted" || b.status === "applying") &&
+        !this.reconciledOrphans.has(b.id),
+    );
+  }
+
+  /** Start the reconcile heartbeat if a batch is pending and it isn't
+   *  already running. Idempotent. */
+  private ensureReconcileHeartbeat(): void {
+    if (this.reconcileHeartbeat) return;
+    if (!this.hasReconcilableBatches()) return;
+    this.reconcileHeartbeat = setInterval(() => {
+      if (!this.hasReconcilableBatches()) {
+        this.stopReconcileHeartbeat();
+        return;
+      }
+      void this.reconcileInFlightBatches();
+    }, ExtensionState.RECONCILE_HEARTBEAT_MS);
+  }
+
+  private stopReconcileHeartbeat(): void {
+    if (this.reconcileHeartbeat) {
+      clearInterval(this.reconcileHeartbeat);
+      this.reconcileHeartbeat = null;
     }
   }
 
@@ -5757,8 +5821,13 @@ class ExtensionState {
         // on reconnect, so without this they strand "submitted" with a
         // stale claim notice. No-op on a fresh connect (nothing pending).
         if (status === "connected") {
+          // A fresh connection — give any previously-404'd orphan one more
+          // chance, reconcile now, and (re)start the heartbeat so a later
+          // half-open socket still self-heals pending batches over HTTP.
+          this.reconciledOrphans.clear();
           void this.reconcileModuleBoards();
           void this.reconcileInFlightBatches();
+          this.ensureReconcileHeartbeat();
         }
       },
     });
@@ -5901,6 +5970,9 @@ class ExtensionState {
       detached.status = "submitted";
       detached.submittedAt = Date.now();
       this.inFlightBatches = [...this.inFlightBatches, detached];
+      // Keep the reconcile heartbeat alive while this batch is pending, so a
+      // half-open WebSocket (no done-broadcast) still self-heals over HTTP.
+      this.ensureReconcileHeartbeat();
     }
     this.session = null;
     this.markCreatingSession(true);
@@ -5918,7 +5990,10 @@ class ExtensionState {
    */
   dismissBatch(id: string): void {
     this.clearClaimWarning(id);
+    this.reconciledOrphans.delete(id);
     this.inFlightBatches = this.inFlightBatches.filter((b) => b.id !== id);
+    // Nothing left to poll → let the heartbeat go idle.
+    if (!this.hasReconcilableBatches()) this.stopReconcileHeartbeat();
   }
 
   /**
