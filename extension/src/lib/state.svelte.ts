@@ -3008,6 +3008,8 @@ class ExtensionState {
   /** Last generated report run + the user's range preference (Phase 16). */
   private static readonly REPORT_KEY = "pinta-report-current-run";
   private static readonly REPORT_RANGE_KEY = "pinta-report-range";
+  /** Extra repo paths to combine into the report (Phase 16b). */
+  private static readonly REPORT_PROJECTS_KEY = "pinta-report-projects";
   /** A whole-window gather (git log + gh/glab + Pinta history) is
    *  legitimately slow — same generous ceiling as a full audit. */
   private static readonly REPORT_TIMEOUT_MS = 600_000;
@@ -3164,11 +3166,18 @@ class ExtensionState {
       sessionId: string | null;
     } | null;
     range: ReportRange;
+    /** Extra repo paths to fold into the report alongside the current
+     *  companion's project (Phase 16b). Absolute paths the user typed —
+     *  the agent runs `git -C <path>` per repo and tags each item's
+     *  `project`. The primary (companion) project is always included
+     *  implicitly, so it is NOT in this list. */
+    projects: string[];
     error: string | null;
   }>({
     currentRun: null,
     pending: null,
     range: "weekly",
+    projects: [],
     error: null,
   });
   private reportTimer: ReturnType<typeof setTimeout> | null = null;
@@ -4329,6 +4338,33 @@ class ExtensionState {
     }
   }
 
+  /** Add an extra repo path to combine into the report. Normalizes
+   *  (trims + strips a trailing slash) and dedupes. The primary
+   *  (companion) project is implicit and must not be added here. */
+  addReportProject(path: string): void {
+    const p = path.trim().replace(/[\\/]+$/, "");
+    if (!p || this.report.projects.includes(p)) return;
+    this.report.projects = [...this.report.projects, p];
+    this.saveReportProjects();
+  }
+
+  removeReportProject(path: string): void {
+    this.report.projects = this.report.projects.filter((x) => x !== path);
+    this.saveReportProjects();
+  }
+
+  private saveReportProjects(): void {
+    try {
+      void chrome.storage?.local?.set({
+        [ExtensionState.REPORT_PROJECTS_KEY]: $state.snapshot(
+          this.report.projects,
+        ),
+      });
+    } catch {
+      // in-memory still drives the next generate this session
+    }
+  }
+
   /** Generate a report for the given range (defaults to the selected
    *  range, anchored on today). No-op if one's already in flight. */
   async generateReport(
@@ -4364,6 +4400,12 @@ class ExtensionState {
       until,
       includeWeekends: false,
       author: null,
+      // Extra repos to combine (Phase 16b). Omitted when empty so a
+      // single-project report stays lean. The agent runs `git -C <path>`
+      // per entry and tags each item's `project`.
+      ...(this.report.projects.length > 0
+        ? { projects: $state.snapshot(this.report.projects) }
+        : {}),
     });
     this.send({
       type: "module.query.submit",
@@ -4491,6 +4533,19 @@ class ExtensionState {
         | undefined;
       if (raw === "daily" || raw === "weekly" || raw === "sprint") {
         this.report.range = raw;
+      }
+    } catch {
+      // defaults stand
+    }
+    try {
+      const stored = await chrome.storage?.local?.get(
+        ExtensionState.REPORT_PROJECTS_KEY,
+      );
+      const raw = stored?.[ExtensionState.REPORT_PROJECTS_KEY] as
+        | string[]
+        | undefined;
+      if (Array.isArray(raw)) {
+        this.report.projects = raw.filter((p): p is string => typeof p === "string");
       }
     } catch {
       // defaults stand

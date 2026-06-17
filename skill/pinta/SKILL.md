@@ -2471,7 +2471,8 @@ Query comment shape:
   "since": "2026-06-01",
   "until": "2026-06-05",
   "includeWeekends": false,
-  "author": null
+  "author": null,
+  "projects": ["C:\\insclix\\insclix-awp-2.0"]
 }
 ```
 
@@ -2481,10 +2482,24 @@ folds them into adjacent weekdays at render, so just bucket items by
 their true date and don't drop weekend work). `author: null` = all
 authors; a string = scope git/PRs to that author.
 
+**Projects (`projects[]`, Phase 16b).** Optional array of ABSOLUTE repo
+paths to combine alongside the primary project (the companion's cwd,
+which is ALWAYS included even when `projects` is absent/empty). Run the
+git + issue-tracker gather below for the primary project AND for each
+listed path — execute git as `git -C <repoPath> …` and run `gh`/`glab`
+from inside each repo. **Tag every item's `project` with the repo's
+folder name** (e.g. `insclix-awp-2.0`, `insclix-claim-forms`) so the
+extension can group the report by project. If a path isn't a readable
+git repo, skip it and add one note line rather than failing the run.
+Pinta activity (source 3) is primary-project only. These paths are
+user-typed config — treat them as the user's intent: read-only git /
+issue-tracker gather, never writes.
+
 **Gather (bounded — see token note):**
-1. **git** — `git log --since=<since> --until=<until> [--author=<author>]`
-   on the current branch (and merge targets like `development` if
-   relevant). Categorize each commit by its conventional-commit prefix:
+1. **git** — `git [-C <repoPath>] log --since=<since> --until=<until> [--author=<author>]`
+   on the current branch of each project (and merge targets like
+   `development` if relevant). Categorize each commit by its
+   conventional-commit prefix:
    `fix:`→`bug-fix`, `feat:`→`feature`, `perf:`/`style:`/`refactor:`→
    `polish`, `test:`→`test`, `docs:`→`docs`, `chore(deps)`/lockfile/
    `npm audit` bumps→`deps`, **merge commits**→`merge`. Collapse a run of
@@ -2500,9 +2515,6 @@ authors; a string = scope git/PRs to that author.
    applied work — annotation batches (`pinta-annotate`), audit runs
    (`pinta-audit`), test marks (`pinta-test`).
 
-Bucket every item under its true `date` (yyyy-mm-dd). Don't pre-fold
-weekends — the extension does that.
-
 Return shape:
 
 ```json
@@ -2516,9 +2528,9 @@ Return shape:
     {
       "date": "2026-06-05",
       "items": [
-        { "id": "290", "ref": "#290", "url": "https://…/290", "title": "mid-edit network-error dialog reuse", "category": "bug-fix", "source": "pr" },
-        { "id": "282", "ref": "#282", "title": "npm audit fix (deps security)", "category": "deps", "source": "pr" },
-        { "title": "Integration merges of the mk daily chain into development (closed out via --end-day)", "category": "merge", "source": "git" }
+        { "id": "290", "ref": "#290", "url": "https://…/290", "title": "mid-edit network-error dialog reuse", "category": "bug-fix", "source": "pr", "project": "insclix-claim-forms" },
+        { "id": "282", "ref": "#282", "title": "npm audit fix (deps security)", "category": "deps", "source": "pr", "project": "insclix-claim-forms" },
+        { "ref": "#12", "title": "camera/viewer-portal drop-zone fix", "category": "bug-fix", "source": "pr", "project": "insclix-awp-2.0" }
       ]
     }
   ]
@@ -2528,8 +2540,12 @@ Return shape:
 `category` ∈ `bug-fix|feature|polish|test|annotate|merge|deps|docs|chore`
 (unknown coerces to `chore`); `source` ∈
 `git|pr|issue|pinta-annotate|pinta-audit|pinta-test` (unknown coerces to
-`git`). `title` is required; `ref`/`url`/`detail` optional. Submit via
-`mark_session_done({id, summary: JSON.stringify(payload)})`.
+`git`). `project` is the repo folder name — set it on EVERY item when
+`projects[]` is non-empty (so the extension can group per project);
+single-project reports may omit it. `title` is required; `ref`/`url`/
+`detail` optional. Bucket every item under its true `date` (yyyy-mm-dd);
+don't pre-fold weekends or pre-group by project — the extension does
+both. Submit via `mark_session_done({id, summary: JSON.stringify(payload)})`.
 
 **Token economy (§ build token-performant).** Keep gather bounded:
 date-window the git/gh queries, cap to ~50 items, emit ONE concise line

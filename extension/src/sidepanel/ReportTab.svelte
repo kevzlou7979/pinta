@@ -3,7 +3,9 @@
   // Pinta activity, gathered by the /pinta agent) as Read-Mode day
   // cards, and export a clean markdown summary by icon. Range = Today /
   // This week / 10-day Sprint; weekend work folds into the lighter
-  // adjacent weekday (done in report.ts, applied here at render).
+  // adjacent weekday. Phase 16b: combine extra repos — each item is
+  // tagged with its project and a multi-project report groups each day's
+  // items under per-project sub-sections.
 
   import { app } from "../lib/state.svelte.js";
   import {
@@ -11,7 +13,10 @@
     foldWeekends,
     formatDayHeading,
     formatShortDay,
+    groupItemsByProject,
     rangeWindow,
+    renderDayMarkdown,
+    reportProjects,
     type ReportCategory,
     type ReportItem,
     type ReportRange,
@@ -31,6 +36,19 @@
   );
   const pending = $derived(app.report.pending !== null);
   const connected = $derived(app.connectionStatus === "connected");
+  // >1 distinct project across the run → group each day by project.
+  const multiProject = $derived(run ? reportProjects(run).length > 1 : false);
+  const primaryProject = $derived(
+    app.selectedCompanion?.projectRoot
+      ? basename(app.selectedCompanion.projectRoot)
+      : null,
+  );
+
+  let newPath = $state("");
+
+  function basename(p: string): string {
+    return p.replace(/[\\/]+$/, "").split(/[\\/]/).pop() || p;
+  }
 
   function pickRange(r: ReportRange) {
     app.setReportRange(r);
@@ -38,6 +56,13 @@
 
   function generate() {
     void app.generateReport();
+  }
+
+  function addProject() {
+    const p = newPath.trim();
+    if (!p) return;
+    app.addReportProject(p);
+    newPath = "";
   }
 
   function download(filename: string, md: string) {
@@ -61,11 +86,10 @@
   }
 
   function exportDay(date: string, items: ReportItem[]) {
-    const lines = [`## ${formatDayHeading(date)}`];
-    for (const it of items) {
-      lines.push(it.ref ? `- ${it.ref} — ${it.title}` : `- ${it.title}`);
-    }
-    download(`pinta-report-${date}.md`, lines.join("\n") + "\n");
+    download(
+      `pinta-report-${date}.md`,
+      renderDayMarkdown({ date, items }, multiProject),
+    );
   }
 
   // Category → chip color. Grouped by intent so the cards scan fast.
@@ -93,8 +117,31 @@
   }
 </script>
 
+{#snippet itemRow(item: ReportItem)}
+  <li class="flex items-start gap-2 px-3 py-2">
+    <span
+      class="shrink-0 mt-0.5 px-1.5 py-0.5 rounded text-[10px] font-medium {chipClass(item.category)}"
+    >
+      {categoryLabel(item.category)}
+    </span>
+    <div class="min-w-0 flex-1 text-[12.5px] text-ink-800 dark:text-night-text leading-snug">
+      {#if item.ref}
+        {#if item.url}
+          <a href={item.url} target="_blank" rel="noopener noreferrer" class="font-mono text-[11.5px] text-brand-pink dark:text-brand-pink-light hover:underline">{item.ref}</a>
+        {:else}
+          <span class="font-mono text-[11.5px] text-ink-500 dark:text-night-mute">{item.ref}</span>
+        {/if}
+        <span class="text-ink-400 dark:text-night-mute"> — </span>
+      {/if}<span class="break-words">{item.title}</span>
+      {#if item.detail}
+        <p class="text-[11px] text-ink-500 dark:text-night-dim mt-0.5 break-words">{item.detail}</p>
+      {/if}
+    </div>
+  </li>
+{/snippet}
+
 <section class="space-y-3">
-  <!-- Header: range selector + Generate + global export -->
+  <!-- Header: title + global export -->
   <div class="flex items-center justify-between gap-2">
     <h2 class="text-sm font-semibold text-ink-900 dark:text-night-text">
       Report
@@ -116,6 +163,7 @@
     {/if}
   </div>
 
+  <!-- Range selector + Generate -->
   <div class="flex items-center gap-1.5">
     {#each RANGES as r (r.id)}
       <button
@@ -149,6 +197,63 @@
         {run ? "Regenerate" : "Generate"}
       {/if}
     </button>
+  </div>
+
+  <!-- Projects manager (Phase 16b) — combine extra repos -->
+  <div class="rounded-md border border-ink-200 dark:border-night-line p-2.5 space-y-2">
+    <span class="text-[11px] uppercase tracking-wide text-ink-500 dark:text-night-mute font-medium">
+      Projects
+    </span>
+    <div class="flex flex-wrap gap-1.5">
+      {#if primaryProject}
+        <span
+          class="inline-flex items-center gap-1 px-2 py-0.5 rounded-full bg-ink-100 dark:bg-night-alt text-[11px] text-ink-700 dark:text-night-dim"
+          title={app.selectedCompanion?.projectRoot}
+        >
+          {primaryProject}
+          <span class="text-ink-400 dark:text-night-mute">· primary</span>
+        </span>
+      {/if}
+      {#each app.report.projects as p (p)}
+        <span
+          class="inline-flex items-center gap-1 px-2 py-0.5 rounded-full bg-brand-pink/10 text-brand-pink dark:text-brand-pink-light text-[11px]"
+          title={p}
+        >
+          {basename(p)}
+          <button
+            type="button"
+            class="leading-none hover:text-brand-magenta dark:hover:text-white"
+            onclick={() => app.removeReportProject(p)}
+            aria-label={`Remove ${p}`}
+            title="Remove"
+          >×</button>
+        </span>
+      {/each}
+    </div>
+    <div class="flex items-center gap-1.5">
+      <input
+        type="text"
+        bind:value={newPath}
+        onkeydown={(e) => {
+          if (e.key === "Enter") addProject();
+        }}
+        placeholder="Add a repo path, e.g. C:\insclix\insclix-awp-2.0"
+        class="flex-1 min-w-0 text-[11.5px] px-2 py-1 rounded border border-ink-200 dark:border-night-line bg-white dark:bg-night-bg text-ink-800 dark:text-night-text placeholder:text-ink-400 dark:placeholder:text-night-mute focus:outline-none focus:ring-1 focus:ring-brand-pink/40"
+        disabled={pending}
+      />
+      <button
+        type="button"
+        class="px-2.5 py-1 text-[11px] rounded border border-ink-200 dark:border-night-line text-ink-600 dark:text-night-dim hover:border-brand-pink hover:text-brand-pink disabled:opacity-50"
+        onclick={addProject}
+        disabled={pending || newPath.trim() === ""}
+      >
+        Add
+      </button>
+    </div>
+    <p class="text-[10px] text-ink-400 dark:text-night-mute leading-snug">
+      Extra repos are gathered from git + your issue tracker (no Pinta
+      activity). The current project is always included as primary.
+    </p>
   </div>
 
   {#if !connected}
@@ -208,7 +313,7 @@
             class="shrink-0 w-6 h-6 inline-flex items-center justify-center rounded text-ink-400 dark:text-night-mute hover:text-brand-pink dark:hover:text-brand-pink-light hover:bg-ink-100 dark:hover:bg-night-line"
             onclick={() => exportDay(day.date, day.items)}
             title="Export this day (.md)"
-            aria-label="Export {formatDayHeading(day.date)} as markdown"
+            aria-label={`Export ${formatDayHeading(day.date)} as markdown`}
           >
             <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
               <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" />
@@ -217,28 +322,24 @@
             </svg>
           </button>
         </div>
-        <ul class="divide-y divide-ink-100 dark:divide-night-line/60">
-          {#each day.items as item (item.id)}
-            <li class="flex items-start gap-2 px-3 py-2">
-              <span class="shrink-0 mt-0.5 px-1.5 py-0.5 rounded text-[10px] font-medium {chipClass(item.category)}">
-                {categoryLabel(item.category)}
-              </span>
-              <div class="min-w-0 flex-1 text-[12.5px] text-ink-800 dark:text-night-text leading-snug">
-                {#if item.ref}
-                  {#if item.url}
-                    <a href={item.url} target="_blank" rel="noopener noreferrer" class="font-mono text-[11.5px] text-brand-pink dark:text-brand-pink-light hover:underline">{item.ref}</a>
-                  {:else}
-                    <span class="font-mono text-[11.5px] text-ink-500 dark:text-night-mute">{item.ref}</span>
-                  {/if}
-                  <span class="text-ink-400 dark:text-night-mute"> — </span>
-                {/if}<span class="break-words">{item.title}</span>
-                {#if item.detail}
-                  <p class="text-[11px] text-ink-500 dark:text-night-dim mt-0.5 break-words">{item.detail}</p>
-                {/if}
-              </div>
-            </li>
+        {#if multiProject}
+          {#each groupItemsByProject(day.items) as group (group.project)}
+            <div class="px-3 pt-2 pb-1 text-[10px] font-semibold uppercase tracking-wide text-ink-500 dark:text-night-mute border-t border-ink-100 dark:border-night-line/60 first:border-t-0">
+              {group.project || "Other"}
+            </div>
+            <ul class="divide-y divide-ink-100 dark:divide-night-line/60">
+              {#each group.items as item (item.id)}
+                {@render itemRow(item)}
+              {/each}
+            </ul>
           {/each}
-        </ul>
+        {:else}
+          <ul class="divide-y divide-ink-100 dark:divide-night-line/60">
+            {#each day.items as item (item.id)}
+              {@render itemRow(item)}
+            {/each}
+          </ul>
+        {/if}
       </div>
     {/each}
   {:else if run}
@@ -249,8 +350,9 @@
     <p class="text-xs text-ink-500 dark:text-night-mute italic leading-snug">
       No report yet. Pick a range and hit Generate — the agent gathers your
       bug fixes, polishes, tests, annotations, and merges from git + your
-      issue tracker + Pinta activity, grouped by day. Export any day or the
-      whole range as clean markdown.
+      issue tracker + Pinta activity, grouped by day. Add extra repos above
+      to combine projects. Export any day or the whole range as clean
+      markdown.
     </p>
   {/if}
 </section>
