@@ -13,7 +13,6 @@
     foldWeekends,
     formatDayHeading,
     formatShortDay,
-    groupItemsByProject,
     rangeWindow,
     renderDayMarkdown,
     reportProjects,
@@ -124,6 +123,16 @@
     >
       {categoryLabel(item.category)}
     </span>
+    {#if multiProject && item.project}
+      <!-- Per-task project tag (Phase 16b) — only when the report spans
+           multiple repos, so single-project reports stay clean. -->
+      <span
+        class="shrink-0 mt-0.5 px-1.5 py-0.5 rounded text-[10px] font-medium bg-ink-100 text-ink-600 dark:bg-night-alt dark:text-night-dim"
+        title={item.project}
+      >
+        {item.project}
+      </span>
+    {/if}
     <div class="min-w-0 flex-1 text-[12.5px] text-ink-800 dark:text-night-text leading-snug">
       {#if item.ref}
         {#if item.url}
@@ -322,24 +331,11 @@
             </svg>
           </button>
         </div>
-        {#if multiProject}
-          {#each groupItemsByProject(day.items) as group (group.project)}
-            <div class="px-3 pt-2 pb-1 text-[10px] font-semibold uppercase tracking-wide text-ink-500 dark:text-night-mute border-t border-ink-100 dark:border-night-line/60 first:border-t-0">
-              {group.project || "Other"}
-            </div>
-            <ul class="divide-y divide-ink-100 dark:divide-night-line/60">
-              {#each group.items as item (item.id)}
-                {@render itemRow(item)}
-              {/each}
-            </ul>
+        <ul class="divide-y divide-ink-100 dark:divide-night-line/60">
+          {#each day.items as item (item.id)}
+            {@render itemRow(item)}
           {/each}
-        {:else}
-          <ul class="divide-y divide-ink-100 dark:divide-night-line/60">
-            {#each day.items as item (item.id)}
-              {@render itemRow(item)}
-            {/each}
-          </ul>
-        {/if}
+        </ul>
       </div>
     {/each}
   {:else if run}

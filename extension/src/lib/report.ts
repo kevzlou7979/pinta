@@ -337,7 +337,7 @@ export function foldWeekends(
 }
 
 /** Distinct non-empty project labels across a run. >1 means the report
- *  spans multiple repos → cards + export group by project. */
+ *  spans multiple repos → cards + export tag each item with its project. */
 export function reportProjects(run: ReportRun): string[] {
   const set = new Set<string>();
   for (const d of run.days) {
@@ -346,53 +346,31 @@ export function reportProjects(run: ReportRun): string[] {
   return [...set];
 }
 
-/** Group a day's items by project, preserving first-seen order. Items
- *  with no project land under "" (rendered without a subhead / as
- *  "Other" in markdown). */
-export function groupItemsByProject(
-  items: ReportItem[],
-): { project: string; items: ReportItem[] }[] {
-  const order: string[] = [];
-  const map = new Map<string, ReportItem[]>();
-  for (const it of items) {
-    const p = it.project ?? "";
-    if (!map.has(p)) {
-      map.set(p, []);
-      order.push(p);
-    }
-    map.get(p)!.push(it);
-  }
-  return order.map((p) => ({ project: p, items: map.get(p)! }));
+/** One markdown line for an item. When the report spans multiple
+ *  projects, prefix the line with its `[project]` tag so you can see
+ *  which repo each task came from (e.g. `- [insclix-awp-2.0] #319 —
+ *  …`); single-project reports stay clean (`- #ref — title`). */
+function reportItemLine(it: ReportItem, multiProject: boolean): string {
+  const tag = multiProject && it.project ? `[${it.project}] ` : "";
+  return it.ref ? `- ${tag}${it.ref} — ${it.title}` : `- ${tag}${it.title}`;
 }
 
-function reportItemLine(it: ReportItem): string {
-  return it.ref ? `- ${it.ref} — ${it.title}` : `- ${it.title}`;
-}
-
-/** Markdown for a single day. When `multiProject`, the day's items are
- *  grouped under `### <project>` subheads (locked layout: grouped by
- *  project per day); otherwise flat `- #ref — title` lines. Shared by
- *  the whole-report export and the per-day export button. */
+/** Markdown for a single day — flat `- #ref — title` lines, each
+ *  prefixed with `[project]` when the report spans multiple projects.
+ *  Shared by the whole-report export and the per-day export button. */
 export function renderDayMarkdown(day: ReportDay, multiProject: boolean): string {
   const lines = [`## ${formatDayHeading(day.date)}`];
-  if (multiProject) {
-    for (const group of groupItemsByProject(day.items)) {
-      lines.push("", `### ${group.project || "Other"}`);
-      for (const it of group.items) lines.push(reportItemLine(it));
-    }
-  } else {
-    for (const it of day.items) lines.push(reportItemLine(it));
-  }
+  for (const it of day.items) lines.push(reportItemLine(it, multiProject));
   return lines.join("\n").trimEnd() + "\n";
 }
 
 /**
  * Render a ReportRun as clean markdown. Single-project reports are flat
  * `- #ref — title` lines (matches the requested export format exactly);
- * multi-project reports group each day's items under `### <project>`
- * subheads. Weekend folds are applied here so the export reflects what
- * the cards show; the fold badge is deliberately omitted from markdown
- * to keep the export clean (it lives in the card UI only).
+ * multi-project reports prefix each line with its `[project]` tag.
+ * Weekend folds are applied here so the export reflects what the cards
+ * show; the fold badge is deliberately omitted from markdown to keep the
+ * export clean (it lives in the card UI only).
  */
 export function renderReportMarkdown(run: ReportRun): string {
   const { label } = rangeWindow(run.range, run.anchorDate);

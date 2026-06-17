@@ -182,7 +182,7 @@ describe("renderReportMarkdown", () => {
     expect(md).not.toContain("###");
   });
 
-  it("groups by project per day when the run spans multiple projects", () => {
+  it("tags each line with its project when the run spans multiple projects", () => {
     const multi: ReportRun = {
       runId: "r2",
       range: "daily",
@@ -194,17 +194,17 @@ describe("renderReportMarkdown", () => {
           items: [
             { id: "1", ref: "#290", title: "claim fix", category: "bug-fix", source: "pr", project: "insclix-claim-forms" },
             { id: "2", ref: "#12", title: "awp polish", category: "polish", source: "pr", project: "insclix-awp-2.0" },
-            { id: "3", ref: "#13", title: "awp deps", category: "deps", source: "pr", project: "insclix-awp-2.0" },
+            { id: "3", title: "merge bumps", category: "merge", source: "git", project: "insclix-awp-2.0" },
           ],
         },
       ],
     };
     const md = renderReportMarkdown(multi);
     expect(md).toContain("## June 05 2026");
-    expect(md).toContain("### insclix-claim-forms");
-    expect(md).toContain("### insclix-awp-2.0");
-    expect(md).toContain("- #290 — claim fix");
-    expect(md).toContain("- #12 — awp polish");
+    expect(md).not.toContain("###"); // inline tags, not sub-sections
+    expect(md).toContain("- [insclix-claim-forms] #290 — claim fix");
+    expect(md).toContain("- [insclix-awp-2.0] #12 — awp polish");
+    expect(md).toContain("- [insclix-awp-2.0] merge bumps"); // ref-less, still tagged
   });
 });
 
