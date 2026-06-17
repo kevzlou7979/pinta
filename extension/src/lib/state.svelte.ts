@@ -26,6 +26,13 @@ import {
   moduleIsConfigured,
   type ModuleSpec,
 } from "./modules.js";
+import {
+  parseReportPayload,
+  rangeWindow,
+  renderReportMarkdown,
+  type ReportRange,
+  type ReportRun,
+} from "./report.js";
 import { WsClient, type WsClientStatus } from "./ws-client.js";
 import {
   discoverCompanions,
@@ -646,6 +653,7 @@ class ExtensionState {
     void this.loadAuditDispositions();
     void this.loadAuditCheckChats();
     void this.loadAuditFiledIssues();
+    void this.loadReportRun();
     void this.loadModuleBoards();
     // Stage the legacy global catalog (if any) for the first companion
     // to claim. The actual per-project load happens inside connectTo.
@@ -2997,6 +3005,13 @@ class ExtensionState {
   /** Findings filed as an issue/task (GitLab or local), keyed by check.id. */
   private static readonly AUDIT_FILED_ISSUES_KEY = "pinta-audit-filed-issues";
 
+  /** Last generated report run + the user's range preference (Phase 16). */
+  private static readonly REPORT_KEY = "pinta-report-current-run";
+  private static readonly REPORT_RANGE_KEY = "pinta-report-range";
+  /** A whole-window gather (git log + gh/glab + Pinta history) is
+   *  legitimately slow — same generous ceiling as a full audit. */
+  private static readonly REPORT_TIMEOUT_MS = 600_000;
+
   /** Per-finding op timers (Discuss / File-issue), keyed by
    *  `${op}:${checkId}` so a stuck agent reply clears its spinner. */
   private auditOpTimers = new Map<string, ReturnType<typeof setTimeout>>();
@@ -3130,6 +3145,33 @@ class ExtensionState {
   });
 
   private auditTimer: ReturnType<typeof setTimeout> | null = null;
+
+  /** Report module (Phase 16). `currentRun` is the last generated report
+   *  (true-dated days; the UI folds weekends at render). `range` is the
+   *  user's selected window for the next generate. */
+  report = $state<{
+    currentRun: ReportRun | null;
+    pending: {
+      runId: string;
+      startedAt: number;
+      range: ReportRange;
+      anchorDate: string;
+      /** Phase 16 — the ephemeral query session's id, pinned from
+       *  `module.query.created`. Lets `reconcileReport()` recover a run
+       *  whose `session.synced(done)` was missed during a (half-open) WS
+       *  blip — the companion never replays ephemeral module-query
+       *  sessions on reconnect. Null until the created-ack lands. */
+      sessionId: string | null;
+    } | null;
+    range: ReportRange;
+    error: string | null;
+  }>({
+    currentRun: null,
+    pending: null,
+    range: "weekly",
+    error: null,
+  });
+  private reportTimer: ReturnType<typeof setTimeout> | null = null;
 
   /** Boards for imported INTERACTIVE modules (Phase 19 dynamic tabs),
    *  keyed by module id. Each slot mirrors the audit slot: the agent's
@@ -3982,6 +4024,38 @@ class ExtensionState {
     }
   }
 
+  /**
+   * On (re)connect — or via the reconcile heartbeat when the socket is
+   * half-open and no reconnect ever fires — recover a report run whose
+   * `session.synced(done)` we missed. The companion never replays the
+   * ephemeral report query session, so a report that finished during a WS
+   * blip would otherwise spin until REPORT_TIMEOUT_MS (10 min). Mirrors
+   * reconcileModuleBoards: fetch the pinned session over HTTP and, if it
+   * reached a terminal state, route it through the normal handler
+   * (idempotent — same path the live broadcast would have taken).
+   * Best-effort — any fetch error leaves `pending` for a later reconnect /
+   * heartbeat / timeout to resolve.
+   */
+  private async reconcileReport(): Promise<void> {
+    const base = this.httpBase();
+    if (!base) return;
+    const pending = this.report.pending;
+    if (!pending || !pending.sessionId) return;
+    try {
+      const res = await ExtensionState.fetchWithTimeout(
+        `${base}/v1/sessions/${encodeURIComponent(pending.sessionId)}`,
+      );
+      if (!res.ok) return;
+      const session = (await res.json()) as Session;
+      if (session.status === "done" || session.status === "error") {
+        this.handleReportSync(session);
+      }
+    } catch {
+      // Companion unreachable / transient — keep pending; a later
+      // reconnect or the report timeout will recover it.
+    }
+  }
+
   /** Heartbeat that re-fetches in-flight batch status over HTTP while any
    *  batch is pending. Recovers a HALF-OPEN WebSocket — the companion was
    *  restarted (or the socket silently died) so it never sent a close
@@ -4084,17 +4158,28 @@ class ExtensionState {
     );
   }
 
-  /** Start the reconcile heartbeat if a batch is pending and it isn't
-   *  already running. Idempotent. */
+  /** True while any reconcilable run is in flight — an annotation batch
+   *  (submitted/applying) OR a report run with a pinned session id. Drives
+   *  the reconcile-heartbeat lifecycle so a half-open socket self-heals the
+   *  Phase 16 report slot too, not just batches. (Module boards reconcile
+   *  on reconnect only; the report slot opts into the heartbeat because a
+   *  report can finish long after submit, well inside a half-open window.) */
+  private hasReconcilableWork(): boolean {
+    return this.hasReconcilableBatches() || !!this.report.pending?.sessionId;
+  }
+
+  /** Start the reconcile heartbeat if a batch or report is pending and it
+   *  isn't already running. Idempotent. */
   private ensureReconcileHeartbeat(): void {
     if (this.reconcileHeartbeat) return;
-    if (!this.hasReconcilableBatches()) return;
+    if (!this.hasReconcilableWork()) return;
     this.reconcileHeartbeat = setInterval(() => {
-      if (!this.hasReconcilableBatches()) {
+      if (!this.hasReconcilableWork()) {
         this.stopReconcileHeartbeat();
         return;
       }
       void this.reconcileInFlightBatches();
+      void this.reconcileReport();
     }, ExtensionState.RECONCILE_HEARTBEAT_MS);
   }
 
@@ -4213,6 +4298,211 @@ class ExtensionState {
       // `error`, which come later.
       this.audit.error = null;
     }
+  }
+
+  // ─── Report module (Phase 16) ───────────────────────────────────────
+  // Mirrors AuditFlow's op/sync lifecycle: generateReport fires a
+  // `module.query.submit` (op:"report-generate"); the agent gathers
+  // git + gh/glab + Pinta activity over the range window and returns a
+  // ReportRun via mark_session_done, routed back through handleReportSync.
+  // The companion relays the queryComment opaquely — no companion change.
+
+  /** Local calendar date as ISO yyyy-mm-dd — a report anchored on
+   *  "today" should match the user's wall clock, not UTC. */
+  private static todayISO(): string {
+    const d = new Date();
+    return new Date(d.getTime() - d.getTimezoneOffset() * 60000)
+      .toISOString()
+      .slice(0, 10);
+  }
+
+  /** Persist + apply the user's range preference (Today / This week /
+   *  Sprint) so it sticks across panel reloads. */
+  setReportRange(range: ReportRange): void {
+    this.report.range = range;
+    try {
+      void chrome.storage?.local?.set({
+        [ExtensionState.REPORT_RANGE_KEY]: range,
+      });
+    } catch {
+      // in-memory still drives the next generate this session
+    }
+  }
+
+  /** Generate a report for the given range (defaults to the selected
+   *  range, anchored on today). No-op if one's already in flight. */
+  async generateReport(
+    range?: ReportRange,
+    anchorDate?: string,
+  ): Promise<void> {
+    if (this.report.pending) return;
+    if (!this.client || this.connectionStatus !== "connected") {
+      this.report.error =
+        "No companion connected. Start `pinta-companion .` in your project to generate a report.";
+      return;
+    }
+    const r = range ?? this.report.range;
+    const anchor = anchorDate ?? ExtensionState.todayISO();
+    const { since, until } = rangeWindow(r, anchor);
+    const runId = crypto.randomUUID();
+    this.report.pending = {
+      runId,
+      startedAt: Date.now(),
+      range: r,
+      anchorDate: anchor,
+      sessionId: null,
+    };
+    this.report.error = null;
+    this.claimNotice = null;
+    this.armReportTimeout();
+    const queryComment = JSON.stringify({
+      op: "report-generate",
+      runId,
+      range: r,
+      anchorDate: anchor,
+      since,
+      until,
+      includeWeekends: false,
+      author: null,
+    });
+    this.send({
+      type: "module.query.submit",
+      url: this.lastUrl ?? "",
+      moduleId: "report",
+      moduleSettings: {},
+      queryComment,
+    });
+  }
+
+  /** User clicked Cancel on a slow report. */
+  cancelReport(): void {
+    if (!this.report.pending) return;
+    this.clearReportTimeout();
+    this.report.pending = null;
+    this.report.error = "Cancelled.";
+  }
+
+  private armReportTimeout(): void {
+    this.clearReportTimeout();
+    this.armAgentWait({
+      softMs: ExtensionState.REPORT_TIMEOUT_MS,
+      what: "generate the report",
+      setHandle: (t) => {
+        this.reportTimer = t;
+      },
+      stillPending: () => !!this.report.pending,
+      giveUp: () => {
+        if (!this.report.pending) return;
+        this.report.pending = null;
+        this.report.error =
+          ExtensionState.slowWaitGiveUp("generate the report");
+      },
+    });
+  }
+
+  private clearReportTimeout(): void {
+    if (this.reportTimer) {
+      clearTimeout(this.reportTimer);
+      this.reportTimer = null;
+    }
+    this.retireAgentWaitNotice();
+  }
+
+  /** Routed from onMessage when a `report` module session.synced lands.
+   *  Done → parse + store the ReportRun; error → surface it; applying →
+   *  clear the early error. Mirrors handleAuditSync. */
+  private handleReportSync(session: Session): void {
+    if (!this.report.pending) return;
+    const pending = this.report.pending;
+    if (session.status === "done") {
+      const summary = session.appliedSummary ?? "";
+      // Empty "done" (multi-agent race) — keep pending + timer so a real
+      // response can still land. Mirrors handleAuditSync.
+      if (summary.trim() === "") return;
+      this.clearReportTimeout();
+      try {
+        const raw = JSON.parse(summary) as unknown;
+        const run = parseReportPayload(raw, {
+          runId: pending.runId,
+          range: pending.range,
+          anchorDate: pending.anchorDate,
+          generatedAt: Date.now(),
+        });
+        if (run) {
+          this.report.currentRun = run;
+          this.report.error = null;
+          void this.saveReportRun();
+        } else {
+          const preview = summary.slice(0, 200);
+          this.report.error =
+            `Agent returned an unrecognized report response. ` +
+            `Restart \`/pinta\` in your project (the SKILL.md report handler may not have loaded yet). ` +
+            (preview
+              ? `Agent said: "${preview}${summary.length > 200 ? "…" : ""}"`
+              : "");
+        }
+      } catch (err) {
+        this.report.error = `Couldn't parse agent response: ${(err as Error).message}`;
+      }
+      this.report.pending = null;
+    } else if (session.status === "error") {
+      this.clearReportTimeout();
+      this.report.error = session.errorMessage ?? "Report generation failed.";
+      this.report.pending = null;
+    } else if (session.status === "applying") {
+      this.report.error = null;
+    }
+  }
+
+  private async saveReportRun(): Promise<void> {
+    try {
+      if (this.report.currentRun) {
+        await chrome.storage?.local?.set({
+          [ExtensionState.REPORT_KEY]: $state.snapshot(this.report.currentRun),
+        });
+      } else {
+        await chrome.storage?.local?.remove(ExtensionState.REPORT_KEY);
+      }
+    } catch (err) {
+      if (ExtensionState.isQuotaExceeded(err)) {
+        this.report.error =
+          "Browser storage is full — the report couldn't save. " +
+          "Try clearing chat history or older audit results.";
+      }
+    }
+  }
+
+  async loadReportRun(): Promise<void> {
+    try {
+      const stored = await chrome.storage?.local?.get(ExtensionState.REPORT_KEY);
+      const raw = stored?.[ExtensionState.REPORT_KEY] as ReportRun | undefined;
+      if (raw && typeof raw === "object" && Array.isArray(raw.days)) {
+        this.report.currentRun = raw;
+      }
+    } catch {
+      // storage missing (test env) — defaults fine
+    }
+    try {
+      const stored = await chrome.storage?.local?.get(
+        ExtensionState.REPORT_RANGE_KEY,
+      );
+      const raw = stored?.[ExtensionState.REPORT_RANGE_KEY] as
+        | ReportRange
+        | undefined;
+      if (raw === "daily" || raw === "weekly" || raw === "sprint") {
+        this.report.range = raw;
+      }
+    } catch {
+      // defaults stand
+    }
+  }
+
+  /** Render the current report as clean markdown for the export button.
+   *  Single-project reports stay flat; multi-project reports group each
+   *  day's items by project (detected inside renderReportMarkdown). */
+  exportReportMarkdown(): string {
+    if (!this.report.currentRun) return "";
+    return renderReportMarkdown(this.report.currentRun);
   }
 
   private applyAuditResult(payload: { [k: string]: unknown }): void {
@@ -5827,6 +6117,7 @@ class ExtensionState {
           this.reconciledOrphans.clear();
           void this.reconcileModuleBoards();
           void this.reconcileInFlightBatches();
+          void this.reconcileReport();
           this.ensureReconcileHeartbeat();
         }
       },
@@ -5992,8 +6283,10 @@ class ExtensionState {
     this.clearClaimWarning(id);
     this.reconciledOrphans.delete(id);
     this.inFlightBatches = this.inFlightBatches.filter((b) => b.id !== id);
-    // Nothing left to poll → let the heartbeat go idle.
-    if (!this.hasReconcilableBatches()) this.stopReconcileHeartbeat();
+    // Nothing left to poll → let the heartbeat go idle. Check the combined
+    // predicate so dismissing the last batch doesn't kill a heartbeat a
+    // still-pending report run depends on.
+    if (!this.hasReconcilableWork()) this.stopReconcileHeartbeat();
   }
 
   /**
@@ -6147,6 +6440,19 @@ class ExtensionState {
           const slot = this.moduleBoards[msg.moduleId];
           if (slot?.pending) slot.pendingSessionId = msg.session.id;
         }
+        // Phase 16 — pin the report module's ephemeral session id so
+        // reconcileReport() can recover a run whose session.synced(done)
+        // is missed during a half-open WS blip (mirrors the moduleBoards
+        // pin above). Start the heartbeat so the HTTP poll heals it even
+        // when no reconnect ever fires.
+        if (
+          msg.moduleId === "report" &&
+          this.report.pending &&
+          !this.report.pending.sessionId
+        ) {
+          this.report.pending.sessionId = msg.session.id;
+          this.ensureReconcileHeartbeat();
+        }
         break;
       }
       case "session.created":
@@ -6235,6 +6541,17 @@ class ExtensionState {
             return;
           }
           this.handleAuditSync(msg.session);
+          return;
+        }
+        // Phase 16 — Report module sessions (modules: [{id: "report"}])
+        // bypass the annotation draft, same as the audit / chat branches.
+        // Done / error apply to the report.* slot via handleReportSync;
+        // intermediate statuses are no-ops but MUST early-return so the
+        // ephemeral report session never overwrites the user's draft.
+        const isReportSession =
+          msg.session.modules?.some((m) => m.id === "report") ?? false;
+        if (isReportSession) {
+          this.handleReportSync(msg.session);
           return;
         }
         // Phase 19 — imported INTERACTIVE module sessions (a module the

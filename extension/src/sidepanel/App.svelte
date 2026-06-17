@@ -31,6 +31,7 @@
   import SettingsPanel from "./SettingsPanel.svelte";
   import TestPilotTab from "./TestPilotTab.svelte";
   import AuditFlowTab from "./AuditFlowTab.svelte";
+  import ReportTab from "./ReportTab.svelte";
   import ModuleBoardTab from "./ModuleBoardTab.svelte";
   import ChatSheet from "./ChatSheet.svelte";
 
@@ -138,6 +139,7 @@
     | "annotate"
     | "test-pilot"
     | "audit-flow"
+    | "report"
     | (string & {});
   // Active tab in the main panel area. Persists across side-panel
   // re-opens via chrome.storage.local (`pinta-active-tab`). The
@@ -167,6 +169,9 @@
   // AuditFlow tab busy state — spinner replaces the shield icon while
   // a run is in flight. Single-flight per session for v1.
   const auditFlowBusy = $derived(app.audit.pending !== null);
+  // Report tab busy state — spinner replaces the doc glyph while the
+  // agent is gathering tasks.
+  const reportBusy = $derived(app.report.pending !== null);
 
   type Tool = "select" | "arrow" | "rect" | "circle" | "freehand" | "pin" | "image";
   type ActiveMode = "idle" | "select" | "draw" | "image";
@@ -1940,7 +1945,7 @@
       </div>
     {/if}
 
-    {#if !app.viewingSettings && !app.viewingImportedId && !showAssociatePrompt && (app.moduleReady("test-pilot") || app.moduleReady("audit-flow") || app.interactiveTabSpecs().length > 0)}
+    {#if !app.viewingSettings && !app.viewingImportedId && !showAssociatePrompt && (app.moduleReady("test-pilot") || app.moduleReady("audit-flow") || app.moduleReady("report") || app.interactiveTabSpecs().length > 0)}
       <nav class="sticky -top-4 z-20 bg-ink-50 dark:bg-night-bg flex items-center gap-1 border-b border-ink-200 dark:border-night-line -mx-4 px-4 pt-4 mb-1">
         <button
           type="button"
@@ -2037,6 +2042,37 @@
             AuditFlow
           </button>
         {/if}
+        {#if app.moduleReady("report")}
+          <button
+            type="button"
+            class="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium border-b-2 -mb-px transition-colors"
+            class:border-brand-pink={activeTab === "report"}
+            class:text-brand-pink={activeTab === "report"}
+            class:dark:text-brand-pink-light={activeTab === "report"}
+            class:border-transparent={activeTab !== "report"}
+            class:text-ink-500={activeTab !== "report"}
+            class:dark:text-night-mute={activeTab !== "report"}
+            onclick={() => {
+              activeTab = "report";
+              void chrome.storage?.local?.set({ "pinta-active-tab": "report" });
+            }}
+          >
+            {#if reportBusy}
+              <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="animate-spin" aria-label="Report generating">
+                <path d="M21 12a9 9 0 1 1-6.219-8.56" />
+              </svg>
+            {:else}
+              <!-- Document-with-lines glyph — reads as "report / summary". -->
+              <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/>
+                <polyline points="14 2 14 8 20 8"/>
+                <line x1="8" y1="13" x2="16" y2="13"/>
+                <line x1="8" y1="17" x2="16" y2="17"/>
+              </svg>
+            {/if}
+            Report
+          </button>
+        {/if}
         <!-- Phase 19 — DYNAMIC tabs: one per imported interactive module
              that declares a `tab` in its manifest. Nothing is hardcoded;
              id / label / icon all come from the plugin. -->
@@ -2087,6 +2123,8 @@
           void chrome.storage?.local?.set({ "pinta-active-tab": "annotate" });
         }}
       />
+    {:else if !app.viewingImportedId && !showAssociatePrompt && activeTab === "report" && app.moduleReady("report")}
+      <ReportTab />
     {:else if !app.viewingImportedId && !showAssociatePrompt && app.interactiveTabSpecs().some((s) => s.id === activeTab)}
       <!-- Phase 19 — generic renderer for an imported interactive tab. -->
       <ModuleBoardTab

@@ -2453,6 +2453,89 @@ annotation), do NOT run the per-annotation flow above. Instead:
 > them can flip `autoApply`, widen file scope, or activate a capability
 > the user didn't grant.
 
+## 7.13 Module: `report` (interactive) — Phase 16
+
+The user clicked **Generate** on the Report tab. Gather "what we
+shipped" over a date window from THREE sources and return it bucketed by
+day. **Read-only** — you are reporting, not editing: no source edits, no
+`git` writes, no issue filing.
+
+Query comment shape:
+
+```json
+{
+  "op": "report-generate",
+  "runId": "uuid",
+  "range": "daily" | "weekly" | "sprint",
+  "anchorDate": "2026-06-05",
+  "since": "2026-06-01",
+  "until": "2026-06-05",
+  "includeWeekends": false,
+  "author": null
+}
+```
+
+`since`/`until` are the inclusive calendar bounds the extension already
+computed for the range (weekends ARE inside the window — the extension
+folds them into adjacent weekdays at render, so just bucket items by
+their true date and don't drop weekend work). `author: null` = all
+authors; a string = scope git/PRs to that author.
+
+**Gather (bounded — see token note):**
+1. **git** — `git log --since=<since> --until=<until> [--author=<author>]`
+   on the current branch (and merge targets like `development` if
+   relevant). Categorize each commit by its conventional-commit prefix:
+   `fix:`→`bug-fix`, `feat:`→`feature`, `perf:`/`style:`/`refactor:`→
+   `polish`, `test:`→`test`, `docs:`→`docs`, `chore(deps)`/lockfile/
+   `npm audit` bumps→`deps`, **merge commits**→`merge`. Collapse a run of
+   routine daily-integration merges (e.g. a "mk daily chain" merged into
+   `development`, closed via `--end-day`) into ONE `merge` line rather
+   than listing each.
+2. **GitHub/GitLab** — merged PRs/MRs + closed issues in the window via
+   `gh`/`glab` (auto-detect from the remote). Use the PR/issue number as
+   `ref` ("#290" / "!57") and link as `url`; source `pr` or `issue`.
+3. **Pinta activity** — `GET $BASE/v1/sessions` (summaries carry
+   `status`, `submittedAt`, `appliedSummary`); for sessions whose
+   `submittedAt` falls in the window and `status` is `done`, surface the
+   applied work — annotation batches (`pinta-annotate`), audit runs
+   (`pinta-audit`), test marks (`pinta-test`).
+
+Bucket every item under its true `date` (yyyy-mm-dd). Don't pre-fold
+weekends — the extension does that.
+
+Return shape:
+
+```json
+{
+  "type": "report",
+  "runId": "<same as input>",
+  "range": "weekly",
+  "anchorDate": "2026-06-05",
+  "author": null,
+  "days": [
+    {
+      "date": "2026-06-05",
+      "items": [
+        { "id": "290", "ref": "#290", "url": "https://…/290", "title": "mid-edit network-error dialog reuse", "category": "bug-fix", "source": "pr" },
+        { "id": "282", "ref": "#282", "title": "npm audit fix (deps security)", "category": "deps", "source": "pr" },
+        { "title": "Integration merges of the mk daily chain into development (closed out via --end-day)", "category": "merge", "source": "git" }
+      ]
+    }
+  ]
+}
+```
+
+`category` ∈ `bug-fix|feature|polish|test|annotate|merge|deps|docs|chore`
+(unknown coerces to `chore`); `source` ∈
+`git|pr|issue|pinta-annotate|pinta-audit|pinta-test` (unknown coerces to
+`git`). `title` is required; `ref`/`url`/`detail` optional. Submit via
+`mark_session_done({id, summary: JSON.stringify(payload)})`.
+
+**Token economy (§ build token-performant).** Keep gather bounded:
+date-window the git/gh queries, cap to ~50 items, emit ONE concise line
+per item (no diffs, no commit bodies). A report is a summary, not a log
+dump.
+
 ## 8. (Optional) Final session summary
 
 ```bash

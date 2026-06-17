@@ -198,11 +198,32 @@ const AUDIT_FLOW: ModuleSpec = {
   settings: [],
 };
 
+/**
+ * Report (Phase 16) — view what you shipped and export it clean.
+ *
+ * The /pinta agent gathers tasks from git + GitHub/GitLab + your Pinta
+ * activity over a date window and returns them bucketed by day; the
+ * extension renders Read-Mode day cards and exports clean markdown for a
+ * day / week / 10-day sprint. No settings in v1 — range + author live in
+ * the tab UI, not module config.
+ */
+const REPORT: ModuleSpec = {
+  id: "report",
+  name: "Report",
+  description:
+    "View what you shipped — bug fixes, polishes, tests, annotations, merges — gathered from git + GitHub/GitLab + your Pinta activity, as Read-Mode day cards. Export a clean markdown summary for any day, week, or 10-day sprint (weekend work folds into the lighter adjacent weekday).",
+  mode: "interactive",
+  sessionCheckboxLabel: "",
+  sessionCheckboxHint: "",
+  settings: [],
+};
+
 export const BUILTIN_MODULES: ModuleSpec[] = [
   GITLAB_ISSUES,
   TEST_PILOT,
   CHAT,
   AUDIT_FLOW,
+  REPORT,
 ];
 
 export function getModuleSpec(id: string): ModuleSpec | null {
