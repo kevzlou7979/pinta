@@ -10,7 +10,7 @@
 // extension stores that faithfully and applies `foldWeekends` only at
 // render time, so the fold is a reversible presentation transform.
 
-export type ReportRange = "daily" | "weekly" | "sprint";
+export type ReportRange = "daily" | "weekly" | "sprint" | "custom";
 
 /** Buckets an item lands in. Drives the category chip + optional
  *  group-by-category export. The agent picks one per item (usually from
@@ -71,6 +71,13 @@ export type ReportRun = {
   range: ReportRange;
   /** ISO `yyyy-mm-dd` the range is anchored on (usually "today"). */
   anchorDate: string;
+  /** Inclusive calendar window the report actually covers. Always set at
+   *  generate time (computed from the range, or the picker for "custom"),
+   *  so the title label is correct without recomputing — required for the
+   *  "custom" range where there's no rangeWindow formula. Optional only
+   *  for back-compat with runs stored before this field existed. */
+  since?: string;
+  until?: string;
   generatedAt: number;
   /** git user / Pinta author the report was scoped to, if any. */
   author?: string;
@@ -297,7 +304,9 @@ export function foldWeekends(
     });
   }
 
-  if (range !== "daily") {
+  // Daily + custom show their exact days (no fold) — a single day, or a
+  // window the user picked explicitly. Weekly/sprint fold weekends.
+  if (range !== "daily" && range !== "custom") {
     const weekendDates = [...byDate.keys()].filter(isWeekend).sort();
     for (const wDate of weekendDates) {
       const weekend = byDate.get(wDate)!;
@@ -373,7 +382,10 @@ export function renderDayMarkdown(day: ReportDay, multiProject: boolean): string
  * export clean (it lives in the card UI only).
  */
 export function renderReportMarkdown(run: ReportRun): string {
-  const { label } = rangeWindow(run.range, run.anchorDate);
+  const label =
+    run.since && run.until
+      ? formatRangeLabel(run.since, run.until)
+      : rangeWindow(run.range, run.anchorDate).label;
   const multiProject = reportProjects(run).length > 1;
   const days = foldWeekends(run.days, run.range);
   const blocks = days.map((day) => renderDayMarkdown(day, multiProject));
@@ -390,7 +402,14 @@ export function renderReportMarkdown(run: ReportRun): string {
  */
 export function parseReportPayload(
   raw: unknown,
-  ctx: { runId: string; range: ReportRange; anchorDate: string; generatedAt: number },
+  ctx: {
+    runId: string;
+    range: ReportRange;
+    anchorDate: string;
+    generatedAt: number;
+    since?: string;
+    until?: string;
+  },
 ): ReportRun | null {
   if (!raw || typeof raw !== "object") return null;
   const obj = raw as Record<string, unknown>;
@@ -422,6 +441,8 @@ export function parseReportPayload(
         ? obj.anchorDate
         : ctx.anchorDate,
     generatedAt: ctx.generatedAt,
+    ...(ctx.since ? { since: ctx.since } : {}),
+    ...(ctx.until ? { until: ctx.until } : {}),
     ...(typeof obj.author === "string" && obj.author ? { author: obj.author } : {}),
     days,
   };

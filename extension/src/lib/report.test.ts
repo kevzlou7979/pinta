@@ -91,6 +91,12 @@ describe("foldWeekends", () => {
     expect(out[0]!.date).toBe("2026-06-06");
   });
 
+  it("custom range is a passthrough (exact picked days, no fold)", () => {
+    const days = [day(FRI, ["a"]), day("2026-06-06", ["sat"])]; // incl. a Saturday
+    const out = foldWeekends(days, "custom");
+    expect(out.map((d) => d.date)).toEqual(["2026-06-06", FRI]); // both kept, newest-first
+  });
+
   it("folds a Saturday into the preceding Friday when Monday is absent", () => {
     const days = [day(FRI, ["a"]), day("2026-06-06", ["sat1", "sat2"])];
     const out = foldWeekends(days, "weekly");
@@ -205,6 +211,23 @@ describe("renderReportMarkdown", () => {
     expect(md).toContain("- [insclix-claim-forms] #290 — claim fix");
     expect(md).toContain("- [insclix-awp-2.0] #12 — awp polish");
     expect(md).toContain("- [insclix-awp-2.0] merge bumps"); // ref-less, still tagged
+  });
+
+  it("labels the title from since/until for a custom range", () => {
+    const custom: ReportRun = {
+      runId: "r3",
+      range: "custom",
+      anchorDate: "2026-06-10",
+      since: "2026-06-01",
+      until: "2026-06-10",
+      generatedAt: 0,
+      days: [
+        { date: "2026-06-06", items: [{ id: "1", title: "sat work", category: "chore", source: "git" }] },
+      ],
+    };
+    const md = renderReportMarkdown(custom);
+    expect(md).toContain("# Report — June 01–10 2026");
+    expect(md).toContain("## June 06 2026"); // custom = no fold; Saturday shown as-is
   });
 });
 

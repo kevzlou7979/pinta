@@ -12,6 +12,7 @@
     categoryLabel,
     foldWeekends,
     formatDayHeading,
+    formatRangeLabel,
     formatShortDay,
     rangeWindow,
     renderDayMarkdown,
@@ -25,13 +26,18 @@
     { id: "daily", label: "Today", hint: "Just today's work" },
     { id: "weekly", label: "This week", hint: "Monday → today" },
     { id: "sprint", label: "Sprint", hint: "Last 10 working days" },
+    { id: "custom", label: "Custom", hint: "Pick a single date or a range" },
   ];
 
   const run = $derived(app.report.currentRun);
   // Fold weekends for display; the stored run keeps true-dated days.
   const days = $derived(run ? foldWeekends(run.days, run.range) : []);
   const rangeLabel = $derived(
-    run ? rangeWindow(run.range, run.anchorDate).label : "",
+    run
+      ? run.since && run.until
+        ? formatRangeLabel(run.since, run.until)
+        : rangeWindow(run.range, run.anchorDate).label
+      : "",
   );
   const pending = $derived(app.report.pending !== null);
   const connected = $derived(app.connectionStatus === "connected");
@@ -49,8 +55,43 @@
     return p.replace(/[\\/]+$/, "").split(/[\\/]/).pop() || p;
   }
 
+  function todayLocal(): string {
+    const d = new Date();
+    return new Date(d.getTime() - d.getTimezoneOffset() * 60000)
+      .toISOString()
+      .slice(0, 10);
+  }
+
   function pickRange(r: ReportRange) {
     app.setReportRange(r);
+    // Seed the custom window to today the first time it's opened so the
+    // date inputs aren't blank.
+    if (r === "custom" && !app.report.customSince) {
+      const t = todayLocal();
+      app.setReportCustomRange(t, t);
+    }
+  }
+
+  // From/To changes keep the window ordered: a new "from" past the
+  // current "to" pulls "to" with it (single-day default), and vice versa.
+  function onCustomSince(e: Event) {
+    const since = (e.currentTarget as HTMLInputElement).value;
+    if (!since) return;
+    const until =
+      app.report.customUntil && app.report.customUntil >= since
+        ? app.report.customUntil
+        : since;
+    app.setReportCustomRange(since, until);
+  }
+
+  function onCustomUntil(e: Event) {
+    const until = (e.currentTarget as HTMLInputElement).value;
+    if (!until) return;
+    const since =
+      app.report.customSince && app.report.customSince <= until
+        ? app.report.customSince
+        : until;
+    app.setReportCustomRange(since, until);
   }
 
   function generate() {
@@ -207,6 +248,35 @@
       {/if}
     </button>
   </div>
+
+  <!-- Custom date window — single day = same From/To. -->
+  {#if app.report.range === "custom"}
+    <div class="flex items-center gap-2 flex-wrap text-[11.5px] text-ink-600 dark:text-night-dim">
+      <label class="inline-flex items-center gap-1">
+        From
+        <input
+          type="date"
+          value={app.report.customSince}
+          onchange={onCustomSince}
+          disabled={pending}
+          class="px-2 py-1 rounded border border-ink-200 dark:border-night-line bg-white dark:bg-night-bg text-ink-800 dark:text-night-text focus:outline-none focus:ring-1 focus:ring-brand-pink/40"
+        />
+      </label>
+      <label class="inline-flex items-center gap-1">
+        To
+        <input
+          type="date"
+          value={app.report.customUntil}
+          onchange={onCustomUntil}
+          disabled={pending}
+          class="px-2 py-1 rounded border border-ink-200 dark:border-night-line bg-white dark:bg-night-bg text-ink-800 dark:text-night-text focus:outline-none focus:ring-1 focus:ring-brand-pink/40"
+        />
+      </label>
+      <span class="text-[10px] text-ink-400 dark:text-night-mute">
+        Same date in both = a single day.
+      </span>
+    </div>
+  {/if}
 
   <!-- Projects manager (Phase 16b) — combine extra repos -->
   <div class="rounded-md border border-ink-200 dark:border-night-line p-2.5 space-y-2">

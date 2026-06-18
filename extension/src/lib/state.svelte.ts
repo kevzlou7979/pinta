@@ -3010,6 +3010,8 @@ class ExtensionState {
   private static readonly REPORT_RANGE_KEY = "pinta-report-range";
   /** Extra repo paths to combine into the report (Phase 16b). */
   private static readonly REPORT_PROJECTS_KEY = "pinta-report-projects";
+  /** Picked window for the "custom" range. */
+  private static readonly REPORT_CUSTOM_KEY = "pinta-report-custom";
   /** A whole-window gather (git log + gh/glab + Pinta history) is
    *  legitimately slow — same generous ceiling as a full audit. */
   private static readonly REPORT_TIMEOUT_MS = 600_000;
@@ -3158,6 +3160,10 @@ class ExtensionState {
       startedAt: number;
       range: ReportRange;
       anchorDate: string;
+      /** Inclusive window this run covers — echoed into the stored run so
+       *  the title label is right (load-bearing for "custom"). */
+      since: string;
+      until: string;
       /** Phase 16 — the ephemeral query session's id, pinned from
        *  `module.query.created`. Lets `reconcileReport()` recover a run
        *  whose `session.synced(done)` was missed during a (half-open) WS
@@ -3166,6 +3172,10 @@ class ExtensionState {
       sessionId: string | null;
     } | null;
     range: ReportRange;
+    /** Picked window for the "custom" range (ISO yyyy-mm-dd). Single-day
+     *  = same value in both. Persisted so it sticks across reloads. */
+    customSince: string;
+    customUntil: string;
     /** Extra repo paths to fold into the report alongside the current
      *  companion's project (Phase 16b). Absolute paths the user typed —
      *  the agent runs `git -C <path>` per repo and tags each item's
@@ -3177,6 +3187,8 @@ class ExtensionState {
     currentRun: null,
     pending: null,
     range: "weekly",
+    customSince: "",
+    customUntil: "",
     projects: [],
     error: null,
   });
@@ -4338,6 +4350,20 @@ class ExtensionState {
     }
   }
 
+  /** Set the custom-range window (ISO yyyy-mm-dd). Persists so it sticks
+   *  across reloads. Single-day = pass the same value for both. */
+  setReportCustomRange(since: string, until: string): void {
+    this.report.customSince = since;
+    this.report.customUntil = until;
+    try {
+      void chrome.storage?.local?.set({
+        [ExtensionState.REPORT_CUSTOM_KEY]: { since, until },
+      });
+    } catch {
+      // in-memory still drives the next generate this session
+    }
+  }
+
   /** Add an extra repo path to combine into the report. Normalizes
    *  (trims + strips a trailing slash) and dedupes. The primary
    *  (companion) project is implicit and must not be added here. */
@@ -4379,13 +4405,25 @@ class ExtensionState {
     }
     const r = range ?? this.report.range;
     const anchor = anchorDate ?? ExtensionState.todayISO();
-    const { since, until } = rangeWindow(r, anchor);
+    // "custom" uses the picked window (defaulting to today, swapped if the
+    // user picked them backwards); the others compute it from the range.
+    let since: string;
+    let until: string;
+    if (r === "custom") {
+      since = this.report.customSince || ExtensionState.todayISO();
+      until = this.report.customUntil || since;
+      if (since > until) [since, until] = [until, since];
+    } else {
+      ({ since, until } = rangeWindow(r, anchor));
+    }
     const runId = crypto.randomUUID();
     this.report.pending = {
       runId,
       startedAt: Date.now(),
       range: r,
       anchorDate: anchor,
+      since,
+      until,
       sessionId: null,
     };
     this.report.error = null;
@@ -4468,6 +4506,8 @@ class ExtensionState {
           runId: pending.runId,
           range: pending.range,
           anchorDate: pending.anchorDate,
+          since: pending.since,
+          until: pending.until,
           generatedAt: Date.now(),
         });
         if (run) {
@@ -4531,8 +4571,27 @@ class ExtensionState {
       const raw = stored?.[ExtensionState.REPORT_RANGE_KEY] as
         | ReportRange
         | undefined;
-      if (raw === "daily" || raw === "weekly" || raw === "sprint") {
+      if (
+        raw === "daily" ||
+        raw === "weekly" ||
+        raw === "sprint" ||
+        raw === "custom"
+      ) {
         this.report.range = raw;
+      }
+    } catch {
+      // defaults stand
+    }
+    try {
+      const stored = await chrome.storage?.local?.get(
+        ExtensionState.REPORT_CUSTOM_KEY,
+      );
+      const raw = stored?.[ExtensionState.REPORT_CUSTOM_KEY] as
+        | { since?: unknown; until?: unknown }
+        | undefined;
+      if (raw && typeof raw === "object") {
+        if (typeof raw.since === "string") this.report.customSince = raw.since;
+        if (typeof raw.until === "string") this.report.customUntil = raw.until;
       }
     } catch {
       // defaults stand
