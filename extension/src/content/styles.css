@@ -185,6 +185,11 @@
     "Segoe UI",
     sans-serif;
   color: #0f172a;
+  /* Pinta's in-page popup is always light chrome. Pin the color-scheme so
+     native form controls (textarea, selects, the resize handle) render
+     light even when the user's OS / page is in dark mode — otherwise the
+     UA paints the textarea with a dark background. */
+  color-scheme: light;
   z-index: 3;
 }
 .popup__head {
@@ -427,9 +432,15 @@
   padding: 6px 8px;
   font-size: 13px;
   font-family: inherit;
-  color: inherit;
+  /* Explicit light bg + dark text so the box never inherits the UA's
+     dark-mode form-control styling (matches the text inputs above). */
+  background: #fff;
+  color: #0f172a;
   resize: vertical;
   outline: none;
+}
+.popup textarea::placeholder {
+  color: #94a3b8;
 }
 .popup textarea:focus {
   border-color: #0f172a;
