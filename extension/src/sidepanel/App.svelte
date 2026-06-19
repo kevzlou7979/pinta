@@ -843,11 +843,6 @@
   const anyBatchDone = $derived(
     app.inFlightBatches.some((b) => b.status === "done"),
   );
-  const anyBatchTerminal = $derived(
-    app.inFlightBatches.some(
-      (b) => b.status === "done" || b.status === "error",
-    ),
-  );
   // A batch still in "submitted" hasn't been claimed by any agent yet —
   // if no `/pinta` is running it sits here spinning forever. Surface a
   // Cancel escape hatch for exactly those (an "applying" batch is being
@@ -865,13 +860,11 @@
       app.dismissBatch(id);
     }
   }
-  // Clear every finished (done / error) batch from the stack at once.
-  // Active batches are left running. Snapshot ids first so we don't mutate
-  // the array we're iterating.
-  function dismissFinishedBatches(): void {
-    for (const id of app.inFlightBatches
-      .filter((b) => b.status === "done" || b.status === "error")
-      .map((b) => b.id)) {
+  // Clear the WHOLE tray — every batch regardless of status (processing,
+  // done, or errored). Local only (no session.cancel wire); a still-running
+  // agent keeps working but its row is removed. Snapshot ids first.
+  function clearAllBatches(): void {
+    for (const id of app.inFlightBatches.map((b) => b.id)) {
       app.dismissBatch(id);
     }
   }
@@ -2489,10 +2482,11 @@
           <h2 class="text-xs uppercase tracking-wide text-ink-500 dark:text-night-mute font-medium">
             Submitted ({inFlightAnnotations.length})
           </h2>
-          {#if anyBatchTerminal || anyBatchWaiting}
+          {#if app.inFlightBatches.length > 0}
             <!-- All tray actions live behind one ⋮ kebab to keep the header
                  tidy: Cancel waiting / Reload / Commit / Commit & push /
-                 Clear done. -->
+                 Clear (always available so processing-only trays can be
+                 cleared too). -->
             <div class="relative shrink-0" use:clickOutside={() => (trayMenuOpen = false)}>
               <button
                 type="button"
@@ -2564,11 +2558,11 @@
                     type="button"
                     class="w-full flex items-center gap-2.5 px-3 py-1.5 text-[12px] text-ink-700 dark:text-night-dim hover:bg-ink-50 dark:hover:bg-night-alt hover:text-ink-900 dark:hover:text-night-text"
                     role="menuitem"
-                    onclick={() => { dismissFinishedBatches(); trayMenuOpen = false; }}
-                    title="Clear finished annotations from this list"
+                    onclick={() => { clearAllBatches(); trayMenuOpen = false; }}
+                    title="Clear every submitted annotation from this list — processing and done"
                   >
                     <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="3 6 5 6 21 6"/><path d="M19 6l-1.5 14a2 2 0 0 1-2 1.5h-7a2 2 0 0 1-2-1.5L5 6"/></svg>
-                    Clear done
+                    Clear
                   </button>
                 </div>
               {/if}
