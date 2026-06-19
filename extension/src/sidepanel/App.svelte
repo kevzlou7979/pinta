@@ -342,6 +342,9 @@
   let associatedAt = $state<number | null>(null);
   let associateError = $state<string | null>(null);
   let downloadMenuOpen = $state(false);
+  // SUBMITTED-tray ⋮ kebab (Cancel / Reload / Commit / Commit & push /
+  // Clear done) — collapses the tray header actions into one menu.
+  let trayMenuOpen = $state(false);
   // Separate open-state for the Annotate list-header export popover, so
   // its dropdown toggles independently of the footer's downloadDropdown
   // (both render the shared `downloadMenuItems` snippet).
@@ -2487,47 +2490,108 @@
             Submitted ({inFlightAnnotations.length})
           </h2>
           {#if anyBatchTerminal || anyBatchWaiting}
-            <div class="inline-flex items-center gap-1.5 shrink-0">
-              {#if anyBatchWaiting}
-                <!-- Escape hatch for a submission no agent ever claimed —
-                     without this a stuck "submitted" card spins with no way
-                     out. Removes the unclaimed batch(es) from the tray. -->
-                <button
-                  type="button"
-                  class="inline-flex items-center gap-1 rounded border border-ink-300 dark:border-night-line bg-white dark:bg-night-card text-ink-700 dark:text-night-text text-[11px] px-2 py-0.5 hover:bg-ink-50 dark:hover:bg-night-line"
-                  onclick={cancelWaitingBatches}
-                  title="No agent has picked this up — cancel the waiting submission(s) and clear them from this list"
-                >
-                  Cancel
-                </button>
-              {/if}
-              {#if anyBatchDone}
-                <button
-                  type="button"
-                  class="inline-flex items-center gap-1 rounded border border-ink-300 dark:border-night-line bg-white dark:bg-night-card text-ink-700 dark:text-night-text text-[11px] px-2 py-0.5 hover:bg-ink-50 dark:hover:bg-night-line disabled:opacity-50"
-                  onclick={reloadActiveTab}
-                  disabled={reloadingAt !== null || activeTabId == null}
-                  title="Reload the page to see the applied changes"
-                >
-                  {#if reloadingAt}
-                    <svg class="animate-spin" width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21 12a9 9 0 1 1-6.219-8.56"/></svg>
-                    Reloading…
-                  {:else}
-                    Reload
-                  {/if}
-                </button>
-              {/if}
+            <!-- All tray actions live behind one ⋮ kebab to keep the header
+                 tidy: Cancel waiting / Reload / Commit / Commit & push /
+                 Clear done. -->
+            <div class="relative shrink-0" use:clickOutside={() => (trayMenuOpen = false)}>
               <button
                 type="button"
-                class="rounded border border-ink-300 dark:border-night-line bg-white dark:bg-night-card text-ink-700 dark:text-night-text text-[11px] px-2 py-0.5 hover:bg-ink-50 dark:hover:bg-night-line"
-                onclick={dismissFinishedBatches}
-                title="Clear finished annotations from this list"
+                class="w-7 h-7 inline-flex items-center justify-center rounded-full border border-ink-200 bg-white text-ink-600 hover:text-brand-pink hover:border-ink-400 dark:border-night-line dark:bg-night-card dark:text-night-dim dark:hover:text-brand-pink-light transition-colors"
+                onclick={() => (trayMenuOpen = !trayMenuOpen)}
+                aria-haspopup="menu"
+                aria-expanded={trayMenuOpen}
+                aria-label="Submitted actions"
+                title="Actions"
               >
-                Clear done
+                {#if app.commit.pending}
+                  <svg class="animate-spin" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21 12a9 9 0 1 1-6.219-8.56"/></svg>
+                {:else}
+                  <svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><circle cx="12" cy="5" r="1.6"/><circle cx="12" cy="12" r="1.6"/><circle cx="12" cy="19" r="1.6"/></svg>
+                {/if}
               </button>
+              {#if trayMenuOpen}
+                <div class="absolute right-0 top-full mt-1 z-30 w-52 rounded-md border border-ink-200 bg-white shadow-lg dark:border-night-line dark:bg-night-card py-1" role="menu">
+                  {#if anyBatchWaiting}
+                    <button
+                      type="button"
+                      class="w-full flex items-center gap-2.5 px-3 py-1.5 text-[12px] text-ink-700 dark:text-night-dim hover:bg-ink-50 dark:hover:bg-night-alt hover:text-ink-900 dark:hover:text-night-text"
+                      role="menuitem"
+                      onclick={() => { cancelWaitingBatches(); trayMenuOpen = false; }}
+                      title="No agent has picked this up — cancel the waiting submission(s)"
+                    >
+                      <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="10"/><line x1="15" y1="9" x2="9" y2="15"/><line x1="9" y1="9" x2="15" y2="15"/></svg>
+                      Cancel waiting
+                    </button>
+                  {/if}
+                  {#if anyBatchDone}
+                    <button
+                      type="button"
+                      class="w-full flex items-center gap-2.5 px-3 py-1.5 text-[12px] text-ink-700 dark:text-night-dim hover:bg-ink-50 dark:hover:bg-night-alt hover:text-ink-900 dark:hover:text-night-text disabled:opacity-50"
+                      role="menuitem"
+                      onclick={() => { reloadActiveTab(); trayMenuOpen = false; }}
+                      disabled={reloadingAt !== null || activeTabId == null}
+                      title="Reload the page to see the applied changes"
+                    >
+                      <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 12a9 9 0 1 0 3-6.7L3 8"/><path d="M3 3v5h5"/></svg>
+                      Reload page
+                    </button>
+                    <div class="my-1 border-t border-ink-100 dark:border-night-line"></div>
+                    <button
+                      type="button"
+                      class="w-full flex items-center gap-2.5 px-3 py-1.5 text-[12px] text-ink-700 dark:text-night-dim hover:bg-ink-50 dark:hover:bg-night-alt hover:text-ink-900 dark:hover:text-night-text disabled:opacity-50"
+                      role="menuitem"
+                      onclick={() => { void app.commitAppliedBatches(false); trayMenuOpen = false; }}
+                      disabled={app.commit.pending !== null}
+                      title="Agent commits the files it applied (auto message from your annotations)"
+                    >
+                      <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="3"/><line x1="3" y1="12" x2="9" y2="12"/><line x1="15" y1="12" x2="21" y2="12"/></svg>
+                      Commit
+                    </button>
+                    <button
+                      type="button"
+                      class="w-full flex items-center gap-2.5 px-3 py-1.5 text-[12px] text-ink-700 dark:text-night-dim hover:bg-ink-50 dark:hover:bg-night-alt hover:text-ink-900 dark:hover:text-night-text disabled:opacity-50"
+                      role="menuitem"
+                      onclick={() => { void app.commitAppliedBatches(true); trayMenuOpen = false; }}
+                      disabled={app.commit.pending !== null}
+                      title="Commit the applied files, then push to the remote"
+                    >
+                      <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="3"/><line x1="3" y1="12" x2="9" y2="12"/><line x1="15" y1="12" x2="21" y2="12"/><polyline points="16 5 19 8 16 11"/></svg>
+                      Commit &amp; push
+                    </button>
+                  {/if}
+                  <div class="my-1 border-t border-ink-100 dark:border-night-line"></div>
+                  <button
+                    type="button"
+                    class="w-full flex items-center gap-2.5 px-3 py-1.5 text-[12px] text-ink-700 dark:text-night-dim hover:bg-ink-50 dark:hover:bg-night-alt hover:text-ink-900 dark:hover:text-night-text"
+                    role="menuitem"
+                    onclick={() => { dismissFinishedBatches(); trayMenuOpen = false; }}
+                    title="Clear finished annotations from this list"
+                  >
+                    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="3 6 5 6 21 6"/><path d="M19 6l-1.5 14a2 2 0 0 1-2 1.5h-7a2 2 0 0 1-2-1.5L5 6"/></svg>
+                    Clear done
+                  </button>
+                </div>
+              {/if}
             </div>
           {/if}
         </div>
+        {#if app.commit.pending}
+          <p class="text-[11px] text-ink-500 dark:text-night-mute inline-flex items-center gap-1.5">
+            <svg class="animate-spin" width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21 12a9 9 0 1 1-6.219-8.56"/></svg>
+            {app.commit.pending === "commit-push" ? "Committing & pushing applied changes…" : "Committing applied changes…"}
+          </p>
+        {:else if app.commit.result}
+          <div class="flex items-start gap-2 rounded-md border border-emerald-300 bg-emerald-50 dark:border-emerald-800/50 dark:bg-emerald-950/30 p-2 text-[11px] text-emerald-700 dark:text-emerald-300 leading-snug">
+            <span class="flex-1 min-w-0 break-words">✓ {app.commit.result}</span>
+            <button type="button" class="shrink-0 text-emerald-600 hover:text-emerald-800 dark:hover:text-emerald-200 leading-none px-1" onclick={() => (app.commit.result = null)} aria-label="Dismiss" title="Dismiss">✕</button>
+          </div>
+        {/if}
+        {#if app.commit.error}
+          <div class="flex items-start gap-2 rounded-md border border-red-300 bg-red-50 dark:border-red-800/50 dark:bg-red-950/30 p-2 text-[11px] text-red-700 dark:text-red-300 leading-snug">
+            <span class="flex-1 min-w-0 break-words">{app.commit.error}</span>
+            <button type="button" class="shrink-0 text-red-500 hover:text-red-700 dark:hover:text-red-200 leading-none px-1" onclick={() => (app.commit.error = null)} aria-label="Dismiss" title="Dismiss">✕</button>
+          </div>
+        {/if}
         <ul class="space-y-2" aria-label="Submitted annotations">
           {#each inFlightAnnotations as item, i (`${item.annotation.id}:${i}`)}
             <AnnotationCard

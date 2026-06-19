@@ -3015,6 +3015,9 @@ class ExtensionState {
   /** A whole-window gather (git log + gh/glab + Pinta history) is
    *  legitimately slow — same generous ceiling as a full audit. */
   private static readonly REPORT_TIMEOUT_MS = 600_000;
+  /** Commit-applied-changes action (Annotate tray) — git add/commit
+   *  (+push) is quick, so a normal per-op ceiling. */
+  private static readonly COMMIT_TIMEOUT_MS = 120_000;
 
   /** Per-finding op timers (Discuss / File-issue), keyed by
    *  `${op}:${checkId}` so a stuck agent reply clears its spinner. */
@@ -3193,6 +3196,16 @@ class ExtensionState {
     error: null,
   });
   private reportTimer: ReturnType<typeof setTimeout> | null = null;
+
+  /** Commit-applied-changes action (Annotate SUBMITTED tray). The agent
+   *  commits the files it applied for the done batches; "commit-push"
+   *  also pushes. `result` holds the agent's short success line. */
+  commit = $state<{
+    pending: "commit" | "commit-push" | null;
+    error: string | null;
+    result: string | null;
+  }>({ pending: null, error: null, result: null });
+  private commitTimer: ReturnType<typeof setTimeout> | null = null;
 
   /** Boards for imported INTERACTIVE modules (Phase 19 dynamic tabs),
    *  keyed by module id. Each slot mirrors the audit slot: the agent's
@@ -4617,6 +4630,132 @@ class ExtensionState {
   exportReportMarkdown(): string {
     if (!this.report.currentRun) return "";
     return renderReportMarkdown(this.report.currentRun);
+  }
+
+  // ─── Commit applied changes (Annotate tray, Phase 16c) ───────────────
+  // The extension can't run git, so the /pinta agent does it: a
+  // `module.query.submit` with op:"git-commit" carrying the done batches'
+  // annotations (comments + sourceFiles). The agent commits only the
+  // files it applied (scope:"applied"), auto-messages from the comments,
+  // optionally pushes, and returns a short result via mark_session_done.
+  // Routed back through handleCommitSync (by op, in onMessage).
+
+  /** Commit the changes the agent applied for the done batches. `push`
+   *  also pushes. No-op if one's already in flight or nothing's applied. */
+  async commitAppliedBatches(push: boolean): Promise<void> {
+    if (this.commit.pending) return;
+    if (!this.client || this.connectionStatus !== "connected") {
+      this.commit.error =
+        "No companion connected. Start `pinta-companion .` in your project to commit.";
+      return;
+    }
+    const done = this.inFlightBatches.filter((b) => b.status === "done");
+    if (done.length === 0) {
+      this.commit.error = "Nothing applied yet to commit.";
+      return;
+    }
+    const batches = done.map((b) => ({
+      batchId: b.id,
+      appliedSummary: b.appliedSummary ?? "",
+      annotations: b.annotations
+        .filter((a) => a.kind !== "query")
+        .map((a) => {
+          const t = a.targets?.[0] ?? a.target;
+          return {
+            comment: a.comment ?? "",
+            selector: t?.selector,
+            sourceFile: t?.sourceFile,
+          };
+        }),
+    }));
+    const runId = crypto.randomUUID();
+    this.commit.pending = push ? "commit-push" : "commit";
+    this.commit.error = null;
+    this.commit.result = null;
+    this.armCommitTimeout();
+    const queryComment = JSON.stringify({
+      op: "git-commit",
+      runId,
+      push,
+      scope: "applied",
+      message: "auto",
+      batches,
+    });
+    this.send({
+      type: "module.query.submit",
+      url: this.lastUrl ?? "",
+      moduleId: "git-commit",
+      moduleSettings: {},
+      queryComment,
+    });
+  }
+
+  private armCommitTimeout(): void {
+    this.clearCommitTimeout();
+    const verb =
+      this.commit.pending === "commit-push" ? "commit and push" : "commit";
+    this.armAgentWait({
+      softMs: ExtensionState.COMMIT_TIMEOUT_MS,
+      what: verb,
+      setHandle: (t) => {
+        this.commitTimer = t;
+      },
+      stillPending: () => !!this.commit.pending,
+      giveUp: () => {
+        if (!this.commit.pending) return;
+        this.commit.pending = null;
+        this.commit.error = ExtensionState.slowWaitGiveUp(verb);
+      },
+    });
+  }
+
+  private clearCommitTimeout(): void {
+    if (this.commitTimer) {
+      clearTimeout(this.commitTimer);
+      this.commitTimer = null;
+    }
+    this.retireAgentWaitNotice();
+  }
+
+  /** Routed from onMessage when a `git-commit` op session.synced lands.
+   *  Done → store the agent's short result; error → surface it. */
+  private handleCommitSync(session: Session): void {
+    if (!this.commit.pending) return;
+    if (session.status === "done") {
+      const summary = session.appliedSummary ?? "";
+      if (summary.trim() === "") return; // empty done — keep waiting
+      this.clearCommitTimeout();
+      let result = summary.slice(0, 300);
+      try {
+        const payload = JSON.parse(summary) as {
+          reply?: string;
+          message?: string;
+          committed?: boolean;
+          sha?: string;
+          pushed?: boolean;
+          files?: number;
+        };
+        result =
+          payload.reply ??
+          payload.message ??
+          (payload.committed
+            ? `Committed${payload.sha ? ` ${payload.sha}` : ""}${
+                payload.files ? ` (${payload.files} files)` : ""
+              }${payload.pushed ? " · pushed" : ""}`
+            : result);
+      } catch {
+        // non-JSON — use the raw summary preview
+      }
+      this.commit.result = result;
+      this.commit.error = null;
+      this.commit.pending = null;
+    } else if (session.status === "error") {
+      this.clearCommitTimeout();
+      this.commit.error = session.errorMessage ?? "Commit failed.";
+      this.commit.pending = null;
+    } else if (session.status === "applying") {
+      this.commit.error = null;
+    }
   }
 
   private applyAuditResult(payload: { [k: string]: unknown }): void {
@@ -6583,6 +6722,14 @@ class ExtensionState {
           this.armClaimWarning(msg.session);
         } else {
           this.clearClaimWarning(msg.session.id);
+        }
+
+        // Phase 16c — commit-applied-changes op. Routed by op (not module
+        // id) so it never falls through to the annotation-batch path and
+        // overwrites the draft. Early return like the other module ops.
+        if (ExtensionState.queryOp(msg.session) === "git-commit") {
+          this.handleCommitSync(msg.session);
+          return;
         }
 
         // Route Test Pilot query session events away from the regular
