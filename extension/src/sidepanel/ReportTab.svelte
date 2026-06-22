@@ -1,11 +1,11 @@
 <script lang="ts">
   // Phase 16 — Report module. View what you shipped (git + gh/glab +
   // Pinta activity, gathered by the /pinta agent) as Read-Mode day
-  // cards, and export a clean markdown summary by icon. Range = Today /
-  // This week / 10-day Sprint; weekend work folds into the lighter
-  // adjacent weekday. Phase 16b: combine extra repos — each item is
-  // tagged with its project and a multi-project report groups each day's
-  // items under per-project sub-sections.
+  // cards, and export a clean markdown summary. Phase 16d — actions are
+  // standardized into an icon group (Filter range dropdown / Projects
+  // dialog / Regenerate / Export) to match the Annotate actions area;
+  // the range pills, inline date inputs, and inline Projects panel moved
+  // behind the Filter dropdown + Projects modal.
 
   import { app } from "../lib/state.svelte.js";
   import {
@@ -29,6 +29,10 @@
     { id: "custom", label: "Custom", hint: "Pick a single date or a range" },
   ];
 
+  // Shared icon-button style for the actions group (mirrors the header ⋮).
+  const ACTION_BTN =
+    "relative w-8 h-8 inline-flex items-center justify-center rounded-md border border-ink-200 bg-white text-ink-600 hover:text-brand-pink hover:border-ink-400 dark:border-night-line dark:bg-night-card dark:text-night-dim dark:hover:text-brand-pink-light disabled:opacity-50 transition-colors";
+
   const run = $derived(app.report.currentRun);
   // Fold weekends for display; the stored run keeps true-dated days.
   const days = $derived(run ? foldWeekends(run.days, run.range) : []);
@@ -41,8 +45,10 @@
   );
   const pending = $derived(app.report.pending !== null);
   const connected = $derived(app.connectionStatus === "connected");
-  // >1 distinct project across the run → group each day by project.
   const multiProject = $derived(run ? reportProjects(run).length > 1 : false);
+  const currentRangeName = $derived(
+    RANGES.find((r) => r.id === app.report.range)?.label ?? "This week",
+  );
   const primaryProject = $derived(
     app.selectedCompanion?.projectRoot
       ? basename(app.selectedCompanion.projectRoot)
@@ -50,6 +56,21 @@
   );
 
   let newPath = $state("");
+  let filterMenuOpen = $state(false);
+  let projectsDialogOpen = $state(false);
+
+  /** Close-on-outside-click action (matches App.svelte's header menu). */
+  function clickOutside(node: HTMLElement, cb: () => void) {
+    const handler = (e: MouseEvent) => {
+      if (!node.contains(e.target as Node)) cb();
+    };
+    document.addEventListener("mousedown", handler, true);
+    return {
+      destroy() {
+        document.removeEventListener("mousedown", handler, true);
+      },
+    };
+  }
 
   function basename(p: string): string {
     return p.replace(/[\\/]+$/, "").split(/[\\/]/).pop() || p;
@@ -64,16 +85,17 @@
 
   function pickRange(r: ReportRange) {
     app.setReportRange(r);
-    // Seed the custom window to today the first time it's opened so the
-    // date inputs aren't blank.
+    // Seed the custom window to today so the date inputs aren't blank.
     if (r === "custom" && !app.report.customSince) {
       const t = todayLocal();
       app.setReportCustomRange(t, t);
     }
+    // Non-custom ranges apply immediately; custom keeps the dropdown open
+    // so the user can pick dates.
+    if (r !== "custom") filterMenuOpen = false;
   }
 
-  // From/To changes keep the window ordered: a new "from" past the
-  // current "to" pulls "to" with it (single-day default), and vice versa.
+  // From/To changes keep the window ordered.
   function onCustomSince(e: Event) {
     const since = (e.currentTarget as HTMLInputElement).value;
     if (!since) return;
@@ -165,8 +187,6 @@
       {categoryLabel(item.category)}
     </span>
     {#if multiProject && item.project}
-      <!-- Per-task project tag (Phase 16b) — only when the report spans
-           multiple repos, so single-project reports stay clean. -->
       <span
         class="shrink-0 mt-0.5 px-1.5 py-0.5 rounded text-[10px] font-medium bg-ink-100 text-ink-600 dark:bg-night-alt dark:text-night-dim"
         title={item.project}
@@ -191,148 +211,133 @@
 {/snippet}
 
 <section class="space-y-3">
-  <!-- Header: title + global export -->
+  <!-- Header: title + selected-range label + actions icon group -->
   <div class="flex items-center justify-between gap-2">
     <h2 class="text-sm font-semibold text-ink-900 dark:text-night-text">
       Report
     </h2>
-    {#if run}
+    <div class="flex items-center gap-1.5">
+      <span class="text-[11px] text-ink-500 dark:text-night-mute mr-0.5">
+        {currentRangeName}
+      </span>
+
+      <!-- Filter: range dropdown (Today / This week / Sprint / Custom) -->
+      <div class="relative" use:clickOutside={() => (filterMenuOpen = false)}>
+        <button
+          type="button"
+          class={ACTION_BTN}
+          onclick={() => (filterMenuOpen = !filterMenuOpen)}
+          aria-haspopup="menu"
+          aria-expanded={filterMenuOpen}
+          title="Filter — {currentRangeName}"
+          aria-label="Filter range"
+        >
+          <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+            <polygon points="22 3 2 3 10 12.46 10 19 14 21 14 12.46 22 3" />
+          </svg>
+        </button>
+        {#if filterMenuOpen}
+          <div class="absolute right-0 top-full mt-1 z-50 w-48 rounded-md border border-ink-200 bg-white shadow-lg dark:border-night-line dark:bg-night-card py-1" role="menu">
+            {#each RANGES as r (r.id)}
+              <button
+                type="button"
+                class="w-full flex items-center gap-2 px-3 py-1.5 text-[12px] {app.report.range === r.id ? 'text-brand-pink dark:text-brand-pink-light font-medium' : 'text-ink-700 dark:text-night-dim'} hover:bg-ink-50 dark:hover:bg-night-alt"
+                role="menuitemradio"
+                aria-checked={app.report.range === r.id}
+                onclick={() => pickRange(r.id)}
+                title={r.hint}
+              >
+                <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" class={app.report.range === r.id ? "" : "opacity-0"} aria-hidden="true"><polyline points="20 6 9 17 4 12" /></svg>
+                {r.label}
+              </button>
+            {/each}
+            {#if app.report.range === "custom"}
+              <!-- Inline date-range picker, revealed when Custom is active. -->
+              <div class="border-t border-ink-100 dark:border-night-line mt-1 px-3 py-2 space-y-1.5">
+                <label class="flex items-center justify-between gap-2 text-[11px] text-ink-600 dark:text-night-dim">
+                  From
+                  <input
+                    type="date"
+                    value={app.report.customSince}
+                    onchange={onCustomSince}
+                    class="px-1.5 py-1 rounded border border-ink-200 dark:border-night-line bg-white dark:bg-night-bg text-ink-800 dark:text-night-text text-[11px] focus:outline-none focus:ring-1 focus:ring-brand-pink/40"
+                  />
+                </label>
+                <label class="flex items-center justify-between gap-2 text-[11px] text-ink-600 dark:text-night-dim">
+                  To
+                  <input
+                    type="date"
+                    value={app.report.customUntil}
+                    onchange={onCustomUntil}
+                    class="px-1.5 py-1 rounded border border-ink-200 dark:border-night-line bg-white dark:bg-night-bg text-ink-800 dark:text-night-text text-[11px] focus:outline-none focus:ring-1 focus:ring-brand-pink/40"
+                  />
+                </label>
+                <p class="text-[10px] text-ink-400 dark:text-night-mute">Same date = a single day.</p>
+                <button
+                  type="button"
+                  class="w-full text-[11px] rounded border border-ink-200 dark:border-night-line text-ink-600 dark:text-night-dim hover:border-brand-pink hover:text-brand-pink py-1"
+                  onclick={() => (filterMenuOpen = false)}
+                >
+                  Done
+                </button>
+              </div>
+            {/if}
+          </div>
+        {/if}
+      </div>
+
+      <!-- Projects: opens the repos dialog -->
       <button
         type="button"
-        class="w-7 h-7 inline-flex items-center justify-center rounded-md text-ink-500 dark:text-night-mute hover:text-brand-pink dark:hover:text-brand-pink-light hover:bg-ink-100 dark:hover:bg-night-alt"
-        onclick={exportAll}
-        title="Export the whole report as markdown (.md)"
-        aria-label="Export report as markdown"
+        class={ACTION_BTN}
+        onclick={() => (projectsDialogOpen = true)}
+        title="Projects — combine extra repos"
+        aria-label="Projects"
       >
         <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
-          <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" />
-          <polyline points="7 10 12 15 17 10" />
-          <line x1="12" y1="15" x2="12" y2="3" />
+          <circle cx="12" cy="12" r="3" />
+          <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z" />
         </svg>
+        {#if app.report.projects.length > 0}
+          <span class="absolute -top-1 -right-1 min-w-[14px] h-[14px] px-1 inline-flex items-center justify-center rounded-full bg-brand-pink text-white text-[9px] font-semibold leading-none dark:bg-brand-pink-light dark:text-night-bg">
+            {app.report.projects.length}
+          </span>
+        {/if}
       </button>
-    {/if}
-  </div>
 
-  <!-- Range selector + Generate -->
-  <div class="flex items-center gap-1.5">
-    {#each RANGES as r (r.id)}
+      <!-- Regenerate (refresh) -->
       <button
         type="button"
-        class="px-2.5 py-1 text-[11.5px] rounded-md border transition-colors"
-        class:border-brand-pink={app.report.range === r.id}
-        class:text-brand-pink={app.report.range === r.id}
-        class:dark:text-brand-pink-light={app.report.range === r.id}
-        class:border-ink-200={app.report.range !== r.id}
-        class:dark:border-night-line={app.report.range !== r.id}
-        class:text-ink-600={app.report.range !== r.id}
-        class:dark:text-night-dim={app.report.range !== r.id}
-        onclick={() => pickRange(r.id)}
-        disabled={pending}
-        title={r.hint}
+        class={ACTION_BTN}
+        onclick={generate}
+        disabled={pending || !connected}
+        title={connected ? (run ? "Regenerate report" : "Generate report") : "Connect a companion to generate"}
+        aria-label={run ? "Regenerate report" : "Generate report"}
       >
-        {r.label}
+        {#if pending}
+          <svg class="animate-spin" width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21 12a9 9 0 1 1-6.219-8.56" /></svg>
+        {:else}
+          <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M23 4v6h-6" /><path d="M1 20v-6h6" /><path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15" /></svg>
+        {/if}
       </button>
-    {/each}
-    <button
-      type="button"
-      class="ml-auto inline-flex items-center gap-1.5 px-3 py-1 text-xs font-medium rounded-md bg-brand-pink text-white hover:bg-brand-magenta dark:hover:bg-brand-pink-light disabled:opacity-50"
-      onclick={generate}
-      disabled={pending || !connected}
-      title={connected ? "Generate the report" : "Connect a companion to generate a report"}
-    >
-      {#if pending}
-        <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" class="animate-spin" aria-hidden="true"><path d="M21 12a9 9 0 1 1-6.219-8.56" /></svg>
-        Generating…
-      {:else}
-        {run ? "Regenerate" : "Generate"}
-      {/if}
-    </button>
-  </div>
 
-  <!-- Custom date window — single day = same From/To. -->
-  {#if app.report.range === "custom"}
-    <div class="flex items-center gap-2 flex-wrap text-[11.5px] text-ink-600 dark:text-night-dim">
-      <label class="inline-flex items-center gap-1">
-        From
-        <input
-          type="date"
-          value={app.report.customSince}
-          onchange={onCustomSince}
-          disabled={pending}
-          class="px-2 py-1 rounded border border-ink-200 dark:border-night-line bg-white dark:bg-night-bg text-ink-800 dark:text-night-text focus:outline-none focus:ring-1 focus:ring-brand-pink/40"
-        />
-      </label>
-      <label class="inline-flex items-center gap-1">
-        To
-        <input
-          type="date"
-          value={app.report.customUntil}
-          onchange={onCustomUntil}
-          disabled={pending}
-          class="px-2 py-1 rounded border border-ink-200 dark:border-night-line bg-white dark:bg-night-bg text-ink-800 dark:text-night-text focus:outline-none focus:ring-1 focus:ring-brand-pink/40"
-        />
-      </label>
-      <span class="text-[10px] text-ink-400 dark:text-night-mute">
-        Same date in both = a single day.
-      </span>
-    </div>
-  {/if}
-
-  <!-- Projects manager (Phase 16b) — combine extra repos -->
-  <div class="rounded-md border border-ink-200 dark:border-night-line p-2.5 space-y-2">
-    <span class="text-[11px] uppercase tracking-wide text-ink-500 dark:text-night-mute font-medium">
-      Projects
-    </span>
-    <div class="flex flex-wrap gap-1.5">
-      {#if primaryProject}
-        <span
-          class="inline-flex items-center gap-1 px-2 py-0.5 rounded-full bg-ink-100 dark:bg-night-alt text-[11px] text-ink-700 dark:text-night-dim"
-          title={app.selectedCompanion?.projectRoot}
+      <!-- Export whole report -->
+      {#if run}
+        <button
+          type="button"
+          class={ACTION_BTN}
+          onclick={exportAll}
+          title="Export the whole report (.md)"
+          aria-label="Export report as markdown"
         >
-          {primaryProject}
-          <span class="text-ink-400 dark:text-night-mute">· primary</span>
-        </span>
+          <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+            <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" />
+            <polyline points="7 10 12 15 17 10" />
+            <line x1="12" y1="15" x2="12" y2="3" />
+          </svg>
+        </button>
       {/if}
-      {#each app.report.projects as p (p)}
-        <span
-          class="inline-flex items-center gap-1 px-2 py-0.5 rounded-full bg-brand-pink/10 text-brand-pink dark:text-brand-pink-light text-[11px]"
-          title={p}
-        >
-          {basename(p)}
-          <button
-            type="button"
-            class="leading-none hover:text-brand-magenta dark:hover:text-white"
-            onclick={() => app.removeReportProject(p)}
-            aria-label={`Remove ${p}`}
-            title="Remove"
-          >×</button>
-        </span>
-      {/each}
     </div>
-    <div class="flex items-center gap-1.5">
-      <input
-        type="text"
-        bind:value={newPath}
-        onkeydown={(e) => {
-          if (e.key === "Enter") addProject();
-        }}
-        placeholder="Add a repo path, e.g. C:\insclix\insclix-awp-2.0"
-        class="flex-1 min-w-0 text-[11.5px] px-2 py-1 rounded border border-ink-200 dark:border-night-line bg-white dark:bg-night-bg text-ink-800 dark:text-night-text placeholder:text-ink-400 dark:placeholder:text-night-mute focus:outline-none focus:ring-1 focus:ring-brand-pink/40"
-        disabled={pending}
-      />
-      <button
-        type="button"
-        class="px-2.5 py-1 text-[11px] rounded border border-ink-200 dark:border-night-line text-ink-600 dark:text-night-dim hover:border-brand-pink hover:text-brand-pink disabled:opacity-50"
-        onclick={addProject}
-        disabled={pending || newPath.trim() === ""}
-      >
-        Add
-      </button>
-    </div>
-    <p class="text-[10px] text-ink-400 dark:text-night-mute leading-snug">
-      Extra repos are gathered from git + your issue tracker (no Pinta
-      activity). The current project is always included as primary.
-    </p>
   </div>
 
   {#if !connected}
@@ -410,15 +415,94 @@
     {/each}
   {:else if run}
     <p class="text-xs text-ink-500 dark:text-night-mute italic">
-      No tasks found for {rangeLabel}. Try a wider range.
+      No tasks found for {rangeLabel}. Try a wider range from the filter.
     </p>
   {:else}
     <p class="text-xs text-ink-500 dark:text-night-mute italic leading-snug">
-      No report yet. Pick a range and hit Generate — the agent gathers your
-      bug fixes, polishes, tests, annotations, and merges from git + your
-      issue tracker + Pinta activity, grouped by day. Add extra repos above
-      to combine projects. Export any day or the whole range as clean
-      markdown.
+      No report yet. Pick a range from the filter <span class="font-medium">▾</span>, optionally add
+      repos via the projects <span class="font-medium">⚙</span>, then hit the
+      refresh icon to generate — the agent gathers your bug fixes, polishes,
+      tests, annotations, and merges, grouped by day. Export any day or the
+      whole range as clean markdown.
     </p>
   {/if}
 </section>
+
+<!-- Projects dialog (modal) — combine extra repos -->
+{#if projectsDialogOpen}
+  <button
+    type="button"
+    class="fixed inset-0 z-40 bg-black/40 dark:bg-black/60"
+    onclick={() => (projectsDialogOpen = false)}
+    aria-label="Close projects dialog"
+  ></button>
+  <div
+    class="fixed left-1/2 top-1/2 -translate-x-1/2 -translate-y-1/2 z-50 w-[90%] max-w-sm rounded-lg border border-ink-200 dark:border-night-line bg-white dark:bg-night-card shadow-2xl p-4 space-y-3"
+    role="dialog"
+    aria-modal="true"
+    aria-label="Report projects"
+  >
+    <div class="flex items-center justify-between">
+      <h3 class="text-sm font-semibold text-ink-900 dark:text-night-text">Projects</h3>
+      <button
+        type="button"
+        class="w-7 h-7 inline-flex items-center justify-center rounded-full text-ink-500 dark:text-night-mute hover:text-ink-900 dark:hover:text-night-text hover:bg-ink-100 dark:hover:bg-night-alt"
+        onclick={() => (projectsDialogOpen = false)}
+        aria-label="Close"
+        title="Close"
+      >
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><line x1="18" y1="6" x2="6" y2="18" /><line x1="6" y1="6" x2="18" y2="18" /></svg>
+      </button>
+    </div>
+    <p class="text-[11px] text-ink-500 dark:text-night-mute leading-snug">
+      Combine extra repos into the report — gathered from git + your issue
+      tracker (no Pinta activity). The current project is always included as
+      primary.
+    </p>
+    <div class="flex flex-wrap gap-1.5">
+      {#if primaryProject}
+        <span
+          class="inline-flex items-center gap-1 px-2 py-0.5 rounded-full bg-ink-100 dark:bg-night-alt text-[11px] text-ink-700 dark:text-night-dim"
+          title={app.selectedCompanion?.projectRoot}
+        >
+          {primaryProject}
+          <span class="text-ink-400 dark:text-night-mute">· primary</span>
+        </span>
+      {/if}
+      {#each app.report.projects as p (p)}
+        <span
+          class="inline-flex items-center gap-1 px-2 py-0.5 rounded-full bg-brand-pink/10 text-brand-pink dark:text-brand-pink-light text-[11px]"
+          title={p}
+        >
+          {basename(p)}
+          <button
+            type="button"
+            class="leading-none hover:text-brand-magenta dark:hover:text-white"
+            onclick={() => app.removeReportProject(p)}
+            aria-label={`Remove ${p}`}
+            title="Remove"
+          >×</button>
+        </span>
+      {/each}
+    </div>
+    <div class="flex items-center gap-1.5">
+      <input
+        type="text"
+        bind:value={newPath}
+        onkeydown={(e) => {
+          if (e.key === "Enter") addProject();
+        }}
+        placeholder="Add a repo path, e.g. C:\insclix\insclix-awp-2.0"
+        class="flex-1 min-w-0 text-[11.5px] px-2 py-1 rounded border border-ink-200 dark:border-night-line bg-white dark:bg-night-bg text-ink-800 dark:text-night-text placeholder:text-ink-400 dark:placeholder:text-night-mute focus:outline-none focus:ring-1 focus:ring-brand-pink/40"
+      />
+      <button
+        type="button"
+        class="px-2.5 py-1 text-[11px] rounded border border-ink-200 dark:border-night-line text-ink-600 dark:text-night-dim hover:border-brand-pink hover:text-brand-pink disabled:opacity-50"
+        onclick={addProject}
+        disabled={newPath.trim() === ""}
+      >
+        Add
+      </button>
+    </div>
+  </div>
+{/if}
