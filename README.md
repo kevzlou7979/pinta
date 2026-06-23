@@ -37,6 +37,28 @@ matching source files for you.
 
 Recent additions on top of the original V1 pipeline:
 
+- **Report module — daily / weekly / sprint summaries** *(v0.6.0)*. A
+  built-in **Report** tab merges git + GitHub activity with Pinta
+  sessions into Read-mode day cards across a day, week, 10-day sprint,
+  or custom window — multi-project aware, with one-click Markdown export
+  (per-day or whole-range). See `spec/SPEC.md` §8 Phase 16.
+- **AuditFlow fixes in place** *(v0.6.0)*. "Fix with agent" no longer
+  bounces to Annotate — each finding fixes the source in place with a
+  per-row loader, fixes run concurrently, and the category ⋮ gains
+  **Fix All**.
+- **Module board actions + free-form notes** *(v0.6.0)*. Board modules
+  gain header actions (e.g. the Tasks module's "End Day"), client-side
+  card ops (add-to-Test-Pilot), and `featuredSection` columns; the
+  Annotate composer accepts a free-form **note** task with no DOM
+  target — the agent finds the code itself.
+- **Backup / restore + header redesign** *(v0.5.0)*. Export / import the
+  AuditFlow catalog and a global `pinta-settings.json`; a redesigned
+  header with a ⋮ menu, version badge, and live connection status dot.
+- **AuditFlow — Lighthouse-style audits** *(v0.4.0)*. Five built-in
+  audits (security, performance, accessibility, mobile, cross-browser)
+  plus custom markdown-defined checks, each one click from
+  Fix-with-agent. Results persist per project and re-run on demand. See
+  `spec/SPEC.md` §8 Phase 15.
 - **Chat module — global + Just Ask + per-row** *(post-v0.3.1)*. Single
   Settings toggle lights up an "ask the agent" surface in three
   places: a global FAB at the bottom-right corner of the side panel,
@@ -222,7 +244,7 @@ See [`spec/SPEC.md` §7–9](spec/SPEC.md) for the full status of each.
 
 ## Modules included
 
-Pinta ships with two built-in **modules** — small agent-side
+Pinta ships with five built-in **modules** — small agent-side
 integrations that extend the core annotation loop. Enable in
 **Settings**, opt in per submit (or per query for interactive modules).
 The wire contract stays narrow: each module carries a stable id and a
@@ -282,10 +304,41 @@ routes back into the Test Pilot tab. See
 [`spec/SPEC.md` §8 Phase 12](spec/SPEC.md#phase-12--built-in-modules--test-pilot--shipped)
 for the full design.
 
+### 🛡️  AuditFlow  ·  *interactive*
+
+Lighthouse-style audits in their own side-panel tab — five built-ins
+(security, performance, accessibility, mobile, cross-browser) plus
+custom checks you define with the same markdown format.
+
+- **Per-finding "Fix with agent" edits the source in place** — a per-row
+  loader, concurrent fixes, and **Fix All** on a category — instead of
+  detouring through Annotate.
+- **Discuss** (chat) and **File issue** (GitLab / local) per finding.
+- Pass/fail summary per audit; results persist per project and re-run on
+  demand. See `spec/SPEC.md` §8 Phase 15.
+
+### 💬  Chat  ·  *inquiry*
+
+A three-tier "ask the agent" surface from one wire: a global tab,
+**Just Ask** on any Annotate session, and per-row chat on Test Pilot.
+Threads persist per surface and accept pasted images; inquiry sessions
+never edit source. See `spec/SPEC.md` §8 Phase 14.
+
+### 📅  Report  ·  *interactive*
+
+Merged git + GitHub activity and Pinta sessions as Read-mode day cards —
+daily, weekly, 10-day sprint, or a custom range, multi-project aware.
+One-click Markdown export, per-day or whole-range. See `spec/SPEC.md`
+§8 Phase 16.
+
 ### Writing your own
 
-Today's set is built-in only — Pinta doesn't load third-party modules.
-But the surface is small enough that adding a new one is straightforward:
+Beyond the five built-ins, Pinta can load **importable modules** — a
+third party ships one as a single `.pinta-module.json` (manifest + agent
+instructions) dropped into `.pinta/modules/`, gated behind a Settings
+consent dialog and a default-deny capability check (sample at
+`examples/echo-notes.pinta-module.json`). Adding a *built-in* module is
+just as small:
 
 1. Add an entry to `extension/src/lib/modules.ts` with `id`, settings
    schema, and `mode: "per-submit" | "interactive"`.

@@ -552,6 +552,7 @@
     .module--testpilot { --module-accent: rgba(140,80,220,0.18); }
     .module--auditflow { --module-accent: rgba(20,184,166,0.18); }
     .module--chat { --module-accent: rgba(59,130,246,0.18); }
+    .module--report { --module-accent: rgba(245,158,11,0.18); }
 
     .module-icon {
       width: 72px; height: 72px;
@@ -593,6 +594,14 @@
     [data-theme="dark"] .module--chat .module-icon {
       background: linear-gradient(135deg, rgba(59,130,246,0.28), rgba(59,130,246,0.08));
       color: #93c5fd;
+    }
+    .module--report .module-icon {
+      background: linear-gradient(135deg, #fff7e6, #ffedcc);
+      color: #b45309;
+    }
+    [data-theme="dark"] .module--report .module-icon {
+      background: linear-gradient(135deg, rgba(245,158,11,0.28), rgba(245,158,11,0.08));
+      color: #fcd34d;
     }
 
     /* Flask icon — wiggles + spawns a bubble that drifts up on hover. */
@@ -749,6 +758,8 @@
     .module--chat .module-mode { background: #e0eaff; color: #1d4ed8; border-color: rgba(59,130,246,0.25); }
     [data-theme="dark"] .module--auditflow .module-mode { background: rgba(20,184,166,0.18); color: #6ee7c7; border-color: rgba(20,184,166,0.32); }
     [data-theme="dark"] .module--chat .module-mode { background: rgba(59,130,246,0.18); color: #93c5fd; border-color: rgba(59,130,246,0.32); }
+    .module--report .module-mode { background: #fff7e6; color: #92400e; border-color: rgba(245,158,11,0.25); }
+    [data-theme="dark"] .module--report .module-mode { background: rgba(245,158,11,0.18); color: #fcd34d; border-color: rgba(245,158,11,0.32); }
 
     .module-desc {
       margin: 0 0 16px;
@@ -781,6 +792,7 @@
     .module--testpilot .module-list li::before { background: #7c3aed; }
     .module--auditflow .module-list li::before { background: #10b981; }
     .module--chat .module-list li::before { background: #3b82f6; }
+    .module--report .module-list li::before { background: #f59e0b; }
     [data-theme="dark"] .module-list li { color: var(--ink); }
 
     /* Reveal-on-load entrance for the modules section. Fires once per
@@ -1763,7 +1775,7 @@
   <header class="hero" id="top">
     <div class="container">
       <span class="hero-logo-wrap"><img class="hero-logo" src="assets/icons/icon-256.png" alt="Pinta logo" width="108" height="108" /></span>
-      <div><span class="pill"><span class="pulse"></span> v0.3.0 — per-page annotations + GitLab Issues</span></div>
+      <div><span class="pill"><span class="pulse"></span> v0.6.0 — Report module + in-place AuditFlow fixes</span></div>
       <h1 class="hero-title"><span class="type" data-type="Annotate your running app.">Annotate your running app.</span><br /><span class="grad type" data-type="Let an agent do the edits.">Let an agent do the edits.</span></h1>
       <p class="lede">
         Circle a button. Point at a heading. Type <em>"make this tonal"</em>.
@@ -1876,9 +1888,9 @@
   <section id="features">
     <div class="container">
       <div class="section-head">
-        <span class="eyebrow">What V1 includes · v0.3.0</span>
+        <span class="eyebrow">What Pinta includes · v0.6.0</span>
         <h2>The whole loop, shipped.</h2>
-        <p class="sub">Phases 0–5 of <a href="https://github.com/kevzlou7979/pinta/blob/main/spec/SPEC.md">the spec</a> are live, plus the polish phases (8 inline editing, 9 protocol, 10 standalone, 11 share files, 12 built-in modules + multi-page annotations). Source mapping (Phase 6) is next.</p>
+        <p class="sub">The core annotate → submit → edit loop plus the polish phases (inline editing, protocol, standalone, share files) — and five built-in modules: GitLab Issues, Test Pilot, AuditFlow, Chat, and Report. See <a href="https://github.com/kevzlou7979/pinta/blob/main/spec/SPEC.md">the spec</a> for the phase-by-phase breakdown.</p>
       </div>
       <div class="features">
         <div class="feature">
@@ -1992,8 +2004,9 @@
         <p class="sub">
           Modules ride along on a session or run interactively from their
           own tab — tick a checkbox, grant whatever setup the module
-          needs once, and the agent handles the rest. Four ship with v0.3.x;
-          more on the way.
+          needs once, and the agent handles the rest. Five ship today —
+          GitLab Issues, Test Pilot, AuditFlow, Chat, and Report — plus an
+          SDK for writing your own.
         </p>
       </div>
       <div class="modules">
@@ -2075,13 +2088,14 @@
             Lighthouse-style audits inside Pinta — five built-ins
             (security, performance, accessibility, mobile, cross-browser)
             plus user-defined custom checks. Every finding is one click
-            from <strong>Fix with agent</strong>, which routes straight
-            through Annotate.
+            from <strong>Fix with agent</strong>, which now fixes the code
+            <em>in place</em> — a per-finding loader, concurrent fixes, and
+            <strong>Fix All</strong> on the category.
           </p>
           <ul class="module-list">
             <li>Five built-in audits — security, performance, accessibility, mobile, cross-browser</li>
             <li>Define your own audits with a markdown spec — same format the built-ins use</li>
-            <li>Per-finding <strong>Fix with agent</strong> creates an annotation pre-loaded with selector + evidence</li>
+            <li>Per-finding <strong>Fix with agent</strong> edits the source in place — runs concurrently, with <strong>Fix All</strong> per category</li>
             <li>Pass/fail summary per audit, re-run on demand, results persist per project</li>
           </ul>
         </article>
@@ -2111,6 +2125,32 @@
             <li><strong>Just Ask</strong> on any Annotate session for a quick clarification before submitting</li>
             <li>Per-row chat on Test Pilot — drill into a specific test without leaving the catalog</li>
             <li>Auto-attaches the right context: selector, outerHTML, screenshot, current module state</li>
+          </ul>
+        </article>
+        <article class="module module--report">
+          <div class="module-icon">
+            <!-- Report / document glyph. -->
+            <svg width="36" height="36" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+              <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z" />
+              <path d="M14 2v6h6" />
+              <path d="M8 13h6" /><path d="M8 17h8" /><path d="M9 9h1" />
+            </svg>
+          </div>
+          <div class="module-meta">
+            <h3>Report</h3>
+            <span class="module-mode">Interactive</span>
+          </div>
+          <p class="module-desc">
+            Turn shipped work into a standup-ready summary. The
+            <strong>Report</strong> tab merges your git + GitHub activity
+            with Pinta sessions and lays them out as clean day cards — for
+            a day, a week, a 10-day sprint, or any custom window.
+          </p>
+          <ul class="module-list">
+            <li>Daily / weekly / sprint ranges, plus arbitrary custom windows</li>
+            <li>Multi-project — combine extra repos, grouped by project per day</li>
+            <li>Read-mode day cards with weekend-fold</li>
+            <li>One-click Markdown export, per-day or whole-range</li>
           </ul>
         </article>
       </div>
@@ -2345,6 +2385,7 @@ npx pinta-companion@0.6.0 install-skill
           <div class="timeline-card">
             <h3>Inquiry mode</h3>
             <p>A shared chat sheet for asking the agent questions — global header icon, "Just Ask" on Annotate, and per-row chat on Test Pilot. One wire, one UI, three entry points.</p>
+            <span class="timeline-status is-shipped">Shipped</span>
           </div>
         </div>
         <div class="timeline-item">
@@ -2354,8 +2395,8 @@ npx pinta-companion@0.6.0 install-skill
           </div>
           <div class="timeline-card">
             <h3>AuditFlow</h3>
-            <p>Lighthouse-style audits inside Pinta — security, performance, accessibility, and mobile out of the box, plus user-defined custom audits. Every finding is one click from "Fix with agent."</p>
-            <span class="timeline-status is-locked">Spec locked</span>
+            <p>Lighthouse-style audits inside Pinta — security, performance, accessibility, mobile, and cross-browser out of the box, plus user-defined custom audits. Every finding is one click from "Fix with agent," which fixes the code in place.</p>
+            <span class="timeline-status is-shipped">Shipped</span>
           </div>
         </div>
         <div class="timeline-item">
@@ -2364,9 +2405,9 @@ npx pinta-companion@0.6.0 install-skill
             <span class="node-num">16</span>
           </div>
           <div class="timeline-card">
-            <h3>Test Pilot sign-off</h3>
-            <p>Tester exports a self-describing Markdown sign-off — pre-filled tester info, per-row Pass/Fail, environment + notes. Developer hits "Import results" and reviews exactly what was tested. Round-trip via YAML frontmatter.</p>
-            <span class="timeline-status is-locked">Spec locked</span>
+            <h3>Report</h3>
+            <p>A built-in Report tab — merged git + GitHub activity and Pinta sessions laid out as day cards across a day, week, or 10-day sprint, with clean Markdown export. Multi-project aware, custom ranges supported.</p>
+            <span class="timeline-status is-shipped">Shipped</span>
           </div>
         </div>
         <div class="timeline-item">

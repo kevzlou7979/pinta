@@ -110,6 +110,70 @@ ask them to amend, OR ask them to paste a corrected version.
 - Edit `CHANGELOG.md`: insert the new section at the top, immediately
   after the H1 + intro paragraph. Preserve existing entries.
 
+## Step 4.5 — Refresh the site + README content (NOT just the version pin)
+
+`pin-docs-version.mjs` only swaps the `npx pinta-companion@x.y.z`
+strings. It does NOT touch feature lists, the hero tagline, module
+cards, or the roadmap — so the landing page silently drifts stale (it
+sat on "v0.3.0 — per-page annotations + GitLab Issues" through three
+minor releases). Every release, walk the new `CHANGELOG.md` section you
+just wrote and bring the user-facing content in line with what actually
+shipped. This is hand-edited marketing copy — there's no codegen.
+
+### `docs/index.html` (the GitHub Pages landing page)
+
+- **Hero version pill** (`<span class="pill"><span class="pulse">…`):
+  bump to the new version + a one-line headline of the release, e.g.
+  `v0.6.0 — Report module + in-place AuditFlow fixes`.
+- **Features eyebrow** (`<span class="eyebrow">What … includes · vX`):
+  bump the version, and delete any "Phase N is next" sentence the
+  release just completed.
+- **Modules section** (`id="modules"`):
+  - Add a `.module` card for any module that shipped this cycle (copy an
+    existing `<article class="module module--…">` block). For a brand-new
+    module also add a `--<name>` accent block in the `<style>` —
+    `--module-accent`, `.module--<name> .module-icon` (light + dark),
+    `.module-mode` (light + dark), and the `.module-list li::before`
+    bullet, mirroring the gitlab/testpilot/auditflow/chat/report set.
+  - Fix any description the release changed (e.g. AuditFlow's "Fix with
+    agent routes through Annotate" became "fixes in place" in v0.6.0).
+  - Update the section `<p class="sub">` count ("Five ship today…").
+- **Feature cards** (`id="features"`): add a card (or a small
+  `<span class="pill" …>vX.Y</span>` badge) for the headline capability.
+- **Roadmap timeline** (`id="roadmap"`): move every phase the release
+  shipped to `<span class="timeline-status is-shipped">Shipped</span>`,
+  and drop or replace items that are now done so the list shows only
+  genuine upcoming work. Cross-check phase numbers against
+  `spec/SPEC.md` §8 — the HTML has drifted from the spec numbering
+  before (Phase 16 was labelled "Test Pilot sign-off" while the
+  codebase shipped Report as Phase 16).
+
+### `docs/docs.html`
+
+- If the release changed a documented flow, hotkey, or module behavior,
+  update the matching section. (Version strings are already pinned by
+  `pin-docs-version.mjs`.)
+
+### `README.md`
+
+- **What's new**: prepend a bullet (or small group) for the new version,
+  3–6 headline items mirroring the CHANGELOG `### Added` highlights,
+  tagged `*(vX.Y.Z)*`. Keep older entries.
+- **Modules included** (`## Modules included`): add/adjust the subsection
+  if a module was added or materially changed.
+- **Roadmap** (`## Roadmap`): mark shipped items, prune completed ones.
+
+### Consistency gate
+
+Before moving on, three sources must name the SAME version and the SAME
+headline features: `CHANGELOG.md`'s newest section, the README "What's
+new" top entry, and the landing page's hero pill + features eyebrow. If
+they disagree, the page is still stale — fix it now, not next release.
+
+> These files are already in the Step 6 `git add` list
+> (`README.md docs/index.html docs/docs.html`), so the refresh ships in
+> the release commit — don't add a separate commit.
+
 ## Step 5 — Build + verify
 
 Run:
