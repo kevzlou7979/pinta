@@ -456,6 +456,17 @@ no DOM target. The `comment` describes intent; the screenshot shows what
 the drawing points at. Identify the area visually from the screenshot, then
 grep the codebase for nearby text you can read off the screenshot.
 
+**Manual task / note (`kind: "note"`)** — a free-form task the user typed
+in the side panel with NO DOM target, no selector, and (usually) no
+screenshot. Treat `comment` as the work to do — e.g. "Create a new dialog
+for this feature." There's nothing to anchor against on the page, so use
+your own judgment: grep the project for the relevant component / route /
+feature named in the comment, decide where the change belongs, and present
+it in the plan like any other edit. Optional `images: AnnotationImage[]`
+are inline visual references the comment points at via `[image1]` etc.
+(read them per §7.4). If the task is too vague to place confidently, say so
+in the plan and ask before editing rather than guessing at a file.
+
 **Placed image (`kind: "image"`)** — the user dropped a reference image
 *on the page* at a specific location to indicate "make this region look
 like this." `images[0]` carries the bitmap (`dataUrl` or `path`) and a
@@ -1724,6 +1735,8 @@ session lifecycle). Same operating rules as Test Pilot apply.
 - `"audit-discuss"` — chat about one finding (read-only).
 - `"audit-file-issue"` — file one finding as a GitLab issue or a local
   `.pinta/tasks.md` task.
+- `"audit-fix"` — **apply** one finding's fix directly to the project
+  source (the only audit op that edits code), then mark it resolved.
 
 The query comment shape (for `op: "audit"`):
 
@@ -2288,16 +2301,70 @@ If neither path is possible (no `gitlab` AND `fallbackToLocal` is
 `false`), `mark_session_error` with a one-line reason. **Token-lean:**
 read only what you need to compose the body; don't re-audit.
 
+### `op: "audit-fix"` — apply one finding's fix in place
+
+The user clicked **Fix** on a finding (or **Fix All** on a category, which
+fires one of these per finding). Unlike every other audit op, this one
+**edits project source** — it does the work the old "Fix with agent"
+Annotate handoff used to set up, but directly, with no tab switch.
+
+Query comment shape:
+
+```json
+{
+  "op": "audit-fix",
+  "runId": "uuid",
+  "checkId": "<stable fingerprint>",
+  "finding": {
+    "category": "mobile",
+    "label": "Touch target sizes below 32px",
+    "description": "…",
+    "fixHint": "On touch, raise the small button to ≥32px…",
+    "status": "warn",
+    "value": "small button 30px",
+    "where": { "file": "app/src/lib/components/ui/button/button.svelte", "line": 23 }
+  },
+  "suggestedAnnotation": null
+}
+```
+
+Apply it:
+
+1. **Read the real code** at `finding.where.file` (around `where.line`).
+   If it's already satisfied, that's success — return applied with an
+   "already satisfied" summary. Never edit from the `description` alone.
+2. **Make the minimal change** implementing `finding.fixHint` (use
+   `description` for context; use `suggestedAnnotation` verbatim as the
+   intended edit when present). Follow the §7 source-edit discipline —
+   smallest diff, match surrounding style, no unrelated reformatting.
+   Stay strictly within THIS finding's scope; don't refactor neighbours
+   or chase other findings.
+3. Do **not** `git add`/commit/push, run tests, or re-audit — just apply
+   the edit. (The user re-runs the category to confirm.)
+
+Close the loop — **REQUIRED**:
+```json
+{ "type": "audit-fix-applied", "checkId": "<same id>", "summary": "<one line: what changed>" }
+```
+`mark_session_done({ id, summary: JSON.stringify(payload) })`. The extension
+only flips the finding to **Fixed** (and marks it resolved in the progress
+rollup) on seeing `type: "audit-fix-applied"` — so always close with this
+exact JSON, or the row's border-loader spins until it times out even though
+the edit landed. If you genuinely can't apply it (file missing, finding
+ambiguous, fix exceeds one finding's scope), `mark_session_error` with a
+one-line reason. **Token-lean:** read only the target file + the minimum to
+make the edit, never re-audit.
+
 ### `audit-flow` operating rules
 
-- **No source edits.** Audits are read-only. Don't touch any file.
-  Don't `git add`, don't run tests, don't lint. The user routes
-  individual findings into Annotate via Fix-with-agent if they want
-  to act on them — those edits happen in a separate session, not in
-  the audit run.
-  - **Exceptions (per-finding ops only):** `audit-file-issue` may run
-    `glab` and write **`.pinta/tasks.md`** (never project source);
-    `audit-discuss` is read-only chat. Everything else here still holds.
+- **The `audit` run itself is read-only.** While computing the audit (op
+  `"audit"` / `"audit-suggest"`), don't touch any file, don't `git add`,
+  don't run tests or lint. Findings are reported, not fixed, in the run.
+  - **Per-finding op exceptions:** `audit-fix` **edits project source** to
+    apply one finding's fix (scoped to that finding — see its section);
+    `audit-file-issue` may run `glab` and write **`.pinta/tasks.md`**;
+    `audit-discuss` is read-only chat. These are the only writes, and only
+    on an explicit per-finding click — never during the `audit` run.
 - **`npm audit` is the ONLY shell command** allowed in the security
   audit (read-only, fast, well-understood). 15b adds more (axe-core,
   Lighthouse, doiuse) — those land with explicit guidance per
@@ -2513,7 +2580,13 @@ issue-tracker gather, never writes.
    `status`, `submittedAt`, `appliedSummary`); for sessions whose
    `submittedAt` falls in the window and `status` is `done`, surface the
    applied work — annotation batches (`pinta-annotate`), audit runs
-   (`pinta-audit`), test marks (`pinta-test`).
+   (`pinta-audit`), test marks (`pinta-test`). A module session's
+   `appliedSummary` is a JSON object — **summarize it into a plain one-line
+   `title`, NEVER paste the raw JSON.** e.g.
+   `{"type":"audit-flow-run","overall":67,"rating":"Needs work",…}` →
+   `"Ran an AuditFlow audit — scored 67/100 · Needs work"`;
+   `{"type":"test-pilot-catalog","filename":"generated-tests.md",…}` →
+   `"Generated a Test Pilot catalog from generated-tests.md"`.
 
 Return shape:
 

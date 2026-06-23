@@ -28,22 +28,14 @@
   import { parseAuditCatalog } from "../lib/audit-catalog-doc.js";
   import ChatSheet from "./ChatSheet.svelte";
 
-  // Active tab switch is passed down so Fix-with-agent can flip to
-  // Annotate after composing the draft. Parent (App.svelte) owns the
-  // tab state.
-  type Props = {
-    onSwitchToAnnotate: () => void;
-  };
-  let { onSwitchToAnnotate }: Props = $props();
+  // AuditFlow takes no props — Fix now happens IN PLACE (no Annotate
+  // handoff): the agent edits the code directly and the row shows a
+  // "fixing" border-loader until it's done.
 
   // Card expansion — keyed by category id. Default collapsed when a
   // category has only passing checks; expanded otherwise so the user
   // sees fail/warn rows immediately. Recomputed when the run changes.
   let expanded = $state<Record<string, boolean>>({});
-  // Track per-check "handoff fired" state so the Fix button visibly
-  // confirms after click + disables briefly (prevents double-tap
-  // duplicates). Keyed by check id. Reset when a new run lands.
-  let handedOff = $state<Record<string, true>>({});
   // Per-check expanded body — clicking the row toggles the
   // description / where / fix-hint detail.
   let openCheckId = $state<string | null>(null);
@@ -65,7 +57,6 @@
       next[cat.id] = hasIssue;
     }
     expanded = next;
-    handedOff = {};
     openCheckId = null;
   });
 
@@ -274,13 +265,31 @@
     openCheckId = openCheckId === id ? null : id;
   }
 
-  // ─── Fix-with-agent handoff ─────────────────────────────────────────
-  async function handoffToAnnotate(check: AuditCheck): Promise<void> {
-    const id = await app.handoffAuditCheckToAnnotate(check);
-    if (id) {
-      handedOff[check.id] = true;
-      onSwitchToAnnotate();
-    }
+  // ─── Fix in place (no Annotate handoff) ─────────────────────────────
+  // Applies the fix INSIDE AuditFlow via the agent. The check shows a
+  // "fixing" border-loader until the agent edits the source + marks it
+  // resolved. Multiple checks can be fixing at once.
+  function fixCheck(check: AuditCheck): void {
+    void app.fixAuditCheck(check);
+  }
+  // How many actionable (fail/warn) findings in a category are still
+  // fixable — not resolved/wont-fix and not already fixing. Drives the
+  // category ⋮ "Fix All (N)" entry + its enabled state.
+  function fixableInCategory(category: { checks: AuditCheck[] }): number {
+    return category.checks.filter(
+      (c) =>
+        (c.status === "fail" || c.status === "warn") &&
+        app.audit.dispositions[c.id] !== "resolved" &&
+        app.audit.dispositions[c.id] !== "wont-fix" &&
+        !app.audit.pendingCheckFix[c.id],
+    ).length;
+  }
+  // How many findings in a category are currently being fixed — drives the
+  // "Fixing N…" pill on the category header so progress shows even when the
+  // category is collapsed (pending-bubbles-to-parent).
+  function fixingInCategory(category: { checks: AuditCheck[] }): number {
+    return category.checks.filter((c) => app.audit.pendingCheckFix[c.id])
+      .length;
   }
 
   // ─── Discuss (per-finding chat via the shared ChatSheet) + File issue ─
@@ -621,7 +630,9 @@
         check.fixHint != null ||
         check.suggestedAnnotation != null ||
         check.where?.file != null)}
-    <li>
+    {@const fixing = app.audit.pendingCheckFix[check.id]}
+    {@const fixed = app.audit.dispositions[check.id] === "resolved"}
+    <li class:pinta-loading-card={fixing} class:rounded-lg={fixing}>
       <!-- Header row — toggle button (flex-1) + a three-dots kebab that
            holds the per-check actions (Mark as · Edit · Delete). The
            kebab is a sibling of the toggle so we don't nest <button>s;
@@ -691,17 +702,20 @@
                 <button
                   type="button"
                   class="w-full flex items-center gap-2 px-3 py-1.5 text-[12px] text-ink-700 dark:text-night-dim hover:bg-ink-50 dark:hover:bg-night-alt hover:text-ink-900 dark:hover:text-night-text disabled:opacity-50 disabled:cursor-default"
-                  onclick={() => { handoffToAnnotate(check); checkKebabOpen = null; }}
-                  disabled={handedOff[check.id]}
+                  onclick={() => { fixCheck(check); checkKebabOpen = null; }}
+                  disabled={fixing || fixed}
                   role="menuitem"
-                  title="Fix with agent — compose a Pinta annotation pre-filled with this finding"
+                  title="Fix with the agent — applies the change to your code in place"
                 >
-                  {#if handedOff[check.id]}
+                  {#if fixing}
+                    <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="animate-spin" aria-hidden="true"><path d="M21 12a9 9 0 1 1-6.219-8.56"/></svg>
+                    Fixing…
+                  {:else if fixed}
                     <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="20 6 9 17 4 12"/></svg>
-                    Drafted in Annotate
+                    Fixed
                   {:else}
                     <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M15 4V2"/><path d="M15 16v-2"/><path d="M8 9h2"/><path d="M20 9h2"/><path d="M17.8 11.8 19 13"/><path d="M15 9h.01"/><path d="M17.8 6.2 19 5"/><path d="m3 21 9-9"/><path d="M12.2 6.2 11 5"/></svg>
-                    Fix with agent
+                    Fix
                   {/if}
                 </button>
                 <button
@@ -858,21 +872,26 @@
             {@const issuePending = app.audit.pendingFileIssue[check.id]}
             <div class="space-y-2 pt-1">
               <div class="flex flex-wrap items-center gap-2">
-                <!-- PRIMARY — Fix with agent. Icon + label; composes a
-                     prefilled annotation + switches to Annotate. Confirms +
-                     disables after click so the user can't double-handoff. -->
+                <!-- PRIMARY — Fix in place. The agent edits the code
+                     directly (no Annotate handoff); the row shows a "fixing"
+                     border-loader until done, then the button reads "Fixed". -->
                 <button
                   type="button"
                   class="inline-flex items-center gap-1.5 rounded-md bg-brand-pink hover:bg-brand-magenta dark:hover:bg-brand-pink-light text-white text-[11px] font-semibold px-2.5 py-1 disabled:opacity-60 disabled:cursor-default"
-                  onclick={() => handoffToAnnotate(check)}
-                  disabled={handedOff[check.id]}
-                  title={handedOff[check.id]
-                    ? "Drafted in Annotate — switch to the Annotate tab to review"
-                    : "Fix with agent — compose a Pinta annotation pre-filled with this check's details"}
+                  onclick={() => fixCheck(check)}
+                  disabled={fixing || fixed}
+                  title={fixed
+                    ? "Fixed by the agent"
+                    : fixing
+                      ? "Fixing… the agent is editing your code"
+                      : "Fix with the agent — applies the change to your code in place"}
                 >
-                  {#if handedOff[check.id]}
+                  {#if fixing}
+                    <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" class="animate-spin" aria-hidden="true"><path d="M21 12a9 9 0 1 1-6.219-8.56"/></svg>
+                    Fixing…
+                  {:else if fixed}
                     <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="20 6 9 17 4 12"/></svg>
-                    Drafted
+                    Fixed
                   {:else}
                     <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M15 4V2"/><path d="M15 16v-2"/><path d="M8 9h2"/><path d="M20 9h2"/><path d="M17.8 11.8 19 13"/><path d="M15 9h.01"/><path d="M17.8 6.2 19 5"/><path d="m3 21 9-9"/><path d="M12.2 6.2 11 5"/></svg>
                     Fix
@@ -1300,6 +1319,12 @@
                 {#if isCustom}
                   <span class="shrink-0 inline-flex items-center rounded-sm bg-brand-pink/10 text-brand-pink dark:text-brand-pink-light text-[9px] font-semibold uppercase tracking-wide px-1 py-px" title="Custom category you added">added</span>
                 {/if}
+                {#if fixingInCategory(category) > 0}
+                  <span class="shrink-0 inline-flex items-center gap-1 rounded-full bg-brand-pink/10 text-brand-pink dark:text-brand-pink-light text-[9px] font-semibold px-1.5 py-px" title="Fix in progress">
+                    <svg width="9" height="9" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" class="animate-spin" aria-hidden="true"><path d="M21 12a9 9 0 1 1-6.219-8.56"/></svg>
+                    Fixing {fixingInCategory(category)}
+                  </span>
+                {/if}
               </div>
               <div class="text-[11px] text-ink-500 dark:text-night-mute mt-0.5 tabular-nums">
                 {#if tally.fail > 0}<span class="text-red-600 dark:text-red-400 font-semibold">{tally.fail} fail</span> · {/if}
@@ -1362,6 +1387,22 @@
               class="absolute z-30 right-2 top-9 bg-white dark:bg-night-card border border-ink-200 dark:border-night-line rounded-md shadow-lg py-1 min-w-[150px]"
               role="menu"
             >
+              {#if fixableInCategory(category) > 0}
+                <button
+                  type="button"
+                  class="w-full flex items-center gap-2 px-3 py-1.5 text-[12px] font-semibold text-brand-pink dark:text-brand-pink-light hover:bg-brand-pink/5 dark:hover:bg-brand-pink/10 disabled:opacity-40 disabled:cursor-not-allowed disabled:hover:bg-transparent"
+                  onclick={() => { app.fixAllInCategory(category.id); categoryKebabOpen = null; }}
+                  disabled={app.connectionStatus !== "connected"}
+                  role="menuitem"
+                  title={app.connectionStatus !== "connected"
+                    ? "Connect a companion to fix findings"
+                    : "Fix every actionable finding in this category with the agent"}
+                >
+                  <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M15 4V2"/><path d="M15 16v-2"/><path d="M8 9h2"/><path d="M20 9h2"/><path d="M17.8 11.8 19 13"/><path d="M15 9h.01"/><path d="M17.8 6.2 19 5"/><path d="m3 21 9-9"/><path d="M12.2 6.2 11 5"/></svg>
+                  Fix All ({fixableInCategory(category)})
+                </button>
+                <div class="my-1 border-t border-ink-100 dark:border-night-line"></div>
+              {/if}
               <button
                 type="button"
                 class="w-full flex items-center gap-2 px-3 py-1.5 text-[12px] text-ink-700 dark:text-night-dim hover:bg-ink-50 dark:hover:bg-night-alt hover:text-ink-900 dark:hover:text-night-text"

@@ -1599,11 +1599,92 @@ subscriptions in Apr 2026.)
 dispatch + compliance reassertion + capability gating). Sample:
 `examples/echo-notes.pinta-module.json`.
 
-**Deferred / open questions:** zip + `tools/` packaging; `interactive` /
-`inquiry` imported modules (constrained UI DSL); signed modules + a
+**Interactive imported modules — data-driven board tab (tier 2; built,
+uncommitted at 2026-06-23).** The "deferred" interactive tier above has
+since been implemented: an imported module with `mode: "interactive"` + a
+`tab` in its manifest renders its own side-panel tab with **zero bundled
+code**, via the generic `ModuleBoardTab.svelte`. The manifest's `ModuleTab`
+declares the tab (`name` / `icon` / `op` / `actionLabel` /
+`cardActionLabel`) plus optional **`boardActions`** — header buttons next
+to Refresh (e.g. the Tasks module's "End Day"). The module's agent returns
+a **`ModuleBoard`** (`shared/src/types.ts`) as the session-summary JSON:
+`groups` (each optionally a **`featuredSection`** that renders as its own
+labelled section in the primary view), `cards`, and a `featured` pickup
+list. Each card's `actions[]` has three mutually-exclusive flavours:
+**`url`** (deep-link), **`op`** (round-trips to the module's agent, which
+performs the action and returns a refreshed board), and **`clientOp`**
+(handled entirely in the extension, no round-trip — e.g.
+`add-to-test-pilot`, which files the card into the Test Pilot catalog under
+a parent section named with today's date). Reference module:
+`insclix.workflow-tasks`. Files: `extension/src/sidepanel/ModuleBoardTab.svelte`;
+`ModuleTab` / `ModuleBoard*` in `shared/src/types.ts`; `runModuleOp` /
+`runModuleClientOp` in `state.svelte.ts`.
+
+**Deferred / open questions:** zip + `tools/` packaging; `inquiry`
+imported modules (the `interactive` board tab is now built — see above);
+signed modules + a
 curated registry (`pinta module add acme.jira-sync`) and the Pro/
 marketplace tie-in; richer `engines.pintaVersion` enforcement;
 capability granularity (per-path file scope, multi-host network).
+
+---
+
+### Phase 20 — Floating toolkit (Device toolkit) — Planned
+
+A **floating, draggable toolkit** overlaid on the user's page — Photoshop's
+floating tool palettes are the mental model — rendered by the content-script
+**Shadow DOM overlay** (`extension/src/content/`), NOT the side panel, so it
+sits over the app the user is building. **Off by default**, enabled in
+**Settings**, which exposes a list of *toolkit entries* the user toggles on
+(the extensible part). **v1 ships exactly one entry: the Device toolkit.**
+
+**Device toolkit.** Three buttons — **Mobile / Tablet / Laptop** — that
+toggle the rendered **screen width**, plus a **Full / reset** to return to
+the natural width. The three widths are **configurable** in their own
+Settings sub-panel (defaults: Mobile `375`, Tablet `768`, Laptop `1280` px).
+Active device is highlighted; clicking it again resets.
+
+**How the width toggle works — pick at build time (the load-bearing
+decision).** Three approaches, increasing fidelity + cost:
+
+1. **In-page device frame (default for v1).** The content script constrains
+   the document to the chosen width and centers it with a device frame — a
+   responsive *preview*. **Permission-free**, no window disruption, instant,
+   stays fully in the bring-your-own-Claude / minimal-permission compliance
+   lane. **Caveat:** CSS `@media (max-width: …)` breakpoints do NOT fire
+   (they read the real `window.innerWidth`), so it's a layout/width preview
+   — excellent for fluid + `@container`-query layouts, approximate for
+   breakpoint-driven ones. Ship this first.
+2. **Resize the browser window.** The service worker resizes the Chrome
+   window (`chrome.windows.update`, + side-panel width allowance) so real
+   `@media` breakpoints fire. Truest layout, still permission-free, but it
+   resizes the user's whole window on each toggle (disruptive; the side
+   panel competes for space; Chrome's min window width makes ~375 borderline).
+3. **Device emulation via `chrome.debugger`.** True device mode (viewport +
+   device-pixel-ratio + touch + media queries) via CDP
+   `Emulation.setDeviceMetricsOverride`, like DevTools' device toolbar. Most
+   accurate. **Rejected posture:** needs the `debugger` permission — a new
+   Chrome Web Store review item + a persistent "Pinta is debugging this
+   browser" banner — the same approach Pinta deliberately rejected for
+   Lighthouse. Only revisit if true emulation becomes a must-have.
+
+**Settings shape.** A new **"Toolkit"** section: a master "Enable floating
+toolkit" toggle, per-entry toggles (just "Device toolkit" in v1), and the
+Device toolkit's editable width presets. Persists to `chrome.storage.local`
+like other settings and flows to the content script via the existing
+settings channel so the overlay shows/hides the palette live.
+
+**Likely files:** a new floating-toolkit component under
+`extension/src/content/` (Shadow DOM overlay, draggable, remembers its
+position), the width-toggle logic (in-page CSS for approach 1), a "Toolkit"
+block in `SettingsPanel.svelte`, and toolkit settings in `state.svelte.ts`.
+No companion or agent involvement — a pure in-browser tool.
+
+**Relation to the Multi-Device Canvas idea:** this is the lightweight,
+single-viewport cousin of that parked concept (which renders Mobile/Tablet/
+Laptop side-by-side in one pannable canvas). The Device toolkit toggles
+*one* viewport in place; the canvas shows *all at once*. They can coexist —
+ship the toolkit first.
 
 ---
 

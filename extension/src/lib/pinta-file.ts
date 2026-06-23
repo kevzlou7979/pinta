@@ -358,6 +358,7 @@ function unwrapQuotes(s: string): string {
 function mapKind(label: string): AnnotationKind {
   const v = label.toLowerCase().trim();
   if (v === "element") return "select";
+  if (v === "note") return "note";
   if (v === "pin" || v === "arrow" || v === "rect" || v === "circle" || v === "freehand" || v === "image") {
     return v as AnnotationKind;
   }

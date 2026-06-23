@@ -2892,6 +2892,66 @@ class ExtensionState {
     return ids;
   }
 
+  /**
+   * Cross-module client-side card-action dispatcher. A board module
+   * declares `clientOp` on a card action; `ModuleBoardTab` forwards the
+   * string here (no agent round-trip). Returns a short outcome the board
+   * surfaces as a dismissible notice. Unknown ops are a no-op with a hint.
+   */
+  runModuleClientOp(
+    clientOp: string,
+    card: { id: string; title: string; subtitle?: string; description?: string },
+  ): { ok: boolean; message: string } {
+    if (clientOp === "add-to-test-pilot") return this.addTaskToTestPilot(card);
+    return { ok: false, message: `Unknown action: ${clientOp}` };
+  }
+
+  /**
+   * Add a board task into the Test Pilot catalog as a CHILD test under a
+   * PARENT section named with today's date — the "send a finished task to
+   * QA" handoff. Auto-creates a catalog when none is loaded so the action
+   * works standalone, reuses today's section when it already exists, and
+   * dedupes by title so a double-click doesn't add the task twice.
+   */
+  addTaskToTestPilot(card: {
+    id: string;
+    title: string;
+    subtitle?: string;
+    description?: string;
+  }): { ok: boolean; message: string } {
+    // Today's date as the parent section title — stable within the day, so
+    // every task added today lands under the same section.
+    const today = new Date().toLocaleDateString(undefined, {
+      year: "numeric",
+      month: "short",
+      day: "numeric",
+    });
+    // Auto-create a lightweight catalog so the handoff works before any
+    // Test Pilot import; an existing catalog is left untouched.
+    if (!this.testPilot.catalog) {
+      this.testPilot.catalog = {
+        docId: crypto.randomUUID(),
+        filename: "tasks.md",
+        importedAt: Date.now(),
+        title: "Tasks",
+        sections: [],
+      };
+    }
+    const title = card.title.trim() || `#${card.id}`;
+    const expected = card.description?.trim() || card.subtitle?.trim() || "";
+    const found = this.findSection(today);
+    if (found) {
+      if (found.section.tests.some((t) => t.test.trim() === title)) {
+        return { ok: true, message: `Already in Test Pilot → ${today}` };
+      }
+      this.addTestPilotTest(today, { test: title, expected });
+    } else {
+      this.addTestPilotSectionWithTests(today, [{ test: title, expected }]);
+    }
+    this.testPilot.error = null;
+    return { ok: true, message: `Added to Test Pilot → ${today}` };
+  }
+
   /** Like nextUserTestId() but takes an explicit sections list so the
    *  caller can include rows that haven't been pushed into the catalog
    *  yet (e.g. mid-batch when assembling a new section). Pure derived
@@ -3134,6 +3194,10 @@ class ExtensionState {
     >;
     /** In-flight File-issue sends, keyed by check.id. In-memory only. */
     pendingFileIssue: Record<string, boolean>;
+    /** In-flight in-place Fix sends, keyed by check.id — drives the
+     *  per-check "fixing" border-loader. In-memory only; on done the
+     *  finding is marked `resolved`. Multiple may run concurrently. */
+    pendingCheckFix: Record<string, boolean>;
     error: string | null;
   }>({
     agentRun: null,
@@ -3148,6 +3212,7 @@ class ExtensionState {
     pendingCheckChat: {},
     filedIssues: {},
     pendingFileIssue: {},
+    pendingCheckFix: {},
     error: null,
   });
 
@@ -3688,6 +3753,92 @@ class ExtensionState {
     }
   }
 
+  /** Fix one finding IN-PLACE via the agent — NO Annotate handoff. Sends
+   *  op "audit-fix" with the finding; the agent edits the project source to
+   *  implement the fix and returns a one-line summary. Drives the per-check
+   *  "fixing" border-loader (`pendingCheckFix`). Concurrent: many findings
+   *  can be fixing at once, each its own session keyed by `checkId`. */
+  async fixAuditCheck(check: AuditCheck): Promise<void> {
+    if (this.audit.pendingCheckFix[check.id]) return;
+    if (this.audit.dispositions[check.id] === "resolved") return;
+    if (!this.client || this.connectionStatus !== "connected") {
+      this.audit.error =
+        "No companion connected. Start `pinta-companion .` in your project to fix findings.";
+      return;
+    }
+    const queryComment = JSON.stringify({
+      op: "audit-fix",
+      runId: this.audit.currentRun?.runId,
+      checkId: check.id,
+      finding: {
+        category: check.category,
+        label: check.label,
+        description: check.description,
+        fixHint: check.fixHint,
+        status: check.status,
+        value: check.value,
+        where: check.where,
+      },
+      ...(check.suggestedAnnotation
+        ? { suggestedAnnotation: check.suggestedAnnotation }
+        : {}),
+    });
+    this.audit.error = null;
+    this.audit.pendingCheckFix[check.id] = true;
+    this.armAuditOpTimer("audit-fix", check.id, this.audit.pendingCheckFix);
+    this.send({
+      type: "module.query.submit",
+      url: this.lastUrl ?? "",
+      moduleId: "audit-flow",
+      moduleSettings: this.modules["audit-flow"]?.settings ?? {},
+      queryComment,
+    });
+  }
+
+  private handleAuditFixSync(session: Session, checkId: string): void {
+    const hadPending = !!this.audit.pendingCheckFix[checkId];
+    if (session.status === "done") {
+      this.clearAuditOpTimer("audit-fix", checkId);
+      let ok = false;
+      try {
+        ok = JSON.parse(session.appliedSummary ?? "")?.type === "audit-fix-applied";
+      } catch {
+        ok = false;
+      }
+      if (ok) {
+        // Agent applied the fix → mark resolved so it counts as addressed
+        // in the progress rollup (and flips the Fix button to "Fixed").
+        this.setAuditDisposition(checkId, "resolved");
+        this.audit.error = null;
+      } else {
+        this.audit.error =
+          "Couldn't apply this fix — the agent didn't confirm the change.";
+      }
+      if (hadPending) delete this.audit.pendingCheckFix[checkId];
+    } else if (session.status === "error") {
+      this.clearAuditOpTimer("audit-fix", checkId);
+      this.audit.error = session.errorMessage ?? "Fixing this finding failed.";
+      if (hadPending) delete this.audit.pendingCheckFix[checkId];
+    }
+  }
+
+  /** Fix-all for one category — fire an in-place fix for every actionable
+   *  (fail/warn), not-yet-resolved, not-in-flight finding. Concurrent:
+   *  each gets its own session; the agent works through them. */
+  fixAllInCategory(categoryId: string): void {
+    const cat = this.audit.currentRun?.categories.find(
+      (c) => c.id === categoryId,
+    );
+    if (!cat) return;
+    for (const check of cat.checks) {
+      if (check.status !== "fail" && check.status !== "warn") continue;
+      const d = this.audit.dispositions[check.id];
+      if (d === "resolved" || d === "wont-fix") continue;
+      if (this.audit.pendingCheckFix[check.id]) continue;
+      void this.fixAuditCheck(check);
+    }
+  }
+
   /** Kick off an audit run. Reads `this.audit.selectedCategories`
    *  for which categories to inspect (set by the picker UI), or
    *  accepts an explicit override for ad-hoc runs / re-runs. Bails
@@ -3895,10 +4046,17 @@ class ExtensionState {
     return this.moduleBoards[moduleId]!;
   }
 
-  /** Fire the tab's primary action: send the declared `op` to the agent
-   *  for an imported interactive module. The agent returns a ModuleBoard
-   *  via mark_session_done, routed back through handleModuleBoardSync. */
-  async runModuleOp(moduleId: string, op: string): Promise<void> {
+  /** Fire the tab's primary action, or a per-card action: send `op` to the
+   *  agent for an imported interactive module. When `cardId` is set, the op
+   *  is a per-card action (e.g. "start-task" on iid 293) and the id is
+   *  threaded into the query envelope so the agent knows which card to act
+   *  on. Either way the agent returns a refreshed ModuleBoard via
+   *  mark_session_done, routed back through handleModuleBoardSync. */
+  async runModuleOp(
+    moduleId: string,
+    op: string,
+    cardId?: string,
+  ): Promise<void> {
     const slot = this.ensureModuleBoard(moduleId);
     if (slot.pending) return;
     if (!this.client || this.connectionStatus !== "connected") {
@@ -3915,7 +4073,9 @@ class ExtensionState {
     const settings = $state.snapshot(
       this.modules[moduleId]?.settings ?? {},
     ) as Record<string, string | boolean>;
-    const queryComment = JSON.stringify({ op, runId, settings });
+    const queryComment = JSON.stringify(
+      cardId ? { op, runId, settings, cardId } : { op, runId, settings },
+    );
     this.send({
       type: "module.query.submit",
       url: this.lastUrl ?? "",
@@ -6799,6 +6959,11 @@ class ExtensionState {
           if (op === "audit-file-issue") {
             const checkId = ExtensionState.queryField(msg.session, "checkId");
             if (checkId) this.handleAuditFileIssueSync(msg.session, checkId);
+            return;
+          }
+          if (op === "audit-fix") {
+            const checkId = ExtensionState.queryField(msg.session, "checkId");
+            if (checkId) this.handleAuditFixSync(msg.session, checkId);
             return;
           }
           this.handleAuditSync(msg.session);

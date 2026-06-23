@@ -193,6 +193,68 @@
     return ""; // current value doesn't matter — only override on change
   }
 
+  // ── Padding / Margin per-side editing ──────────────────────────────
+  // The shorthand strings (`padding`, `margin`) stay canonical — they feed
+  // `cssChanges`. Expanding a control parses its shorthand into four sides;
+  // editing a side recomposes the shortest shorthand back into the string.
+  // The sync effects below only write while a control is open, so the
+  // collapsed shorthand input keeps working untouched.
+  type Sides = { top: string; right: string; bottom: string; left: string };
+  type SideKey = keyof Sides;
+  const SIDE_KEYS = [
+    ["top", "T"],
+    ["right", "R"],
+    ["bottom", "B"],
+    ["left", "L"],
+  ] as const;
+
+  let paddingOpen = $state(false);
+  let marginOpen = $state(false);
+  let padSides = $state<Sides>({ top: "", right: "", bottom: "", left: "" });
+  let marSides = $state<Sides>({ top: "", right: "", bottom: "", left: "" });
+
+  // CSS box shorthand → 4 sides. 1 val = all; 2 = V H; 3 = T H B; 4 = T R B L.
+  function splitSides(shorthand: string): Sides {
+    const p = (shorthand || "").trim().split(/\s+/).filter(Boolean);
+    if (p.length === 1) return { top: p[0]!, right: p[0]!, bottom: p[0]!, left: p[0]! };
+    if (p.length === 2) return { top: p[0]!, right: p[1]!, bottom: p[0]!, left: p[1]! };
+    if (p.length === 3) return { top: p[0]!, right: p[1]!, bottom: p[2]!, left: p[1]! };
+    if (p.length >= 4) return { top: p[0]!, right: p[1]!, bottom: p[2]!, left: p[3]! };
+    return { top: "", right: "", bottom: "", left: "" };
+  }
+  // 4 sides → shortest equivalent shorthand. All-blank stays "" (no override);
+  // a partially-filled box treats blank sides as 0.
+  function joinSides(s: Sides): string {
+    const raw = [s.top, s.right, s.bottom, s.left].map((x) => x.trim());
+    if (raw.every((x) => x === "")) return "";
+    const [t, r, b, l] = raw.map((x) => (x === "" ? "0" : x));
+    if (t === r && r === b && b === l) return t;
+    if (t === b && r === l) return `${t} ${r}`;
+    if (r === l) return `${t} ${r} ${b}`;
+    return `${t} ${r} ${b} ${l}`;
+  }
+  function togglePadding(): void {
+    paddingOpen = !paddingOpen;
+    if (paddingOpen) padSides = splitSides(padding);
+  }
+  function toggleMargin(): void {
+    marginOpen = !marginOpen;
+    if (marginOpen) marSides = splitSides(margin);
+  }
+  function setPadSide(side: SideKey, value: string): void {
+    padSides[side] = value;
+  }
+  function setMarSide(side: SideKey, value: string): void {
+    marSides[side] = value;
+  }
+  // Live-recompose the shorthand from the side boxes while a control is open.
+  $effect(() => {
+    if (paddingOpen) padding = joinSides(padSides);
+  });
+  $effect(() => {
+    if (marginOpen) margin = joinSides(marSides);
+  });
+
   // Initial snapshot for diffing.
   const initial = {
     fontSize,
@@ -373,6 +435,23 @@
   }
 </script>
 
+{#snippet sideBox(s: Sides, set: (side: SideKey, value: string) => void)}
+  <div class="sides">
+    {#each SIDE_KEYS as [k, lbl] (k)}
+      <label class="side" title={k}>
+        <span>{lbl}</span>
+        <input
+          type="text"
+          value={s[k]}
+          oninput={(e) => set(k, e.currentTarget.value)}
+          onkeydown={onKey}
+          placeholder="0"
+        />
+      </label>
+    {/each}
+  </div>
+{/snippet}
+
 <div
   class="popup popup--editor"
   class:popup--drop={dropActive}
@@ -480,8 +559,44 @@
     </div>
   {:else if activeTab === "spacing"}
     <div class="grid">
-      <label>Padding <input type="text" bind:value={padding} onkeydown={onKey} placeholder="e.g. 1rem 2rem" /></label>
-      <label>Margin <input type="text" bind:value={margin} onkeydown={onKey} placeholder="e.g. 0 auto" /></label>
+      <div class="field">
+        <span class="field-row">
+          Padding
+          <button
+            type="button"
+            class="expander"
+            class:expander--open={paddingOpen}
+            title={paddingOpen ? "Use a single shorthand value" : "Edit top / right / bottom / left"}
+            aria-label="Toggle per-side padding"
+            aria-expanded={paddingOpen}
+            onclick={togglePadding}
+          >&#9662;</button>
+        </span>
+        {#if paddingOpen}
+          {@render sideBox(padSides, setPadSide)}
+        {:else}
+          <input type="text" bind:value={padding} onkeydown={onKey} placeholder="e.g. 1rem 2rem" />
+        {/if}
+      </div>
+      <div class="field">
+        <span class="field-row">
+          Margin
+          <button
+            type="button"
+            class="expander"
+            class:expander--open={marginOpen}
+            title={marginOpen ? "Use a single shorthand value" : "Edit top / right / bottom / left"}
+            aria-label="Toggle per-side margin"
+            aria-expanded={marginOpen}
+            onclick={toggleMargin}
+          >&#9662;</button>
+        </span>
+        {#if marginOpen}
+          {@render sideBox(marSides, setMarSide)}
+        {:else}
+          <input type="text" bind:value={margin} onkeydown={onKey} placeholder="e.g. 0 auto" />
+        {/if}
+      </div>
       <label>Border radius <input type="text" bind:value={borderRadius} onkeydown={onKey} placeholder="e.g. 8px, 50%" /></label>
       <label>Background <input type="color" bind:value={backgroundColor} /></label>
     </div>

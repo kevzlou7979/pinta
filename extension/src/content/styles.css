@@ -318,6 +318,68 @@
   padding: 2px;
   cursor: pointer;
 }
+/* Padding / Margin per-side expander (matches .popup label layout) */
+.popup .field {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  font-size: 11px;
+  color: #475569;
+  font-weight: 500;
+}
+.popup .field-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 6px;
+}
+.popup .expander {
+  appearance: none;
+  border: none;
+  background: transparent;
+  color: #94a3b8;
+  cursor: pointer;
+  font-size: 10px;
+  line-height: 1;
+  padding: 2px 4px;
+  border-radius: 3px;
+  transition:
+    transform 0.12s ease,
+    color 0.12s ease,
+    background 0.12s ease;
+}
+.popup .expander:hover {
+  color: #ff3d6e;
+  background: #fff1f5;
+}
+.popup .expander--open {
+  transform: rotate(180deg);
+  color: #ff3d6e;
+}
+.popup .sides {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 4px;
+}
+.popup label.side {
+  flex-direction: row;
+  align-items: center;
+  gap: 5px;
+  font-size: 10px;
+  font-weight: 600;
+  color: #94a3b8;
+}
+.popup label.side span {
+  width: 12px;
+  flex-shrink: 0;
+  text-align: center;
+}
+.popup .side input[type="text"] {
+  width: 100%;
+  min-width: 0;
+  box-sizing: border-box;
+  padding: 4px 6px;
+}
 .chips {
   display: flex;
   flex-wrap: wrap;

@@ -2,6 +2,7 @@
   import { onMount, onDestroy } from "svelte";
   import type {
     Annotation,
+    AnnotationImage,
     AnnotationTarget,
     Session,
     SessionManifest,
@@ -27,6 +28,7 @@
   import { matchAny, suggestPattern } from "../lib/url-patterns.js";
   import type { Companion } from "../lib/companions.js";
   import AnnotationCard from "./AnnotationCard.svelte";
+  import NoteComposer from "./NoteComposer.svelte";
   import SessionHistory from "./SessionHistory.svelte";
   import SettingsPanel from "./SettingsPanel.svelte";
   import TestPilotTab from "./TestPilotTab.svelte";
@@ -871,9 +873,10 @@
   // Drawing-kind annotations carry only stroke coords + comment — no DOM
   // selector, no outerHTML. Without a screenshot the agent has nothing to
   // act on, so we auto-enable capture as soon as one lands in the session
-  // and lock the toggle.
+  // and lock the toggle. `note` is excluded: it's a free-form task with
+  // no on-page anchor, so it never needs (or forces) a screenshot.
   const hasDrawingAnnotation = $derived(
-    annotations.some((a) => a.kind !== "select"),
+    annotations.some((a) => a.kind !== "select" && a.kind !== "note"),
   );
   // True when at least one ticked module needs the screenshot embedded
   // in its output (e.g. GitLab Issues attaches it to every issue body).
@@ -1106,6 +1109,24 @@
     app.addAnnotation(annotation);
     selector = "";
     comment = "";
+  }
+
+  // Free-form manual task — no DOM target, no selector, no screenshot.
+  // The comment is the task; optional reference images ride along inline.
+  function addNoteFromForm(payload: { comment: string; images: AnnotationImage[] }) {
+    const text = payload.comment.trim();
+    if (!text && payload.images.length === 0) return;
+    const annotation: Annotation = {
+      id: uid("ann"),
+      createdAt: Date.now(),
+      kind: "note",
+      strokes: [],
+      color: "#FF3D6E",
+      comment: text,
+      images: payload.images.length > 0 ? payload.images : undefined,
+      viewport: snapshotViewport(),
+    };
+    app.addAnnotation(annotation);
   }
 
   function removeAnnotation(id: string) {
@@ -2113,18 +2134,17 @@
     {:else if !app.viewingImportedId && !showAssociatePrompt && activeTab === "test-pilot" && app.moduleReady("test-pilot")}
       <TestPilotTab />
     {:else if !app.viewingImportedId && !showAssociatePrompt && activeTab === "audit-flow" && app.moduleReady("audit-flow")}
-      <AuditFlowTab
-        onSwitchToAnnotate={() => {
-          activeTab = "annotate";
-          void chrome.storage?.local?.set({ "pinta-active-tab": "annotate" });
-        }}
-      />
+      <AuditFlowTab />
     {:else if !app.viewingImportedId && !showAssociatePrompt && activeTab === "report" && app.moduleReady("report")}
       <ReportTab />
     {:else if !app.viewingImportedId && !showAssociatePrompt && app.interactiveTabSpecs().some((s) => s.id === activeTab)}
       <!-- Phase 19 — generic renderer for an imported interactive tab. -->
       <ModuleBoardTab
         spec={app.interactiveTabSpecs().find((s) => s.id === activeTab)!}
+        onOpenTestPilot={() => {
+          activeTab = "test-pilot";
+          void chrome.storage?.local?.set({ "pinta-active-tab": "test-pilot" });
+        }}
       />
     {:else if app.viewingImportedId}
       {@const imp = app.importedSessions.find((s) => s.id === app.viewingImportedId)}
@@ -2322,6 +2342,17 @@
         </p>
       {/if}
     </section>
+
+    <details class="rounded-md border border-ink-200 bg-white dark:border-night-line dark:bg-night-card">
+      <summary class="px-3 py-2 text-xs text-ink-600 dark:text-night-dim cursor-pointer flex items-center gap-1.5">
+        <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>
+        Add a task (no element needed)
+      </summary>
+      <NoteComposer
+        disabled={sessionPending || allDone}
+        onadd={addNoteFromForm}
+      />
+    </details>
 
     <details class="rounded-md border border-ink-200 bg-white dark:border-night-line dark:bg-night-card">
       <summary class="px-3 py-2 text-xs text-ink-600 dark:text-night-dim cursor-pointer">

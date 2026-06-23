@@ -355,13 +355,94 @@ export function reportProjects(run: ReportRun): string[] {
   return [...set];
 }
 
+/**
+ * Make an item title human-friendly. Pinta module sessions (AuditFlow, Test
+ * Pilot, …) record their result as a JSON `appliedSummary`; when that lands
+ * in a report item's `title` it shows as a raw `{"type":…}` blob. Detect
+ * those and render a plain one-line summary instead. Anything that isn't a
+ * JSON object passes through unchanged — idempotent, so it's safe at both
+ * render AND export time.
+ */
+export function humanizeReportTitle(title: string): string {
+  const t = (title ?? "").trim();
+  if (!t.startsWith("{")) return title;
+  let obj: Record<string, unknown> | null = null;
+  try {
+    const parsed = JSON.parse(t);
+    if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
+      obj = parsed as Record<string, unknown>;
+    }
+  } catch {
+    obj = null;
+  }
+  if (obj && typeof obj.type === "string") return friendlyModuleLine(obj.type, obj);
+  // Looks like JSON but unparseable (truncated) or has no `type` — pull a
+  // `type` marker if one's there, else a generic line. Never show raw braces.
+  const m = /"type"\s*:\s*"([^"]+)"/.exec(t);
+  if (m && m[1]) return friendlyModuleLine(m[1], {});
+  return obj ? title : "Pinta activity";
+}
+
+/** Plain-English one-liner for a Pinta module session result, keyed by its
+ *  `type` marker. Unknown types fall back to a title-cased version of the
+ *  marker so we never leak JSON. */
+function friendlyModuleLine(type: string, o: Record<string, unknown>): string {
+  const num = (k: string): number | null =>
+    typeof o[k] === "number" ? (o[k] as number) : null;
+  const str = (k: string): string | null =>
+    typeof o[k] === "string" && (o[k] as string).trim()
+      ? (o[k] as string).trim()
+      : null;
+  switch (type) {
+    case "audit-flow-run": {
+      const overall = num("overall");
+      const rating = str("rating");
+      const bits = [overall != null ? `scored ${overall}/100` : null, rating]
+        .filter(Boolean)
+        .join(" · ");
+      return bits ? `Ran an AuditFlow audit — ${bits}` : "Ran an AuditFlow audit";
+    }
+    case "test-pilot-catalog": {
+      const file = str("filename");
+      const sections = Array.isArray(o.sections) ? (o.sections as unknown[]) : [];
+      const tests = sections.reduce<number>((n, s) => {
+        const ts = (s as { tests?: unknown })?.tests;
+        return n + (Array.isArray(ts) ? ts.length : 0);
+      }, 0);
+      let line = "Generated a Test Pilot catalog";
+      if (file) line += ` from ${file}`;
+      if (tests) line += ` — ${tests} test${tests === 1 ? "" : "s"}`;
+      else if (sections.length)
+        line += ` — ${sections.length} section${sections.length === 1 ? "" : "s"}`;
+      return line;
+    }
+    case "audit-issue-filed":
+      return str("target") === "gitlab"
+        ? "Filed an AuditFlow finding as a GitLab issue"
+        : "Logged an AuditFlow finding to tasks";
+    case "audit-fix-applied": {
+      const s = str("summary");
+      return s ? `Fixed an AuditFlow finding — ${s}` : "Fixed an AuditFlow finding";
+    }
+    case "audit-discussion":
+      return "Discussed an AuditFlow finding";
+    default: {
+      const words = type.replace(/[-_]+/g, " ").trim();
+      return words
+        ? words.charAt(0).toUpperCase() + words.slice(1)
+        : "Pinta activity";
+    }
+  }
+}
+
 /** One markdown line for an item. When the report spans multiple
  *  projects, prefix the line with its `[project]` tag so you can see
  *  which repo each task came from (e.g. `- [insclix-awp-2.0] #319 —
  *  …`); single-project reports stay clean (`- #ref — title`). */
 function reportItemLine(it: ReportItem, multiProject: boolean): string {
   const tag = multiProject && it.project ? `[${it.project}] ` : "";
-  return it.ref ? `- ${tag}${it.ref} — ${it.title}` : `- ${tag}${it.title}`;
+  const title = humanizeReportTitle(it.title);
+  return it.ref ? `- ${tag}${it.ref} — ${title}` : `- ${tag}${title}`;
 }
 
 /** Markdown for a single day — flat `- #ref — title` lines, each

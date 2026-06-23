@@ -1484,10 +1484,10 @@
     }
     [data-theme="dark"] footer { background: var(--cream-soft); }
     [data-theme="dark"] .hero::before {
+      /* Charcoal hero: a single restrained pink wash, no orange/magenta. */
       background:
-        radial-gradient(800px 360px at 12% 10%, rgba(255,136,85,0.18), transparent 60%),
-        radial-gradient(700px 320px at 88% 5%,  rgba(255,61,110,0.22), transparent 60%),
-        radial-gradient(900px 420px at 50% 110%, rgba(199,45,180,0.16), transparent 60%);
+        radial-gradient(820px 380px at 50% -6%, rgba(255,90,133,0.12), transparent 62%),
+        radial-gradient(680px 320px at 14% 6%,  rgba(255,90,133,0.05), transparent 60%);
     }
     [data-theme="dark"] .arch-card {
       background:
@@ -1497,6 +1497,48 @@
     }
     [data-theme="dark"] .theme-toggle .icon-sun { display: block; }
     [data-theme="dark"] .theme-toggle .icon-moon { display: none; }
+
+    /* ---------- DARK MODE · charcoal accent restraint ----------
+       Dark mode is charcoal with pink as the single accent (see the palette
+       note above). These overrides neutralize the decorative multi-hue
+       rainbows (yellow/orange/magenta/violet) that otherwise leak in from the
+       light theme. Semantic color — module brand icons, arch role tints, the
+       success badge, terminal dots — is intentionally left intact. */
+
+    /* Hero title — charcoal→pink tonal sweep instead of the rainbow. */
+    [data-theme="dark"] h1.hero-title .grad {
+      background: linear-gradient(95deg, #FF8FAB 0%, var(--pink) 55%, var(--pink-deep) 100%);
+      -webkit-background-clip: text;
+      background-clip: text;
+      color: transparent;
+    }
+
+    /* Demo frame — charcoal mat with one restrained pink edge, not a
+       yellow→pink→violet→magenta border. */
+    [data-theme="dark"] .hero-demo {
+      background:
+        linear-gradient(135deg, rgba(255,90,133,0.24), rgba(255,90,133,0.06) 55%, rgba(42,42,51,0.55)),
+        var(--paper);
+      border-color: var(--line-strong);
+    }
+
+    /* Step numbers — uniform charcoal chips with pink numerals (the base
+       rule colors them with bright gradients meant for light backgrounds). */
+    [data-theme="dark"] .step .step-num {
+      background: linear-gradient(135deg, rgba(255,90,133,0.20), rgba(255,90,133,0.05));
+      border: 1px solid rgba(255,90,133,0.28);
+      color: var(--pink);
+    }
+
+    /* Feature hover accent bar — single pink, not the 4-color rainbow. */
+    [data-theme="dark"] .feature::before {
+      background: linear-gradient(90deg, transparent, var(--pink), transparent);
+    }
+
+    /* Rule connector bars — collapse all three to the pink accent. */
+    [data-theme="dark"] .rule::before {
+      background: linear-gradient(90deg, var(--pink), var(--pink-deep));
+    }
 
     /* ---------- ANIMATIONS ---------- */
 

@@ -9,6 +9,15 @@ export type AnnotationKind =
   | "select"
   | "image"
   /**
+   * Free-form manual task / note — has NO DOM target, no selector, and
+   * needs no screenshot. The user types a plain description in the side
+   * panel (e.g. "Create a new dialog for this feature") and may attach
+   * reference `images`. The agent treats `comment` as the task to
+   * implement, finding the relevant code itself. Created from the
+   * Annotate tab's "Add a task" composer; rendered like any other card.
+   */
+  | "note"
+  /**
    * Test Pilot module queries — annotation has no DOM target. Its
    * `comment` carries a JSON-encoded query (e.g. parse a doc, fetch
    * detail steps for a test id) and the agent answers via
@@ -285,6 +294,13 @@ export type ModuleTab = {
   /** Label for the per-card action button (e.g. "Open"). Defaults to
    *  "Open" when a card has a `url`. */
   cardActionLabel?: string;
+  /** Board-level action buttons rendered in the loaded-board header next
+   *  to Refresh (e.g. the tasks module's "End Day"). Each reuses
+   *  {@link ModuleBoardCardAction}: an `op` round-trips to the agent with
+   *  NO cardId (board-level) and a refreshed board replaces this one; a
+   *  `url` is a plain deep-link. Declared statically in the manifest so the
+   *  agent needn't re-emit them on every board build. */
+  boardActions?: ModuleBoardCardAction[];
 };
 
 /* ──────────────────────────────────────────────────────────────────────
@@ -304,6 +320,45 @@ export type ModuleBoardGroup = {
   name: string;
   /** Optional accent color (hex) for the column + its cards' stage dot. */
   color?: string;
+  /** When true, this group renders as its own labelled section in the
+   *  `featured` (primary) view, below the pickup list — e.g. the tasks
+   *  module surfaces its "Review" column this way so review items are
+   *  always visible without switching to the full board. Stays generic:
+   *  any board module can opt a column into the featured view. */
+  featuredSection?: boolean;
+};
+
+/**
+ * A per-card action button shown when a card is expanded. Two flavours,
+ * mutually exclusive:
+ *  - `url`  → a deep-link; clicking opens it in a new tab and the agent is
+ *             NOT invoked (e.g. "Open in GitLab", or human-only transitions
+ *             like Approve/Reopen that deep-link to the status widget).
+ *  - `op`   → an agent action; clicking dispatches this op (with the card's
+ *             id) back to the module's agent via the companion, the agent
+ *             performs the action, and a refreshed board replaces this one
+ *             (e.g. "Start Task", "Move to Review", "Commit & Push").
+ */
+export type ModuleBoardCardAction = {
+  /** Stable id for the action (e.g. "start", "review", "approve"). */
+  id: string;
+  /** Button label (e.g. "Start Task"). */
+  label: string;
+  /** Deep-link target. Set this OR `op`, not both. */
+  url?: string;
+  /** Agent op to dispatch. Set this OR `url`, not both. */
+  op?: string;
+  /** Client-side intent handled entirely in the extension — NO agent
+   *  round-trip and NO navigation (e.g. "add-to-test-pilot" pushes the
+   *  card into the Test Pilot catalog). Set this OR `op` OR `url`. The
+   *  renderer forwards the string to the app, which maps known intents;
+   *  unknown intents are a no-op. */
+  clientOp?: string;
+  /** Visual emphasis: "primary" = filled accent, "default" = outline
+   *  (default), "danger" = destructive tint. */
+  style?: "primary" | "default" | "danger";
+  /** Optional confirmation prompt shown before an `op` action fires. */
+  confirm?: string;
 };
 
 export type ModuleBoardCard = {
@@ -320,8 +375,16 @@ export type ModuleBoardCard = {
   tags?: string[];
   /** Highlight this card (e.g. assigned to the current user). */
   highlight?: boolean;
-  /** External link opened by the per-card action. */
+  /** External link opened by the default per-card action (back-compat:
+   *  used when `actions` is absent). */
   url?: string;
+  /** Longer body shown when the card is expanded — e.g. the issue
+   *  description. Rendered in place of the old stage trace. */
+  description?: string;
+  /** Per-card action buttons shown when the card is expanded. Each either
+   *  opens a `url` (deep-link) or dispatches an `op` to the agent. When
+   *  present, these replace the single `url` action. */
+  actions?: ModuleBoardCardAction[];
   /** Key/value detail shown when the card is expanded. */
   meta?: Record<string, string>;
 };

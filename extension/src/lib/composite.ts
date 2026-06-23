@@ -55,6 +55,8 @@ export async function compositeAnnotations(
     const n = i + 1;
     const color = a.color || SELECT_COLOR;
     const badgeColor = opts.badgeColorOverride ?? color;
+    // `note` is a free-form task with no on-page anchor — nothing to paint.
+    if (a.kind === "note") continue;
     if (a.kind === "select") {
       paintSelect(ctx, a, n, badgeColor);
     } else if (a.kind === "image") {

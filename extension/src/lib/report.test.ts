@@ -4,6 +4,7 @@ import {
   categoryLabel,
   foldWeekends,
   formatDayHeading,
+  humanizeReportTitle,
   isWeekend,
   parseReportPayload,
   rangeWindow,
@@ -291,5 +292,53 @@ describe("parseReportPayload", () => {
     expect(parseReportPayload({ days: [] }, ctx)).toBeNull();
     expect(parseReportPayload("nope", ctx)).toBeNull();
     expect(parseReportPayload(null, ctx)).toBeNull();
+  });
+});
+
+describe("humanizeReportTitle", () => {
+  it("passes plain titles through unchanged", () => {
+    expect(humanizeReportTitle("Fixed the login dialog overlay")).toBe(
+      "Fixed the login dialog overlay",
+    );
+    expect(humanizeReportTitle("")).toBe("");
+  });
+
+  it("summarizes an audit-flow-run JSON blob", () => {
+    const raw = JSON.stringify({
+      type: "audit-flow-run",
+      runId: "7c8dc9c9",
+      overall: 67,
+      rating: "Needs work",
+      categories: [{ id: "mobile" }],
+    });
+    expect(humanizeReportTitle(raw)).toBe(
+      "Ran an AuditFlow audit — scored 67/100 · Needs work",
+    );
+  });
+
+  it("summarizes a test-pilot-catalog JSON blob with a test count", () => {
+    const raw = JSON.stringify({
+      type: "test-pilot-catalog",
+      docId: "fb49bee4",
+      filename: "generated-tests.md",
+      sections: [{ tests: [1, 2] }, { tests: [3] }],
+    });
+    expect(humanizeReportTitle(raw)).toBe(
+      "Generated a Test Pilot catalog from generated-tests.md — 3 tests",
+    );
+  });
+
+  it("falls back to a title-cased type for unknown module results", () => {
+    expect(humanizeReportTitle('{"type":"chat-reply","reply":"hi"}')).toBe(
+      "Chat reply",
+    );
+  });
+
+  it("never leaks raw braces for a truncated JSON blob", () => {
+    // A blob cut off mid-object (JSON.parse fails) still resolves to a
+    // friendly line via the `type` marker — never the raw braces.
+    const truncated = '{"type":"audit-flow-run","overall":89,"rating":"Good","categ';
+    expect(humanizeReportTitle(truncated)).toBe("Ran an AuditFlow audit");
+    expect(humanizeReportTitle(truncated).startsWith("{")).toBe(false);
   });
 });

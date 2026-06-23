@@ -14,6 +14,7 @@
     formatDayHeading,
     formatRangeLabel,
     formatShortDay,
+    humanizeReportTitle,
     rangeWindow,
     renderDayMarkdown,
     reportProjects,
@@ -202,7 +203,7 @@
           <span class="font-mono text-[11.5px] text-ink-500 dark:text-night-mute">{item.ref}</span>
         {/if}
         <span class="text-ink-400 dark:text-night-mute"> — </span>
-      {/if}<span class="break-words">{item.title}</span>
+      {/if}<span class="break-words">{humanizeReportTitle(item.title)}</span>
       {#if item.detail}
         <p class="text-[11px] text-ink-500 dark:text-night-dim mt-0.5 break-words">{item.detail}</p>
       {/if}
