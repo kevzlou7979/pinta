@@ -4,6 +4,60 @@ Notable changes shipped on top of the original V1 pipeline. Newest first.
 For the architectural design behind each item, see
 [`spec/SPEC.md`](spec/SPEC.md).
 
+## 0.6.0 — 2026-06-24
+
+### Added
+
+- **Report module (Phase 16).** New built-in Report tab — view + export
+  shipped tasks per day / week / 10-day sprint, with custom date ranges
+  (single day or arbitrary window) and multi-project combine (extra repos
+  grouped by project per day). Clean Markdown export (per-day + whole
+  range); header standardized into an icon actions group.
+- **AuditFlow in-place Fix.** "Fix" now runs the agent in place instead of
+  bouncing to Annotate — each finding shows a "fixing" border-loader,
+  fixes run concurrently across findings, and the category ⋮ gains
+  "Fix All". Discuss (chat) + File-issue (GitLab / local) are wired per
+  finding.
+- **ModuleBoard actions (module SDK).** Board-level header actions next to
+  Refresh (e.g. the Tasks module's "End Day"); richer per-card actions —
+  agent `op`, deep-link `url`, and client-only `clientOp` (e.g.
+  add-to-Test-Pilot files a card into the catalog) with optional
+  `confirm` / `style`; `featuredSection` lets a board column surface in
+  the primary view.
+- **Free-form "note" tasks.** The Annotate composer accepts a plain task
+  description with no DOM target — the agent finds the relevant code
+  itself — with optional reference image attachments.
+- **Async annotation batches** submitted from in-content, plus a global
+  "Ask Pinta" FAB, and image attachments on every chat tier.
+- **Backup / restore.** AuditFlow catalog + global `pinta-settings.json`
+  export / import; header ⋮ menu with a version badge + connection status
+  dot; AuditFlow action-icon group.
+
+### Changed
+
+- Annotate defaults to Auto-apply on; the tray ⋮ kebab adds Commit /
+  Commit & push of applied changes; "Clear done" → "Clear" clears every
+  tray row.
+- Audit waits surface a "still waiting for an agent" amber notice instead
+  of a red error, and mandate a live re-scan every run (never reuse a
+  prior count); the header gains a Re-run icon + clearer Reloading state.
+- Quick Settings gear in the header.
+- **Charcoal dark mode on the landing page.** The GitHub Pages site's
+  decorative rainbow gradients are neutralized in dark mode so pink stays
+  the single accent against charcoal.
+
+### Fixed
+
+- Companion broadcasts detached annotation-batch status; a periodic HTTP
+  reconcile heals batches stuck behind a half-open WebSocket.
+- Stop the horizontal-scroll sliver in the overlay (`100vw` → `inset:0`).
+- Keep the in-page annotation textarea light in OS dark mode.
+- **Dependencies.** `npm audit fix` patched the shipped `hono` + build
+  `rollup` / `crxjs` advisories. The remaining `vitest` / `vite`
+  advisories are **dev-tooling only** (not shipped in the extension or the
+  published companion package) and are deferred pending a breaking
+  `@crxjs`-coupled major bump.
+
 ## 0.5.0 — 2026-06-05
 
 ### Added

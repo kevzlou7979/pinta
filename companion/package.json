@@ -1,6 +1,6 @@
 {
   "name": "pinta-companion",
-  "version": "0.5.0",
+  "version": "0.6.0",
   "description": "Companion server for the Pinta browser-annotation workflow. Bridges the Pinta Chrome extension and your coding agent (Claude Code, Cursor, Aider) so visual annotations turn into source-file edits.",
   "license": "MIT",
   "author": "kevzlou7979 <kevzlou7979@gmail.com>",
