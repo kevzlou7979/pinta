@@ -258,6 +258,43 @@
       aside.toc { position: static; max-height: none; padding-right: 0; }
     }
 
+    /* TOC: full sidebar on desktop, collapsed "On this page" disclosure
+       on mobile (so it stops dominating the top of the page). The
+       <details> is `open` by default; JS collapses it ≤880px. */
+    .toc-d > summary {
+      list-style: none;
+      cursor: pointer;
+      display: flex; align-items: center; justify-content: space-between;
+      gap: 10px;
+      padding: 11px 14px;
+      border: 1px solid var(--line);
+      border-radius: 10px;
+      background: var(--cream-soft);
+      color: var(--ink);
+      font-size: 12px; font-weight: 700;
+      letter-spacing: 0.08em; text-transform: uppercase;
+    }
+    .toc-d > summary::-webkit-details-marker { display: none; }
+    .toc-d > summary::after {
+      content: ""; width: 8px; height: 8px; flex: 0 0 auto;
+      border-right: 2px solid currentColor;
+      border-bottom: 2px solid currentColor;
+      transform: rotate(45deg);
+      transition: transform .2s ease;
+    }
+    .toc-d[open] > summary::after { transform: rotate(-135deg); }
+    .toc-body { padding-top: 16px; }
+    @media (min-width: 881px) {
+      .toc-d > summary { display: none; }
+      .toc-body { padding-top: 0; }
+    }
+    /* Small phones: let the header wrap cleanly instead of overflowing. */
+    @media (max-width: 640px) {
+      nav.top .row { flex-wrap: wrap; gap: 8px 14px; }
+      nav.top .nav-links { gap: 14px; font-size: 13.5px; }
+      .layout { padding: 24px 18px 80px; }
+    }
+
     /* ============================================================
        Callout boxes — used for tips, warnings, "advanced topic"
        notes that should stand apart from prose.
@@ -339,6 +376,9 @@
 
     <!-- TOC sidebar -->
     <aside class="toc" aria-label="Table of contents">
+      <details class="toc-d" open>
+        <summary>On this page</summary>
+        <div class="toc-body">
       <h4>Getting started</h4>
       <ul>
         <li><a href="#what-is-pinta">What is Pinta</a></li>
@@ -367,6 +407,8 @@
         <li><a href="#troubleshooting">Troubleshooting</a></li>
         <li><a href="#privacy">Privacy</a></li>
       </ul>
+        </div>
+      </details>
     </aside>
 
     <!-- Main content -->
@@ -908,6 +950,21 @@ glab auth login --scopes api,write_repository</code></pre>
           html.setAttribute('data-theme', 'dark');
           try { localStorage.setItem('pinta-theme', 'dark'); } catch (e) {}
         }
+      });
+    })();
+
+    // Collapsible TOC: full sidebar on desktop, collapsed disclosure ≤880px.
+    (function () {
+      var toc = document.querySelector('.toc-d');
+      if (!toc) return;
+      var mq = window.matchMedia('(min-width: 881px)');
+      function sync() { toc.open = mq.matches; }
+      sync();
+      if (mq.addEventListener) { mq.addEventListener('change', sync); }
+      else if (mq.addListener) { mq.addListener(sync); }
+      // On mobile, tapping a TOC link collapses the disclosure again.
+      toc.addEventListener('click', function (e) {
+        if (!mq.matches && e.target.closest('a')) toc.open = false;
       });
     })();
   </script>

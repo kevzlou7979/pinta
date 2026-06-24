@@ -129,6 +129,13 @@
       font-size: 13px;
       color: var(--ink-mute);
     }
+    /* Mobile: tighten the gutters and let the wide compliance table scroll
+       inside its own box instead of overflowing the page. */
+    @media (max-width: 720px) {
+      .wrap { padding: 40px 18px 72px; }
+      table { display: block; overflow-x: auto; -webkit-overflow-scrolling: touch; }
+      th, td { min-width: 8.5rem; }
+    }
   </style>
   <script>
     (function () {
