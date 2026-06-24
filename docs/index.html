@@ -190,6 +190,9 @@
 
     @media (max-width: 720px) {
       .nav-links a:not(.nav-cta) { display: none; }
+      .nav-links { gap: 12px; }
+      .nav-burger { display: inline-flex; }
+      .nav-menu.open { display: flex; }
     }
 
     /* ---------- HERO ---------- */
@@ -1358,6 +1361,49 @@
     .theme-toggle .icon-sun { display: none; }
     .theme-toggle .icon-moon { display: block; }
 
+    /* ---------- MOBILE NAV (hamburger) ---------- */
+    .nav-burger {
+      display: none;
+      width: 38px; height: 38px;
+      align-items: center; justify-content: center;
+      border: 1px solid var(--line-strong);
+      border-radius: 10px;
+      background: var(--paper);
+      color: var(--ink);
+      cursor: pointer;
+      padding: 0;
+      transition: border-color .15s ease, color .15s ease, transform .12s ease;
+    }
+    .nav-burger:hover { border-color: var(--ink); color: var(--pink); }
+    .nav-burger:active { transform: translateY(1px); }
+    .nav-burger svg { width: 20px; height: 20px; display: block; }
+    .nav-burger .burger-x { display: none; }
+    .nav-burger[aria-expanded="true"] .burger-open { display: none; }
+    .nav-burger[aria-expanded="true"] .burger-x { display: block; }
+
+    /* Dropdown panel — full-width below the bar, only ever shown ≤720px
+       (the .open rule lives inside the mobile media query, so resizing
+       up to desktop auto-hides it without any JS). */
+    .nav-menu {
+      display: none;
+      flex-direction: column;
+      gap: 2px;
+      padding: 8px 16px 14px;
+      border-top: 1px solid var(--line);
+      background: var(--cream);
+      box-shadow: 0 14px 26px rgba(22,17,13,0.12);
+    }
+    .nav-menu a {
+      display: block;
+      padding: 12px;
+      border-radius: 10px;
+      color: var(--ink-dim);
+      font-size: 15px;
+      font-weight: 500;
+    }
+    .nav-menu a:hover { background: var(--cream-soft); color: var(--ink); text-decoration: none; }
+    .nav-menu a:active { background: var(--cream-deep); }
+
     /* ---------- DARK MODE ---------- */
     [data-theme="dark"] {
       /* Neutral charcoal surfaces — matches the Chrome extension's
@@ -1767,6 +1813,19 @@
           <svg class="nav-cta-ico" width="14" height="14" viewBox="0 0 16 16" fill="currentColor" aria-hidden="true"><path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.013 8.013 0 0016 8c0-4.42-3.58-8-8-8z"/></svg>
           View on GitHub
         </a>
+        <button id="nav-burger" class="nav-burger" type="button" aria-label="Open menu" aria-expanded="false" aria-controls="nav-menu">
+          <svg class="burger-open" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 6h18M3 12h18M3 18h18"/></svg>
+          <svg class="burger-x" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M18 6 6 18M6 6l12 12"/></svg>
+        </button>
+      </div>
+      <div id="nav-menu" class="nav-menu">
+        <a href="#how">How it works</a>
+        <a href="#features">Features</a>
+        <a href="#modules">Modules</a>
+        <a href="#install">Install</a>
+        <a href="docs.html">Docs</a>
+        <a href="privacy.html">Privacy</a>
+        <a href="compliance.html">Compliance</a>
       </div>
     </div>
   </nav>
@@ -2502,6 +2561,35 @@ npx pinta-companion@0.6.0 install-skill
         // Force reflow so the animation can replay on consecutive clicks.
         void btn.offsetWidth;
         btn.classList.add('clicked');
+      });
+    })();
+
+    // ---------- Mobile nav (hamburger) ----------
+    (function () {
+      var burger = document.getElementById('nav-burger');
+      var menu = document.getElementById('nav-menu');
+      if (!burger || !menu) return;
+      function setOpen(open) {
+        menu.classList.toggle('open', open);
+        burger.setAttribute('aria-expanded', open ? 'true' : 'false');
+        burger.setAttribute('aria-label', open ? 'Close menu' : 'Open menu');
+      }
+      burger.addEventListener('click', function (e) {
+        e.stopPropagation();
+        setOpen(!menu.classList.contains('open'));
+      });
+      // Tapping a link navigates, then closes the menu.
+      menu.addEventListener('click', function (e) {
+        if (e.target.closest('a')) setOpen(false);
+      });
+      // Escape closes; so does a tap anywhere outside the menu/burger.
+      document.addEventListener('keydown', function (e) {
+        if (e.key === 'Escape') setOpen(false);
+      });
+      document.addEventListener('click', function (e) {
+        if (menu.classList.contains('open') && !menu.contains(e.target) && !burger.contains(e.target)) {
+          setOpen(false);
+        }
       });
     })();
 
