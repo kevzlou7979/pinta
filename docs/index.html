@@ -191,8 +191,6 @@
     @media (max-width: 720px) {
       .nav-links a:not(.nav-cta) { display: none; }
       .nav-links { gap: 12px; }
-      .nav-burger { display: inline-flex; }
-      .nav-menu.open { display: flex; }
     }
 
     /* ---------- HERO ---------- */
@@ -1403,6 +1401,14 @@
     }
     .nav-menu a:hover { background: var(--cream-soft); color: var(--ink); text-decoration: none; }
     .nav-menu a:active { background: var(--cream-deep); }
+
+    /* Reveal the burger + dropdown on mobile. These MUST come after the
+       base `.nav-burger { display: none }` above — equal specificity, so
+       later wins; otherwise the base rule hides the burger at all widths. */
+    @media (max-width: 720px) {
+      .nav-burger { display: inline-flex; }
+      .nav-menu.open { display: flex; }
+    }
 
     /* ---------- DARK MODE ---------- */
     [data-theme="dark"] {
