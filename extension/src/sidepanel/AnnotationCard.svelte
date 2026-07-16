@@ -1,5 +1,7 @@
 <script lang="ts">
   import type { Annotation } from "@pinta/shared";
+  import { app } from "../lib/state.svelte.js";
+  import MicButton from "../lib/voice/MicButton.svelte";
 
   type Props = {
     annotation: Annotation;
@@ -18,6 +20,10 @@
      *  `accentColorOverride` is set so the numbered badge has something
      *  to render. Ignored otherwise. */
     index?: number;
+    /** Drift Check verdict for this annotation, if a check has run. When
+     *  the status isn't "ok" the card shows a badge so the user can spot
+     *  which changes drifted / were missed and need a resubmit. */
+    drift?: { status: "ok" | "drifted" | "missing" | "unverifiable"; reason?: string } | null;
     onremove: () => void;
     onsave: (comment: string) => void;
   };
@@ -27,12 +33,45 @@
     pending = false,
     accentColorOverride,
     index,
+    drift = null,
     onremove,
     onsave,
   }: Props = $props();
 
+  // Only surface a badge for verdicts that need attention; "ok" stays
+  // quiet so the list doesn't turn into a wall of green.
+  const driftBadge = $derived.by(() => {
+    if (!drift || drift.status === "ok") return null;
+    if (drift.status === "drifted")
+      return {
+        label: "Drifted",
+        classes:
+          "bg-amber-100 text-amber-800 dark:bg-amber-950/60 dark:text-amber-200",
+        title:
+          drift.reason ??
+          "The change was applied but has since diverged — resubmit to re-apply.",
+      };
+    if (drift.status === "missing")
+      return {
+        label: "Missing",
+        classes:
+          "bg-red-100 text-red-800 dark:bg-red-950/60 dark:text-red-200",
+        title:
+          drift.reason ??
+          "No trace of this change in source — the agent missed it. Resubmit to apply.",
+      };
+    return {
+      label: "Unverified",
+      classes:
+        "bg-ink-100 text-ink-700 dark:bg-night-alt dark:text-night-dim",
+      title:
+        drift.reason ?? "The agent couldn't confirm this change either way.",
+    };
+  });
+
   let editing = $state(false);
   let draftComment = $state(annotation.comment);
+  let draftCommentEl: HTMLTextAreaElement | undefined = $state();
 
   // Read targets[] when present, fall back to [target] for older
   // sessions persisted before v0.3. Empty if neither is set (drawing
@@ -130,6 +169,15 @@
         <span class="uppercase tracking-wide font-medium"
           >{annotation.kind}</span
         >
+        {#if driftBadge}
+          <span
+            class="inline-flex items-center gap-1 px-1.5 py-0.5 rounded-full text-[10px] font-semibold uppercase tracking-wide {driftBadge.classes}"
+            title={driftBadge.title}
+          >
+            <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M10.29 3.86 1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"/><line x1="12" y1="9" x2="12" y2="13"/><line x1="12" y1="17" x2="12.01" y2="17"/></svg>
+            {driftBadge.label}
+          </span>
+        {/if}
         {#if targets.length === 1 && targets[0]?.selector}
           <span class="truncate font-mono">{targets[0]!.selector}</span>
         {:else if targets.length > 1}
@@ -158,13 +206,21 @@
       {/if}
 
       {#if editing}
-        <textarea
-          rows={3}
-          autofocus
-          bind:value={draftComment}
-          onkeydown={onKey}
-          class="w-full mt-1 rounded border border-ink-300 bg-white text-ink-900 px-2 py-1.5 text-sm focus:outline-none focus:ring-2 focus:ring-brand-pink dark:border-night-line dark:bg-night-alt dark:text-night-text dark:placeholder-night-mute"
-        ></textarea>
+        <div class="relative mt-1">
+          <textarea
+            rows={3}
+            autofocus
+            bind:this={draftCommentEl}
+            bind:value={draftComment}
+            onkeydown={onKey}
+            class="w-full pr-10 rounded border border-ink-300 bg-white text-ink-900 px-2 py-1.5 text-sm focus:outline-none focus:ring-2 focus:ring-brand-pink dark:border-night-line dark:bg-night-alt dark:text-night-text dark:placeholder-night-mute"
+          ></textarea>
+          {#if app.voiceReady}
+            <span class="absolute right-1.5 bottom-1.5">
+              <MicButton el={draftCommentEl} lang={app.voiceLang} />
+            </span>
+          {/if}
+        </div>
         <div class="flex justify-end gap-1.5 mt-1.5">
           <button
             type="button"
@@ -192,6 +248,41 @@
             <span class="line-through text-ink-500 dark:text-night-mute">{annotation.contentChange.textBefore.slice(0, 60)}</span>
             <span class="text-ink-400 dark:text-night-mute">→</span>
             <span class="text-brand-magenta dark:text-brand-pink-light">{annotation.contentChange.textAfter.slice(0, 60)}</span>
+          </p>
+        {/if}
+        {#if annotation.move}
+          <p class="text-[11px] text-ink-600 dark:text-night-dim mt-1 break-words">
+            <span class="text-ink-400 dark:text-night-mute">Move:</span>
+            {#if annotation.move.drop === "reorder"}
+              <span class="text-emerald-700 dark:text-emerald-400">→ {annotation.move.container?.selector ?? "container"}</span>
+              {#if annotation.move.reference}
+                <span class="text-ink-500 dark:text-night-mute">({annotation.move.position} <span class="font-mono text-[10px]">{annotation.move.reference.selector}</span>)</span>
+              {:else}
+                <span class="text-ink-500 dark:text-night-mute">(append inside)</span>
+              {/if}
+            {:else}
+              <span class="text-emerald-700 dark:text-emerald-400">by {annotation.move.offset?.dx ?? 0}px, {annotation.move.offset?.dy ?? 0}px</span>
+              <span class="text-ink-500 dark:text-night-mute">(free position)</span>
+            {/if}
+          </p>
+        {/if}
+        {#if annotation.textInsert}
+          <p class="text-[11px] text-ink-600 dark:text-night-dim mt-1 break-words">
+            <span class="text-ink-400 dark:text-night-mute">New paragraph:</span>
+            <span class="text-brand-magenta dark:text-brand-pink-light">“{annotation.textInsert.text.slice(0, 80)}{annotation.textInsert.text.length > 80 ? "…" : ""}”</span>
+            {#if annotation.textInsert.reference}
+              <span class="text-ink-500 dark:text-night-mute">({annotation.textInsert.position} <span class="font-mono text-[10px]">{annotation.textInsert.reference.selector}</span>)</span>
+            {/if}
+          </p>
+        {/if}
+        {#if annotation.kind === "delete"}
+          <p class="text-[11px] text-ink-600 dark:text-night-dim mt-1 break-words">
+            <span class="text-red-600 dark:text-red-400 font-medium">Remove</span>
+            <span class="text-ink-500 dark:text-night-mute"
+              >{targets.length > 1
+                ? `${targets.length} elements`
+                : "this element"} from source</span
+            >
           </p>
         {/if}
         {#if annotation.cssChanges && Object.keys(annotation.cssChanges).length > 0}

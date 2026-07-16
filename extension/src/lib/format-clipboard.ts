@@ -1,5 +1,55 @@
 import type { Annotation } from "@pinta/shared";
 
+/**
+ * Human sentences for a structural annotation (move / text-insert /
+ * delete), used by both export formats so an agent without the wire JSON
+ * still gets BOTH ends of the change. Returns [] for annotations without
+ * one.
+ */
+function structuredChangeLines(a: Annotation): string[] {
+  const out: string[] = [];
+  if (a.kind === "delete") {
+    const targets = a.targets ?? (a.target ? [a.target] : []);
+    const sels = targets
+      .map((t) => `\`${t.selector}\``)
+      .filter((s) => s !== "``")
+      .join(", ");
+    if (targets.length > 1) {
+      out.push(`Remove these ${targets.length} elements from the source${sels ? `: ${sels}` : ""}.`);
+    } else {
+      out.push(`Remove this element from the source${sels ? ` (${sels})` : ""}.`);
+    }
+  }
+  if (a.move) {
+    if (a.move.drop === "reorder") {
+      const ref = a.move.reference;
+      const where = ref
+        ? `${a.move.position ?? "before"} \`${ref.selector}\``
+        : "appended inside";
+      out.push(
+        `Move this element into \`${a.move.container?.selector ?? "(container)"}\`, ${where}.`,
+      );
+      if (a.move.container?.sourceFile) {
+        out.push(
+          `Destination source: ${a.move.container.sourceFile}${a.move.container.sourceLine ? `:${a.move.container.sourceLine}` : ""}`,
+        );
+      }
+    } else {
+      out.push(
+        `Move this element by ${a.move.offset?.dx ?? 0}px, ${a.move.offset?.dy ?? 0}px (free position — apply via CSS positioning).`,
+      );
+    }
+  }
+  if (a.textInsert) {
+    const ref = a.textInsert.reference;
+    const where = ref
+      ? `${a.textInsert.position} \`${ref.selector}\``
+      : "inside this container";
+    out.push(`Add a new paragraph ${where}: "${a.textInsert.text}"`);
+  }
+  return out;
+}
+
 export type ExportFormat = "md" | "txt";
 
 export type FormatOptions = {
@@ -83,6 +133,9 @@ export function formatSessionAsClipboard(input: {
         : a.target.sourceFile;
       lines.push(`- **Source:** \`${src}\``);
     }
+    for (const change of structuredChangeLines(a)) {
+      lines.push(`- **Change:** ${change}`);
+    }
     lines.push(`- **Comment:** ${a.comment}`);
     lines.push("");
   });
@@ -140,6 +193,9 @@ export function formatSessionAsText(input: {
         ? `${a.target.sourceFile}:${a.target.sourceLine}`
         : a.target.sourceFile;
       lines.push(`  Source: ${src}`);
+    }
+    for (const change of structuredChangeLines(a)) {
+      lines.push(`  Change: ${change.replace(/`/g, "")}`);
     }
     lines.push(`  Comment: ${a.comment}`);
     lines.push("");

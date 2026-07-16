@@ -1,11 +1,16 @@
 <script lang="ts">
   import type { AnnotationImage } from "@pinta/shared";
+  import { content } from "./state.svelte.js";
+  import MicButton from "../lib/voice/MicButton.svelte";
 
   type Props = {
     anchor: { top: number; left: number; width: number; height: number };
     title?: string;
     value: string;
     images?: AnnotationImage[];
+    /** Allow submitting with an empty comment — used by tools whose
+     *  gesture IS the payload (e.g. Move: the drop carries the intent). */
+    allowEmpty?: boolean;
     onsubmit: () => void;
     oncancel: () => void;
   };
@@ -14,6 +19,7 @@
     title = "",
     value = $bindable(""),
     images = $bindable<AnnotationImage[]>([]),
+    allowEmpty = false,
     onsubmit,
     oncancel,
   }: Props = $props();
@@ -141,15 +147,22 @@
   {#if title}
     <div class="popup__head">{title}</div>
   {/if}
-  <textarea
-    bind:this={textarea}
-    bind:value
-    onkeydown={onKey}
-    onpaste={onPaste}
-    placeholder="What do you want changed? Paste or drop images for visual reference."
-    rows="3"
-    autofocus
-  ></textarea>
+  <span style="position: relative; display: block;">
+    <textarea
+      bind:this={textarea}
+      bind:value
+      onkeydown={onKey}
+      onpaste={onPaste}
+      placeholder="What do you want changed? Paste or drop images for visual reference."
+      rows="3"
+      autofocus
+    ></textarea>
+    {#if content.voiceEnabled}
+      <span style="position: absolute; right: 4px; bottom: 6px;">
+        <MicButton el={textarea} lang={content.voiceLang} />
+      </span>
+    {/if}
+  </span>
   {#if images.length > 0}
     <div class="thumbs">
       {#each images as img, i (img.id)}
@@ -172,7 +185,7 @@
     <button
       class="btn btn--primary"
       onclick={onsubmit}
-      disabled={!value.trim()}
+      disabled={!allowEmpty && !value.trim()}
     >
       Add annotation
     </button>

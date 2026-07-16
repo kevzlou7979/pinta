@@ -1,6 +1,7 @@
 import { mount } from "svelte";
 import Overlay from "./Overlay.svelte";
 import css from "./styles.css?inline";
+import { content } from "./state.svelte.js";
 
 const HOST_TAG = "pinta-overlay-host";
 
@@ -146,6 +147,10 @@ if (!document.querySelector(HOST_TAG)) {
   }
 
   document.documentElement.appendChild(host);
+
+  // Mirror the Voice Command module's enabled/lang from storage so the
+  // on-page mic buttons + Alt+V know whether to show / which language.
+  content.initVoice();
 
   mount(Overlay, { target: root });
 }

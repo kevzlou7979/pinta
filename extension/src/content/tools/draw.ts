@@ -2,8 +2,13 @@ import type { AnnotationKind, Point } from "@pinta/shared";
 
 // "image" is a placement tool (drag-resize handles) handled by a
 // separate overlay pipeline, not a stroke-based draw tool — exclude
-// it from DrawTool so the stroke renderers stay exhaustive.
-export type DrawTool = Exclude<AnnotationKind, "select" | "image">;
+// it from DrawTool so the stroke renderers stay exhaustive. "move"
+// (element drag) and "text-insert" (typed paragraph) are likewise
+// non-stroke pipelines.
+export type DrawTool = Exclude<
+  AnnotationKind,
+  "select" | "image" | "move" | "text-insert"
+>;
 
 export const DRAW_TOOLS: DrawTool[] = [
   "arrow",

@@ -25,7 +25,31 @@ export type AnnotationKind =
    * Side panel routes these sessions away from the annotation list
    * into the Test Pilot tab.
    */
-  | "query";
+  | "query"
+  /**
+   * Move tool (drag & drop) — the user dragged an existing element
+   * (`targets[0]`) to a new spot. The destination lives in the `move`
+   * field: a reorder/reparent (container + sibling reference) or a
+   * free-position offset. The agent applies it in source — markup-order
+   * change for "reorder", positioning CSS for "free".
+   */
+  | "move"
+  /**
+   * Text tool "add paragraph" — the user typed a NEW paragraph at a
+   * chosen spot. `targets[0]` is the container; `textInsert` carries the
+   * text + sibling reference. (In-place text EDITS ride `kind:"select"`
+   * with `contentChange` instead.)
+   */
+  | "text-insert"
+  /**
+   * Delete tool — the user marked one or more existing elements for
+   * REMOVAL. Every element lives in `targets[]` (single click yields one
+   * entry; Ctrl/Cmd+click adds more). There's no destination and no
+   * `move`/`textInsert` payload: the agent simply removes each target
+   * from source. `comment` is optional context ("remove this promo
+   * banner"). Rolls back on the page by restoring the dimmed preview.
+   */
+  | "delete";
 
 export type AnnotationTarget = {
   selector: string;
@@ -137,6 +161,40 @@ export type Annotation = {
    * sessions may lack it; readers fall back to `session.url`.
    */
   url?: string;
+
+  /**
+   * Set on `kind:"move"` — where the dragged element (`targets[0]`)
+   * should go. `drop` picks the interpretation:
+   * - `"reorder"` — move the element in markup order: into `container`,
+   *   placed `position` relative to `reference` ("inside" = append when
+   *   the container has no usable sibling anchor).
+   * - `"free"` — no meaningful container at the drop point; apply the
+   *   pixel `offset` via positioning CSS (transform/margin/absolute),
+   *   translated to the project's styling system. `destinationRect` is
+   *   where the element visually landed, in the SAME coordinate space
+   *   as `AnnotationTarget.boundingRect` (so composite/renderers can
+   *   relate the two directly).
+   */
+  move?: {
+    drop: "reorder" | "free";
+    container?: AnnotationTarget;
+    reference?: AnnotationTarget;
+    position?: "before" | "after" | "inside";
+    offset?: { dx: number; dy: number };
+    destinationRect?: { x: number; y: number; width: number; height: number };
+  };
+
+  /**
+   * Set on `kind:"text-insert"` — a new paragraph the user typed at a
+   * chosen spot. `targets[0]` is the container element; the paragraph
+   * goes `position` relative to `reference` ("inside" = append into the
+   * container). `text` is the plain paragraph text.
+   */
+  textInsert?: {
+    reference?: AnnotationTarget;
+    position: "before" | "after" | "inside";
+    text: string;
+  };
 };
 
 export type AnnotationImage = {
@@ -260,13 +318,16 @@ export type ModuleSettingSpec = {
 /**
  * How a module surfaces in the side panel. `"per-submit"` renders a
  * footer checkbox; `"interactive"` owns a side-panel tab; `"inquiry"`
- * lights up cross-cutting surfaces. Imported modules may be
- * `"interactive"` when their manifest declares a `tab` (see `ModuleTab`)
- * — the extension renders that tab dynamically from the manifest, so no
- * bundled code is needed. An interactive imported module with no `tab`
- * declared surfaces nothing (and should not be `"interactive"`).
+ * lights up cross-cutting surfaces; `"client"` is a purely browser-local
+ * enhancement (e.g. Voice Command) — it shows ONLY in Settings, never a
+ * tab, never a footer checkbox, and never rides on `session.modules[]`
+ * to the agent. Imported modules may be `"interactive"` when their
+ * manifest declares a `tab` (see `ModuleTab`) — the extension renders
+ * that tab dynamically from the manifest, so no bundled code is needed.
+ * An interactive imported module with no `tab` declared surfaces nothing
+ * (and should not be `"interactive"`).
  */
-export type ModuleMode = "per-submit" | "interactive" | "inquiry";
+export type ModuleMode = "per-submit" | "interactive" | "inquiry" | "client";
 
 /**
  * Declares that an interactive module owns a side-panel tab. When present

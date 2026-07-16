@@ -18,6 +18,7 @@ import type {
   ModulePackage,
   ModuleCapability,
   ModuleBoard,
+  AnnotationImage,
 } from "@pinta/shared";
 import {
   BUILTIN_MODULES,
@@ -27,11 +28,31 @@ import {
   type ModuleSpec,
 } from "./modules.js";
 import {
+  foldWeekends,
+  formatDayHeading,
+  isAnnotateRollup,
+  mergeCustomItems,
+  mergeReportDays,
+  parseHowToTestResult,
   parseReportPayload,
+  isoDateLocal,
+  looksLikeModuleSummary,
+  mergeAnnotationChildren,
+  oneLineComment,
+  pagePathFromUrl,
+  parseShotResult,
   rangeWindow,
   renderReportMarkdown,
+  shotKeyForItem,
+  type ReportCategory,
+  type ReportCustomItem,
+  type ReportDay,
+  type ReportHowToTest,
+  type ReportItem,
+  type ReportItemChild,
   type ReportRange,
   type ReportRun,
+  type ReportShot,
 } from "./report.js";
 import { WsClient, type WsClientStatus } from "./ws-client.js";
 import {
@@ -181,6 +202,17 @@ export type TestPilotCatalog = {
   author?: string;
   description?: string;
 };
+
+/**
+ * Drift Check verdict for a single applied annotation:
+ * - `ok`           — the intended change is present in current source.
+ * - `drifted`      — the change was applied but has since diverged /
+ *                    partially reverted (needs a resubmit).
+ * - `missing`      — no trace of the change in source (agent missed it).
+ * - `unverifiable` — the agent couldn't confirm either way (e.g. a
+ *                    free-form drawing / vague note with no anchor).
+ */
+export type DriftStatus = "ok" | "drifted" | "missing" | "unverifiable";
 
 /** In-flight query metadata so we can route the eventual session.synced
  *  to the right Test Pilot slot. */
@@ -433,6 +465,16 @@ class ExtensionState {
    * `autoApply` / `includeScreenshot` pattern).
    */
   tickedModules = $state<Record<string, boolean>>({});
+  /**
+   * Draft for the Annotate "Add a task" composer (NoteComposer). Held in
+   * the store, not the component, so an in-progress task survives an
+   * Annotate-panel unmount — the panel is the {:else} fall-through of the
+   * tab switch, so visiting Test Pilot / AuditFlow / Report destroys it.
+   */
+  noteDraft = $state<{ comment: string; images: AnnotationImage[] }>({
+    comment: "",
+    images: [],
+  });
   /** True when Settings panel is open in the side panel. */
   viewingSettings = $state<boolean>(false);
   /**
@@ -445,6 +487,16 @@ class ExtensionState {
     enabled: false,
     color: "#3B82F6",
   });
+
+  /**
+   * When true, the side panel reloads the page after the agent finishes
+   * applying a batch IF no hot-reload (HMR) was detected — so you see the
+   * change without a manual refresh. Default OFF so the page never refreshes
+   * out from under you while you're annotating the next batch; reload on
+   * demand via the tray/footer Reload button, or flip this on in Settings.
+   * Persisted to chrome.storage.local under `pinta-auto-reload`.
+   */
+  autoReload = $state<boolean>(false);
 
   /**
    * Test Pilot — interactive module state. The user imports a markdown
@@ -646,6 +698,7 @@ class ExtensionState {
     void this.refreshImported();
     void this.loadModules();
     void this.loadPulseSettings();
+    void this.loadAutoReload();
     void this.loadStandaloneOrigins();
     void this.loadGlobalChat();
     void this.loadAnnotateChats();
@@ -763,6 +816,37 @@ class ExtensionState {
     if (!/^#[0-9a-fA-F]{6}$/.test(hex)) return;
     this.pulseSettings.color = hex;
     void this.savePulseSettings();
+  }
+
+  // ─── Auto-reload after applied changes ─────────────────────────────
+
+  private static readonly AUTO_RELOAD_KEY = "pinta-auto-reload";
+
+  async loadAutoReload(): Promise<void> {
+    try {
+      const stored = await chrome.storage?.local?.get(
+        ExtensionState.AUTO_RELOAD_KEY,
+      );
+      const raw = stored?.[ExtensionState.AUTO_RELOAD_KEY];
+      if (typeof raw === "boolean") this.autoReload = raw;
+    } catch {
+      // storage missing — default (off) stands
+    }
+  }
+
+  private async saveAutoReload(): Promise<void> {
+    try {
+      await chrome.storage?.local?.set({
+        [ExtensionState.AUTO_RELOAD_KEY]: this.autoReload,
+      });
+    } catch {
+      // ignore — in-memory value still drives this session
+    }
+  }
+
+  setAutoReload(enabled: boolean): void {
+    this.autoReload = enabled;
+    void this.saveAutoReload();
   }
 
   // ─── Test Pilot (interactive module) ───────────────────────────────
@@ -3072,12 +3156,33 @@ class ExtensionState {
   private static readonly REPORT_PROJECTS_KEY = "pinta-report-projects";
   /** Picked window for the "custom" range. */
   private static readonly REPORT_CUSTOM_KEY = "pinta-report-custom";
+  /** Hand-typed custom items, kept in their own cache so a refresh
+   *  (regenerate) never drops them — merged into the cards at render time. */
+  private static readonly REPORT_CUSTOM_ITEMS_KEY = "pinta-report-custom-items";
+  /** Per-entry "proof" screenshots (Phase 16f), keyed by item id. Own cache
+   *  (like custom items) so a Refresh never drops them; the PNG bytes live
+   *  on disk + are served by the companion, this just holds the metadata. */
+  private static readonly REPORT_SHOTS_KEY = "pinta-report-shots";
+  /** Per-entry "How to test" step guides (Phase 16g), keyed by item id. Own
+   *  cache so a Refresh never drops them. */
+  private static readonly REPORT_HOWTO_KEY = "pinta-report-howto";
   /** A whole-window gather (git log + gh/glab + Pinta history) is
    *  legitimately slow — same generous ceiling as a full audit. */
   private static readonly REPORT_TIMEOUT_MS = 600_000;
+  /** A single-entry screenshot (open one page + frame one element) is far
+   *  cheaper than a full gather, but a cold dev server + element hunt can
+   *  still take a bit — a comfortable per-op ceiling. */
+  private static readonly REPORT_SHOT_TIMEOUT_MS = 240_000;
+  /** Generating a "How to test" guide reads the change + writes a handful of
+   *  steps — a normal per-op ceiling, like Test Pilot's detail-steps. */
+  private static readonly REPORT_HOWTO_TIMEOUT_MS = 300_000;
   /** Commit-applied-changes action (Annotate tray) — git add/commit
    *  (+push) is quick, so a normal per-op ceiling. */
   private static readonly COMMIT_TIMEOUT_MS = 120_000;
+
+  /** Drift Check soft-wait — the agent re-reads N sessions and greps
+   *  source per annotation, so it's a normal multi-file round-trip. */
+  private static readonly DRIFT_TIMEOUT_MS = 120_000;
 
   /** Per-finding op timers (Discuss / File-issue), keyed by
    *  `${op}:${checkId}` so a stuck agent reply clears its spinner. */
@@ -3250,6 +3355,37 @@ class ExtensionState {
      *  `project`. The primary (companion) project is always included
      *  implicitly, so it is NOT in this list. */
     projects: string[];
+    /** Hand-typed entries the user added to the report. Persisted in their
+     *  OWN cache (NOT inside `currentRun`), so regenerating the report can't
+     *  drop them; merged into the day cards at render time, filtered to the
+     *  current window — out-of-range entries are hidden, never lost. */
+    customItems: ReportCustomItem[];
+    /** The day (ISO yyyy-mm-dd) a per-day "fetch more commits" is in flight
+     *  for, or null. One at a time — drives that card's spinner and gates a
+     *  second fetch. Not persisted (an in-flight marker). */
+    expandingDate: string | null;
+    /** Per-entry "proof" screenshots keyed by item id (Phase 16f). Own
+     *  persisted cache so a Refresh never drops them; the bytes are on disk
+     *  + served by the companion (see `shotUrl`). */
+    shots: Record<string, ReportShot>;
+    /** The item id a screenshot capture is in flight for, or null. One at a
+     *  time — drives the camera spinner + bubbles to the parent. Not
+     *  persisted (an in-flight marker). */
+    shotPending: string | null;
+    /** Per-entry "How to test" step guides keyed by item id (Phase 16g).
+     *  Own persisted cache so a Refresh never drops them. */
+    howTo: Record<string, ReportHowToTest>;
+    /** The item id a how-to-test generation is in flight for, or null. One
+     *  at a time. Not persisted (an in-flight marker). */
+    howToPending: string | null;
+    /** Client-side fallback for annotate roll-up items the agent left as a
+     *  bare count (no `children`): on expand we fetch that day's annotation
+     *  comments straight from the companion and cache them here, keyed by the
+     *  day's ISO date. Display-only (never written into the run); a regenerate
+     *  that DOES carry `children` takes precedence. Not persisted. */
+    annotationChildren: Record<string, ReportItemChild[]>;
+    /** The day (ISO) an annotation-children fetch is in flight for, or null. */
+    annotationChildrenPending: string | null;
     error: string | null;
   }>({
     currentRun: null,
@@ -3258,9 +3394,20 @@ class ExtensionState {
     customSince: "",
     customUntil: "",
     projects: [],
+    customItems: [],
+    expandingDate: null,
+    shots: {},
+    shotPending: null,
+    howTo: {},
+    howToPending: null,
+    annotationChildren: {},
+    annotationChildrenPending: null,
     error: null,
   });
   private reportTimer: ReturnType<typeof setTimeout> | null = null;
+  private reportExpandTimer: ReturnType<typeof setTimeout> | null = null;
+  private reportShotTimer: ReturnType<typeof setTimeout> | null = null;
+  private reportHowToTimer: ReturnType<typeof setTimeout> | null = null;
 
   /** Commit-applied-changes action (Annotate SUBMITTED tray). The agent
    *  commits the files it applied for the done batches; "commit-push"
@@ -3271,6 +3418,24 @@ class ExtensionState {
     result: string | null;
   }>({ pending: null, error: null, result: null });
   private commitTimer: ReturnType<typeof setTimeout> | null = null;
+
+  /**
+   * Drift Check (Annotate tab) — after the agent applies a batch, ask it
+   * to re-read source and confirm each change actually landed. Flags any
+   * annotation that drifted (change reverted / partially applied) or is
+   * missing (never applied), so the user can Resubmit it. `results` is
+   * keyed by annotation id; `resubmitting` is true while a fresh draft is
+   * being repopulated with flagged annotations (relabels Send → Resubmit).
+   * UI-only — never persisted or sent on the wire.
+   */
+  drift = $state<{
+    pending: { sessionId: string | null; startedAt: number } | null;
+    results: Record<string, { status: DriftStatus; reason?: string }>;
+    error: string | null;
+    checkedAt: number | null;
+    resubmitting: boolean;
+  }>({ pending: null, results: {}, error: null, checkedAt: null, resubmitting: false });
+  private driftTimer: ReturnType<typeof setTimeout> | null = null;
 
   /** Boards for imported INTERACTIVE modules (Phase 19 dynamic tabs),
    *  keyed by module id. Each slot mirrors the audit slot: the agent's
@@ -4564,6 +4729,57 @@ class ExtensionState {
     }
   }
 
+  /** Add a hand-typed custom item to the report for a given day. Lives in
+   *  its own persisted cache, so regenerating the report never drops it.
+   *  Returns the new item's id (or null if the input was empty). */
+  addReportCustomItem(
+    date: string,
+    title: string,
+    category: ReportCategory,
+  ): string | null {
+    const t = title.trim();
+    if (!t || !/^\d{4}-\d{2}-\d{2}$/.test(date)) return null;
+    // id is stable + collision-proof without Date.now()/random (both banned
+    // here): a monotonic counter = (max existing seq) + 1, so it survives
+    // delete-then-add (a plain length suffix would repeat).
+    const nextSeq =
+      this.report.customItems.reduce((max, c) => {
+        const n = Number.parseInt(/^custom:(\d+):/.exec(c.id)?.[1] ?? "-1", 10);
+        return Number.isFinite(n) && n > max ? n : max;
+      }, -1) + 1;
+    const id = `custom:${nextSeq}:${date}`;
+    this.report.customItems = [
+      ...this.report.customItems,
+      { id, date, title: t, category },
+    ];
+    this.saveReportCustomItems();
+    return id;
+  }
+
+  /** Remove a custom item by id. The ONLY way a manual entry leaves the
+   *  report — refresh / range / project changes never touch the cache. */
+  removeReportCustomItem(id: string): void {
+    this.report.customItems = this.report.customItems.filter(
+      (c) => c.id !== id,
+    );
+    this.saveReportCustomItems();
+  }
+
+  private saveReportCustomItems(): void {
+    try {
+      void chrome.storage?.local?.set({
+        [ExtensionState.REPORT_CUSTOM_ITEMS_KEY]: $state.snapshot(
+          this.report.customItems,
+        ),
+      });
+    } catch (err) {
+      if (ExtensionState.isQuotaExceeded(err)) {
+        this.report.error =
+          "Browser storage is full — the custom entry couldn't save.";
+      }
+    }
+  }
+
   /** Generate a report for the given range (defaults to the selected
    *  range, anchored on today). No-op if one's already in flight. */
   async generateReport(
@@ -4659,6 +4875,517 @@ class ExtensionState {
       this.reportTimer = null;
     }
     this.retireAgentWaitNotice();
+  }
+
+  // ─── Annotation-children fallback ────────────────────────────────────
+  // When the agent leaves a "N Pinta annotations" roll-up as a bare count
+  // (older skill, or it skipped the per-session fetch), the side panel can
+  // still show the detail: on expand we read that day's annotate sessions
+  // straight from the companion and turn each annotation's `comment` into a
+  // child line. Display-only — cached in `report.annotationChildren[date]`,
+  // never written into the run, so a regenerate with real `children` wins.
+
+  /** Lazily fetch the annotation comments for one report day from the
+   *  companion and cache them as children under `date`. `includeDates` lets a
+   *  folded weekday also pull in the weekend days that folded into it (pass
+   *  `[weekday, ...foldedFrom]`) so weekend annotations fill the gap on the
+   *  weekday rather than vanishing; defaults to just `date`. No-op when not
+   *  connected, already cached, or a fetch is already in flight. Best-effort:
+   *  a transport error surfaces via `report.error` and leaves the cache empty
+   *  (the card shows a graceful "couldn't load" state rather than throwing). */
+  async loadAnnotationChildren(
+    date: string,
+    includeDates?: string[],
+  ): Promise<void> {
+    if (this.report.annotationChildren[date]) return; // cached (even if empty)
+    if (this.report.annotationChildrenPending) return; // one at a time
+    const base = this.httpBase();
+    if (!base) return;
+    const wanted = new Set(
+      includeDates && includeDates.length ? includeDates : [date],
+    );
+    this.report.annotationChildrenPending = date;
+    try {
+      const listRes = await ExtensionState.fetchWithTimeout(`${base}/v1/sessions`, {
+        timeoutMs: 8_000,
+      });
+      if (!listRes.ok) throw new Error(`HTTP ${listRes.status}`);
+      const summaries = (await listRes.json()) as Array<{
+        id: string;
+        status?: string;
+        submittedAt?: number;
+        annotationCount?: number;
+        appliedSummary?: string;
+      }>;
+      // Plain annotation batches submitted on one of the wanted days (the
+      // weekday plus any weekend days folded into it): done, with
+      // annotations, and NOT a module result (audit/test/chat carry a
+      // JSON `appliedSummary` with a `type` — skip those so we don't pull
+      // Test Pilot / AuditFlow notes in as if they were annotations).
+      const candidates = summaries.filter(
+        (s) =>
+          s.status === "done" &&
+          (s.annotationCount ?? 0) > 0 &&
+          wanted.has(isoDateLocal(s.submittedAt) ?? "") &&
+          !looksLikeModuleSummary(s.appliedSummary),
+      );
+      const children: ReportItemChild[] = [];
+      const CHILD_MAX = 50;
+      for (const s of candidates) {
+        if (children.length >= CHILD_MAX) break;
+        try {
+          const sRes = await ExtensionState.fetchWithTimeout(
+            `${base}/v1/sessions/${encodeURIComponent(s.id)}`,
+            { timeoutMs: 8_000 },
+          );
+          if (!sRes.ok) continue;
+          const full = (await sRes.json()) as {
+            url?: string;
+            annotations?: Array<{ comment?: string }>;
+          };
+          const page = pagePathFromUrl(full.url);
+          for (const a of full.annotations ?? []) {
+            const title = oneLineComment(a.comment);
+            if (!title) continue;
+            children.push(page ? { title, ref: page } : { title });
+            if (children.length >= CHILD_MAX) break;
+          }
+        } catch {
+          // Skip a single unreadable session; keep what we have.
+        }
+      }
+      this.report.annotationChildren = {
+        ...this.report.annotationChildren,
+        [date]: children,
+      };
+    } catch (err) {
+      this.report.error = `Couldn't load annotation details: ${(err as Error).message}`;
+    } finally {
+      this.report.annotationChildrenPending = null;
+    }
+  }
+
+  // ─── Per-entry "proof" screenshot (Phase 16f) ────────────────────────
+  // Click the camera on a report row → ask the /pinta agent (op:
+  // "report-screenshot") to open that entry's page, frame the specific
+  // element the change touched, and write a tight PNG to disk. The
+  // companion serves the file; `shotUrl` points the side-panel <img> at it.
+
+  /** Build the companion URL the <img>/fetch reads the captured PNG from.
+   *  Null when there's no shot for the item or no connected companion. The
+   *  `t=capturedAt` param busts the browser cache after a re-capture. */
+  shotUrl(itemId: string): string | null {
+    const shot = this.report.shots[itemId];
+    const port = this.selectedCompanion?.port;
+    if (!shot || !port) return null;
+    return `http://127.0.0.1:${port}/v1/report-shot?key=${encodeURIComponent(
+      shot.shotKey,
+    )}&t=${shot.capturedAt}`;
+  }
+
+  /** Fire a screenshot capture for one report entry. No-op if one's already
+   *  in flight or the entry has no page URL to open. */
+  async captureItemScreenshot(item: ReportItem, date: string): Promise<void> {
+    if (this.report.shotPending) return;
+    if (!this.client || this.connectionStatus !== "connected") {
+      this.report.error =
+        "No companion connected. Start `pinta-companion .` in your project to capture a screenshot.";
+      return;
+    }
+    // The entry's own `url` may be a PR/commit link rather than an app page,
+    // so the live page open in the user's browser (`lastUrl`) is the better
+    // navigation target. Require at least one usable http(s) URL.
+    const itemUrl =
+      item.url && /^https?:\/\//i.test(item.url) ? item.url.trim() : undefined;
+    const pageUrl =
+      this.lastUrl && /^https?:\/\//i.test(this.lastUrl)
+        ? this.lastUrl
+        : undefined;
+    if (!itemUrl && !pageUrl) {
+      this.report.error =
+        "No page URL to screenshot. Open the page in your running app (or give the entry a page link) and try again.";
+      return;
+    }
+    const shotKey = shotKeyForItem(item.id);
+    this.report.shotPending = item.id;
+    this.report.error = null;
+    this.claimNotice = null;
+    this.armReportShotTimeout();
+    const queryComment = JSON.stringify({
+      op: "report-screenshot",
+      itemId: item.id,
+      shotKey,
+      // Where the change lives in the running app (preferred nav target);
+      // the entry's own link is context (may be a PR/commit).
+      ...(pageUrl ? { pageUrl } : {}),
+      ...(itemUrl ? { url: itemUrl } : {}),
+      title: item.title,
+      ...(item.detail ? { detail: item.detail } : {}),
+      category: item.category,
+      ...(item.ref ? { ref: item.ref } : {}),
+      date,
+    });
+    this.send({
+      type: "module.query.submit",
+      url: this.lastUrl ?? "",
+      moduleId: "report",
+      moduleSettings: {},
+      queryComment,
+    });
+  }
+
+  /** User clicked Cancel on a slow capture. */
+  cancelItemScreenshot(): void {
+    if (!this.report.shotPending) return;
+    this.clearReportShotTimeout();
+    this.report.shotPending = null;
+    this.report.error = "Cancelled.";
+  }
+
+  private armReportShotTimeout(): void {
+    this.clearReportShotTimeout();
+    this.armAgentWait({
+      softMs: ExtensionState.REPORT_SHOT_TIMEOUT_MS,
+      what: "capture the screenshot",
+      setHandle: (t) => {
+        this.reportShotTimer = t;
+      },
+      stillPending: () => !!this.report.shotPending,
+      giveUp: () => {
+        if (!this.report.shotPending) return;
+        this.report.shotPending = null;
+        this.report.error =
+          ExtensionState.slowWaitGiveUp("capture the screenshot");
+      },
+    });
+  }
+
+  private clearReportShotTimeout(): void {
+    if (this.reportShotTimer) {
+      clearTimeout(this.reportShotTimer);
+      this.reportShotTimer = null;
+    }
+    this.retireAgentWaitNotice();
+  }
+
+  /** Routed from onMessage when an op:"report-screenshot" session lands.
+   *  Done → store the shot metadata (the PNG is on disk, served by the
+   *  companion); error / ok:false → surface a dismissible error. Mirrors
+   *  handleReportExpandSync's terminal-only discipline. */
+  private handleReportShotSync(session: Session): void {
+    if (session.status !== "done" && session.status !== "error") return;
+    const itemId = ExtensionState.queryField(session, "itemId");
+    if (!itemId || this.report.shotPending !== itemId) {
+      // Not the capture we're waiting on (or a stale replay) — drop it.
+      this.clearReportShotTimeout();
+      return;
+    }
+    this.clearReportShotTimeout();
+    if (session.status === "error") {
+      this.report.error =
+        session.errorMessage ?? "Couldn't capture the screenshot.";
+      this.report.shotPending = null;
+      return;
+    }
+    const summary = session.appliedSummary ?? "";
+    // Empty "done" (multi-agent race) — keep pending + timer so a real
+    // response can still land. Mirrors handleReportSync.
+    if (summary.trim() === "") {
+      this.armReportShotTimeout();
+      return;
+    }
+    try {
+      const result = parseShotResult(JSON.parse(summary));
+      if (!result) {
+        this.report.error =
+          "Agent returned an unrecognized screenshot response. " +
+          "Restart `/pinta` in your project (the SKILL.md report-screenshot handler may not have loaded yet).";
+      } else if (!result.ok) {
+        this.report.error =
+          result.reason ?? "Couldn't capture the screenshot for that entry.";
+      } else {
+        this.report.shots = {
+          ...this.report.shots,
+          [itemId]: {
+            itemId,
+            shotKey: result.shotKey,
+            capturedAt: Date.now(),
+            ...(result.note ? { note: result.note } : {}),
+          },
+        };
+        this.report.error = null;
+        void this.saveReportShots();
+      }
+    } catch (err) {
+      this.report.error = `Couldn't parse the screenshot response: ${(err as Error).message}`;
+    }
+    this.report.shotPending = null;
+  }
+
+  private async saveReportShots(): Promise<void> {
+    try {
+      await chrome.storage?.local?.set({
+        [ExtensionState.REPORT_SHOTS_KEY]: $state.snapshot(this.report.shots),
+      });
+    } catch (err) {
+      if (ExtensionState.isQuotaExceeded(err)) {
+        this.report.error =
+          "Browser storage is full — the screenshot record couldn't save.";
+      }
+    }
+  }
+
+  // ─── Per-entry "How to test" guide (Phase 16g) ───────────────────────
+  // Click the clipboard icon on a report row → ask the /pinta agent
+  // (op:"report-how-to-test") for manual QA steps that verify that shipped
+  // item. Steps render via the shared StepList (same markup as Test Pilot's
+  // detail view) and are cached per item id so a Refresh never drops them.
+
+  /** Ask the agent for a how-to-test guide for one entry. No-op if one's
+   *  already in flight. */
+  async requestHowToTest(item: ReportItem, date: string): Promise<void> {
+    if (this.report.howToPending) return;
+    if (!this.client || this.connectionStatus !== "connected") {
+      this.report.error =
+        "No companion connected. Start `pinta-companion .` in your project to generate test steps.";
+      return;
+    }
+    this.report.howToPending = item.id;
+    this.report.error = null;
+    this.claimNotice = null;
+    this.armReportHowToTimeout();
+    const pageUrl =
+      this.lastUrl && /^https?:\/\//i.test(this.lastUrl)
+        ? this.lastUrl
+        : undefined;
+    const queryComment = JSON.stringify({
+      op: "report-how-to-test",
+      itemId: item.id,
+      title: item.title,
+      ...(item.detail ? { detail: item.detail } : {}),
+      category: item.category,
+      ...(item.ref ? { ref: item.ref } : {}),
+      ...(item.url ? { url: item.url } : {}),
+      ...(pageUrl ? { pageUrl } : {}),
+      ...(item.files && item.files.length ? { files: item.files } : {}),
+      date,
+    });
+    this.send({
+      type: "module.query.submit",
+      url: this.lastUrl ?? "",
+      moduleId: "report",
+      moduleSettings: {},
+      queryComment,
+    });
+  }
+
+  /** User clicked Cancel on a slow how-to-test generation. */
+  cancelHowToTest(): void {
+    if (!this.report.howToPending) return;
+    this.clearReportHowToTimeout();
+    this.report.howToPending = null;
+    this.report.error = "Cancelled.";
+  }
+
+  private armReportHowToTimeout(): void {
+    this.clearReportHowToTimeout();
+    this.armAgentWait({
+      softMs: ExtensionState.REPORT_HOWTO_TIMEOUT_MS,
+      what: "generate the test steps",
+      setHandle: (t) => {
+        this.reportHowToTimer = t;
+      },
+      stillPending: () => !!this.report.howToPending,
+      giveUp: () => {
+        if (!this.report.howToPending) return;
+        this.report.howToPending = null;
+        this.report.error =
+          ExtensionState.slowWaitGiveUp("generate the test steps");
+      },
+    });
+  }
+
+  private clearReportHowToTimeout(): void {
+    if (this.reportHowToTimer) {
+      clearTimeout(this.reportHowToTimer);
+      this.reportHowToTimer = null;
+    }
+    this.retireAgentWaitNotice();
+  }
+
+  /** Routed from onMessage when an op:"report-how-to-test" session lands.
+   *  Done → cache the steps; error → surface a dismissible error. Mirrors
+   *  handleReportShotSync's terminal-only discipline. */
+  private handleReportHowToSync(session: Session): void {
+    if (session.status !== "done" && session.status !== "error") return;
+    const itemId = ExtensionState.queryField(session, "itemId");
+    if (!itemId || this.report.howToPending !== itemId) {
+      this.clearReportHowToTimeout();
+      return;
+    }
+    this.clearReportHowToTimeout();
+    if (session.status === "error") {
+      this.report.error =
+        session.errorMessage ?? "Couldn't generate test steps for that entry.";
+      this.report.howToPending = null;
+      return;
+    }
+    const summary = session.appliedSummary ?? "";
+    // Empty "done" (multi-agent race) — keep pending + re-arm so a real
+    // response can still land. Mirrors handleReportSync.
+    if (summary.trim() === "") {
+      this.armReportHowToTimeout();
+      return;
+    }
+    try {
+      const result = parseHowToTestResult(JSON.parse(summary));
+      if (!result) {
+        this.report.error =
+          "Agent returned an unrecognized test-steps response. " +
+          "Restart `/pinta` in your project (the SKILL.md report-how-to-test handler may not have loaded yet).";
+      } else {
+        this.report.howTo = {
+          ...this.report.howTo,
+          [itemId]: { itemId, steps: result.steps, askedAt: Date.now() },
+        };
+        this.report.error = null;
+        void this.saveReportHowTo();
+      }
+    } catch (err) {
+      this.report.error = `Couldn't parse the test-steps response: ${(err as Error).message}`;
+    }
+    this.report.howToPending = null;
+  }
+
+  private async saveReportHowTo(): Promise<void> {
+    try {
+      await chrome.storage?.local?.set({
+        [ExtensionState.REPORT_HOWTO_KEY]: $state.snapshot(this.report.howTo),
+      });
+    } catch (err) {
+      if (ExtensionState.isQuotaExceeded(err)) {
+        this.report.error =
+          "Browser storage is full — the test steps couldn't save.";
+      }
+    }
+  }
+
+  /** Per-day "fetch more commits" (Phase 16e). Re-queries the agent for a
+   *  SINGLE date with op:"report-day-expand" — same gather rules as the
+   *  main report but UNCAPPED and WITHOUT collapsing routine merges — then
+   *  merges the returned items into that day's card (dedupe by id). Stacks
+   *  with manual cache items (separate store) and survives the global
+   *  refresh. One at a time; no-op without a current run. */
+  async fetchMoreDay(date: string): Promise<void> {
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(date)) return;
+    if (this.report.pending || this.report.expandingDate) return;
+    const run = this.report.currentRun;
+    if (!run) return;
+    if (!this.client || this.connectionStatus !== "connected") {
+      this.report.error =
+        "No companion connected. Start `pinta-companion .` in your project to fetch more.";
+      return;
+    }
+    const runId = crypto.randomUUID();
+    this.report.expandingDate = date;
+    this.report.error = null;
+    this.claimNotice = null;
+    this.armReportExpandTimeout(date);
+    const queryComment = JSON.stringify({
+      op: "report-day-expand",
+      runId,
+      date,
+      range: run.range,
+      anchorDate: run.anchorDate,
+      // No cap, expand collapsed merges into individual commits.
+      nocap: true,
+      expandMerges: true,
+      author: run.author ?? null,
+      ...(this.report.projects.length > 0
+        ? { projects: $state.snapshot(this.report.projects) }
+        : {}),
+    });
+    this.send({
+      type: "module.query.submit",
+      url: this.lastUrl ?? "",
+      moduleId: "report",
+      moduleSettings: {},
+      queryComment,
+    });
+  }
+
+  private armReportExpandTimeout(date: string): void {
+    this.clearReportExpandTimeout();
+    this.armAgentWait({
+      softMs: ExtensionState.REPORT_TIMEOUT_MS,
+      what: `fetch more commits for ${formatDayHeading(date)}`,
+      setHandle: (t) => {
+        this.reportExpandTimer = t;
+      },
+      stillPending: () => this.report.expandingDate === date,
+      giveUp: () => {
+        if (this.report.expandingDate !== date) return;
+        this.report.expandingDate = null;
+        this.report.error = ExtensionState.slowWaitGiveUp(
+          `fetch more commits for ${formatDayHeading(date)}`,
+        );
+      },
+    });
+  }
+
+  private clearReportExpandTimeout(): void {
+    if (this.reportExpandTimer) {
+      clearTimeout(this.reportExpandTimer);
+      this.reportExpandTimer = null;
+    }
+    this.retireAgentWaitNotice();
+  }
+
+  /** Routed from onMessage (by op) when a `report-day-expand` session
+   *  resolves. Done → merge the returned commits into the matching day and
+   *  persist; error → surface it. Non-terminal statuses are ignored so the
+   *  ephemeral session never disturbs the run or the annotation draft. */
+  private handleReportExpandSync(session: Session): void {
+    if (session.status !== "done" && session.status !== "error") return;
+    const date = ExtensionState.queryField(session, "date");
+    if (!date || this.report.expandingDate !== date) {
+      // Not the day we're waiting on (or a stale replay) — drop it.
+      this.clearReportExpandTimeout();
+      return;
+    }
+    this.clearReportExpandTimeout();
+    const run = this.report.currentRun;
+    if (session.status === "error" || !run) {
+      this.report.error =
+        session.errorMessage ?? "Couldn't fetch more commits for that day.";
+      this.report.expandingDate = null;
+      return;
+    }
+    try {
+      const raw = JSON.parse(session.appliedSummary ?? "{}");
+      const parsed = parseReportPayload(raw, {
+        runId: run.runId,
+        range: run.range,
+        anchorDate: run.anchorDate,
+        generatedAt: Date.now(),
+        ...(run.since ? { since: run.since } : {}),
+        ...(run.until ? { until: run.until } : {}),
+      });
+      if (!parsed) {
+        this.report.error = `No additional commits found for ${formatDayHeading(date)}.`;
+      } else {
+        const { days, added } = mergeReportDays(run.days, parsed.days);
+        if (added > 0) {
+          this.report.currentRun = { ...run, days };
+          void this.saveReportRun();
+        } else {
+          this.report.error = `No new commits found for ${formatDayHeading(date)} — everything's already listed.`;
+        }
+      }
+    } catch (err) {
+      this.report.error = `Couldn't parse the fetched commits: ${(err as Error).message}`;
+    }
+    this.report.expandingDate = null;
   }
 
   /** Routed from onMessage when a `report` module session.synced lands.
@@ -4782,14 +5509,145 @@ class ExtensionState {
     } catch {
       // defaults stand
     }
+    try {
+      const stored = await chrome.storage?.local?.get(
+        ExtensionState.REPORT_CUSTOM_ITEMS_KEY,
+      );
+      const raw = stored?.[ExtensionState.REPORT_CUSTOM_ITEMS_KEY] as
+        | unknown[]
+        | undefined;
+      if (Array.isArray(raw)) {
+        this.report.customItems = raw.filter(
+          (c): c is ReportCustomItem =>
+            !!c &&
+            typeof c === "object" &&
+            typeof (c as ReportCustomItem).id === "string" &&
+            typeof (c as ReportCustomItem).date === "string" &&
+            typeof (c as ReportCustomItem).title === "string" &&
+            typeof (c as ReportCustomItem).category === "string",
+        );
+      }
+    } catch {
+      // defaults stand
+    }
+    try {
+      const stored = await chrome.storage?.local?.get(
+        ExtensionState.REPORT_SHOTS_KEY,
+      );
+      const raw = stored?.[ExtensionState.REPORT_SHOTS_KEY] as
+        | Record<string, unknown>
+        | undefined;
+      if (raw && typeof raw === "object") {
+        const shots: Record<string, ReportShot> = {};
+        for (const [id, v] of Object.entries(raw)) {
+          if (
+            v &&
+            typeof v === "object" &&
+            typeof (v as ReportShot).shotKey === "string" &&
+            typeof (v as ReportShot).capturedAt === "number"
+          ) {
+            shots[id] = {
+              itemId: id,
+              shotKey: (v as ReportShot).shotKey,
+              capturedAt: (v as ReportShot).capturedAt,
+              ...(typeof (v as ReportShot).note === "string"
+                ? { note: (v as ReportShot).note }
+                : {}),
+            };
+          }
+        }
+        this.report.shots = shots;
+      }
+    } catch {
+      // defaults stand
+    }
+    try {
+      const stored = await chrome.storage?.local?.get(
+        ExtensionState.REPORT_HOWTO_KEY,
+      );
+      const raw = stored?.[ExtensionState.REPORT_HOWTO_KEY] as
+        | Record<string, unknown>
+        | undefined;
+      if (raw && typeof raw === "object") {
+        const howTo: Record<string, ReportHowToTest> = {};
+        for (const [id, v] of Object.entries(raw)) {
+          if (
+            v &&
+            typeof v === "object" &&
+            Array.isArray((v as ReportHowToTest).steps) &&
+            typeof (v as ReportHowToTest).askedAt === "number"
+          ) {
+            const steps = (v as ReportHowToTest).steps.filter(
+              (s): s is string => typeof s === "string",
+            );
+            if (steps.length)
+              howTo[id] = {
+                itemId: id,
+                steps,
+                askedAt: (v as ReportHowToTest).askedAt,
+              };
+          }
+        }
+        this.report.howTo = howTo;
+      }
+    } catch {
+      // defaults stand
+    }
   }
 
   /** Render the current report as clean markdown for the export button.
    *  Single-project reports stay flat; multi-project reports group each
    *  day's items by project (detected inside renderReportMarkdown). */
   exportReportMarkdown(): string {
-    if (!this.report.currentRun) return "";
-    return renderReportMarkdown(this.report.currentRun);
+    const run = this.report.currentRun;
+    if (!run) return "";
+    // Weekend-fold + manual entries applied here so the export matches the
+    // cards exactly (weekends filled into weekdays, not shown as sections).
+    const folded = mergeAnnotationChildren(
+      this.foldedExportDays(),
+      $state.snapshot(this.report.annotationChildren),
+    );
+    // Days are already folded; renderReportMarkdown re-folds harmlessly
+    // (no weekend dates remain) and derives the label + project grouping.
+    return renderReportMarkdown({ ...run, days: folded });
+  }
+
+  /** The exact day buckets the export renders: the run's true-dated days with
+   *  the user's manual entries merged in (within the window) and weekends
+   *  folded into their weekday. Shared by the render and the pre-fetch so both
+   *  agree on which weekday a weekend's annotations belong to. */
+  private foldedExportDays(): ReportDay[] {
+    const run = this.report.currentRun;
+    if (!run) return [];
+    const win =
+      run.since && run.until
+        ? { since: run.since, until: run.until }
+        : (() => {
+            const w = rangeWindow(run.range, run.anchorDate);
+            return { since: w.since, until: w.until };
+          })();
+    return foldWeekends(
+      mergeCustomItems(run.days, $state.snapshot(this.report.customItems), win),
+      run.range,
+    );
+  }
+
+  /** Before an export, pull annotation detail for every annotate roll-up day
+   *  the agent didn't already expand — fetching each folded weekday together
+   *  with the weekend days that folded into it, so weekend annotations land on
+   *  the weekday. No-op when disconnected. */
+  async prepareReportExport(): Promise<void> {
+    for (const day of this.foldedExportDays()) {
+      const needs = day.items.some(
+        (it) => isAnnotateRollup(it) && !(it.children && it.children.length),
+      );
+      if (needs && !this.report.annotationChildren[day.date]) {
+        await this.loadAnnotationChildren(day.date, [
+          day.date,
+          ...(day.foldedFrom ?? []),
+        ]);
+      }
+    }
   }
 
   // ─── Commit applied changes (Annotate tray, Phase 16c) ───────────────
@@ -5956,6 +6814,17 @@ class ExtensionState {
     return moduleIsConfigured(spec, entry.settings);
   }
 
+  /** Voice Command (Phase 20) convenience accessors — drive the per-field
+   *  mic buttons + the Alt+V hotkey in the side panel. Reactive via
+   *  `this.modules`. */
+  get voiceReady(): boolean {
+    return this.moduleReady("voice-command");
+  }
+  get voiceLang(): string {
+    const v = this.modules["voice-command"]?.settings?.language;
+    return typeof v === "string" && v.trim() ? v : "en-US";
+  }
+
   setModuleTicked(id: string, ticked: boolean): void {
     if (ticked) this.tickedModules[id] = true;
     else delete this.tickedModules[id];
@@ -6653,6 +7522,9 @@ class ExtensionState {
     // No-op in standalone — the side panel hides Submit there. Defensive
     // guard so a stray call (e.g. from a hotkey) doesn't crash.
     if (this.appMode === "standalone") return;
+    // A fresh submit supersedes any prior Drift Check verdicts (including
+    // a resubmit-in-progress), so clear them to avoid stale badges.
+    this.clearDrift();
     const modules = this.buildSessionModules();
     this.send({
       type: "session.submit",
@@ -6866,6 +7738,15 @@ class ExtensionState {
           this.report.pending.sessionId = msg.session.id;
           this.ensureReconcileHeartbeat();
         }
+        // Drift Check — pin the ephemeral query session so a stray
+        // session.synced routes to handleDriftCheckSync, not the draft.
+        if (
+          msg.moduleId === "drift-check" &&
+          this.drift.pending &&
+          !this.drift.pending.sessionId
+        ) {
+          this.drift.pending.sessionId = msg.session.id;
+        }
         break;
       }
       case "session.created":
@@ -6889,6 +7770,36 @@ class ExtensionState {
         // overwrites the draft. Early return like the other module ops.
         if (ExtensionState.queryOp(msg.session) === "git-commit") {
           this.handleCommitSync(msg.session);
+          return;
+        }
+
+        // Drift Check — routed by op so the ephemeral verify session's
+        // query annotation never lands in the draft list.
+        if (ExtensionState.queryOp(msg.session) === "drift-check") {
+          this.handleDriftCheckSync(msg.session);
+          return;
+        }
+
+        // Phase 16e — per-day "fetch more commits". Routed by op (before
+        // the generic isReportSession branch below) so it merges into the
+        // existing run instead of being treated as a full report run.
+        if (ExtensionState.queryOp(msg.session) === "report-day-expand") {
+          this.handleReportExpandSync(msg.session);
+          return;
+        }
+
+        // Phase 16f — per-entry "proof" screenshot. Routed by op (before the
+        // generic isReportSession branch) so it lands in the shots cache
+        // rather than being parsed as a full report run.
+        if (ExtensionState.queryOp(msg.session) === "report-screenshot") {
+          this.handleReportShotSync(msg.session);
+          return;
+        }
+
+        // Phase 16g — per-entry "How to test" guide. Routed by op so the
+        // steps land in the howTo cache rather than the report-run handler.
+        if (ExtensionState.queryOp(msg.session) === "report-how-to-test") {
+          this.handleReportHowToSync(msg.session);
           return;
         }
 
@@ -7115,6 +8026,134 @@ class ExtensionState {
    *  `comment` is the JSON we sent as `queryComment` — that's our only
    *  channel for correlating per-request data (testId, op) back through
    *  the WebSocket roundtrip. */
+  // ─── Drift Check ─────────────────────────────────────────────────
+  /**
+   * Ask the agent to re-verify every applied annotation against the
+   * CURRENT source. Targets the DONE in-flight batches; sends their
+   * session ids + annotation ids so the agent re-reads each session from
+   * the companion and checks whether each change actually landed. The
+   * verdicts route back via `session.synced` (op:"drift-check") →
+   * `handleDriftCheckSync`. Token-lean: the payload is just ids, the
+   * agent already has the sessions on disk.
+   */
+  async runDriftCheck(): Promise<void> {
+    if (!this.client || this.connectionStatus !== "connected") {
+      this.drift.error =
+        "No companion connected — start `pinta-companion .` in your project to run a Drift Check.";
+      return;
+    }
+    if (this.drift.pending) return; // already running
+    const targets = this.inFlightBatches
+      .filter((b) => b.status === "done")
+      .map((b) => ({
+        sessionId: b.id,
+        annotationIds: b.annotations
+          .filter((a) => a.status !== "error")
+          .map((a) => a.id),
+      }))
+      .filter((t) => t.annotationIds.length > 0);
+    if (targets.length === 0) {
+      this.drift.error =
+        "Nothing to check yet — apply a batch first, then run Drift Check.";
+      return;
+    }
+    const url = this.lastUrl ?? this.session?.url ?? "";
+    this.drift.error = null;
+    this.drift.results = {};
+    this.drift.checkedAt = null;
+    this.drift.pending = { sessionId: null, startedAt: Date.now() };
+    this.armAgentWait({
+      softMs: ExtensionState.DRIFT_TIMEOUT_MS,
+      what: "Drift Check",
+      setHandle: (t) => (this.driftTimer = t),
+      stillPending: () => this.drift.pending !== null,
+      giveUp: () => {
+        this.drift.pending = null;
+        this.drift.error =
+          "Drift Check timed out — the agent didn't respond. Is a /pinta terminal running?";
+      },
+    });
+    const queryComment = JSON.stringify({ op: "drift-check", targets });
+    this.send({
+      type: "module.query.submit",
+      url,
+      moduleId: "drift-check",
+      moduleSettings: {},
+      queryComment,
+    });
+  }
+
+  private clearDriftTimer(): void {
+    if (this.driftTimer) {
+      clearTimeout(this.driftTimer);
+      this.driftTimer = null;
+    }
+    this.retireAgentWaitNotice();
+  }
+
+  /** Routed from `onMessage` when a `session.synced` with op:"drift-check"
+   *  lands. Parses the agent's per-annotation verdicts into
+   *  `drift.results` keyed by annotation id. */
+  private handleDriftCheckSync(session: Session): void {
+    if (session.status === "done") {
+      const summary = session.appliedSummary ?? "";
+      // Empty-"done" race guard (mirrors handleAuditSuggestSync): leave
+      // pending + let a real response land.
+      if (summary.trim() === "") return;
+      this.clearDriftTimer();
+      this.drift.pending = null;
+      const results: Record<string, { status: DriftStatus; reason?: string }> = {};
+      try {
+        const payload = JSON.parse(summary) as {
+          results?: { id?: string; status?: string; reason?: string }[];
+        };
+        for (const r of payload.results ?? []) {
+          const id = (r.id ?? "").trim();
+          if (!id) continue;
+          const status: DriftStatus = ["ok", "drifted", "missing", "unverifiable"].includes(
+            r.status ?? "",
+          )
+            ? (r.status as DriftStatus)
+            : "unverifiable";
+          results[id] = { status, reason: r.reason?.trim() || undefined };
+        }
+      } catch {
+        this.drift.error = "Drift Check returned a malformed result.";
+        return;
+      }
+      this.drift.results = results;
+      this.drift.checkedAt = Date.now();
+      if (Object.keys(results).length === 0) {
+        this.drift.error = "Drift Check came back empty — nothing was verified.";
+      }
+    } else if (session.status === "error") {
+      this.clearDriftTimer();
+      this.drift.pending = null;
+      this.drift.error = session.errorMessage ?? "Drift Check failed.";
+    }
+  }
+
+  /** Annotation ids the last Drift Check flagged as needing a resubmit
+   *  (drifted or missing — not the merely unverifiable ones). */
+  get driftFlaggedIds(): string[] {
+    return Object.entries(this.drift.results)
+      .filter(([, v]) => v.status === "drifted" || v.status === "missing")
+      .map(([id]) => id);
+  }
+
+  /** Clear Drift Check state (tray cleared / fresh batch submitted) so
+   *  stale verdicts don't linger on the next batch. */
+  clearDrift(): void {
+    this.clearDriftTimer();
+    this.drift = {
+      pending: null,
+      results: {},
+      error: null,
+      checkedAt: null,
+      resubmitting: false,
+    };
+  }
+
   private static queryField(session: Session, field: string): string | null {
     const annot = session.annotations.find((a) => a.kind === "query");
     if (!annot?.comment) return null;

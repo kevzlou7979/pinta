@@ -10,6 +10,7 @@
   // dialog, and grants a subset. The companion writes it to
   // `.pinta/modules/<id>/`; the /pinta skill loads `agent.md` (§7.12).
 
+  import { onMount } from "svelte";
   import { app } from "../lib/state.svelte.js";
   import {
     moduleIsConfigured,
@@ -29,6 +30,43 @@
   } from "../lib/pinta-settings.js";
 
   let revealedSecrets = $state<Record<string, boolean>>({});
+
+  // Voice Command (Phase 20) — mic permission is granted to the EXTENSION
+  // origin once, from this visible surface (the offscreen recognizer can't
+  // show a prompt). Track + drive that grant here.
+  let micState = $state<"unknown" | "granted" | "denied" | "checking">(
+    "unknown",
+  );
+
+  onMount(() => {
+    try {
+      void navigator.permissions
+        // `microphone` isn't in the default PermissionName union — cast.
+        ?.query({ name: "microphone" } as unknown as PermissionDescriptor)
+        .then((status) => {
+          micState = status.state === "granted" ? "granted" : status.state === "denied" ? "denied" : "unknown";
+          status.onchange = () => {
+            micState = status.state === "granted" ? "granted" : status.state === "denied" ? "denied" : "unknown";
+          };
+        })
+        .catch(() => {});
+    } catch {
+      // permissions API unavailable — leave as unknown
+    }
+  });
+
+  async function grantMicrophone(): Promise<void> {
+    micState = "checking";
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      // We only needed the prompt — stop the tracks immediately; the
+      // offscreen recognizer opens its own capture when dictating.
+      stream.getTracks().forEach((t) => t.stop());
+      micState = "granted";
+    } catch {
+      micState = "denied";
+    }
+  }
 
   // Which module cards are expanded to show their description + settings.
   // Default (undefined) is computed per-card: collapsed normally, but
@@ -493,6 +531,38 @@
                 — the per-submit checkbox will activate in the footer.
               </p>
             {/if}
+
+            {#if spec.id === "voice-command"}
+              <!-- Mic must be granted to the extension once, from here (a
+                   visible surface). After that the mic buttons + Alt+V work
+                   in the side panel AND on any page, no per-site prompts. -->
+              <div class="pt-2 border-t border-ink-100 dark:border-night-line space-y-1.5">
+                <div class="flex items-center gap-2">
+                  <button
+                    type="button"
+                    class="text-[11px] rounded border border-ink-300 dark:border-night-line px-2 py-1 text-ink-700 dark:text-night-dim hover:border-brand-pink hover:text-brand-pink disabled:opacity-50"
+                    onclick={grantMicrophone}
+                    disabled={micState === "checking" || micState === "granted"}
+                  >
+                    {micState === "granted"
+                      ? "Microphone enabled ✓"
+                      : micState === "checking"
+                        ? "Requesting…"
+                        : "Grant microphone"}
+                  </button>
+                  {#if micState === "denied"}
+                    <span class="text-[10px] text-red-600 dark:text-red-400">
+                      Blocked — allow mic for this extension in your browser.
+                    </span>
+                  {/if}
+                </div>
+                <p class="text-[10px] text-ink-500 dark:text-night-mute leading-tight">
+                  Dictate into any text field with its mic button, or press
+                  <kbd class="font-mono">Alt</kbd>+<kbd class="font-mono">V</kbd>
+                  on the focused field. Needs an internet connection.
+                </p>
+              </div>
+            {/if}
           </div>
         {/if}
 
@@ -683,6 +753,68 @@
           </div>
         </div>
       {/if}
+    </div>
+  </div>
+
+  <!-- Page reload after the agent applies a batch. Auto reloads for you
+       (skipped when HMR is detected); Manual leaves the page alone so it
+       never refreshes out from under you while you annotate again. -->
+  <div class="space-y-2">
+    <h3 class="text-xs uppercase tracking-wide text-ink-500 dark:text-night-mute font-medium">
+      Page reload
+    </h3>
+    <div
+      class="rounded-md border border-ink-200 dark:border-night-line bg-white dark:bg-night-card p-3"
+    >
+      <div class="flex items-start gap-2">
+        <div class="min-w-0 flex-1">
+          <div class="flex items-center gap-1.5">
+            <span
+              class="inline-flex shrink-0"
+              class:text-brand-pink={app.autoReload}
+              class:dark:text-brand-pink-light={app.autoReload}
+              class:text-ink-400={!app.autoReload}
+              class:dark:text-night-mute={!app.autoReload}
+              aria-hidden="true"
+            >
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                <path d="M21 2v6h-6" />
+                <path d="M3 12a9 9 0 0 1 15-6.7L21 8" />
+                <path d="M3 22v-6h6" />
+                <path d="M21 12a9 9 0 0 1-15 6.7L3 16" />
+              </svg>
+            </span>
+            <span class="text-sm font-semibold text-ink-900 dark:text-night-text">
+              Auto-reload after changes
+            </span>
+          </div>
+          <p class="text-[12px] text-ink-700 dark:text-night-dim mt-0.5">
+            Off by default — on the Pinta tab this also holds back your dev
+            server's hot-reload (Vite HMR) full-refreshes, so the page can't
+            reload out from under you while you annotate. Reload on demand with
+            the Reload button. Turn on to let the page auto-reload after the
+            agent applies a batch.
+          </p>
+        </div>
+        <label class="shrink-0 inline-flex items-center cursor-pointer">
+          <input
+            type="checkbox"
+            class="sr-only peer"
+            checked={app.autoReload}
+            onchange={(e) =>
+              app.setAutoReload((e.currentTarget as HTMLInputElement).checked)}
+          />
+          <span
+            class="relative w-9 h-5 bg-ink-300 dark:bg-night-line rounded-full peer-checked:bg-brand-pink dark:peer-checked:bg-brand-pink-light transition-colors"
+            aria-hidden="true"
+          >
+            <span
+              class="absolute top-0.5 left-0.5 w-4 h-4 bg-white rounded-full transition-transform"
+              class:translate-x-4={app.autoReload}
+            ></span>
+          </span>
+        </label>
+      </div>
     </div>
   </div>
 

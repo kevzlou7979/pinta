@@ -26,14 +26,16 @@ export type ReportCategory =
   | "docs"
   | "chore";
 
-/** Where an item came from — drives the small source glyph. */
+/** Where an item came from — drives the small source glyph. "manual" is a
+ *  hand-typed custom entry (see ReportCustomItem). */
 export type ReportSource =
   | "git"
   | "pr"
   | "issue"
   | "pinta-annotate"
   | "pinta-audit"
-  | "pinta-test";
+  | "pinta-test"
+  | "manual";
 
 export type ReportItem = {
   /** Stable id for keying + dedupe. Synthesized from ref/title if the
@@ -55,6 +57,92 @@ export type ReportItem = {
    *  multiple projects so the cards + export can group by project.
    *  Single-project reports may leave it unset. */
   project?: string;
+  /** True when the user typed this entry by hand (a merged custom-cache
+   *  item) rather than the agent gathering it — drives the "Manual" badge
+   *  and the inline delete control in the cards. Never set on agent
+   *  payloads. */
+  userAdded?: boolean;
+  /** Top changed-file paths for this item (commits mostly), repo-relative
+   *  and capped for the compact view — the agent sends the first few, not
+   *  every file. Drives the small file line under the title. */
+  files?: string[];
+  /** Total number of files the item changed, when it's more than `files`
+   *  carries (drives the "+N more" suffix). Omit when it equals
+   *  `files.length`. */
+  fileCount?: number;
+  /** Nested sub-entries for a roll-up item — e.g. a "Pinta annotations"
+   *  parent whose children are each annotation's comment. The card renders
+   *  them behind a collapsible disclosure and the markdown export indents
+   *  them under the parent bullet. Omit (or empty) for a plain item. */
+  children?: ReportItemChild[];
+};
+
+/** One nested entry under a roll-up ReportItem (e.g. a single Pinta
+ *  annotation's comment). Deliberately minimal — a one-line title, plus an
+ *  optional ref/url so an expanded child can still link out. */
+export type ReportItemChild = {
+  /** One-line label (humanized at render/export time like a parent title). */
+  title: string;
+  /** Optional short ref shown before the title (e.g. a page path). */
+  ref?: string;
+  /** Optional link for the child. */
+  url?: string;
+};
+
+/**
+ * A report entry the user typed by hand. Stored in its OWN persisted cache
+ * (never inside a ReportRun) so regenerating the report can't drop it — it's
+ * re-merged into the day cards at render/export time via `mergeCustomItems`.
+ * Minimal by design: a dated title + category.
+ */
+export type ReportCustomItem = {
+  /** Stable id for keying + delete. */
+  id: string;
+  /** ISO `yyyy-mm-dd` the entry belongs to. */
+  date: string;
+  title: string;
+  category: ReportCategory;
+};
+
+/**
+ * A captured "proof" screenshot for one report entry (Phase 16f). The
+ * /pinta agent opens the entry's page, frames the specific element the
+ * change touched (e.g. the now-red button), and writes a PNG to
+ * `.pinta/report-shots/<shotKey>.png` on disk. The extension can't read
+ * disk, so the companion serves that file over HTTP and the side panel
+ * points an <img> at it — this record is just the metadata, kept in its
+ * OWN persisted cache keyed by item id (like ReportCustomItem) so a
+ * Refresh never drops it.
+ */
+export type ReportShot = {
+  /** The ReportItem.id this shot belongs to. */
+  itemId: string;
+  /** Filesystem-safe stem for the on-disk PNG + the companion lookup key.
+   *  Derived deterministically from itemId via `shotKeyForItem`, so a
+   *  re-capture overwrites the same file. */
+  shotKey: string;
+  /** When the agent captured it (ms epoch) — drives cache-busting the
+   *  <img> URL and a "captured X ago" hint. */
+  capturedAt: number;
+  /** The agent's one-line description of what it framed (e.g. "the
+   *  primary submit button, now red"). Optional. */
+  note?: string;
+};
+
+/**
+ * A generated "How to test" guide for one report entry (Phase 16g). The
+ * /pinta agent turns the shipped item into manual QA verification steps
+ * (same step-markdown the Test Pilot detail view renders). Cached in its
+ * OWN persisted store keyed by item id (like ReportShot / ReportCustomItem)
+ * so a Refresh never drops it.
+ */
+export type ReportHowToTest = {
+  /** The ReportItem.id this guide belongs to. */
+  itemId: string;
+  /** Ordered steps; each is step-markdown (parsed via `parseStep`). */
+  steps: string[];
+  /** When the agent generated it (ms epoch). */
+  askedAt: number;
 };
 
 export type ReportDay = {
@@ -105,6 +193,7 @@ const REPORT_SOURCES = new Set<ReportSource>([
   "pinta-annotate",
   "pinta-audit",
   "pinta-test",
+  "manual",
 ]);
 
 const MONTHS = [
@@ -279,6 +368,49 @@ export function rangeWindow(
 }
 
 /**
+ * Merge the user's hand-entered custom items into a run's TRUE-dated day
+ * buckets. Manual items live in their own persisted cache (never inside a
+ * ReportRun), so a refresh that replaces the run can't drop them — they're
+ * re-merged here at render/export time. Items whose date falls OUTSIDE the
+ * supplied inclusive `window` are skipped (hidden, not lost): they reappear
+ * the moment a range covering their date is selected. Omit `window` to
+ * include every custom item (used for the no-run fallback view).
+ *
+ * Returns a fresh array (inputs untouched), still true-dated and unsorted —
+ * run the result through `foldWeekends` for display.
+ */
+export function mergeCustomItems(
+  days: ReportDay[],
+  custom: ReportCustomItem[],
+  window?: { since: string; until: string },
+): ReportDay[] {
+  const byDate = new Map<string, ReportDay>();
+  for (const d of days) {
+    byDate.set(d.date, {
+      date: d.date,
+      items: [...d.items],
+      ...(d.foldedFrom ? { foldedFrom: [...d.foldedFrom] } : {}),
+    });
+  }
+  for (const c of custom) {
+    // ISO yyyy-mm-dd compares lexicographically, so plain string bounds work.
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(c.date)) continue;
+    if (window && (c.date < window.since || c.date > window.until)) continue;
+    const item: ReportItem = {
+      id: c.id,
+      title: c.title,
+      category: c.category,
+      source: "manual",
+      userAdded: true,
+    };
+    const bucket = byDate.get(c.date);
+    if (bucket) bucket.items.push(item);
+    else byDate.set(c.date, { date: c.date, items: [item] });
+  }
+  return [...byDate.values()];
+}
+
+/**
  * Fold weekend (Sat/Sun) work into the lighter adjacent weekday.
  *
  * The locked rule: weekends aren't their own sections in weekly/sprint
@@ -342,7 +474,69 @@ export function foldWeekends(
 
   return [...byDate.values()]
     .filter((d) => d.items.length > 0)
+    .map(coalesceAnnotateRollups)
     .sort((a, b) => (a.date < b.date ? 1 : a.date > b.date ? -1 : 0));
+}
+
+/** After a weekend fold, a weekday can end up with more than one annotation
+ *  roll-up (its own + the folded weekend's). Collapse them into a single
+ *  "Fixes and Additional Features" row, concatenating any children, so the
+ *  day shows one roll-up rather than duplicates. Non-annotate items and days
+ *  with ≤1 roll-up are returned unchanged (same identity). */
+function coalesceAnnotateRollups(day: ReportDay): ReportDay {
+  const rollups = day.items.filter(isAnnotateRollup);
+  if (rollups.length <= 1) return day;
+  const first = rollups[0]!;
+  const mergedChildren = rollups.flatMap((r) => r.children ?? []);
+  const mergedFirst: ReportItem = {
+    ...first,
+    ...(mergedChildren.length ? { children: mergedChildren } : {}),
+  };
+  const extras = new Set(rollups.slice(1));
+  const items = day.items
+    .filter((it) => !extras.has(it))
+    .map((it) => (it === first ? mergedFirst : it));
+  return { ...day, items };
+}
+
+/**
+ * Merge freshly-fetched `incoming` day buckets into the run's existing
+ * (true-dated) `days`, deduping items by `id` so re-fetching a day only
+ * ADDS commits that weren't already listed — never drops or reorders what
+ * was there. New dates create their own bucket. Returns a fresh array plus
+ * the count of genuinely-new items (drives the "no new commits" note).
+ *
+ * Inputs are not mutated. Used by the per-day "fetch more" action; manual
+ * cache items live in a separate store and are untouched here.
+ */
+export function mergeReportDays(
+  existing: ReportDay[],
+  incoming: ReportDay[],
+): { days: ReportDay[]; added: number } {
+  const byDate = new Map<string, ReportDay>();
+  for (const d of existing) {
+    byDate.set(d.date, {
+      date: d.date,
+      items: [...d.items],
+      ...(d.foldedFrom ? { foldedFrom: [...d.foldedFrom] } : {}),
+    });
+  }
+  let added = 0;
+  for (const d of incoming) {
+    let bucket = byDate.get(d.date);
+    if (!bucket) {
+      bucket = { date: d.date, items: [] };
+      byDate.set(d.date, bucket);
+    }
+    const seen = new Set(bucket.items.map((it) => it.id));
+    for (const it of d.items) {
+      if (seen.has(it.id)) continue;
+      bucket.items.push(it);
+      seen.add(it.id);
+      added++;
+    }
+  }
+  return { days: [...byDate.values()], added };
 }
 
 /** Distinct non-empty project labels across a run. >1 means the report
@@ -355,17 +549,84 @@ export function reportProjects(run: ReportRun): string[] {
   return [...set];
 }
 
+/** Conventional-commit types we strip from the front of a subject. Limited to
+ *  this set so a hand-typed manual entry like `Met John: notes` keeps its colon
+ *  prefix — only real commit noise is removed. */
+const CC_TYPE =
+  /^(?:feat|fix|chore|docs|style|refactor|perf|test|build|ci|revert|merge|wip)(?:\([^)]*\))?!?:\s*/i;
+
+/** The daily-merge gitlink bump, e.g. `bump svelte gitlink` or, with an issue
+ *  ref in front, `#368 bump svelte gitlink`. The captured `#ref` is preserved
+ *  (traceability), the bump token itself is dropped, and a trailing ` -- ` is
+ *  consumed so the real subject after it becomes the title. */
+const GITLINK_BUMP = /(#\S+\s+)?\bbump\s+(?:\S+\s+)*?gitlink\b[ \t]*(?:--+[ \t]*)?/i;
+
+/** Words kept lowercase in Title Case unless first/last. */
+const SMALL_WORDS = new Set([
+  "a", "an", "and", "as", "at", "but", "by", "for", "from", "in", "into",
+  "nor", "of", "on", "onto", "or", "over", "per", "the", "to", "via", "vs",
+  "with",
+]);
+
+/** Title-case a single token, but PRESERVE anything that looks technical so a
+ *  company-facing report never mangles it: tokens with internal capitals
+ *  (`PDF`, `DTO`, `CTA`, `McKay`), anything containing a digit (`#00447c`,
+ *  `i18n`, `1.7.2`, `#369`), and pure symbols (`+`, `→`). Plain words get
+ *  their first letter capitalised; small words stay lowercase mid-sentence. */
+function titleCaseToken(word: string, isEdge: boolean): string {
+  if (!word) return word;
+  if (/[A-Z]/.test(word.slice(1))) return word; // internal capital → acronym/camel
+  if (/\d/.test(word)) return word; // has a digit → ref/hex/version/i18n
+  if (!/[a-z]/i.test(word)) return word; // no letters → symbol/punctuation
+  const lower = word.toLowerCase();
+  if (!isEdge && SMALL_WORDS.has(lower.replace(/[^a-z]/g, ""))) return lower;
+  return lower.replace(/[a-z]/i, (c) => c.toUpperCase()); // cap first letter
+}
+
+/** Apply Title Case across a cleaned subject. First and last words are always
+ *  capitalised; everything else honours the small-word list. */
+function toTitleCase(s: string): string {
+  const words = s.split(/\s+/);
+  return words
+    .map((w, i) => titleCaseToken(w, i === 0 || i === words.length - 1))
+    .join(" ");
+}
+
+/** Strip conventional-commit + gitlink-bump noise from a commit subject and
+ *  tidy separators, leaving just the human-meaningful message. Returns null
+ *  when nothing meaningful survives (so callers keep the original). */
+function cleanCommitSubject(raw: string): string | null {
+  let s = raw.replace(CC_TYPE, "").trim();
+  const m = GITLINK_BUMP.exec(s);
+  if (m) {
+    const ref = m[1] ? m[1].trim() + " " : "";
+    let rest = (s.slice(0, m.index) + s.slice(m.index + m[0].length)).trim();
+    // When the real message was wrapped wholly in parens (no ` -- ` form),
+    // unwrap the single outer pair so it reads as a sentence.
+    const wrapped = /^\(([^()]*)\)$/.exec(rest);
+    if (wrapped) rest = (wrapped[1] ?? "").trim();
+    s = (ref + rest).trim();
+  }
+  // Prettify separators/arrows for a report audience.
+  s = s.replace(/\s+--+\s+/g, " — ").replace(/->/g, "→").replace(/<-/g, "←");
+  return s.length > 0 ? s : null;
+}
+
 /**
- * Make an item title human-friendly. Pinta module sessions (AuditFlow, Test
- * Pilot, …) record their result as a JSON `appliedSummary`; when that lands
- * in a report item's `title` it shows as a raw `{"type":…}` blob. Detect
- * those and render a plain one-line summary instead. Anything that isn't a
- * JSON object passes through unchanged — idempotent, so it's safe at both
- * render AND export time.
+ * Make an item title human-friendly for a company-facing report. Idempotent,
+ * so it's safe at render AND export time:
+ *  1. Pinta module sessions (AuditFlow, Test Pilot, …) record their result as a
+ *     JSON `appliedSummary`; render a plain one-line summary instead of braces.
+ *  2. Everything else is treated as a commit subject: strip the conventional
+ *     `type(scope):` prefix and the `bump … gitlink --` daily-merge boilerplate,
+ *     then Title Case the remainder while preserving refs/acronyms/hex/versions.
  */
 export function humanizeReportTitle(title: string): string {
   const t = (title ?? "").trim();
-  if (!t.startsWith("{")) return title;
+  if (!t.startsWith("{")) {
+    const cleaned = cleanCommitSubject(t);
+    return cleaned ? toTitleCase(cleaned) : title;
+  }
   let obj: Record<string, unknown> | null = null;
   try {
     const parsed = JSON.parse(t);
@@ -381,6 +642,26 @@ export function humanizeReportTitle(title: string): string {
   const m = /"type"\s*:\s*"([^"]+)"/.exec(t);
   if (m && m[1]) return friendlyModuleLine(m[1], {});
   return obj ? title : "Pinta activity";
+}
+
+/** Fixed, human-friendly label shown for a Pinta annotation roll-up in a
+ *  company-facing report — the raw "N Pinta annotations" count reads as
+ *  internal jargon, so the parent row is titled by what the work actually is. */
+export const ANNOTATION_ROLLUP_LABEL = "Fixes and Additional Features";
+
+/** True when an item is the per-day Pinta annotation roll-up (the collapsible
+ *  parent whose children are individual annotations). */
+export function isAnnotateRollup(item: ReportItem): boolean {
+  return item.source === "pinta-annotate" || item.category === "annotate";
+}
+
+/** Display title for a report item's parent row — the fixed annotation
+ *  roll-up label for annotate items, otherwise the humanized commit subject.
+ *  Shared by the cards and the markdown export so both read the same. */
+export function reportItemDisplayTitle(item: ReportItem): string {
+  return isAnnotateRollup(item)
+    ? ANNOTATION_ROLLUP_LABEL
+    : humanizeReportTitle(item.title);
 }
 
 /** Plain-English one-liner for a Pinta module session result, keyed by its
@@ -435,22 +716,64 @@ function friendlyModuleLine(type: string, o: Record<string, unknown>): string {
   }
 }
 
-/** One markdown line for an item. When the report spans multiple
- *  projects, prefix the line with its `[project]` tag so you can see
- *  which repo each task came from (e.g. `- [insclix-awp-2.0] #319 —
- *  …`); single-project reports stay clean (`- #ref — title`). */
-function reportItemLine(it: ReportItem, multiProject: boolean): string {
-  const tag = multiProject && it.project ? `[${it.project}] ` : "";
-  const title = humanizeReportTitle(it.title);
-  return it.ref ? `- ${tag}${it.ref} — ${title}` : `- ${tag}${title}`;
+/** How many changed-file paths the compact view lists before "+N more". */
+const FILE_PREVIEW_MAX = 3;
+
+/** Compact one-line summary of an item's changed files, or null when it
+ *  has none. e.g. "3 files · a.ts, b.ts, c.ts" or, when more changed than
+ *  are listed, "8 files · a.ts, b.ts, c.ts (+5 more)". Shared by the card
+ *  render and the markdown export so they always agree. */
+export function formatFileSummary(item: ReportItem): string | null {
+  const files = item.files;
+  if (!files || files.length === 0) return null;
+  const total = Math.max(item.fileCount ?? 0, files.length);
+  const shown = files.slice(0, FILE_PREVIEW_MAX);
+  const extra = total - shown.length;
+  const noun = total === 1 ? "file" : "files";
+  const list = shown.join(", ");
+  return extra > 0
+    ? `${total} ${noun} · ${list} (+${extra} more)`
+    : `${total} ${noun} · ${list}`;
 }
 
-/** Markdown for a single day — flat `- #ref — title` lines, each
- *  prefixed with `[project]` when the report spans multiple projects.
- *  Shared by the whole-report export and the per-day export button. */
+/** True when a ref is a human-meaningful tracker id worth showing inline (a
+ *  PR/issue number like `#290` or `!57`) rather than a raw commit short-sha,
+ *  which reads as a code — dropped from the plain export and tucked behind the
+ *  card's info disclosure. */
+export function isTrackerRef(it: ReportItem): boolean {
+  if (!it.ref) return false;
+  if (it.source === "pr" || it.source === "issue") return true;
+  return /^[#!]/.test(it.ref);
+}
+
+/** One markdown line for an item — deliberately PLAIN PROSE for a
+ *  company-facing report: no commit short-shas, no changed-file paths, no
+ *  DOM/route codes. Keeps only a `#PR`/`!issue` tracker ref (dropped for
+ *  bare commits) and, for multi-project runs, the `[project]` tag so you can
+ *  tell repos apart. The on-screen cards still show the full detail; this is
+ *  the export view only. */
+function reportItemLine(it: ReportItem, multiProject: boolean): string {
+  const tag = multiProject && it.project ? `[${it.project}] ` : "";
+  const title = reportItemDisplayTitle(it);
+  const ref = isTrackerRef(it) ? `${it.ref} — ` : "";
+  return `- ${tag}${ref}${title}`;
+}
+
+/** Markdown for a single day — flat, plain-prose `- title` lines (a `#ref`
+ *  kept only for PRs/issues), each prefixed with `[project]` when the report
+ *  spans multiple projects. A roll-up item's `children` (e.g. each Pinta
+ *  annotation) are indented as nested bullets — plain descriptions, no page
+ *  routes. Shared by the whole-report export and the per-day export button. */
 export function renderDayMarkdown(day: ReportDay, multiProject: boolean): string {
   const lines = [`## ${formatDayHeading(day.date)}`];
-  for (const it of day.items) lines.push(reportItemLine(it, multiProject));
+  for (const it of day.items) {
+    lines.push(reportItemLine(it, multiProject));
+    if (it.children?.length) {
+      for (const c of it.children) {
+        lines.push(`  - ${humanizeReportTitle(c.title)}`);
+      }
+    }
+  }
   return lines.join("\n").trimEnd() + "\n";
 }
 
@@ -555,5 +878,233 @@ function coerceItem(raw: unknown, fallbackId: string): ReportItem | null {
     ...(typeof o.project === "string" && o.project.trim()
       ? { project: o.project.trim() }
       : {}),
+    ...coerceFiles(o),
+    ...coerceChildren(o),
   };
+}
+
+/** Pull a capped list of nested sub-entries from a raw item. Accepts either
+ *  bare strings (`["a", "b"]`) or objects (`[{title, ref?, url?}]`) so the
+ *  agent can emit whichever is convenient; both normalize to ReportItemChild.
+ *  Capped so a runaway annotation batch can't bloat the cached run. */
+function coerceChildren(o: Record<string, unknown>): {
+  children?: ReportItemChild[];
+} {
+  const CHILD_STORE_MAX = 100;
+  const raw = Array.isArray(o.children) ? o.children : null;
+  if (!raw) return {};
+  const children: ReportItemChild[] = [];
+  for (const c of raw) {
+    if (typeof c === "string") {
+      const title = c.trim();
+      if (title) children.push({ title });
+    } else if (c && typeof c === "object") {
+      const co = c as Record<string, unknown>;
+      const title = typeof co.title === "string" ? co.title.trim() : "";
+      if (!title) continue;
+      children.push({
+        title,
+        ...(typeof co.ref === "string" && co.ref.trim()
+          ? { ref: co.ref.trim() }
+          : {}),
+        ...(typeof co.url === "string" && co.url.trim()
+          ? { url: co.url.trim() }
+          : {}),
+      });
+    }
+    if (children.length >= CHILD_STORE_MAX) break;
+  }
+  return children.length ? { children } : {};
+}
+
+// ─── Annotation-children fallback helpers ───────────────────────────
+// Pure helpers the client uses to build annotation children directly from
+// companion session data when the agent left a roll-up as a bare count.
+// Kept here (not in state) so they're unit-testable.
+
+/** Local-timezone ISO `yyyy-mm-dd` for an epoch-ms timestamp, or null. Local
+ *  (not UTC) so it lines up with the day a user perceives an annotation was
+ *  submitted — matching the agent's git-derived day buckets. */
+export function isoDateLocal(ms?: number): string | null {
+  if (typeof ms !== "number" || !Number.isFinite(ms)) return null;
+  const d = new Date(ms);
+  const y = d.getFullYear();
+  const m = String(d.getMonth() + 1).padStart(2, "0");
+  const day = String(d.getDate()).padStart(2, "0");
+  return `${y}-${m}-${day}`;
+}
+
+/** True when a session's `appliedSummary` is a module result (AuditFlow /
+ *  Test Pilot / Chat emit a JSON object with a string `type`) rather than a
+ *  plain annotation batch — so the fallback skips those sessions. */
+export function looksLikeModuleSummary(s?: string): boolean {
+  if (typeof s !== "string") return false;
+  const t = s.trim();
+  if (!t.startsWith("{")) return false;
+  try {
+    const o = JSON.parse(t) as unknown;
+    return !!o && typeof o === "object" && typeof (o as { type?: unknown }).type === "string";
+  } catch {
+    // Truncated JSON that still declares a `type` — treat as a module result.
+    return /"type"\s*:/.test(t);
+  }
+}
+
+/** Merge the client-side annotation fallback into a run's days for export:
+ *  any annotate roll-up item that has no `children` of its own gets the
+ *  fetched children for its day (keyed by `day.date`). Returns new arrays
+ *  only where something changed, so untouched days/items keep their identity.
+ *  Pure → safe to call at export time and unit-test. */
+export function mergeAnnotationChildren(
+  days: ReportDay[],
+  cache: Record<string, ReportItemChild[]>,
+): ReportDay[] {
+  return days.map((day) => {
+    const fallback = cache[day.date];
+    if (!fallback || fallback.length === 0) return day;
+    let changed = false;
+    const items = day.items.map((it) => {
+      const isAnnotate =
+        it.source === "pinta-annotate" || it.category === "annotate";
+      if (isAnnotate && !(it.children && it.children.length)) {
+        changed = true;
+        return { ...it, children: fallback };
+      }
+      return it;
+    });
+    return changed ? { ...day, items } : day;
+  });
+}
+
+/** Page path (pathname) from a session URL, for the small ref before a child
+ *  title. Undefined for the bare root or an unparseable URL. */
+export function pagePathFromUrl(url?: string): string | undefined {
+  if (typeof url !== "string" || !url) return undefined;
+  try {
+    const p = new URL(url).pathname;
+    return p && p !== "/" ? p : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+/** Normalize an annotation comment into a single short line for a child
+ *  title: first line, trimmed, capped so a long note can't blow out the row. */
+export function oneLineComment(c?: string): string {
+  if (typeof c !== "string") return "";
+  const first = (c.split(/\r?\n/)[0] ?? "").trim();
+  return first.length <= 120 ? first : first.slice(0, 117).trimEnd() + "…";
+}
+
+/** Pull a capped, cleaned changed-files list (+ optional total count) from
+ *  a raw item. Defensive: filters to non-empty strings, caps the stored
+ *  list so a runaway payload can't bloat storage, and only keeps
+ *  `fileCount` when it exceeds what `files` carries. */
+function coerceFiles(o: Record<string, unknown>): {
+  files?: string[];
+  fileCount?: number;
+} {
+  const FILE_STORE_MAX = 6;
+  const raw = Array.isArray(o.files) ? o.files : null;
+  if (!raw) return {};
+  const files = raw
+    .filter((f): f is string => typeof f === "string" && f.trim() !== "")
+    .map((f) => f.trim())
+    .slice(0, FILE_STORE_MAX);
+  if (files.length === 0) return {};
+  const count =
+    typeof o.fileCount === "number" && Number.isFinite(o.fileCount)
+      ? Math.max(0, Math.floor(o.fileCount))
+      : 0;
+  return count > files.length ? { files, fileCount: count } : { files };
+}
+
+// ─── Per-entry screenshot (Phase 16f) ───────────────────────────────
+// Deterministic agent ↔ companion ↔ extension contract for the "proof"
+// screenshot: the extension derives a safe `shotKey` from the item id and
+// sends it in the op:"report-screenshot" request; the agent writes the PNG
+// to `.pinta/report-shots/<shotKey>.png` and echoes the key back; the
+// companion serves that file by key. Computing the key here (pure) keeps
+// all three layers in lock-step without cross-layer filename sanitization
+// drift.
+
+/** Tiny stable string hash (djb2 → base36). Used only to make `shotKey`
+ *  collision-free across distinct item ids — NOT for security. */
+function shotHash(s: string): string {
+  let h = 5381;
+  for (let i = 0; i < s.length; i++) h = ((h << 5) + h + s.charCodeAt(i)) >>> 0;
+  return h.toString(36);
+}
+
+/** Filesystem-safe, collision-free stem for an entry's screenshot file.
+ *  Deterministic: the same item id always maps to the same key, so a
+ *  re-capture overwrites the same PNG. Pure → unit-tested. */
+export function shotKeyForItem(itemId: string): string {
+  const base = itemId
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, "-")
+    .replace(/^-+|-+$/g, "")
+    .slice(0, 48);
+  return `${base || "entry"}-${shotHash(itemId)}`;
+}
+
+/** What the agent returns in `mark_session_done` for op:"report-screenshot". */
+export type ShotResult = {
+  itemId: string;
+  shotKey: string;
+  ok: boolean;
+  /** One-line description of what was framed (success). */
+  note?: string;
+  /** Why the capture failed (ok:false) — surfaced as a dismissible error. */
+  reason?: string;
+};
+
+/** Validate + normalize the agent's screenshot result envelope. Returns
+ *  null when it's unrecognizable (missing itemId/shotKey). Pure →
+ *  unit-tested. */
+export function parseShotResult(raw: unknown): ShotResult | null {
+  if (!raw || typeof raw !== "object") return null;
+  const o = raw as Record<string, unknown>;
+  const itemId = typeof o.itemId === "string" ? o.itemId.trim() : "";
+  const shotKey = typeof o.shotKey === "string" ? o.shotKey.trim() : "";
+  if (!itemId || !shotKey) return null;
+  return {
+    itemId,
+    shotKey,
+    ok: o.ok === true,
+    ...(typeof o.note === "string" && o.note.trim()
+      ? { note: o.note.trim() }
+      : {}),
+    ...(typeof o.reason === "string" && o.reason.trim()
+      ? { reason: o.reason.trim() }
+      : {}),
+  };
+}
+
+// ─── Per-entry "How to test" (Phase 16g) ────────────────────────────
+
+/** What the agent returns in `mark_session_done` for op:"report-how-to-test"
+ *  — the item id (so the extension routes it) plus ordered step-markdown. */
+export type HowToTestResult = {
+  itemId: string;
+  steps: string[];
+};
+
+/** Validate + normalize the agent's how-to-test result. Filters steps to
+ *  non-empty strings; caps the count so a runaway payload can't bloat
+ *  storage. Returns null when unusable (no itemId or no steps). Pure →
+ *  unit-tested. */
+export function parseHowToTestResult(raw: unknown): HowToTestResult | null {
+  if (!raw || typeof raw !== "object") return null;
+  const o = raw as Record<string, unknown>;
+  const itemId = typeof o.itemId === "string" ? o.itemId.trim() : "";
+  if (!itemId) return null;
+  const rawSteps = Array.isArray(o.steps) ? o.steps : null;
+  if (!rawSteps) return null;
+  const steps = rawSteps
+    .filter((s): s is string => typeof s === "string" && s.trim() !== "")
+    .map((s) => s.trim())
+    .slice(0, 20);
+  if (steps.length === 0) return null;
+  return { itemId, steps };
 }

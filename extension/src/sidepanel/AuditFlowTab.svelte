@@ -27,6 +27,7 @@
   import { auditProgress, statusGlyph } from "../lib/audit-flow.js";
   import { parseAuditCatalog } from "../lib/audit-catalog-doc.js";
   import ChatSheet from "./ChatSheet.svelte";
+  import MicButton from "../lib/voice/MicButton.svelte";
 
   // AuditFlow takes no props — Fix now happens IN PLACE (no Annotate
   // handoff): the agent edits the code directly and the row shows a
@@ -349,7 +350,9 @@
   // ─── Inline check editor ────────────────────────────────────────────
   let editingCheckId = $state<string | null>(null);
   let editCheckLabel = $state("");
+  let editCheckLabelEl: HTMLInputElement | undefined = $state();
   let editCheckDescription = $state("");
+  let editCheckDescriptionEl: HTMLTextAreaElement | undefined = $state();
   function startEditCheck(check: AuditCheck): void {
     editingCheckId = check.id;
     editCheckLabel = check.label;
@@ -390,7 +393,9 @@
   // ─── Add check (per-category, via kebab) ────────────────────────────
   let addingCheckCategory = $state<string | null>(null);
   let newCheckLabel = $state("");
+  let newCheckLabelEl: HTMLInputElement | undefined = $state();
   let newCheckDescription = $state("");
+  let newCheckDescriptionEl: HTMLTextAreaElement | undefined = $state();
   function openAddCheck(categoryId: string): void {
     addingCheckCategory = categoryId;
     newCheckLabel = "";
@@ -784,23 +789,39 @@
           {#if editingCheckId === check.id}
             <!-- Inline check editor (label + description). -->
             <div class="space-y-2">
-              <input
-                data-audit-edit-check={check.id}
-                type="text"
-                bind:value={editCheckLabel}
-                class="w-full rounded-md border border-brand-pink/50 bg-white dark:bg-night-card px-2 py-1.5 text-[12.5px] text-ink-900 dark:text-night-text focus:outline-none focus:ring-1 focus:ring-brand-pink"
-                placeholder="Check label (required)"
-                onkeydown={(e) => {
-                  if (e.key === "Enter") { e.preventDefault(); commitEditCheck(check.id); }
-                  else if (e.key === "Escape") { e.preventDefault(); cancelEditCheck(); }
-                }}
-              />
-              <textarea
-                bind:value={editCheckDescription}
-                rows="3"
-                class="w-full rounded-md border border-ink-300 dark:border-night-line bg-white dark:bg-night-card px-2 py-1.5 text-[12px] text-ink-700 dark:text-night-dim focus:outline-none focus:ring-1 focus:ring-brand-pink resize-y"
-                placeholder="Description (optional)"
-              ></textarea>
+              <div class="relative">
+                <input
+                  data-audit-edit-check={check.id}
+                  type="text"
+                  bind:this={editCheckLabelEl}
+                  bind:value={editCheckLabel}
+                  class="w-full pr-9 rounded-md border border-brand-pink/50 bg-white dark:bg-night-card px-2 py-1.5 text-[12.5px] text-ink-900 dark:text-night-text focus:outline-none focus:ring-1 focus:ring-brand-pink"
+                  placeholder="Check label (required)"
+                  onkeydown={(e) => {
+                    if (e.key === "Enter") { e.preventDefault(); commitEditCheck(check.id); }
+                    else if (e.key === "Escape") { e.preventDefault(); cancelEditCheck(); }
+                  }}
+                />
+                {#if app.voiceReady}
+                  <span class="absolute right-1 top-1/2 -translate-y-1/2">
+                    <MicButton el={editCheckLabelEl} lang={app.voiceLang} />
+                  </span>
+                {/if}
+              </div>
+              <div class="relative">
+                <textarea
+                  bind:this={editCheckDescriptionEl}
+                  bind:value={editCheckDescription}
+                  rows="3"
+                  class="w-full pr-10 rounded-md border border-ink-300 dark:border-night-line bg-white dark:bg-night-card px-2 py-1.5 text-[12px] text-ink-700 dark:text-night-dim focus:outline-none focus:ring-1 focus:ring-brand-pink resize-y"
+                  placeholder="Description (optional)"
+                ></textarea>
+                {#if app.voiceReady}
+                  <span class="absolute right-1.5 bottom-1.5">
+                    <MicButton el={editCheckDescriptionEl} lang={app.voiceLang} />
+                  </span>
+                {/if}
+              </div>
               <div class="flex items-center justify-end gap-2">
                 <button
                   type="button"
@@ -1507,23 +1528,39 @@
           <!-- Inline "Add check" form (from the kebab). -->
           {#if addingCheckCategory === category.id}
             <div class="border-t border-brand-pink/30 bg-white dark:bg-night-card px-3 py-2.5 space-y-2">
-              <input
-                data-audit-add-check
-                type="text"
-                bind:value={newCheckLabel}
-                class="w-full rounded-md border border-brand-pink/50 bg-white dark:bg-night-card px-2 py-1.5 text-[12.5px] text-ink-900 dark:text-night-text focus:outline-none focus:ring-1 focus:ring-brand-pink"
-                placeholder="Check label (required)"
-                onkeydown={(e) => {
-                  if (e.key === "Enter") { e.preventDefault(); commitAddCheck(); }
-                  else if (e.key === "Escape") { e.preventDefault(); cancelAddCheck(); }
-                }}
-              />
-              <textarea
-                bind:value={newCheckDescription}
-                rows="2"
-                class="w-full rounded-md border border-ink-300 dark:border-night-line bg-white dark:bg-night-card px-2 py-1.5 text-[12px] text-ink-700 dark:text-night-dim focus:outline-none focus:ring-1 focus:ring-brand-pink resize-y"
-                placeholder="Description (optional)"
-              ></textarea>
+              <div class="relative">
+                <input
+                  data-audit-add-check
+                  type="text"
+                  bind:this={newCheckLabelEl}
+                  bind:value={newCheckLabel}
+                  class="w-full pr-9 rounded-md border border-brand-pink/50 bg-white dark:bg-night-card px-2 py-1.5 text-[12.5px] text-ink-900 dark:text-night-text focus:outline-none focus:ring-1 focus:ring-brand-pink"
+                  placeholder="Check label (required)"
+                  onkeydown={(e) => {
+                    if (e.key === "Enter") { e.preventDefault(); commitAddCheck(); }
+                    else if (e.key === "Escape") { e.preventDefault(); cancelAddCheck(); }
+                  }}
+                />
+                {#if app.voiceReady}
+                  <span class="absolute right-1 top-1/2 -translate-y-1/2">
+                    <MicButton el={newCheckLabelEl} lang={app.voiceLang} />
+                  </span>
+                {/if}
+              </div>
+              <div class="relative">
+                <textarea
+                  bind:this={newCheckDescriptionEl}
+                  bind:value={newCheckDescription}
+                  rows="2"
+                  class="w-full pr-10 rounded-md border border-ink-300 dark:border-night-line bg-white dark:bg-night-card px-2 py-1.5 text-[12px] text-ink-700 dark:text-night-dim focus:outline-none focus:ring-1 focus:ring-brand-pink resize-y"
+                  placeholder="Description (optional)"
+                ></textarea>
+                {#if app.voiceReady}
+                  <span class="absolute right-1.5 bottom-1.5">
+                    <MicButton el={newCheckDescriptionEl} lang={app.voiceLang} />
+                  </span>
+                {/if}
+              </div>
               <div class="flex items-center justify-end gap-2">
                 <button
                   type="button"

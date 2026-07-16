@@ -59,6 +59,12 @@ export async function compositeAnnotations(
     if (a.kind === "note") continue;
     if (a.kind === "select") {
       paintSelect(ctx, a, n, badgeColor);
+    } else if (a.kind === "move") {
+      paintMove(ctx, a, n, 0, badgeColor);
+    } else if (a.kind === "text-insert") {
+      paintTextInsert(ctx, a, n, 0, badgeColor);
+    } else if (a.kind === "delete") {
+      paintDelete(ctx, a, n, 0, badgeColor);
     } else if (a.kind === "image") {
       await paintPlacedImage(ctx, a, n, 0, badgeColor);
     } else {
@@ -124,6 +130,12 @@ export async function compositeAnnotationsToViewport(
 
     if (a.kind === "select") {
       paintSelectTranslated(ctx, a, n, viewport.offsetY, badgeColor);
+    } else if (a.kind === "move") {
+      paintMove(ctx, a, n, viewport.offsetY, badgeColor);
+    } else if (a.kind === "text-insert") {
+      paintTextInsert(ctx, a, n, viewport.offsetY, badgeColor);
+    } else if (a.kind === "delete") {
+      paintDelete(ctx, a, n, viewport.offsetY, badgeColor);
     } else if (a.kind === "image") {
       await paintPlacedImage(ctx, a, n, viewport.offsetY, badgeColor);
     } else {
@@ -151,6 +163,27 @@ export async function compositeAnnotationsToViewport(
 function anchorYFor(a: Annotation): number | null {
   if (a.kind === "select") {
     return a.target?.boundingRect ? a.target.boundingRect.y : null;
+  }
+  if (a.kind === "move") {
+    // Route by the DESTINATION (where the arrow points) so the slice the
+    // user reads shows where the element went; fall back to the source.
+    const dest =
+      a.move?.drop === "reorder"
+        ? a.move.container?.boundingRect
+        : a.move?.destinationRect;
+    return dest?.y ?? a.target?.boundingRect?.y ?? null;
+  }
+  if (a.kind === "text-insert") {
+    return (
+      a.textInsert?.reference?.boundingRect?.y ??
+      a.target?.boundingRect?.y ??
+      null
+    );
+  }
+  if (a.kind === "delete") {
+    // Route by the primary (first) target — the badge lands there.
+    const r = a.targets?.[0]?.boundingRect ?? a.target?.boundingRect;
+    return r ? r.y : null;
   }
   if (a.kind === "image") {
     // Use the image's vertical center so a tall image that straddles a
@@ -258,6 +291,147 @@ function paintSelect(
   // Badge in the top-right corner of the select box so it doesn't
   // overlap the selector label that sits at the top-left.
   drawNumberBadge(ctx, x + w, y, n, badgeColor);
+}
+
+const MOVE_COLOR = "#10B981";
+
+/**
+ * Paints a kind:"move" annotation: a solid box on the SOURCE element, a
+ * dashed box at the DESTINATION (container for reorder, landing rect for
+ * free), and an arrow between their centers. Badge sits at the
+ * destination — that's where the reader's eye should land.
+ */
+function paintMove(
+  ctx: CanvasRenderingContext2D,
+  a: Annotation,
+  n: number,
+  offsetY: number,
+  badgeColor: string,
+): void {
+  const src = a.target?.boundingRect;
+  const dest =
+    a.move?.drop === "reorder"
+      ? a.move.container?.boundingRect
+      : a.move?.destinationRect;
+  if (!src && !dest) return;
+  const color = a.color || MOVE_COLOR;
+
+  ctx.save();
+  ctx.lineWidth = SELECT_LINE_WIDTH;
+  ctx.strokeStyle = color;
+  if (src) {
+    ctx.fillStyle = "rgba(16, 185, 129, 0.10)";
+    ctx.fillRect(src.x, src.y - offsetY, src.width, src.height);
+    ctx.strokeRect(src.x, src.y - offsetY, src.width, src.height);
+    if (a.target?.selector) paintLabel(ctx, a.target.selector, src.x, src.y - offsetY);
+  }
+  if (dest) {
+    ctx.setLineDash([6, 4]);
+    ctx.strokeRect(dest.x, dest.y - offsetY, dest.width, dest.height);
+    ctx.setLineDash([]);
+  }
+  ctx.restore();
+
+  if (src && dest) {
+    const from = { x: src.x + src.width / 2, y: src.y - offsetY + src.height / 2 };
+    const to = { x: dest.x + dest.width / 2, y: dest.y - offsetY + dest.height / 2 };
+    drawAnnotation(ctx, "arrow", [from, to], {
+      color,
+      opacity: 1,
+      lineWidth: DRAW_LINE_WIDTH,
+      translate: { x: 0, y: 0 },
+    });
+  }
+  const badgeAt = dest ?? src!;
+  drawNumberBadge(
+    ctx,
+    badgeAt.x + badgeAt.width,
+    badgeAt.y - offsetY,
+    n,
+    badgeColor,
+  );
+}
+
+/**
+ * Paints a kind:"text-insert" annotation: a dashed box at the insertion
+ * spot (the reference sibling when present, else the container) plus the
+ * numbered badge. The paragraph text itself lives in the export/card.
+ */
+function paintTextInsert(
+  ctx: CanvasRenderingContext2D,
+  a: Annotation,
+  n: number,
+  offsetY: number,
+  badgeColor: string,
+): void {
+  const r =
+    a.textInsert?.reference?.boundingRect ?? a.target?.boundingRect;
+  if (!r) return;
+  const color = a.color || MOVE_COLOR;
+  ctx.save();
+  ctx.lineWidth = SELECT_LINE_WIDTH;
+  ctx.strokeStyle = color;
+  ctx.setLineDash([6, 4]);
+  ctx.strokeRect(r.x, r.y - offsetY, r.width, r.height);
+  ctx.setLineDash([]);
+  ctx.restore();
+  drawNumberBadge(ctx, r.x + r.width, r.y - offsetY, n, badgeColor);
+}
+
+const DELETE_COLOR = "#EF4444";
+
+/**
+ * Paints a kind:"delete" annotation: a red box with a diagonal cross over
+ * EVERY target (single click yields one; Ctrl/Cmd+click yields several).
+ * The numbered badge sits on the primary (first) target so it lines up
+ * with the side panel's annotation list.
+ */
+function paintDelete(
+  ctx: CanvasRenderingContext2D,
+  a: Annotation,
+  n: number,
+  offsetY: number,
+  badgeColor: string,
+): void {
+  const targets = a.targets ?? (a.target ? [a.target] : []);
+  const rects = targets
+    .map((t) => t.boundingRect)
+    .filter((r): r is NonNullable<typeof r> => !!r);
+  if (rects.length === 0) return;
+  const color = a.color || DELETE_COLOR;
+
+  ctx.save();
+  ctx.lineWidth = SELECT_LINE_WIDTH;
+  ctx.strokeStyle = color;
+  ctx.fillStyle = "rgba(239, 68, 68, 0.12)";
+  for (const r of rects) {
+    const x = r.x - SELECT_PADDING;
+    const y = r.y - offsetY - SELECT_PADDING;
+    const w = r.width + SELECT_PADDING * 2;
+    const h = r.height + SELECT_PADDING * 2;
+    ctx.fillRect(x, y, w, h);
+    ctx.strokeRect(x, y, w, h);
+    // Diagonal cross so the box reads unmistakably as "remove this".
+    ctx.beginPath();
+    ctx.moveTo(x, y);
+    ctx.lineTo(x + w, y + h);
+    ctx.moveTo(x + w, y);
+    ctx.lineTo(x, y + h);
+    ctx.stroke();
+  }
+  const primary = rects[0]!;
+  const sel = targets[0]?.selector;
+  if (sel) {
+    paintLabel(ctx, sel, primary.x - SELECT_PADDING, primary.y - offsetY - SELECT_PADDING);
+  }
+  ctx.restore();
+  drawNumberBadge(
+    ctx,
+    primary.x + primary.width,
+    primary.y - offsetY,
+    n,
+    badgeColor,
+  );
 }
 
 function paintLabel(

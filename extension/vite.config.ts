@@ -11,6 +11,10 @@ export default defineConfig({
       input: {
         sidepanel: "src/sidepanel/index.html",
         popup: "src/popup/index.html",
+        // Offscreen document that owns the mic for Voice Command. Created
+        // at runtime via chrome.offscreen.createDocument; listed here so
+        // the page + its module script are emitted to the build output.
+        offscreen: "src/offscreen/offscreen.html",
       },
     },
   },

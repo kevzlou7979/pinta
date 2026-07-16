@@ -1,6 +1,8 @@
 <script lang="ts">
   import { onMount } from "svelte";
   import type { AnnotationImage } from "@pinta/shared";
+  import { content } from "./state.svelte.js";
+  import MicButton from "../lib/voice/MicButton.svelte";
 
   type LiveStyles = {
     fontFamily: string;
@@ -54,6 +56,8 @@
   }: Props = $props();
 
   let commentTextarea: HTMLTextAreaElement | undefined = $state();
+  let contentTextarea: HTMLTextAreaElement | undefined = $state();
+  let cssTextarea: HTMLTextAreaElement | undefined = $state();
   let dropActive = $state(false);
 
   function readBlob(blob: File | Blob): Promise<string> {
@@ -493,14 +497,21 @@
   </div>
 
   {#if activeTab === "comment"}
-    <textarea
-      bind:this={commentTextarea}
-      bind:value={comment}
-      onkeydown={onKey}
-      onpaste={onPaste}
-      placeholder="What do you want changed? Paste or drop images for visual reference."
-      rows="4"
-    ></textarea>
+    <span style="position: relative; display: block;">
+      <textarea
+        bind:this={commentTextarea}
+        bind:value={comment}
+        onkeydown={onKey}
+        onpaste={onPaste}
+        placeholder="What do you want changed? Paste or drop images for visual reference."
+        rows="4"
+      ></textarea>
+      {#if content.voiceEnabled}
+        <span style="position: absolute; right: 4px; bottom: 6px;">
+          <MicButton el={commentTextarea} lang={content.voiceLang} />
+        </span>
+      {/if}
+    </span>
     {#if images.length > 0}
       <div class="thumbs">
         {#each images as img, i (img.id)}
@@ -523,12 +534,20 @@
       <code>[image{images.length + 1}]</code> in the comment.
     </p>
   {:else if activeTab === "content"}
-    <textarea
-      bind:value={contentAfter}
-      onkeydown={onKey}
-      placeholder="Edit the element's text content"
-      rows="3"
-    ></textarea>
+    <span style="position: relative; display: block;">
+      <textarea
+        bind:this={contentTextarea}
+        bind:value={contentAfter}
+        onkeydown={onKey}
+        placeholder="Edit the element's text content"
+        rows="3"
+      ></textarea>
+      {#if content.voiceEnabled}
+        <span style="position: absolute; right: 4px; bottom: 6px;">
+          <MicButton el={contentTextarea} lang={content.voiceLang} />
+        </span>
+      {/if}
+    </span>
     <p class="popup__hint">
       {#if contentDirty}
         Text will be replaced from <em>"{liveText.slice(0, 40)}{liveText.length > 40 ? '…' : ''}"</em>
@@ -633,14 +652,22 @@
       </label>
     {/if}
   {:else if activeTab === "css"}
-    <textarea
-      class="popup__css"
-      bind:value={customCss}
-      onkeydown={onKey}
-      placeholder={`/* CSS for ${title} */\ncolor: #ff3d6e;\npadding: 1rem;`}
-      rows="6"
-      spellcheck="false"
-    ></textarea>
+    <span style="position: relative; display: block;">
+      <textarea
+        class="popup__css"
+        bind:this={cssTextarea}
+        bind:value={customCss}
+        onkeydown={onKey}
+        placeholder={`/* CSS for ${title} */\ncolor: #ff3d6e;\npadding: 1rem;`}
+        rows="6"
+        spellcheck="false"
+      ></textarea>
+      {#if content.voiceEnabled}
+        <span style="position: absolute; right: 4px; bottom: 6px;">
+          <MicButton el={cssTextarea} lang={content.voiceLang} />
+        </span>
+      {/if}
+    </span>
     <p class="popup__hint">
       Free-form CSS. Combined with Font / Sizing / Spacing values into one
       annotation.

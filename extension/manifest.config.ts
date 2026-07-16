@@ -30,13 +30,30 @@ export default defineManifest({
     service_worker: "src/background/service-worker.ts",
     type: "module",
   },
-  permissions: ["sidePanel", "tabs", "activeTab", "scripting", "storage"],
+  permissions: [
+    "sidePanel",
+    "tabs",
+    "activeTab",
+    "scripting",
+    "storage",
+    "offscreen",
+  ],
   host_permissions: ["<all_urls>"],
   content_scripts: [
     {
       matches: ["<all_urls>"],
       js: ["src/content/overlay.ts"],
       run_at: "document_idle",
+      all_frames: false,
+    },
+    {
+      // Main-world reload guard — must run BEFORE @vite/client connects so it
+      // can wrap WebSocket and swallow Vite HMR full-reload frames while Pinta
+      // is holding reloads for this tab (auto-reload off). See reload-guard.ts.
+      matches: ["<all_urls>"],
+      js: ["src/content/reload-guard.ts"],
+      run_at: "document_start",
+      world: "MAIN",
       all_frames: false,
     },
   ],

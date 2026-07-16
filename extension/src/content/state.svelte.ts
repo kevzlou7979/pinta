@@ -1,7 +1,32 @@
+/// <reference types="chrome" />
+
 import type { Annotation, Point } from "@pinta/shared";
 import type { DrawTool } from "./tools/draw.js";
 
-export type Mode = "idle" | "select" | "draw" | "image";
+export type Mode =
+  | "idle"
+  | "select"
+  | "draw"
+  | "image"
+  | "move"
+  | "text"
+  | "delete"
+  | "resize";
+
+/**
+ * A previewed element mutation that must be rolled back when its owning
+ * annotation is removed or the session is cleared. The primary element
+ * of an annotation lives on the `annotated` entry itself; `extraPreviews`
+ * carries the ADDITIONAL elements a single annotation previews — the
+ * Ctrl/Cmd+click siblings of a multi-target move or delete. Never
+ * `inserted` (only Pinta-created nodes are), so rollback always restores
+ * the snapshot rather than removing the node.
+ */
+export type ExtraPreview = {
+  element: Element;
+  originalCssText: string;
+  originalInnerHtml: string;
+};
 
 /**
  * In-flight image placement. Set when the user picks a file in the
@@ -35,6 +60,40 @@ export type Draft = {
 class ContentState {
   mode = $state<Mode>("idle");
   tool = $state<DrawTool>("arrow");
+
+  // ─── Voice Command (Phase 20) ──────────────────────────────────────
+  // The on-page mic buttons live in the content script, which can't read
+  // the side panel's module state — so mirror the bits we need from
+  // chrome.storage (`pinta-modules`), kept live via storage.onChanged.
+  voiceEnabled = $state(false);
+  voiceLang = $state("en-US");
+
+  /** Load voice settings from storage and subscribe to changes. Called
+   *  once from the content entry (overlay.ts). */
+  initVoice(): void {
+    const read = (raw: unknown): void => {
+      const entry = (
+        raw as
+          | Record<string, { enabled?: boolean; settings?: Record<string, unknown> }>
+          | undefined
+      )?.["voice-command"];
+      this.voiceEnabled = !!entry?.enabled;
+      const lang = entry?.settings?.language;
+      this.voiceLang = typeof lang === "string" && lang.trim() ? lang : "en-US";
+    };
+    try {
+      void chrome.storage?.local
+        ?.get("pinta-modules")
+        .then((s) => read(s?.["pinta-modules"]));
+      chrome.storage?.onChanged?.addListener((changes, area) => {
+        if (area === "local" && changes["pinta-modules"]) {
+          read(changes["pinta-modules"].newValue);
+        }
+      });
+    } catch {
+      // storage unavailable — voice stays off
+    }
+  }
 
   // Drawings the user has completed in this page session. Rendered semi-
   // transparent on the canvas. Also forwarded to the side panel as Annotations
@@ -86,6 +145,18 @@ class ContentState {
        *  location.href — without this, the rect cache would leak
        *  badges from one SPA route onto another. */
       url?: string;
+      /** True when Pinta CREATED this element (text-insert paragraph
+       *  preview) rather than mutating an existing one. Rollback for
+       *  these is "remove the node", not "restore style/innerHTML". */
+      inserted?: boolean;
+      /** Extra elements this ONE annotation also previews (the Ctrl/Cmd+
+       *  click siblings of a multi-target move / delete). Restored
+       *  alongside the primary on removal / session-clear. */
+      extraPreviews?: ExtraPreview[];
+      /** True for Delete-tool entries: the element is hidden
+       *  (display:none) rather than pointed at, so the overlay suppresses
+       *  its numbered pin badge. Rollback still restores it. */
+      deleted?: boolean;
     }[]
   >([]);
 
@@ -236,6 +307,9 @@ class ContentState {
     outerHTML?: string,
     nearbyText?: string[],
     url?: string,
+    inserted?: boolean,
+    extraPreviews?: ExtraPreview[],
+    deleted?: boolean,
   ): number {
     this.annotated = [
       ...this.annotated,
@@ -249,6 +323,9 @@ class ContentState {
         outerHTML,
         nearbyText,
         url,
+        ...(inserted ? { inserted: true } : {}),
+        ...(extraPreviews && extraPreviews.length ? { extraPreviews } : {}),
+        ...(deleted ? { deleted: true } : {}),
       },
     ];
     return this.globalSeq(id);
@@ -341,7 +418,7 @@ class ContentState {
       : null;
   }
 
-  removeAnnotatedById(id: string): { entry: { element: Element; originalCssText: string; originalInnerHtml: string } | null } {
+  removeAnnotatedById(id: string): { entry: { element: Element; originalCssText: string; originalInnerHtml: string; inserted?: boolean; extraPreviews?: ExtraPreview[] } | null } {
     const idx = this.annotated.findIndex((a) => a.id === id);
     if (idx === -1) return { entry: null };
     const entry = this.annotated[idx]!;
@@ -353,6 +430,8 @@ class ContentState {
         element: entry.element,
         originalCssText: entry.originalCssText,
         originalInnerHtml: entry.originalInnerHtml,
+        inserted: entry.inserted,
+        extraPreviews: entry.extraPreviews,
       },
     };
   }
@@ -361,11 +440,15 @@ class ContentState {
     element: Element;
     originalCssText: string;
     originalInnerHtml: string;
+    inserted?: boolean;
+    extraPreviews?: ExtraPreview[];
   }[] {
     const all = this.annotated.map((a) => ({
       element: a.element,
       originalCssText: a.originalCssText,
       originalInnerHtml: a.originalInnerHtml,
+      inserted: a.inserted,
+      extraPreviews: a.extraPreviews,
     }));
     this.annotated = [];
     return all;

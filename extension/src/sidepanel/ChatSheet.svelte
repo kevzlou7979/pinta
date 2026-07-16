@@ -14,6 +14,7 @@
   import { app, type ChatImage, type ChatMessage } from "../lib/state.svelte.js";
   import { parseStep, parseTestSuggestions } from "../lib/step-md.js";
   import { highlight } from "../lib/prism-setup.js";
+  import MicButton from "../lib/voice/MicButton.svelte";
 
   type Props = {
     open: boolean;
@@ -917,12 +918,19 @@
           bind:this={textareaEl}
           rows="1"
           {placeholder}
-          class="block w-full text-[13px] text-ink-800 dark:text-night-text bg-transparent border-0 rounded-2xl pl-4 pr-14 py-2.5 leading-relaxed resize-none focus:outline-none focus:ring-0 placeholder:text-ink-500 dark:placeholder:text-night-mute max-h-40 overflow-y-auto"
+          class="block w-full text-[13px] text-ink-800 dark:text-night-text bg-transparent border-0 rounded-2xl pr-14 py-2.5 leading-relaxed resize-none focus:outline-none focus:ring-0 placeholder:text-ink-500 dark:placeholder:text-night-mute max-h-40 overflow-y-auto"
+          class:pl-4={!app.voiceReady}
+          class:pl-11={app.voiceReady}
           bind:value={draft}
           onkeydown={onKeyDown}
           onpaste={handlePaste}
           disabled={pending}
         ></textarea>
+        {#if app.voiceReady}
+          <span class="absolute left-1.5 bottom-1.5">
+            <MicButton el={textareaEl} lang={app.voiceLang} />
+          </span>
+        {/if}
         {#if draft.trim() !== "" || attachedImages.length > 0 || pending}
           <button
             type="button"

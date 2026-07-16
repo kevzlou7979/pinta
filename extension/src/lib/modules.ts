@@ -218,12 +218,48 @@ const REPORT: ModuleSpec = {
   settings: [],
 };
 
+/**
+ * Voice Command (Phase 20) — speak instead of type. A purely
+ * browser-local module (`mode: "client"`): when enabled it drops a mic
+ * button on every free-text field across the extension and the on-page
+ * popups, and a global Alt+V hotkey dictates into the focused field.
+ *
+ * There is NO agent side to this — it never rides on `session.modules[]`,
+ * touches the companion, or changes the wire protocol. Speech runs in an
+ * offscreen document (extension origin) via the Web Speech API, so the
+ * microphone is granted once and reused by both the side panel and any
+ * website page. Off by default.
+ *
+ * The only setting is the recognition language (has a default, so the
+ * module is "ready" the moment it's enabled — no required fields).
+ */
+const VOICE_COMMAND: ModuleSpec = {
+  id: "voice-command",
+  name: "Voice Command",
+  description:
+    "Speak instead of type. Adds a mic button to every text field (and a global Alt+V shortcut for the focused field) so you can dictate annotations, chat, tasks, and more. Speech recognition runs in your browser via the Web Speech API — it needs microphone access (granted once) and an internet connection.",
+  mode: "client",
+  sessionCheckboxLabel: "",
+  sessionCheckboxHint: "",
+  settings: [
+    {
+      key: "language",
+      type: "string",
+      label: "Recognition language",
+      hint: "BCP-47 language tag passed to speech recognition. Leave as en-US for US English.",
+      placeholder: "en-US",
+      default: "en-US",
+    },
+  ],
+};
+
 export const BUILTIN_MODULES: ModuleSpec[] = [
   GITLAB_ISSUES,
   TEST_PILOT,
   CHAT,
   AUDIT_FLOW,
   REPORT,
+  VOICE_COMMAND,
 ];
 
 export function getModuleSpec(id: string): ModuleSpec | null {

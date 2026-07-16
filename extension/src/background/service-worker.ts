@@ -43,3 +43,92 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
     return true;
   }
 });
+
+// ─── Voice Command relay (Phase 20) ──────────────────────────────────
+//
+// Surfaces (side panel + content scripts) open a long-lived "voice" port
+// to dictate. We own ONE offscreen document that holds the mic + Web
+// Speech recognition (port name "voice-offscreen"), and route its
+// transcripts back down ONLY the surface port that started — so two tabs
+// never cross streams. Keeping the offscreen doc warm between utterances
+// avoids re-creating it on every mic click.
+
+let offscreenPort: chrome.runtime.Port | null = null;
+let activeVoicePort: chrome.runtime.Port | null = null;
+let offscreenWaiters: Array<(p: chrome.runtime.Port | null) => void> = [];
+
+async function ensureOffscreenReady(): Promise<chrome.runtime.Port | null> {
+  if (offscreenPort) return offscreenPort;
+  try {
+    const has = await chrome.offscreen.hasDocument();
+    if (!has) {
+      await chrome.offscreen.createDocument({
+        url: "src/offscreen/offscreen.html",
+        reasons: [chrome.offscreen.Reason.USER_MEDIA],
+        justification: "Microphone access for Voice Command speech-to-text.",
+      });
+    }
+  } catch (err) {
+    console.error("[pinta] offscreen create failed", err);
+    return null;
+  }
+  if (offscreenPort) return offscreenPort;
+  // The offscreen doc connects its port on load; wait for it (bounded).
+  return await new Promise((resolve) => {
+    const timer = setTimeout(() => {
+      offscreenWaiters = offscreenWaiters.filter((w) => w !== onReady);
+      resolve(offscreenPort);
+    }, 3000);
+    const onReady = (p: chrome.runtime.Port | null) => {
+      clearTimeout(timer);
+      resolve(p);
+    };
+    offscreenWaiters.push(onReady);
+  });
+}
+
+chrome.runtime.onConnect.addListener((port) => {
+  if (port.name === "voice-offscreen") {
+    offscreenPort = port;
+    const waiters = offscreenWaiters;
+    offscreenWaiters = [];
+    waiters.forEach((w) => w(port));
+    // Mic → the surface that started. The offscreen doc only ever has one
+    // recognizer running, so a single active port is correct.
+    port.onMessage.addListener((msg) => {
+      activeVoicePort?.postMessage(msg);
+    });
+    port.onDisconnect.addListener(() => {
+      if (offscreenPort === port) offscreenPort = null;
+    });
+    return;
+  }
+
+  if (port.name === "voice") {
+    port.onMessage.addListener((msg) => {
+      if (msg?.t === "start") {
+        activeVoicePort = port;
+        void ensureOffscreenReady().then((op) => {
+          if (!op) {
+            try {
+              port.postMessage({ t: "error", code: "offscreen-failed" });
+            } catch {
+              /* port already gone */
+            }
+            return;
+          }
+          op.postMessage({ t: "start", lang: msg.lang ?? "en-US" });
+        });
+      } else if (msg?.t === "stop") {
+        offscreenPort?.postMessage({ t: "stop" });
+      }
+    });
+    port.onDisconnect.addListener(() => {
+      if (activeVoicePort === port) {
+        offscreenPort?.postMessage({ t: "stop" });
+        activeVoicePort = null;
+      }
+    });
+    return;
+  }
+});

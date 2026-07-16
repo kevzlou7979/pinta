@@ -1,18 +1,27 @@
 <script lang="ts">
   import type { AnnotationImage } from "@pinta/shared";
+  import { app } from "../lib/state.svelte.js";
+  import MicButton from "../lib/voice/MicButton.svelte";
 
   type Props = {
     /** Mirrors the other Annotate forms — locked while a batch is in
      *  flight or all annotations have settled. */
     disabled?: boolean;
+    /** Draft text + attachments, bound to the persistent store so an
+     *  in-progress task survives an Annotate-panel unmount (tab switch). */
+    comment?: string;
+    images?: AnnotationImage[];
     /** Hands the finished note back to App.svelte, which wraps it in a
      *  `kind: "note"` annotation and pushes it into the session. */
     onadd: (payload: { comment: string; images: AnnotationImage[] }) => void;
   };
-  let { disabled = false, onadd }: Props = $props();
+  let {
+    disabled = false,
+    comment = $bindable(""),
+    images = $bindable<AnnotationImage[]>([]),
+    onadd,
+  }: Props = $props();
 
-  let comment = $state("");
-  let images = $state<AnnotationImage[]>([]);
   let dropActive = $state(false);
   let textarea: HTMLTextAreaElement | undefined = $state();
   let fileInput: HTMLInputElement | undefined = $state();
@@ -143,16 +152,25 @@
   role="group"
   aria-label="Add a task"
 >
-  <textarea
-    bind:this={textarea}
-    placeholder="Describe a task — e.g. “Create a new dialog for this feature”. No element needed."
-    rows={3}
-    class="w-full rounded-md border bg-white text-ink-900 px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-brand-pink dark:bg-night-alt dark:text-night-text dark:placeholder-night-mute disabled:opacity-50 {dropActive ? 'border-brand-pink ring-2 ring-brand-pink/30' : 'border-ink-300 dark:border-night-line'}"
-    bind:value={comment}
-    onkeydown={onKey}
-    onpaste={onPaste}
-    {disabled}
-  ></textarea>
+  <div class="relative">
+    <textarea
+      bind:this={textarea}
+      placeholder="Describe a task — e.g. “Create a new dialog for this feature”. No element needed."
+      rows={3}
+      class="w-full rounded-md border bg-white text-ink-900 py-2 pl-3 text-sm focus:outline-none focus:ring-2 focus:ring-brand-pink dark:bg-night-alt dark:text-night-text dark:placeholder-night-mute disabled:opacity-50 {dropActive ? 'border-brand-pink ring-2 ring-brand-pink/30' : 'border-ink-300 dark:border-night-line'}"
+      class:pr-3={!app.voiceReady}
+      class:pr-10={app.voiceReady}
+      bind:value={comment}
+      onkeydown={onKey}
+      onpaste={onPaste}
+      {disabled}
+    ></textarea>
+    {#if app.voiceReady}
+      <span class="absolute right-1.5 bottom-2">
+        <MicButton el={textarea} lang={app.voiceLang} />
+      </span>
+    {/if}
+  </div>
 
   {#if images.length > 0}
     <div class="flex gap-1 flex-wrap">

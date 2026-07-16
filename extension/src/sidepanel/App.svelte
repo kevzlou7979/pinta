@@ -36,6 +36,8 @@
   import ReportTab from "./ReportTab.svelte";
   import ModuleBoardTab from "./ModuleBoardTab.svelte";
   import ChatSheet from "./ChatSheet.svelte";
+  import MicButton from "../lib/voice/MicButton.svelte";
+  import { voice } from "../lib/voice/controller.js";
 
   // Phase 14 chat surfaces owned by App.svelte (Test Pilot tier owns
   // its own sheet inside TestPilotTab.svelte):
@@ -175,8 +177,8 @@
   // agent is gathering tasks.
   const reportBusy = $derived(app.report.pending !== null);
 
-  type Tool = "select" | "arrow" | "rect" | "circle" | "freehand" | "pin" | "image";
-  type ActiveMode = "idle" | "select" | "draw" | "image";
+  type Tool = "select" | "arrow" | "rect" | "circle" | "freehand" | "pin" | "image" | "move" | "text" | "delete" | "resize";
+  type ActiveMode = "idle" | "select" | "draw" | "image" | "move" | "text" | "delete" | "resize";
 
   // SVG paths render reliably across fonts/OSes, follow currentColor in
   // both light + dark mode, and don't depend on unicode glyph coverage.
@@ -215,6 +217,32 @@
       // clearly an "insert an image" affordance, not a "view image" one.
       svg: '<path d="M21 12v7a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h7"/><path d="m3 16 5-5c.928-.893 2.072-.893 3 0l5 5"/><path d="m14 14 1-1c.928-.893 2.072-.893 3 0l3 3"/><circle cx="9" cy="9" r="1.5" fill="currentColor"/><path d="M19 3v4"/><path d="M17 5h4"/>',
     },
+    {
+      id: "move",
+      label: "Move",
+      // Lucide move — four-way arrows: "drag this element somewhere else".
+      svg: '<path d="M12 2v20"/><path d="M2 12h20"/><path d="m9 5 3-3 3 3"/><path d="m9 19 3 3 3-3"/><path d="m5 9-3 3 3 3"/><path d="m19 9 3 3-3 3"/>',
+    },
+    {
+      id: "text",
+      label: "Text",
+      // Lucide type — click text to edit in place / add a paragraph.
+      svg: '<polyline points="4 7 4 4 20 4 20 7"/><line x1="9" y1="20" x2="15" y2="20"/><line x1="12" y1="4" x2="12" y2="20"/>',
+    },
+    {
+      id: "delete",
+      label: "Delete",
+      // Lucide trash-2 — mark an element (or several, Ctrl/Cmd+click) for
+      // removal from source.
+      svg: '<polyline points="3 6 5 6 21 6"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/><line x1="10" y1="11" x2="10" y2="17"/><line x1="14" y1="11" x2="14" y2="17"/>',
+    },
+    {
+      id: "resize",
+      label: "Resize",
+      // Lucide scaling — a box with a diagonal corner-drag arrow: "drag to
+      // resize this element."
+      svg: '<path d="M21 3 9 15"/><path d="M12 3H3v18h18v-9"/><path d="M16 3h5v5"/><path d="M14 15H9v-5"/>',
+    },
   ];
 
   let pageUrl = $state<string>("");
@@ -228,12 +256,15 @@
   // text/style edits.
   let includeScreenshot = $state(false);
   let copiedAt = $state<number | null>(null);
-  let autoReloadEnabled = $state(true);
   // Default ON — most users want the agent to apply edits without a
   // confirmation round-trip. Untick per-submit to just file/draft instead.
   let autoApplyEnabled = $state(true);
   let hmrDetected = $state<boolean | null>(null);
   let reloadingAt = $state<number | null>(null);
+  // A batch finished without HMR but we did NOT auto-reload (auto-reload is
+  // off, or you'd started annotating again) — offer a manual Reload instead
+  // of yanking the page out from under you.
+  let pendingReload = $state(false);
   let lastHandledSessionId = $state<string | null>(null);
   let lastOverlaySessionId = $state<string | null>(null);
 
@@ -556,6 +587,9 @@
       if (url && sender.tab.id === activeTabId) {
         pageUrl = url;
       }
+      // A real document load resets our shared-DOM attributes — re-arm the
+      // reload guard so Vite full-reloads stay held on this tab.
+      pushReloadHold(sender.tab.id, !app.autoReload);
       replayAnnotationsToTab(sender.tab.id, url);
       return;
     }
@@ -570,6 +604,10 @@
       // mirror the toolbar would lie about what's active.
       if (m.mode === "select") activeTool = "select";
       else if (m.mode === "image") activeTool = "image";
+      else if (m.mode === "move") activeTool = "move";
+      else if (m.mode === "text") activeTool = "text";
+      else if (m.mode === "delete") activeTool = "delete";
+      else if (m.mode === "resize") activeTool = "resize";
       else if (m.mode === "draw") activeTool = (m.tool as Tool | undefined) ?? activeTool;
       else activeTool = null;
       return;
@@ -618,8 +656,19 @@
     }
   };
 
+  // Voice Command (Phase 20) — Alt+V dictates into the focused text field
+  // anywhere in the side panel. Works even on fields without their own mic
+  // button, so it's the panel-wide coverage for the module.
+  function voiceHotkey(e: KeyboardEvent): void {
+    if (!e.altKey || e.ctrlKey || e.metaKey || e.shiftKey) return;
+    if (e.key.toLowerCase() !== "v") return;
+    if (!app.voiceReady) return;
+    if (voice.toggleForFocused(app.voiceLang)) e.preventDefault();
+  }
+
   onMount(async () => {
     chrome.runtime.onMessage.addListener(runtimeMessageHandler);
+    window.addEventListener("keydown", voiceHotkey);
 
     void loadSharePrefs();
     void loadFooterCollapsedPref();
@@ -673,6 +722,7 @@
 
   onDestroy(() => {
     chrome.runtime.onMessage.removeListener(runtimeMessageHandler);
+    window.removeEventListener("keydown", voiceHotkey);
     app.stop();
   });
 
@@ -869,6 +919,36 @@
     for (const id of app.inFlightBatches.map((b) => b.id)) {
       app.dismissBatch(id);
     }
+    // Verdicts referenced the batches we just dropped — clear them too.
+    app.clearDrift();
+  }
+
+  // ─── Drift Check ────────────────────────────────────────────────────
+  // How many verdicts came back, and how many need a resubmit.
+  const driftCheckedCount = $derived(Object.keys(app.drift.results).length);
+  const driftFlaggedCount = $derived(app.driftFlaggedIds.length);
+
+  // Copy the drifted / missing annotations into the current draft (fresh
+  // ids, cleared status) so the user can re-send them. The primary Send
+  // button relabels to "Resubmit" while this is armed.
+  async function resubmitFlagged(): Promise<void> {
+    const ids = new Set(app.driftFlaggedIds);
+    if (ids.size === 0) return;
+    const flagged = app.inFlightBatches
+      .flatMap((b) => b.annotations)
+      .filter((a) => ids.has(a.id));
+    if (flagged.length === 0) return;
+    app.drift.resubmitting = true;
+    for (const a of flagged) {
+      const copy: Annotation = {
+        ...a,
+        id: uid("ann"),
+        createdAt: Date.now(),
+        status: undefined,
+        errorMessage: undefined,
+      };
+      await app.addAnnotation(copy);
+    }
   }
   // Drawing-kind annotations carry only stroke coords + comment — no DOM
   // selector, no outerHTML. Without a screenshot the agent has nothing to
@@ -1011,7 +1091,11 @@
     }
     const next = tool;
     const mode: ActiveMode =
-      next == null ? "idle" : next === "select" ? "select" : "draw";
+      next == null
+        ? "idle"
+        : next === "select" || next === "move" || next === "text" || next === "delete" || next === "resize"
+          ? next
+          : "draw";
     try {
       await chrome.tabs.sendMessage(activeTabId, {
         type: "mode.set",
@@ -1198,8 +1282,35 @@
     }
   }
 
+  // Tell the page's main-world reload guard (reload-guard.ts) whether to hold
+  // back the dev server's Vite HMR full-reloads. We hold whenever auto-reload
+  // is off, so the page can't refresh out from under an in-progress
+  // annotation. Writing the shared-DOM attribute from the isolated world is
+  // visible to the main-world guard.
+  function pushReloadHold(tabId: number | null, hold: boolean) {
+    if (tabId == null) return;
+    chrome.scripting
+      .executeScript({
+        target: { tabId },
+        func: (h: boolean) => {
+          if (h) document.documentElement.dataset.pintaHoldReload = "1";
+          else delete document.documentElement.dataset.pintaHoldReload;
+        },
+        args: [hold],
+      })
+      .catch(() => {});
+  }
+
+  // Keep the guard's hold flag in sync with the setting + active tab. Re-runs
+  // when auto-reload flips or the user switches tabs; `overlay.ready` re-arms
+  // it after a navigation (attributes reset on a real document load).
+  $effect(() => {
+    pushReloadHold(activeTabId, !app.autoReload);
+  });
+
   async function reloadActiveTab() {
     if (activeTabId == null) return;
+    pendingReload = false;
     reloadingAt = Date.now();
     try {
       await chrome.tabs.reload(activeTabId);
@@ -1212,9 +1323,16 @@
     }
   }
 
-  // When a session reaches done/error, optionally auto-reload the tab if
-  // no HMR was detected. Tracked by session id so we don't re-trigger on
-  // re-renders.
+  // True when the user has started composing the NEXT batch — reloading now
+  // would wipe their in-progress annotations, so we never auto-reload here.
+  const draftingAgain = $derived(
+    app.session?.status === "drafting" && annotations.length > 0,
+  );
+
+  // When a session reaches done/error, reload the tab if no HMR was detected
+  // AND auto-reload is on AND the user isn't mid-annotation. Otherwise leave
+  // the page alone and surface a manual Reload button (`pendingReload`).
+  // Tracked by session id so we don't re-trigger on re-renders.
   $effect(() => {
     const session = app.session;
     if (!session) return;
@@ -1225,7 +1343,12 @@
 
     detectHmr(activeTabId).then((hasHmr) => {
       hmrDetected = hasHmr;
-      if (!hasHmr && autoReloadEnabled) reloadActiveTab();
+      if (hasHmr) return; // HMR already refreshed the page for us
+      if (app.autoReload && !draftingAgain) {
+        reloadActiveTab();
+      } else {
+        pendingReload = true; // manual mode, or busy annotating → offer a button
+      }
     });
   });
 
@@ -2335,6 +2458,14 @@
         <p class="text-[11px] text-ink-500 dark:text-night-dim">
           {#if activeTool === "select"}
             Hover the page → click an element → type a comment.
+          {:else if activeTool === "move"}
+            Drag an element to a new spot. Ctrl/Cmd+click first to move several together.
+          {:else if activeTool === "text"}
+            Click text to edit + format (bold, size, color…) with the floating toolbar, or click a gap to add a paragraph.
+          {:else if activeTool === "delete"}
+            Click an element to remove it immediately. Undo by removing its card below.
+          {:else if activeTool === "resize"}
+            Click an element, then drag the right / bottom / corner handles to resize it.
           {:else}
             Drag on the page to draw → type a comment.
           {/if}
@@ -2350,6 +2481,8 @@
       </summary>
       <NoteComposer
         disabled={sessionPending || allDone}
+        bind:comment={app.noteDraft.comment}
+        bind:images={app.noteDraft.images}
         onadd={addNoteFromForm}
       />
     </details>
@@ -2560,6 +2693,17 @@
                       <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 12a9 9 0 1 0 3-6.7L3 8"/><path d="M3 3v5h5"/></svg>
                       Reload page
                     </button>
+                    <button
+                      type="button"
+                      class="w-full flex items-center gap-2.5 px-3 py-1.5 text-[12px] text-ink-700 dark:text-night-dim hover:bg-ink-50 dark:hover:bg-night-alt hover:text-ink-900 dark:hover:text-night-text disabled:opacity-50"
+                      role="menuitem"
+                      onclick={() => { void app.runDriftCheck(); trayMenuOpen = false; }}
+                      disabled={app.drift.pending !== null}
+                      title="Ask the agent to re-read the source and confirm each applied change actually landed. Flags anything that drifted or was missed."
+                    >
+                      <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M9 11l3 3L22 4"/><path d="M21 12v7a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11"/></svg>
+                      Drift Check
+                    </button>
                     <div class="my-1 border-t border-ink-100 dark:border-night-line"></div>
                     <button
                       type="button"
@@ -2617,12 +2761,46 @@
             <button type="button" class="shrink-0 text-red-500 hover:text-red-700 dark:hover:text-red-200 leading-none px-1" onclick={() => (app.commit.error = null)} aria-label="Dismiss" title="Dismiss">✕</button>
           </div>
         {/if}
+        <!-- Drift Check status + resubmit affordance. -->
+        {#if app.drift.pending}
+          <p class="text-[11px] text-ink-500 dark:text-night-mute inline-flex items-center gap-1.5">
+            <svg class="animate-spin" width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21 12a9 9 0 1 1-6.219-8.56"/></svg>
+            Drift Check — re-reading the source to verify each change…
+          </p>
+        {:else if app.drift.error}
+          <div class="flex items-start gap-2 rounded-md border border-red-300 bg-red-50 dark:border-red-800/50 dark:bg-red-950/30 p-2 text-[11px] text-red-700 dark:text-red-300 leading-snug">
+            <span class="flex-1 min-w-0 break-words">{app.drift.error}</span>
+            <button type="button" class="shrink-0 text-red-500 hover:text-red-700 dark:hover:text-red-200 leading-none px-1" onclick={() => (app.drift.error = null)} aria-label="Dismiss" title="Dismiss">✕</button>
+          </div>
+        {:else if app.drift.checkedAt}
+          {#if driftFlaggedCount > 0}
+            <div class="flex items-center gap-2 rounded-md border border-amber-300 bg-amber-50 dark:border-amber-800/50 dark:bg-amber-950/30 p-2 text-[11px] text-amber-800 dark:text-amber-200 leading-snug">
+              <span class="flex-1 min-w-0 break-words">
+                <strong>{driftFlaggedCount}</strong> of {driftCheckedCount} change{driftCheckedCount === 1 ? "" : "s"} drifted or missing.
+              </span>
+              <button
+                type="button"
+                class="shrink-0 rounded bg-amber-600 text-white text-[11px] font-medium px-2 py-1 hover:bg-amber-700"
+                onclick={resubmitFlagged}
+                title="Copy the drifted / missing annotations into a fresh draft so you can Resubmit them to the agent"
+              >
+                Resubmit {driftFlaggedCount} flagged
+              </button>
+            </div>
+          {:else}
+            <div class="flex items-start gap-2 rounded-md border border-emerald-300 bg-emerald-50 dark:border-emerald-800/50 dark:bg-emerald-950/30 p-2 text-[11px] text-emerald-700 dark:text-emerald-300 leading-snug">
+              <span class="flex-1 min-w-0 break-words">✓ Drift Check passed — every applied change is present in source.</span>
+              <button type="button" class="shrink-0 text-emerald-600 hover:text-emerald-800 dark:hover:text-emerald-200 leading-none px-1" onclick={() => app.clearDrift()} aria-label="Dismiss" title="Dismiss">✕</button>
+            </div>
+          {/if}
+        {/if}
         <ul class="space-y-2" aria-label="Submitted annotations">
           {#each inFlightAnnotations as item, i (`${item.annotation.id}:${i}`)}
             <AnnotationCard
               annotation={item.annotation}
               canEdit={false}
               pending={(item.batchStatus === "submitted" || item.batchStatus === "applying") && item.annotation.status !== "done" && item.annotation.status !== "error"}
+              drift={app.drift.results[item.annotation.id] ?? null}
               onremove={() => {}}
               onsave={() => {}}
             />
@@ -3060,6 +3238,8 @@
             💬 Ask agent
           {:else if fileOnlyMode}
             File issues
+          {:else if app.drift.resubmitting}
+            Resubmit
           {:else}
             Send to agent
           {/if}
@@ -3100,7 +3280,9 @@
           <input
             type="checkbox"
             class="accent-brand-pink"
-            bind:checked={autoReloadEnabled}
+            checked={app.autoReload}
+            onchange={(e) =>
+              app.setAutoReload((e.currentTarget as HTMLInputElement).checked)}
           />
           Auto-reload when not using HMR
         </label>
@@ -3110,6 +3292,18 @@
           <span class="text-[11px] text-ink-500 dark:text-night-mute">No HMR detected</span>
         {/if}
       </div>
+    {/if}
+    <!-- Manual reload: shown when a batch finished without HMR and we held
+         back the auto-reload (off, or you're annotating the next batch). -->
+    {#if pendingReload && activeTabId != null}
+      <button
+        type="button"
+        class="mt-2 w-full rounded-md border border-brand-pink/40 bg-brand-pink/5 text-brand-pink dark:text-brand-pink-light text-[12px] font-medium py-1.5 hover:bg-brand-pink/10 disabled:opacity-50"
+        disabled={reloadingAt !== null}
+        onclick={reloadActiveTab}
+      >
+        {reloadingAt !== null ? "Reloading…" : "↻ Reload page to see changes"}
+      </button>
     {/if}
     {/if}
   </footer>

@@ -1,12 +1,19 @@
 <script lang="ts">
   import { onMount } from "svelte";
-  import type { Annotation } from "@pinta/shared";
+  import type { Annotation, AnnotationImage, AnnotationTarget } from "@pinta/shared";
   import { captureTarget } from "./capture.js";
   import { content, type Mode, type Draft } from "./state.svelte.js";
   import { targetAnchor, type DrawTool } from "./tools/draw.js";
+  import {
+    detectDropKind,
+    resolveInsertionPoint,
+    type ResolvedDrop,
+  } from "./tools/place.js";
   import Canvas from "./Canvas.svelte";
   import CommentInput from "./CommentInput.svelte";
   import ElementEditor from "./ElementEditor.svelte";
+  import TextFormatToolbar from "./TextFormatToolbar.svelte";
+  import { voice } from "../lib/voice/controller.js";
 
   let hovered: Element | null = $state(null);
   let selected: Element | null = $state(null);
@@ -163,7 +170,15 @@
         // select-mode (DOM element + pin badge) or draw-mode (canvas
         // stroke). Try both collections — exactly one will match.
         const { entry } = content.removeAnnotatedById(m.annotationId);
-        if (entry) restoreFromSnapshot(entry);
+        if (entry) {
+          // A node Pinta CREATED (text-insert preview) rolls back by
+          // removal; a mutated existing element restores its snapshot.
+          if (entry.inserted) entry.element.remove();
+          else restoreFromSnapshot(entry);
+          // Multi-target annotations (move / delete with Ctrl-clicked
+          // siblings) also preview the extras — restore them too.
+          for (const ex of entry.extraPreviews ?? []) restoreFromSnapshot(ex);
+        }
         content.removeCommittedById(m.annotationId);
         // Drop the matching rect cache so a future replay doesn't pick
         // up the removed entry's last-known position.
@@ -174,7 +189,9 @@
         if (content.pending?.id === m.annotationId) content.cancelPending();
       } else if (m?.type === "annotated.clear") {
         for (const entry of content.takeAllAnnotated()) {
-          restoreFromSnapshot(entry);
+          if (entry.inserted) entry.element.remove();
+          else restoreFromSnapshot(entry);
+          for (const ex of entry.extraPreviews ?? []) restoreFromSnapshot(ex);
         }
         content.clearCommitted();
         if (content.pending) content.cancelPending();
@@ -277,10 +294,17 @@
   onMount(() => {
     function onKey(e: KeyboardEvent) {
       if (!e.altKey || e.ctrlKey || e.metaKey || e.shiftKey) return;
+      const key = e.key.toLowerCase();
+      // Alt+V — dictate into the focused field (Voice Command). Handled
+      // BEFORE the input/textarea guard below, since unlike the mode
+      // hotkeys it's meant to fire while a text field is focused.
+      if (key === "v" && content.voiceEnabled) {
+        if (voice.toggleForFocused(content.voiceLang)) e.preventDefault();
+        return;
+      }
       const ae = document.activeElement as HTMLElement | null;
       const tag = ae?.tagName;
       if (tag === "INPUT" || tag === "TEXTAREA" || ae?.isContentEditable) return;
-      const key = e.key.toLowerCase();
       if (key === "s") {
         e.preventDefault();
         setMode(content.mode === "select" ? "idle" : "select");
@@ -664,6 +688,1005 @@
     content.cancelPendingImage();
     imageComment = "";
   }
+
+  function newAnnId(): string {
+    return typeof crypto !== "undefined" && "randomUUID" in crypto
+      ? `ann-${crypto.randomUUID()}`
+      : `ann-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
+  }
+
+  // ─── Move tool (drag & drop an existing element) ────────────────────
+  // Grab an element, drag it with a live inline-transform preview, and
+  // record where it should go. The preview stays applied after submit
+  // (like select-mode edits) and rolls back through the same
+  // originalCssText snapshot in content.annotated. The DOM is NEVER
+  // reparented during preview — only translated — so rollback is safe.
+
+  /** One extra element being dragged along with the primary (a Ctrl/Cmd+
+   *  click sibling). Carries its own capture + rollback snapshot so the
+   *  agent gets all N targets and the page restores cleanly. */
+  type MoveExtra = {
+    el: HTMLElement;
+    target: AnnotationTarget;
+    originalCssText: string;
+    originalInnerHtml: string;
+  };
+
+  type PendingMove = {
+    el: HTMLElement;
+    /** Captured at grab time, pre-transform, so boundingRect/outerHTML
+     *  reflect where the element really lives in the layout. */
+    sourceTarget: AnnotationTarget;
+    /** Inline style to restore on cancel/remove (true original when the
+     *  element was annotated before). */
+    originalCssText: string;
+    /** innerHTML snapshot of the primary (for the extraPreviews rollback
+     *  shape — the primary itself uses originalCssText). */
+    originalInnerHtml: string;
+    /** Ctrl/Cmd-clicked siblings moving with the primary. Empty for a
+     *  plain single-element drag. */
+    extras: MoveExtra[];
+    dx: number;
+    dy: number;
+    drop: ResolvedDrop | null;
+    /** True once dropped — drag finished, comment popover open. */
+    frozen: boolean;
+  };
+  let pendingMove = $state<PendingMove | null>(null);
+  let moveComment = $state("");
+  let moveImages = $state<AnnotationImage[]>([]);
+  // Elements Ctrl/Cmd+clicked in move mode BEFORE a drag begins. When the
+  // user then grabs any element, these ride along (translated together and
+  // recorded as extra targets). Cleared once folded into a pendingMove.
+  let moveExtras = $state<HTMLElement[]>([]);
+
+  function cancelMove(): void {
+    const p = pendingMove;
+    if (p) {
+      if (p.el.isConnected) p.el.style.cssText = p.originalCssText;
+      for (const ex of p.extras) {
+        if (ex.el.isConnected) ex.el.style.cssText = ex.originalCssText;
+      }
+    }
+    pendingMove = null;
+    moveComment = "";
+    moveImages = [];
+    moveExtras = [];
+    hovered = null;
+  }
+
+  // Leaving move mode (hotkey, side panel toggle, another tool) with a
+  // drag, an un-submitted drop, or a pre-drag multi-selection in flight →
+  // roll everything back.
+  $effect(() => {
+    if (content.mode !== "move" && (pendingMove || moveExtras.length)) {
+      cancelMove();
+    }
+  });
+
+  function beginMoveDrag(el: HTMLElement, e: MouseEvent): void {
+    const existing = content.findAnnotatedByElement(el);
+    const sourceTarget = captureTarget(el);
+    // Fold the pre-drag Ctrl/Cmd+click selection into this drag. The
+    // grabbed element is always the primary; any others become extras
+    // (deduped so grabbing one of the pre-selected elements doesn't
+    // list it twice).
+    const extras: MoveExtra[] = moveExtras
+      .filter((ex) => ex !== el && ex.isConnected)
+      .map((ex) => {
+        const prev = content.findAnnotatedByElement(ex);
+        return {
+          el: ex,
+          target: captureTarget(ex),
+          originalCssText: prev ? prev.originalCssText : ex.style.cssText,
+          originalInnerHtml: prev ? prev.originalInnerHtml : ex.innerHTML,
+        };
+      });
+    moveExtras = [];
+    pendingMove = {
+      el,
+      sourceTarget,
+      originalCssText: existing
+        ? existing.originalCssText
+        : el.style.cssText,
+      originalInnerHtml: existing ? existing.originalInnerHtml : el.innerHTML,
+      extras,
+      dx: 0,
+      dy: 0,
+      drop: null,
+      frozen: false,
+    };
+    const startX = e.clientX;
+    const startY = e.clientY;
+    // Dragged elements must not swallow hit-tests for the drop target —
+    // and transitions would fight the per-frame transform.
+    el.style.transition = "none";
+    el.style.pointerEvents = "none";
+    el.style.willChange = "transform";
+    for (const ex of extras) {
+      ex.el.style.transition = "none";
+      ex.el.style.pointerEvents = "none";
+      ex.el.style.willChange = "transform";
+    }
+
+    function onPointerMove(ev: PointerEvent) {
+      const p = pendingMove;
+      if (!p || p.frozen) return;
+      if (!p.el.isConnected) {
+        // SPA re-render detached the element mid-drag — abort cleanly.
+        cleanup();
+        cancelMove();
+        return;
+      }
+      const dx = ev.clientX - startX;
+      const dy = ev.clientY - startY;
+      p.el.style.transform = `translate(${dx}px, ${dy}px)`;
+      for (const ex of p.extras) {
+        if (ex.el.isConnected) ex.el.style.transform = `translate(${dx}px, ${dy}px)`;
+      }
+      pendingMove = {
+        ...p,
+        dx,
+        dy,
+        drop: resolveInsertionPoint(ev.clientX, ev.clientY, p.el),
+      };
+    }
+    function onPointerUp(ev: PointerEvent) {
+      cleanup();
+      const p = pendingMove;
+      if (!p) return;
+      const moved = Math.hypot(ev.clientX - startX, ev.clientY - startY) >= 4;
+      if (!moved || !p.el.isConnected) {
+        // Accidental click / element gone — nothing to record.
+        cancelMove();
+        return;
+      }
+      p.el.style.pointerEvents = "";
+      for (const ex of p.extras) ex.el.style.pointerEvents = "";
+      pendingMove = { ...p, frozen: true };
+    }
+    function cleanup() {
+      document.removeEventListener("pointermove", onPointerMove, true);
+      document.removeEventListener("pointerup", onPointerUp, true);
+      document.removeEventListener("pointercancel", onPointerUp, true);
+    }
+    document.addEventListener("pointermove", onPointerMove, true);
+    document.addEventListener("pointerup", onPointerUp, true);
+    document.addEventListener("pointercancel", onPointerUp, true);
+  }
+
+  function submitMove(): void {
+    const p = pendingMove;
+    if (!p || !p.frozen) return;
+    const el = p.el;
+    const dropKind = el.isConnected ? detectDropKind(p.drop, el) : "free";
+    const rect = el.getBoundingClientRect();
+    const move: NonNullable<Annotation["move"]> =
+      dropKind === "reorder" && p.drop
+        ? {
+            drop: "reorder",
+            container: captureTarget(p.drop.container),
+            reference: p.drop.reference
+              ? captureTarget(p.drop.reference)
+              : undefined,
+            position: p.drop.position,
+          }
+        : {
+            drop: "free",
+            offset: { dx: Math.round(p.dx), dy: Math.round(p.dy) },
+            // Same coordinate space as AnnotationTarget.boundingRect
+            // (raw getBoundingClientRect) so renderers can relate them.
+            destinationRect: {
+              x: rect.x,
+              y: rect.y,
+              width: rect.width,
+              height: rect.height,
+            },
+          };
+    const annId = newAnnId();
+    // Primary first, then each Ctrl-clicked extra in pick order, so the
+    // agent moves them all to the destination in a predictable sequence.
+    const targets = [p.sourceTarget, ...p.extras.map((ex) => ex.target)];
+    const annotation: Annotation = {
+      id: annId,
+      createdAt: Date.now(),
+      kind: "move",
+      strokes: [],
+      color: "#10B981",
+      comment: moveComment.trim(),
+      images: moveImages.length ? moveImages : undefined,
+      targets,
+      target: p.sourceTarget,
+      move,
+      viewport: snapshotViewport(),
+      url: location.href,
+    };
+    chrome.runtime.sendMessage({ type: "annotation.draw-committed", annotation });
+    // Snapshot so Remove / new-session restores the translate preview for
+    // the primary AND every extra that rode along.
+    content.recordAnnotated(
+      annId,
+      el,
+      p.originalCssText,
+      el.innerHTML,
+      p.sourceTarget.selector,
+      p.sourceTarget.outerHTML,
+      p.sourceTarget.nearbyText,
+      location.href,
+      false,
+      p.extras.map((ex) => ({
+        element: ex.el,
+        originalCssText: ex.originalCssText,
+        originalInnerHtml: ex.originalInnerHtml,
+      })),
+    );
+    pendingMove = null;
+    moveComment = "";
+    moveImages = [];
+    moveExtras = [];
+    setMode("idle");
+  }
+
+  // Move-mode pointer handlers: hover to aim, mousedown to grab.
+  $effect(() => {
+    if (content.mode !== "move") return;
+    function onMove(e: MouseEvent) {
+      if (pendingMove) return;
+      const el = e.target as Element | null;
+      if (!el || el === document.documentElement || el === document.body || isOurNode(el)) {
+        hovered = null;
+        return;
+      }
+      hovered = el;
+    }
+    function onDown(e: MouseEvent) {
+      if (e.button !== 0 || pendingMove) return;
+      const el = e.target as Element | null;
+      if (!el || el === document.documentElement || el === document.body || isOurNode(el)) return;
+      e.preventDefault();
+      e.stopPropagation();
+      // Ctrl/Cmd+click → toggle this element into the pre-drag multi-move
+      // selection instead of starting a drag. Grab any element afterward
+      // and the whole set moves together.
+      if (e.ctrlKey || e.metaKey) {
+        const target = el as HTMLElement;
+        const i = moveExtras.indexOf(target);
+        moveExtras =
+          i >= 0
+            ? moveExtras.filter((_, idx) => idx !== i)
+            : [...moveExtras, target];
+        hovered = null;
+        return;
+      }
+      hovered = null;
+      beginMoveDrag(el as HTMLElement, e);
+    }
+    function onClickSwallow(e: MouseEvent) {
+      // The page must not react to the grab/drop clicks (links, buttons).
+      if (isOurNode(e.target as Element | null)) return;
+      e.preventDefault();
+      e.stopPropagation();
+    }
+    function onKey(e: KeyboardEvent) {
+      if (e.key !== "Escape") return;
+      if (pendingMove) cancelMove();
+      else if (moveExtras.length) moveExtras = [];
+      else setMode("idle");
+    }
+    document.addEventListener("mousemove", onMove, true);
+    document.addEventListener("mousedown", onDown, true);
+    document.addEventListener("click", onClickSwallow, true);
+    document.addEventListener("keydown", onKey, true);
+    return () => {
+      document.removeEventListener("mousemove", onMove, true);
+      document.removeEventListener("mousedown", onDown, true);
+      document.removeEventListener("click", onClickSwallow, true);
+      document.removeEventListener("keydown", onKey, true);
+    };
+  });
+
+  // Live rects for the move overlay. The dragged element's rect reflects
+  // its transform, so the anchor follows the preview.
+  let moveRect = $derived.by(() => {
+    void tick;
+    const p = pendingMove;
+    if (!p || !p.el.isConnected) return null;
+    const r = p.el.getBoundingClientRect();
+    return { top: r.top, left: r.left, width: r.width, height: r.height };
+  });
+  // Highlights for the pre-drag Ctrl/Cmd+click multi-move selection AND
+  // the extras that are mid-drag (so the whole group stays visibly
+  // ganged together). Detached elements are dropped silently.
+  let moveExtraRects = $derived.by(() => {
+    void tick;
+    const els = pendingMove ? pendingMove.extras.map((ex) => ex.el) : moveExtras;
+    return els
+      .map((el) => ({ el, rect: rectOf(el) }))
+      .filter(
+        (x): x is { el: HTMLElement; rect: NonNullable<ReturnType<typeof rectOf>> } =>
+          x.rect !== null && x.el.isConnected,
+      );
+  });
+  let moveDropRects = $derived.by(() => {
+    void tick;
+    const p = pendingMove;
+    if (!p?.drop) return null;
+    if (!p.drop.container.isConnected) return null;
+    const c = p.drop.container.getBoundingClientRect();
+    // barRect is viewport-coords from resolve time — fresh during the
+    // drag (recomputed every pointermove). After the drop it can go
+    // stale on scroll, matching the popover anchor's behavior.
+    const bar = p.drop.barRect;
+    return {
+      container: { top: c.top, left: c.left, width: c.width, height: c.height },
+      bar: { top: bar.y, left: bar.x, width: bar.width, height: bar.height },
+    };
+  });
+
+  // ─── Text tool (click-to-edit + add paragraph) ──────────────────────
+  // Click an element with direct text → edit it in place (contenteditable,
+  // live preview, rides kind:"select" + contentChange — the agent already
+  // knows how to apply those). Click a container / gap → insert a NEW
+  // paragraph there (kind:"text-insert"); the inserted node stays as the
+  // live preview and rollback simply removes it.
+
+  type TextStyleSnapshot = {
+    fontSize: string;
+    fontWeight: string;
+    fontStyle: string;
+    underline: boolean;
+    color: string;
+    textAlign: string;
+    lineHeight: string;
+    letterSpacing: string;
+    textTransform: string;
+  };
+  type PendingTextEdit = {
+    el: HTMLElement;
+    originalCssText: string;
+    originalInnerHtml: string;
+    textBefore: string;
+    /** Text-formatting overrides from the floating toolbar (font-size,
+     *  font-weight, color, text-align, …). Applied live and folded into
+     *  the committed annotation's `cssChanges`. */
+    cssChanges: Record<string, string>;
+    /** Computed text styles at edit start — seeds the toolbar controls. */
+    initialStyles: TextStyleSnapshot;
+  };
+  let pendingTextEdit = $state<PendingTextEdit | null>(null);
+
+  function readTextStyles(el: Element): TextStyleSnapshot {
+    const cs = window.getComputedStyle(el);
+    return {
+      fontSize: cs.fontSize,
+      fontWeight: cs.fontWeight,
+      fontStyle: cs.fontStyle,
+      underline: cs.textDecorationLine.includes("underline"),
+      color: cs.color,
+      textAlign: cs.textAlign,
+      lineHeight: cs.lineHeight,
+      letterSpacing: cs.letterSpacing,
+      textTransform: cs.textTransform,
+    };
+  }
+
+  // Apply one text-formatting property from the toolbar. Empty value
+  // resets it (drop the key, restore the element's original inline style
+  // then re-apply the remaining overrides). Reassigning cssText doesn't
+  // disturb the contentEditable caret or its text.
+  function applyTextFormat(prop: string, value: string): void {
+    const p = pendingTextEdit;
+    if (!p) return;
+    const next = { ...p.cssChanges };
+    if (value.trim()) next[prop] = value.trim();
+    else delete next[prop];
+    pendingTextEdit = { ...p, cssChanges: next };
+    const el = p.el;
+    if (!el.isConnected) return;
+    el.style.cssText = p.originalCssText;
+    for (const [k, v] of Object.entries(next)) {
+      try {
+        el.style.setProperty(k, v);
+      } catch {
+        // ignore invalid property/value
+      }
+    }
+  }
+
+  type PendingTextInsert = {
+    el: HTMLElement; // the inserted placeholder <p>
+    containerTarget: AnnotationTarget;
+    reference?: AnnotationTarget;
+    position: "before" | "after" | "inside";
+  };
+  let pendingTextInsert = $state<PendingTextInsert | null>(null);
+
+  // Live viewport rect of the element being text-edited — anchors the
+  // floating format toolbar and follows the element on scroll/resize.
+  let textEditRect = $derived(rectOf(pendingTextEdit?.el ?? null));
+
+  /** Elements whose text can be edited in place: has a non-empty direct
+   *  Text child and isn't a form control / replaced element. */
+  function hasDirectText(el: Element): boolean {
+    if (
+      el.matches(
+        "input, textarea, select, option, img, svg, svg *, video, audio, canvas, iframe",
+      )
+    ) {
+      return false;
+    }
+    for (const n of el.childNodes) {
+      if (n.nodeType === Node.TEXT_NODE && (n.textContent ?? "").trim()) return true;
+    }
+    return false;
+  }
+
+  function startTextEdit(el: HTMLElement): void {
+    const existing = content.findAnnotatedByElement(el);
+    pendingTextEdit = {
+      el,
+      originalCssText: existing ? existing.originalCssText : el.style.cssText,
+      originalInnerHtml: existing
+        ? existing.originalInnerHtml
+        : el.innerHTML,
+      textBefore: textOf(el),
+      cssChanges: {},
+      initialStyles: readTextStyles(el),
+    };
+    try {
+      el.contentEditable = "plaintext-only";
+    } catch {
+      el.contentEditable = "true";
+    }
+    el.focus();
+    // Select-all so typing replaces; caret-click still works for tweaks.
+    try {
+      const range = document.createRange();
+      range.selectNodeContents(el);
+      const sel = window.getSelection();
+      sel?.removeAllRanges();
+      sel?.addRange(range);
+    } catch {
+      // selection is a nicety only
+    }
+  }
+
+  function finishTextEdit(commit: boolean): void {
+    const p = pendingTextEdit;
+    if (!p) return;
+    pendingTextEdit = null; // clear first — blur fired by cleanup re-enters
+    const el = p.el;
+    if (!el.isConnected) return;
+    el.removeAttribute("contenteditable");
+    const textAfter = textOf(el);
+    const textChanged = textAfter !== p.textBefore;
+    const hasFormat = Object.keys(p.cssChanges).length > 0;
+    if (!commit || (!textChanged && !hasFormat)) {
+      // Untouched or cancelled — put the original markup + styles back.
+      el.style.cssText = p.originalCssText;
+      el.innerHTML = p.originalInnerHtml;
+      return;
+    }
+    const annId = newAnnId();
+    // Capture AFTER the edit so outerHTML reflects the intended state
+    // (same ordering rule as submitSelect).
+    const target = captureTarget(el);
+    const annotation: Annotation = {
+      id: annId,
+      createdAt: Date.now(),
+      kind: "select",
+      strokes: [],
+      color: "#2563eb",
+      comment: "",
+      contentChange: textChanged
+        ? { textBefore: p.textBefore, textAfter }
+        : undefined,
+      cssChanges: hasFormat ? p.cssChanges : undefined,
+      targets: [target],
+      target,
+      viewport: snapshotViewport(),
+      url: location.href,
+    };
+    chrome.runtime.sendMessage({ type: "annotation.draw-committed", annotation });
+    content.recordAnnotated(
+      annId,
+      el,
+      p.originalCssText,
+      p.originalInnerHtml,
+      target.selector,
+      target.outerHTML,
+      target.nearbyText,
+      location.href,
+    );
+  }
+
+  function startTextInsert(clientX: number, clientY: number): void {
+    const resolved = resolveInsertionPoint(clientX, clientY, null);
+    if (!resolved) return;
+    // Capture the container BEFORE inserting so its outerHTML doesn't
+    // include our placeholder.
+    const containerTarget = captureTarget(resolved.container);
+    const reference = resolved.reference
+      ? captureTarget(resolved.reference)
+      : undefined;
+    const p = document.createElement("p");
+    p.dataset.pintaInsert = "1";
+    p.style.outline = "1px dashed rgba(16, 185, 129, 0.7)";
+    p.style.outlineOffset = "2px";
+    p.style.minHeight = "1em";
+    p.style.minWidth = "40px";
+    try {
+      p.contentEditable = "plaintext-only";
+    } catch {
+      p.contentEditable = "true";
+    }
+    if (resolved.position === "inside" || !resolved.reference) {
+      resolved.container.appendChild(p);
+    } else if (resolved.position === "before") {
+      resolved.container.insertBefore(p, resolved.reference);
+    } else {
+      resolved.container.insertBefore(p, resolved.reference.nextSibling);
+    }
+    pendingTextInsert = {
+      el: p,
+      containerTarget,
+      reference,
+      position: resolved.position,
+    };
+    p.focus();
+  }
+
+  function finishTextInsert(commit: boolean): void {
+    const p = pendingTextInsert;
+    if (!p) return;
+    pendingTextInsert = null; // clear first — blur re-enters
+    const el = p.el;
+    const text = el.isConnected ? textOf(el) : "";
+    if (!commit || !text) {
+      el.remove();
+      return;
+    }
+    el.removeAttribute("contenteditable");
+    el.style.outline = "";
+    el.style.outlineOffset = "";
+    const annId = newAnnId();
+    const annotation: Annotation = {
+      id: annId,
+      createdAt: Date.now(),
+      kind: "text-insert",
+      strokes: [],
+      color: "#10B981",
+      comment: "",
+      targets: [p.containerTarget],
+      target: p.containerTarget,
+      textInsert: {
+        reference: p.reference,
+        position: p.position,
+        text,
+      },
+      viewport: snapshotViewport(),
+      url: location.href,
+    };
+    chrome.runtime.sendMessage({ type: "annotation.draw-committed", annotation });
+    // `inserted: true` → rollback removes the node instead of restoring.
+    content.recordAnnotated(
+      annId,
+      el,
+      "",
+      "",
+      undefined,
+      undefined,
+      undefined,
+      location.href,
+      true,
+    );
+  }
+
+  function cancelTextTool(): void {
+    if (pendingTextEdit) finishTextEdit(false);
+    if (pendingTextInsert) finishTextInsert(false);
+    hovered = null;
+  }
+
+  // Leaving text mode with an un-committed edit/insert → roll back.
+  $effect(() => {
+    if (content.mode !== "text" && (pendingTextEdit || pendingTextInsert)) {
+      cancelTextTool();
+    }
+  });
+
+  // Text-mode pointer handlers.
+  $effect(() => {
+    if (content.mode !== "text") return;
+    function editingEl(): HTMLElement | null {
+      return pendingTextEdit?.el ?? pendingTextInsert?.el ?? null;
+    }
+    function onMove(e: MouseEvent) {
+      if (editingEl()) return;
+      const el = e.target as Element | null;
+      if (!el || el === document.documentElement || el === document.body || isOurNode(el)) {
+        hovered = null;
+        return;
+      }
+      hovered = hasDirectText(el) ? el : null;
+    }
+    function onClick(e: MouseEvent) {
+      const el = e.target as Element | null;
+      if (!el || isOurNode(el)) return;
+      const editing = editingEl();
+      if (editing) {
+        // Clicking inside the live edit repositions the caret; clicking
+        // anywhere else commits it (blur also fires, but be explicit).
+        if (el === editing || editing.contains(el)) return;
+        e.preventDefault();
+        e.stopPropagation();
+        if (pendingTextEdit) finishTextEdit(true);
+        if (pendingTextInsert) finishTextInsert(true);
+        return;
+      }
+      e.preventDefault();
+      e.stopPropagation();
+      hovered = null;
+      if (
+        el !== document.documentElement &&
+        el !== document.body &&
+        hasDirectText(el)
+      ) {
+        startTextEdit(el as HTMLElement);
+      } else {
+        startTextInsert(e.clientX, e.clientY);
+      }
+    }
+    function onKey(e: KeyboardEvent) {
+      const editing = editingEl();
+      if (e.key === "Escape") {
+        e.preventDefault();
+        e.stopPropagation();
+        if (editing) cancelTextTool();
+        else setMode("idle");
+        return;
+      }
+      // Enter commits (Shift+Enter keeps typing a newline).
+      if (e.key === "Enter" && !e.shiftKey && editing) {
+        e.preventDefault();
+        e.stopPropagation();
+        if (pendingTextEdit) finishTextEdit(true);
+        if (pendingTextInsert) finishTextInsert(true);
+      }
+    }
+    function onBlur(e: FocusEvent) {
+      const editing = editingEl();
+      if (!editing || e.target !== editing) return;
+      // Focus moving INTO the Pinta formatting toolbar (color picker,
+      // size input, …) must NOT commit — the user is still formatting.
+      // relatedTarget is retargeted to our shadow host across the
+      // boundary, so isOurNode catches it.
+      if (isOurNode(e.relatedTarget as Element | null)) return;
+      // Commit on blur — matches the "click away = done" instinct.
+      if (pendingTextEdit) finishTextEdit(true);
+      if (pendingTextInsert) finishTextInsert(true);
+    }
+    document.addEventListener("mousemove", onMove, true);
+    document.addEventListener("click", onClick, true);
+    document.addEventListener("keydown", onKey, true);
+    document.addEventListener("blur", onBlur, true);
+    return () => {
+      document.removeEventListener("mousemove", onMove, true);
+      document.removeEventListener("click", onClick, true);
+      document.removeEventListener("keydown", onKey, true);
+      document.removeEventListener("blur", onBlur, true);
+    };
+  });
+
+  // ─── Delete tool (remove elements on click) ─────────────────────────
+  // Click an element → it is REMOVED from the page immediately (hidden via
+  // inline `display:none`) and a `kind:"delete"` annotation is created on
+  // the spot. Undo = remove that annotation's card in the side panel,
+  // which restores the element (rollback of the inline-style snapshot).
+  // The tool stays active so you can click through several deletions in a
+  // row. No confirm popover — the click IS the action.
+
+  const DELETE_COLOR = "#EF4444";
+
+  function deleteElementNow(el: HTMLElement): void {
+    // Capture the target from the element's CURRENT (visible) state before
+    // hiding — outerHTML / computedStyles / boundingRect must describe the
+    // real element the agent will delete in source.
+    const target = captureTarget(el);
+    // Snapshot the exact inline style to restore on undo, then hide. Using
+    // `display:none !important` so the element visibly disappears (and the
+    // page reflows) regardless of the page's own CSS.
+    const originalCssText = el.style.cssText;
+    const sep = originalCssText && !originalCssText.endsWith(";") ? "; " : "";
+    el.style.cssText = originalCssText + sep + "display: none !important;";
+
+    const annId = newAnnId();
+    const annotation: Annotation = {
+      id: annId,
+      createdAt: Date.now(),
+      kind: "delete",
+      strokes: [],
+      color: DELETE_COLOR,
+      comment: "",
+      targets: [target],
+      target,
+      viewport: snapshotViewport(),
+      url: location.href,
+    };
+    chrome.runtime.sendMessage({ type: "annotation.draw-committed", annotation });
+    // Record for rollback. `deleted: true` suppresses the on-page pin
+    // badge (there's nothing to point at — the element is gone). Removing
+    // the card fires `annotated.remove`, which restores originalCssText.
+    content.recordAnnotated(
+      annId,
+      el,
+      originalCssText,
+      el.innerHTML,
+      target.selector,
+      target.outerHTML,
+      target.nearbyText,
+      location.href,
+      false,
+      undefined,
+      true,
+    );
+    hovered = null;
+  }
+
+  // Delete-mode pointer handlers: hover to aim, click to remove.
+  $effect(() => {
+    if (content.mode !== "delete") return;
+    function onMove(e: MouseEvent) {
+      const el = e.target as Element | null;
+      if (!el || el === document.documentElement || el === document.body || isOurNode(el)) {
+        hovered = null;
+        return;
+      }
+      hovered = el;
+    }
+    function onDown(e: MouseEvent) {
+      // Act on mousedown so natively-disabled controls (which swallow
+      // `click`) can still be deleted, mirroring select mode's approach.
+      if (e.button !== 0) return;
+      const el = e.target as Element | null;
+      if (!el || isOurNode(el)) return;
+      if (el === document.documentElement || el === document.body) return;
+      e.preventDefault();
+      e.stopPropagation();
+      deleteElementNow(el as HTMLElement);
+    }
+    function onClickSwallow(e: MouseEvent) {
+      // Don't let the page react to the delete click (links, buttons).
+      if (isOurNode(e.target as Element | null)) return;
+      e.preventDefault();
+      e.stopPropagation();
+    }
+    function onKey(e: KeyboardEvent) {
+      if (e.key !== "Escape") return;
+      e.preventDefault();
+      e.stopPropagation();
+      setMode("idle");
+    }
+    document.addEventListener("mousemove", onMove, true);
+    document.addEventListener("mousedown", onDown, true);
+    document.addEventListener("click", onClickSwallow, true);
+    document.addEventListener("keydown", onKey, true);
+    return () => {
+      document.removeEventListener("mousemove", onMove, true);
+      document.removeEventListener("mousedown", onDown, true);
+      document.removeEventListener("click", onClickSwallow, true);
+      document.removeEventListener("keydown", onKey, true);
+    };
+  });
+
+  // ─── Resize tool (drag handles to size divs / grids / any box) ──────
+  // Click an element to select it, then drag the right / bottom / corner
+  // handle to change its width and/or height. Live inline-style preview;
+  // commit rides `kind:"select"` with `cssChanges` (width/height) — the
+  // agent already knows how to translate those into the project's system.
+
+  type ResizePending = {
+    el: HTMLElement;
+    originalCssText: string;
+    originalInnerHtml: string;
+    sourceTarget: AnnotationTarget;
+    /** Current previewed size in CSS px (border-box, from the rect). */
+    width: number;
+    height: number;
+  };
+  let resizePending = $state<ResizePending | null>(null);
+  let resizeComment = $state("");
+
+  function beginResizeSelect(el: HTMLElement): void {
+    const existing = content.findAnnotatedByElement(el);
+    const r = el.getBoundingClientRect();
+    resizePending = {
+      el,
+      originalCssText: existing ? existing.originalCssText : el.style.cssText,
+      originalInnerHtml: existing ? existing.originalInnerHtml : el.innerHTML,
+      sourceTarget: captureTarget(el),
+      width: Math.round(r.width),
+      height: Math.round(r.height),
+    };
+  }
+
+  function cancelResize(): void {
+    const p = resizePending;
+    if (p && p.el.isConnected) p.el.style.cssText = p.originalCssText;
+    resizePending = null;
+    resizeComment = "";
+    hovered = null;
+  }
+
+  // Leaving resize mode with an un-committed selection → roll back.
+  $effect(() => {
+    if (content.mode !== "resize" && resizePending) cancelResize();
+  });
+
+  function onResizeHandleDown(e: PointerEvent, edge: "e" | "s" | "se"): void {
+    const p = resizePending;
+    if (!p || e.button !== 0) return;
+    e.preventDefault();
+    e.stopPropagation();
+    const startX = e.clientX;
+    const startY = e.clientY;
+    const startW = p.width;
+    const startH = p.height;
+    const el = p.el;
+    const handle = e.currentTarget as HTMLElement;
+    try {
+      handle.setPointerCapture(e.pointerId);
+    } catch {
+      // capture unsupported — pointer events still fire on the handle
+    }
+    const prevTransition = el.style.transition;
+    el.style.transition = "none";
+    function onMove(ev: PointerEvent): void {
+      const cur = resizePending;
+      if (!cur || !el.isConnected) return;
+      let w = startW;
+      let h = startH;
+      if (edge === "e" || edge === "se") {
+        w = Math.max(16, Math.round(startW + (ev.clientX - startX)));
+        el.style.width = `${w}px`;
+      }
+      if (edge === "s" || edge === "se") {
+        h = Math.max(16, Math.round(startH + (ev.clientY - startY)));
+        el.style.height = `${h}px`;
+      }
+      resizePending = { ...cur, width: w, height: h };
+    }
+    function onUp(ev: PointerEvent): void {
+      try {
+        handle.releasePointerCapture(ev.pointerId);
+      } catch {
+        // already released
+      }
+      handle.removeEventListener("pointermove", onMove);
+      handle.removeEventListener("pointerup", onUp);
+      handle.removeEventListener("pointercancel", onUp);
+      el.style.transition = prevTransition;
+    }
+    handle.addEventListener("pointermove", onMove);
+    handle.addEventListener("pointerup", onUp);
+    handle.addEventListener("pointercancel", onUp);
+  }
+
+  function submitResize(): void {
+    const p = resizePending;
+    if (!p) return;
+    const el = p.el;
+    const orig = p.sourceTarget.boundingRect;
+    const cssChanges: Record<string, string> = {};
+    if (Math.round(orig.width) !== p.width) cssChanges["width"] = `${p.width}px`;
+    if (Math.round(orig.height) !== p.height) cssChanges["height"] = `${p.height}px`;
+    const hasComment = resizeComment.trim().length > 0;
+    if (Object.keys(cssChanges).length === 0 && !hasComment) {
+      // Nothing actually changed — treat as a cancel.
+      cancelResize();
+      setMode("idle");
+      return;
+    }
+    const annId = newAnnId();
+    // Capture WITH the resize preview applied so outerHTML / computedStyles
+    // reflect the intended size (same rule as submitSelect).
+    const target = captureTarget(el);
+    const annotation: Annotation = {
+      id: annId,
+      createdAt: Date.now(),
+      kind: "select",
+      strokes: [],
+      color: "#2563eb",
+      comment: resizeComment.trim(),
+      cssChanges: Object.keys(cssChanges).length ? cssChanges : undefined,
+      targets: [target],
+      target,
+      viewport: snapshotViewport(),
+      url: location.href,
+    };
+    chrome.runtime.sendMessage({ type: "annotation.draw-committed", annotation });
+    // Keep the preview applied; snapshot for rollback on Remove / clear.
+    content.recordAnnotated(
+      annId,
+      el,
+      p.originalCssText,
+      p.originalInnerHtml,
+      target.selector,
+      target.outerHTML,
+      target.nearbyText,
+      location.href,
+    );
+    resizePending = null;
+    resizeComment = "";
+    setMode("idle");
+  }
+
+  // Resize-mode pointer handlers: hover to aim, click to select. Handles
+  // carry their own pointerdown (onResizeHandleDown) and are skipped here
+  // via isOurNode.
+  $effect(() => {
+    if (content.mode !== "resize") return;
+    function onMove(e: MouseEvent) {
+      if (resizePending) return;
+      const el = e.target as Element | null;
+      if (!el || el === document.documentElement || el === document.body || isOurNode(el)) {
+        hovered = null;
+        return;
+      }
+      hovered = el;
+    }
+    function onDown(e: MouseEvent) {
+      if (e.button !== 0) return;
+      const el = e.target as Element | null;
+      if (!el || isOurNode(el)) return;
+      if (el === document.documentElement || el === document.body) return;
+      e.preventDefault();
+      e.stopPropagation();
+      if (resizePending) {
+        if (resizePending.el === el) return; // already selected
+        // Switching target — roll the previous preview back first.
+        if (resizePending.el.isConnected) {
+          resizePending.el.style.cssText = resizePending.originalCssText;
+        }
+        resizeComment = "";
+      }
+      hovered = null;
+      beginResizeSelect(el as HTMLElement);
+    }
+    function onClickSwallow(e: MouseEvent) {
+      if (isOurNode(e.target as Element | null)) return;
+      e.preventDefault();
+      e.stopPropagation();
+    }
+    function onKey(e: KeyboardEvent) {
+      if (e.key !== "Escape") return;
+      e.preventDefault();
+      e.stopPropagation();
+      if (resizePending) cancelResize();
+      else setMode("idle");
+    }
+    document.addEventListener("mousemove", onMove, true);
+    document.addEventListener("mousedown", onDown, true);
+    document.addEventListener("click", onClickSwallow, true);
+    document.addEventListener("keydown", onKey, true);
+    return () => {
+      document.removeEventListener("mousemove", onMove, true);
+      document.removeEventListener("mousedown", onDown, true);
+      document.removeEventListener("click", onClickSwallow, true);
+      document.removeEventListener("keydown", onKey, true);
+    };
+  });
+
+  // Live rect of the element being resized (tracks its previewed size).
+  let resizeRect = $derived.by(() => {
+    void tick;
+    void resizePending?.width;
+    void resizePending?.height;
+    const p = resizePending;
+    if (!p || !p.el.isConnected) return null;
+    const r = p.el.getBoundingClientRect();
+    return { top: r.top, left: r.left, width: r.width, height: r.height };
+  });
 
   // Submit a select annotation.
   let selectComment = $state("");
@@ -1279,7 +2302,7 @@
 {#each !imported ? content.annotated : [] as a (a.id)}
   {@const r = rectOf(a.element, a.id)}
   {@const n = content.globalSeq(a.id)}
-  {#if r && (!a.url || a.url === currentUrl)}
+  {#if r && !a.deleted && (!a.url || a.url === currentUrl)}
     <div
       class="pin"
       style:top="{Math.max(0, r.top - 8)}px"
@@ -1358,6 +2381,193 @@
   {/if}
 {/if}
 
+{#if content.mode === "move"}
+  {#if hoverRect && !pendingMove}
+    <div
+      class="hl hl--hover"
+      style:top="{hoverRect.top}px"
+      style:left="{hoverRect.left}px"
+      style:width="{hoverRect.width}px"
+      style:height="{hoverRect.height}px"
+    ></div>
+    <div
+      class="label"
+      style:top="{Math.max(0, hoverRect.top - 22)}px"
+      style:left="{hoverRect.left}px"
+    >
+      {describe(hovered)} · {moveExtras.length ? "drag to move all · Ctrl/Cmd+click to add" : "drag to move · Ctrl/Cmd+click for multi"}
+    </div>
+  {/if}
+  <!-- Ctrl/Cmd-clicked siblings — dashed emerald halos, shown both while
+    selecting (pre-drag) and mid-drag so the group stays visibly ganged. -->
+  {#each moveExtraRects as ex (ex.el)}
+    <div
+      class="hl hl--move-extra"
+      style:top="{ex.rect.top}px"
+      style:left="{ex.rect.left}px"
+      style:width="{ex.rect.width}px"
+      style:height="{ex.rect.height}px"
+    ></div>
+  {/each}
+  {#if pendingMove && moveRect}
+    <div
+      class="hl hl--selected"
+      style:top="{moveRect.top}px"
+      style:left="{moveRect.left}px"
+      style:width="{moveRect.width}px"
+      style:height="{moveRect.height}px"
+    ></div>
+  {/if}
+  {#if moveDropRects}
+    <div
+      class="hl hl--drop"
+      style:top="{moveDropRects.container.top}px"
+      style:left="{moveDropRects.container.left}px"
+      style:width="{moveDropRects.container.width}px"
+      style:height="{moveDropRects.container.height}px"
+    ></div>
+    <div
+      class="drop-bar"
+      style:top="{moveDropRects.bar.top}px"
+      style:left="{moveDropRects.bar.left}px"
+      style:width="{moveDropRects.bar.width}px"
+      style:height="{moveDropRects.bar.height}px"
+    ></div>
+  {/if}
+  {#if pendingMove?.frozen && moveRect}
+    <CommentInput
+      anchor={moveRect}
+      title="Move {describe(pendingMove.el)}"
+      allowEmpty={true}
+      bind:value={moveComment}
+      bind:images={moveImages}
+      onsubmit={submitMove}
+      oncancel={cancelMove}
+    />
+  {/if}
+{/if}
+
+{#if content.mode === "text"}
+  {#if hoverRect && !pendingTextEdit && !pendingTextInsert}
+    <div
+      class="hl hl--hover"
+      style:top="{hoverRect.top}px"
+      style:left="{hoverRect.left}px"
+      style:width="{hoverRect.width}px"
+      style:height="{hoverRect.height}px"
+    ></div>
+    <div
+      class="label"
+      style:top="{Math.max(0, hoverRect.top - 22)}px"
+      style:left="{hoverRect.left}px"
+    >
+      {describe(hovered)} · click to edit text
+    </div>
+  {/if}
+  <!-- Floating format toolbar while editing an existing element's text. -->
+  {#if pendingTextEdit && textEditRect}
+    <TextFormatToolbar
+      anchor={textEditRect}
+      title={describe(pendingTextEdit.el)}
+      initial={pendingTextEdit.initialStyles}
+      onformat={applyTextFormat}
+      ondone={() => finishTextEdit(true)}
+      oncancel={cancelTextTool}
+    />
+  {/if}
+{/if}
+
+{#if content.mode === "delete"}
+  {#if hoverRect}
+    <div
+      class="hl hl--delete"
+      style:top="{hoverRect.top}px"
+      style:left="{hoverRect.left}px"
+      style:width="{hoverRect.width}px"
+      style:height="{hoverRect.height}px"
+    ></div>
+    <div
+      class="label label--delete"
+      style:top="{Math.max(0, hoverRect.top - 22)}px"
+      style:left="{hoverRect.left}px"
+    >
+      {describe(hovered)} · click to remove
+    </div>
+  {/if}
+{/if}
+
+{#if content.mode === "resize"}
+  {#if hoverRect && !resizePending}
+    <div
+      class="hl hl--hover"
+      style:top="{hoverRect.top}px"
+      style:left="{hoverRect.left}px"
+      style:width="{hoverRect.width}px"
+      style:height="{hoverRect.height}px"
+    ></div>
+    <div
+      class="label"
+      style:top="{Math.max(0, hoverRect.top - 22)}px"
+      style:left="{hoverRect.left}px"
+    >
+      {describe(hovered)} · click to resize
+    </div>
+  {/if}
+  {#if resizePending && resizeRect}
+    <div
+      class="hl hl--selected"
+      style:top="{resizeRect.top}px"
+      style:left="{resizeRect.left}px"
+      style:width="{resizeRect.width}px"
+      style:height="{resizeRect.height}px"
+    ></div>
+    <!-- Live dimension readout. -->
+    <div
+      class="rsz-dim"
+      style:top="{Math.max(0, resizeRect.top - 22)}px"
+      style:left="{resizeRect.left}px"
+    >
+      {resizePending.width} × {resizePending.height}
+    </div>
+    <!-- Drag handles: right edge (width), bottom edge (height), corner (both). -->
+    <div
+      class="rsz-handle rsz-handle--e"
+      style:top="{resizeRect.top + resizeRect.height / 2 - 7}px"
+      style:left="{resizeRect.left + resizeRect.width - 7}px"
+      onpointerdown={(e) => onResizeHandleDown(e, "e")}
+      role="button"
+      tabindex="0"
+      aria-label="Resize width"
+    ></div>
+    <div
+      class="rsz-handle rsz-handle--s"
+      style:top="{resizeRect.top + resizeRect.height - 7}px"
+      style:left="{resizeRect.left + resizeRect.width / 2 - 7}px"
+      onpointerdown={(e) => onResizeHandleDown(e, "s")}
+      role="button"
+      tabindex="0"
+      aria-label="Resize height"
+    ></div>
+    <div
+      class="rsz-handle rsz-handle--se"
+      style:top="{resizeRect.top + resizeRect.height - 7}px"
+      style:left="{resizeRect.left + resizeRect.width - 7}px"
+      onpointerdown={(e) => onResizeHandleDown(e, "se")}
+      role="button"
+      tabindex="0"
+      aria-label="Resize width and height"
+    ></div>
+    <CommentInput
+      anchor={resizeRect}
+      title="Resize {describe(resizePending.el)} → {resizePending.width}×{resizePending.height}"
+      allowEmpty={true}
+      bind:value={resizeComment}
+      onsubmit={submitResize}
+      oncancel={cancelResize}
+    />
+  {/if}
+{/if}
+
 {#if content.pending && pendingRect}
   <CommentInput
     anchor={pendingRect}
@@ -1409,6 +2619,14 @@
       Draw · {content.tool} · drag on page · Alt+P or Esc to exit
     {:else if content.mode === "image"}
       Image · drag to position · resize from corners · type comment + Save · Esc to cancel
+    {:else if content.mode === "move"}
+      Move · {pendingMove?.frozen ? "confirm in the popover · Esc to undo" : pendingMove ? "release to drop" : moveExtras.length ? `${moveExtras.length} picked · drag any to move all · Ctrl/Cmd+click to add` : "drag an element · Ctrl/Cmd+click to move several"} · Esc to exit
+    {:else if content.mode === "text"}
+      Text · {pendingTextEdit ? "type + format in the toolbar · Enter to save · Esc to cancel" : pendingTextInsert ? "type · Enter to save · Esc to cancel" : "click text to edit · click a gap to add a paragraph"} · Esc to exit
+    {:else if content.mode === "delete"}
+      Delete · click an element to remove it · undo by removing its card in the side panel · Esc to exit
+    {:else if content.mode === "resize"}
+      Resize · {resizePending ? "drag the handles · Save to keep · Esc to undo" : "click an element to resize"} · Esc to exit
     {/if}
   </div>
 {/if}

@@ -12,6 +12,7 @@
 
   import { onMount, tick } from "svelte";
   import { app, type TestPilotTest, type TestPilotStatus, type TestPilotSection } from "../lib/state.svelte.js";
+  import MicButton from "../lib/voice/MicButton.svelte";
   import { parseStep } from "../lib/step-md.js";
   import { highlight } from "../lib/prism-setup.js";
   import ChatSheet from "./ChatSheet.svelte";
@@ -24,6 +25,7 @@
   // query is active, sections render expanded regardless of their saved
   // collapse state so matches are never hidden behind a collapsed header.
   let searchQuery = $state("");
+  let searchEl: HTMLInputElement | undefined = $state();
   const searchActive = $derived(searchQuery.trim().length > 0);
   // Export dropdown — three options (results MD, tester MD, tester DOCX)
   // surfaced as a small menu off the Export button. Closes on outside
@@ -1602,21 +1604,27 @@
         </span>
         <input
           type="search"
+          bind:this={searchEl}
           bind:value={searchQuery}
           placeholder="Search id, category, or content (e.g. AUTH-1)"
           aria-label="Search tests"
-          class="w-full pl-8 pr-8 py-1.5 text-[12px] rounded-md border border-ink-200 dark:border-night-line bg-white dark:bg-night-card text-ink-900 dark:text-night-text placeholder:text-ink-400 dark:placeholder:text-night-mute outline-none focus:border-brand-pink dark:focus:border-brand-pink-light [&::-webkit-search-cancel-button]:appearance-none"
+          class="w-full pl-8 {app.voiceReady ? 'pr-14' : 'pr-8'} py-1.5 text-[12px] rounded-md border border-ink-200 dark:border-night-line bg-white dark:bg-night-card text-ink-900 dark:text-night-text placeholder:text-ink-400 dark:placeholder:text-night-mute outline-none focus:border-brand-pink dark:focus:border-brand-pink-light [&::-webkit-search-cancel-button]:appearance-none"
         />
         {#if searchActive}
           <button
             type="button"
-            class="absolute right-2 top-1/2 -translate-y-1/2 text-ink-400 dark:text-night-mute hover:text-ink-700 dark:hover:text-night-text leading-none"
+            class="absolute {app.voiceReady ? 'right-8' : 'right-2'} top-1/2 -translate-y-1/2 text-ink-400 dark:text-night-mute hover:text-ink-700 dark:hover:text-night-text leading-none"
             onclick={() => (searchQuery = "")}
             aria-label="Clear search"
             title="Clear search"
           >
             <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
           </button>
+        {/if}
+        {#if app.voiceReady}
+          <span class="absolute right-1 top-1/2 -translate-y-1/2">
+            <MicButton el={searchEl} lang={app.voiceLang} />
+          </span>
         {/if}
       </div>
       {#if searchActive}

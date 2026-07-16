@@ -1,4 +1,6 @@
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
+import { readFile } from "node:fs/promises";
+import { basename, join } from "node:path";
 import { URL } from "node:url";
 import type {
   AnnotationStatus,
@@ -196,6 +198,34 @@ async function handle(
   if (method === "GET" && path === "/v1/registry") {
     const snap = await registrySnapshot();
     return sendJson(res, 200, snap);
+  }
+
+  // Serve a per-entry "proof" screenshot the /pinta agent captured for the
+  // Report module (Phase 16f). The agent writes the PNG to
+  // `.pinta/report-shots/<key>.png`; the side panel points an <img> at this
+  // by `?key=`. The key is a filesystem-safe stem the extension derived
+  // (`shotKeyForItem`), but we still strip to a bare basename + whitelist so
+  // a crafted key can't escape the report-shots dir. The earlier CORS
+  // headers (set above) carry through writeHead's merge.
+  if (method === "GET" && path === "/v1/report-shot") {
+    const key = url.searchParams.get("key") ?? "";
+    const safe = basename(key).replace(/[^a-zA-Z0-9._-]/g, "");
+    if (!safe) return sendJson(res, 400, { error: "missing key" });
+    const abs = join(store.projectRoot, ".pinta", "report-shots", `${safe}.png`);
+    try {
+      const bytes = await readFile(abs);
+      res.writeHead(200, {
+        "Content-Type": "image/png",
+        "Content-Length": bytes.length,
+        // The <img> URL is cache-busted with ?t=capturedAt, so a re-capture
+        // is always re-fetched; no-store keeps a stale shot from sticking.
+        "Cache-Control": "no-store",
+      });
+      res.end(bytes);
+    } catch {
+      return sendJson(res, 404, { error: "screenshot not found" });
+    }
+    return;
   }
 
   // Append a URL pattern to this project's .pinta.json. Side panel
