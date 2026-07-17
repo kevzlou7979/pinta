@@ -177,8 +177,8 @@
   // agent is gathering tasks.
   const reportBusy = $derived(app.report.pending !== null);
 
-  type Tool = "select" | "arrow" | "rect" | "circle" | "freehand" | "pin" | "image" | "move" | "text" | "delete" | "resize";
-  type ActiveMode = "idle" | "select" | "draw" | "image" | "move" | "text" | "delete" | "resize";
+  type Tool = "select" | "arrow" | "rect" | "circle" | "freehand" | "pin" | "image" | "move" | "text" | "delete" | "resize" | "paint" | "scale";
+  type ActiveMode = "idle" | "select" | "draw" | "image" | "move" | "text" | "delete" | "resize" | "paint" | "scale";
 
   // SVG paths render reliably across fonts/OSes, follow currentColor in
   // both light + dark mode, and don't depend on unicode glyph coverage.
@@ -242,6 +242,19 @@
       // Lucide scaling — a box with a diagonal corner-drag arrow: "drag to
       // resize this element."
       svg: '<path d="M21 3 9 15"/><path d="M12 3H3v18h18v-9"/><path d="M16 3h5v5"/><path d="M14 15H9v-5"/>',
+    },
+    {
+      id: "paint",
+      label: "Paint",
+      // Lucide palette — recolor an element from the page's own palette.
+      svg: '<circle cx="13.5" cy="6.5" r=".5" fill="currentColor"/><circle cx="17.5" cy="10.5" r=".5" fill="currentColor"/><circle cx="8.5" cy="7.5" r=".5" fill="currentColor"/><circle cx="6.5" cy="12.5" r=".5" fill="currentColor"/><path d="M12 2C6.5 2 2 6.5 2 12s4.5 10 10 10c.926 0 1.648-.746 1.648-1.688 0-.437-.18-.835-.437-1.125-.29-.289-.438-.652-.438-1.125a1.64 1.64 0 0 1 1.668-1.668h1.996c3.051 0 5.555-2.503 5.555-5.554C21.965 6.012 17.461 2 12 2z"/>',
+    },
+    {
+      id: "scale",
+      label: "Scale",
+      // Lucide maximize-2 — outward diagonal arrows: "make the whole widget
+      // proportionally bigger / smaller" (vs Resize's explicit W/H box).
+      svg: '<polyline points="15 3 21 3 21 9"/><polyline points="9 21 3 21 3 15"/><line x1="21" y1="3" x2="14" y2="10"/><line x1="3" y1="21" x2="10" y2="14"/>',
     },
   ];
 
@@ -608,6 +621,8 @@
       else if (m.mode === "text") activeTool = "text";
       else if (m.mode === "delete") activeTool = "delete";
       else if (m.mode === "resize") activeTool = "resize";
+      else if (m.mode === "paint") activeTool = "paint";
+      else if (m.mode === "scale") activeTool = "scale";
       else if (m.mode === "draw") activeTool = (m.tool as Tool | undefined) ?? activeTool;
       else activeTool = null;
       return;
@@ -1093,7 +1108,13 @@
     const mode: ActiveMode =
       next == null
         ? "idle"
-        : next === "select" || next === "move" || next === "text" || next === "delete" || next === "resize"
+        : next === "select" ||
+            next === "move" ||
+            next === "text" ||
+            next === "delete" ||
+            next === "resize" ||
+            next === "paint" ||
+            next === "scale"
           ? next
           : "draw";
     try {
@@ -2465,7 +2486,11 @@
           {:else if activeTool === "delete"}
             Click an element to remove it immediately. Undo by removing its card below.
           {:else if activeTool === "resize"}
-            Click an element, then drag the right / bottom / corner handles to resize it.
+            Click an element, then drag any edge or corner handle to resize it.
+          {:else if activeTool === "paint"}
+            Click an element, then pick a color already used on the page — or point at anything to sample it.
+          {:else if activeTool === "scale"}
+            Click a widget, then drag the corner or pick a % — the agent scales every dimension proportionally.
           {:else}
             Drag on the page to draw → type a comment.
           {/if}

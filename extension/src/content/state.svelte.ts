@@ -11,7 +11,9 @@ export type Mode =
   | "move"
   | "text"
   | "delete"
-  | "resize";
+  | "resize"
+  | "paint"
+  | "scale";
 
 /**
  * A previewed element mutation that must be rolled back when its owning

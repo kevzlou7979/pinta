@@ -11,3 +11,6 @@ build/
 *.log
 **/.claude/dock.local.json
 **/.claude/dock.json
+
+# Vercel
+.vercel

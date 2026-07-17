@@ -813,14 +813,21 @@
   z-index: 6;
   touch-action: none;
 }
-.rsz-handle--e {
+.rsz-handle--e,
+.rsz-handle--w {
   cursor: ew-resize;
 }
-.rsz-handle--s {
+.rsz-handle--s,
+.rsz-handle--n {
   cursor: ns-resize;
 }
-.rsz-handle--se {
+.rsz-handle--se,
+.rsz-handle--nw {
   cursor: nwse-resize;
+}
+.rsz-handle--ne,
+.rsz-handle--sw {
+  cursor: nesw-resize;
 }
 .rsz-dim {
   position: fixed;
@@ -836,6 +843,235 @@
   white-space: nowrap;
   box-shadow: 0 2px 6px rgba(0, 0, 0, 0.3);
   z-index: 7;
+}
+
+/* ── Paint tool ───────────────────────────────────────────────────────
+   Violet family (distinct from pink hover / blue selected / emerald move
+   / red delete) for the aim box, plus the picker's swatch grid. */
+.hl--paint {
+  border-color: #8b5cf6;
+  background: rgba(139, 92, 246, 0.1);
+}
+.label--paint {
+  background: #8b5cf6;
+}
+.paint__props {
+  display: flex;
+  gap: 4px;
+  margin-bottom: 8px;
+}
+.paint__prop {
+  flex: 1;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 5px;
+  height: 28px;
+  border: 1px solid rgba(0, 0, 0, 0.1);
+  border-radius: 6px;
+  background: #f8fafc;
+  color: #334155;
+  font-size: 12px;
+  font-weight: 500;
+  cursor: pointer;
+}
+.paint__prop:hover {
+  background: #eef2f7;
+}
+.paint__prop--on {
+  background: #ede9fe;
+  border-color: #8b5cf6;
+  color: #5b21b6;
+}
+.paint__prop-dot {
+  width: 10px;
+  height: 10px;
+  border-radius: 3px;
+  border: 1px solid rgba(0, 0, 0, 0.2);
+  flex: none;
+}
+.paint__label {
+  margin: 0 0 6px;
+  font-size: 11px;
+  color: #64748b;
+}
+.paint__swatches {
+  display: grid;
+  grid-template-columns: repeat(8, 1fr);
+  gap: 5px;
+  margin-bottom: 10px;
+  max-height: 104px;
+  overflow-y: auto;
+}
+.paint__swatch {
+  aspect-ratio: 1;
+  border-radius: 5px;
+  border: 1px solid rgba(0, 0, 0, 0.18);
+  cursor: pointer;
+  padding: 0;
+  transition: transform 80ms;
+}
+.paint__swatch:hover {
+  transform: scale(1.12);
+}
+.paint__swatch--on {
+  outline: 2px solid #8b5cf6;
+  outline-offset: 2px;
+}
+/* Transparent: the standard checkerboard, so "no color" reads instantly
+   and can't be mistaken for a white swatch. */
+.paint__swatch--none {
+  background-color: #ffffff;
+  background-image:
+    linear-gradient(45deg, #cbd5e1 25%, transparent 25%),
+    linear-gradient(-45deg, #cbd5e1 25%, transparent 25%),
+    linear-gradient(45deg, transparent 75%, #cbd5e1 75%),
+    linear-gradient(-45deg, transparent 75%, #cbd5e1 75%);
+  background-size: 8px 8px;
+  background-position:
+    0 0,
+    0 4px,
+    4px -4px,
+    -4px 0;
+}
+.paint__prop-dot.paint__swatch--none {
+  background-size: 5px 5px;
+  background-position:
+    0 0,
+    0 2.5px,
+    2.5px -2.5px,
+    -2.5px 0;
+}
+.paint__row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.paint__custom {
+  position: relative;
+  width: 28px;
+  height: 28px;
+  border-radius: 6px;
+  border: 1px solid rgba(0, 0, 0, 0.15);
+  overflow: hidden;
+  cursor: pointer;
+  flex: none;
+  display: inline-block;
+}
+.paint__swatch-preview {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+}
+.paint__custom input[type="color"] {
+  position: absolute;
+  inset: -4px;
+  width: 200%;
+  height: 200%;
+  border: none;
+  padding: 0;
+  opacity: 0;
+  cursor: pointer;
+}
+.paint__hex {
+  font:
+    12px / 1 ui-monospace,
+    SFMono-Regular,
+    Menlo,
+    monospace;
+  color: #475569;
+  flex: 1;
+}
+.paint__eyedrop {
+  height: 28px;
+  padding: 0 10px;
+  border-radius: 6px;
+  border: 1px solid rgba(0, 0, 0, 0.1);
+  background: #f1f5f9;
+  color: #334155;
+  font-size: 11px;
+  font-weight: 500;
+  cursor: pointer;
+  white-space: nowrap;
+}
+.paint__eyedrop:hover {
+  background: #e2e8f0;
+}
+.paint__eyedrop--on {
+  background: #8b5cf6;
+  border-color: #8b5cf6;
+  color: white;
+}
+
+/* ── Scale tool ───────────────────────────────────────────────────────
+   Amber family. The on-page transform is a PREVIEW of the percentage the
+   user is choosing — the annotation ships the percentage as intent. */
+.hl--scale {
+  border-color: #f59e0b;
+  background: rgba(245, 158, 11, 0.1);
+}
+.label--scale {
+  background: #f59e0b;
+}
+.scale__badge {
+  background: #f59e0b;
+}
+.scale__handle {
+  border-color: #f59e0b;
+}
+.scale__readout {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  margin-bottom: 6px;
+}
+.scale__pct {
+  font:
+    700 24px / 1 ui-sans-serif,
+    system-ui,
+    sans-serif;
+  color: #0f172a;
+}
+.scale__verb {
+  font-size: 11px;
+  color: #64748b;
+}
+.scale__range {
+  width: 100%;
+  accent-color: #f59e0b;
+  margin: 0 0 8px;
+}
+.scale__chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  margin-bottom: 8px;
+}
+.scale__chip {
+  height: 24px;
+  padding: 0 8px;
+  border-radius: 999px;
+  border: 1px solid rgba(0, 0, 0, 0.1);
+  background: #f8fafc;
+  color: #334155;
+  font-size: 11px;
+  font-weight: 500;
+  cursor: pointer;
+}
+.scale__chip:hover {
+  background: #eef2f7;
+}
+.scale__chip--on {
+  background: #f59e0b;
+  border-color: #f59e0b;
+  color: white;
+}
+.scale__chip--reset {
+  margin-left: auto;
+  color: #64748b;
+}
+.scale__hint {
+  margin-top: 0;
 }
 
 /* Processing pulse — pulsating edge-glow while the agent is applying

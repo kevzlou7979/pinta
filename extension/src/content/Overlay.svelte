@@ -9,10 +9,18 @@
     resolveInsertionPoint,
     type ResolvedDrop,
   } from "./tools/place.js";
+  import {
+    harvestPageColors,
+    normalizeColor,
+    sampleElementColor,
+    type Swatch,
+  } from "./tools/palette.js";
   import Canvas from "./Canvas.svelte";
   import CommentInput from "./CommentInput.svelte";
   import ElementEditor from "./ElementEditor.svelte";
   import TextFormatToolbar from "./TextFormatToolbar.svelte";
+  import PaintPicker from "./PaintPicker.svelte";
+  import ScalePicker from "./ScalePicker.svelte";
   import { voice } from "../lib/voice/controller.js";
 
   let hovered: Element | null = $state(null);
@@ -1480,10 +1488,39 @@
   });
 
   // ─── Resize tool (drag handles to size divs / grids / any box) ──────
-  // Click an element to select it, then drag the right / bottom / corner
-  // handle to change its width and/or height. Live inline-style preview;
-  // commit rides `kind:"select"` with `cssChanges` (width/height) — the
-  // agent already knows how to translate those into the project's system.
+  // Click an element to select it, then drag any of the 8 handles to change
+  // its width and/or height. Live inline-style preview; commit rides
+  // `kind:"select"` with `cssChanges` — the agent already knows how to
+  // translate those into the project's system.
+  //
+  // Dragging a LEFT/TOP edge moves that edge while the opposite edge stays
+  // put — the design-tool behavior people expect. Width/height alone can't
+  // express that (a box grows from its layout origin), so those drags also
+  // accumulate a margin-left / margin-top offset. That offset is previewed
+  // AND emitted, so what you see is exactly what the agent applies. Pure
+  // right/bottom/corner drags emit width/height only, as before.
+
+  /** Which edges a handle moves. */
+  type ResizeEdge = "nw" | "n" | "ne" | "e" | "se" | "s" | "sw" | "w";
+  const MIN_SIZE = 16;
+
+  /** Handle placement as a fraction of the element's rect (0 = left/top,
+   *  1 = right/bottom), so the template can lay all 8 out in one loop. */
+  const RESIZE_HANDLES: {
+    edge: ResizeEdge;
+    x: number;
+    y: number;
+    label: string;
+  }[] = [
+    { edge: "nw", x: 0, y: 0, label: "Resize from top-left" },
+    { edge: "n", x: 0.5, y: 0, label: "Resize from the top edge" },
+    { edge: "ne", x: 1, y: 0, label: "Resize from top-right" },
+    { edge: "e", x: 1, y: 0.5, label: "Resize width from the right edge" },
+    { edge: "se", x: 1, y: 1, label: "Resize from bottom-right" },
+    { edge: "s", x: 0.5, y: 1, label: "Resize height from the bottom edge" },
+    { edge: "sw", x: 0, y: 1, label: "Resize from bottom-left" },
+    { edge: "w", x: 0, y: 0.5, label: "Resize width from the left edge" },
+  ];
 
   type ResizePending = {
     el: HTMLElement;
@@ -1493,6 +1530,13 @@
     /** Current previewed size in CSS px (border-box, from the rect). */
     width: number;
     height: number;
+    /** The element's own computed margins at select time — offsets are
+     *  emitted relative to these so we don't clobber existing spacing. */
+    baseMarginLeft: number;
+    baseMarginTop: number;
+    /** Accumulated shift from left/top-edge drags, in px. 0 = untouched. */
+    offsetX: number;
+    offsetY: number;
   };
   let resizePending = $state<ResizePending | null>(null);
   let resizeComment = $state("");
@@ -1500,6 +1544,7 @@
   function beginResizeSelect(el: HTMLElement): void {
     const existing = content.findAnnotatedByElement(el);
     const r = el.getBoundingClientRect();
+    const cs = window.getComputedStyle(el);
     resizePending = {
       el,
       originalCssText: existing ? existing.originalCssText : el.style.cssText,
@@ -1507,6 +1552,10 @@
       sourceTarget: captureTarget(el),
       width: Math.round(r.width),
       height: Math.round(r.height),
+      baseMarginLeft: parseFloat(cs.marginLeft) || 0,
+      baseMarginTop: parseFloat(cs.marginTop) || 0,
+      offsetX: 0,
+      offsetY: 0,
     };
   }
 
@@ -1523,7 +1572,24 @@
     if (content.mode !== "resize" && resizePending) cancelResize();
   });
 
-  function onResizeHandleDown(e: PointerEvent, edge: "e" | "s" | "se"): void {
+  /** Re-apply the whole resize preview from the original inline style, so
+   *  repeated drags never stack duplicate declarations. */
+  function applyResizePreview(p: ResizePending): void {
+    const el = p.el;
+    if (!el.isConnected) return;
+    const orig = p.sourceTarget.boundingRect;
+    el.style.cssText = p.originalCssText;
+    if (Math.round(orig.width) !== p.width) el.style.width = `${p.width}px`;
+    if (Math.round(orig.height) !== p.height) el.style.height = `${p.height}px`;
+    if (p.offsetX !== 0) {
+      el.style.marginLeft = `${Math.round(p.baseMarginLeft + p.offsetX)}px`;
+    }
+    if (p.offsetY !== 0) {
+      el.style.marginTop = `${Math.round(p.baseMarginTop + p.offsetY)}px`;
+    }
+  }
+
+  function onResizeHandleDown(e: PointerEvent, edge: ResizeEdge): void {
     const p = resizePending;
     if (!p || e.button !== 0) return;
     e.preventDefault();
@@ -1532,6 +1598,8 @@
     const startY = e.clientY;
     const startW = p.width;
     const startH = p.height;
+    const startOX = p.offsetX;
+    const startOY = p.offsetY;
     const el = p.el;
     const handle = e.currentTarget as HTMLElement;
     try {
@@ -1541,20 +1609,37 @@
     }
     const prevTransition = el.style.transition;
     el.style.transition = "none";
+    const movesE = edge === "e" || edge === "ne" || edge === "se";
+    const movesW = edge === "w" || edge === "nw" || edge === "sw";
+    const movesS = edge === "s" || edge === "se" || edge === "sw";
+    const movesN = edge === "n" || edge === "ne" || edge === "nw";
+
     function onMove(ev: PointerEvent): void {
       const cur = resizePending;
       if (!cur || !el.isConnected) return;
+      const dx = ev.clientX - startX;
+      const dy = ev.clientY - startY;
       let w = startW;
       let h = startH;
-      if (edge === "e" || edge === "se") {
-        w = Math.max(16, Math.round(startW + (ev.clientX - startX)));
-        el.style.width = `${w}px`;
+      let ox = startOX;
+      let oy = startOY;
+      if (movesE) w = Math.max(MIN_SIZE, Math.round(startW + dx));
+      if (movesW) {
+        // Left edge follows the cursor: shrink the width and shift the box
+        // right by the same amount, so the RIGHT edge stays anchored. When
+        // the width clamps at MIN_SIZE the offset stops too — otherwise the
+        // element would keep sliding after it stopped shrinking.
+        w = Math.max(MIN_SIZE, Math.round(startW - dx));
+        ox = startOX + (startW - w);
       }
-      if (edge === "s" || edge === "se") {
-        h = Math.max(16, Math.round(startH + (ev.clientY - startY)));
-        el.style.height = `${h}px`;
+      if (movesS) h = Math.max(MIN_SIZE, Math.round(startH + dy));
+      if (movesN) {
+        h = Math.max(MIN_SIZE, Math.round(startH - dy));
+        oy = startOY + (startH - h);
       }
-      resizePending = { ...cur, width: w, height: h };
+      const next = { ...cur, width: w, height: h, offsetX: ox, offsetY: oy };
+      resizePending = next;
+      applyResizePreview(next);
     }
     function onUp(ev: PointerEvent): void {
       try {
@@ -1580,6 +1665,13 @@
     const cssChanges: Record<string, string> = {};
     if (Math.round(orig.width) !== p.width) cssChanges["width"] = `${p.width}px`;
     if (Math.round(orig.height) !== p.height) cssChanges["height"] = `${p.height}px`;
+    // Only present when the user actually dragged a left / top edge.
+    if (p.offsetX !== 0) {
+      cssChanges["margin-left"] = `${Math.round(p.baseMarginLeft + p.offsetX)}px`;
+    }
+    if (p.offsetY !== 0) {
+      cssChanges["margin-top"] = `${Math.round(p.baseMarginTop + p.offsetY)}px`;
+    }
     const hasComment = resizeComment.trim().length > 0;
     if (Object.keys(cssChanges).length === 0 && !hasComment) {
       // Nothing actually changed — treat as a cancel.
@@ -1683,6 +1775,460 @@
     void resizePending?.width;
     void resizePending?.height;
     const p = resizePending;
+    if (!p || !p.el.isConnected) return null;
+    const r = p.el.getBoundingClientRect();
+    return { top: r.top, left: r.left, width: r.width, height: r.height };
+  });
+
+  // ─── Paint tool (recolor from the page's own palette) ───────────────
+  // Click an element, then pick a color from the swatches harvested off
+  // the live page (or point at any element / use the screen eyedropper).
+  // Live inline-style preview; commits as `kind:"select"` + `cssChanges`
+  // (background-color / color / border-color) — no new agent contract.
+
+  type PaintProp = "background-color" | "color" | "border-color";
+
+  type PaintPending = {
+    el: HTMLElement;
+    originalCssText: string;
+    originalInnerHtml: string;
+    cssChanges: Record<string, string>;
+    initial: Record<PaintProp, string>;
+  };
+  let paintPending = $state<PaintPending | null>(null);
+  // Harvested once per entry into paint mode — walking the DOM for every
+  // selection would be wasteful and the page palette doesn't change.
+  let paintSwatches = $state<Swatch[]>([]);
+  let paintEyedropping = $state(false);
+  let paintPicker = $state<PaintPicker | null>(null);
+
+  /** The element's current colors as #RRGGBB, or "" when it has none
+   *  (transparent background / no border). Empty matters: it means ANY
+   *  pick is a real change, so painting white onto a transparent element
+   *  isn't mistaken for "same as the original" and dropped. */
+  function readPaintColors(el: Element): Record<PaintProp, string> {
+    const cs = window.getComputedStyle(el);
+    return {
+      "background-color": normalizeColor(cs.backgroundColor) ?? "",
+      color: normalizeColor(cs.color) ?? "",
+      "border-color": normalizeColor(cs.borderTopColor) ?? "",
+    };
+  }
+
+  function beginPaint(el: HTMLElement): void {
+    const existing = content.findAnnotatedByElement(el);
+    paintPending = {
+      el,
+      originalCssText: existing ? existing.originalCssText : el.style.cssText,
+      originalInnerHtml: existing ? existing.originalInnerHtml : el.innerHTML,
+      cssChanges: {},
+      initial: readPaintColors(el),
+    };
+  }
+
+  function cancelPaint(): void {
+    const p = paintPending;
+    if (p && p.el.isConnected) p.el.style.cssText = p.originalCssText;
+    paintPending = null;
+    paintEyedropping = false;
+    hovered = null;
+  }
+
+  // Leaving paint mode with an un-submitted pick → roll the preview back.
+  $effect(() => {
+    if (content.mode !== "paint" && paintPending) cancelPaint();
+  });
+
+  // Harvest the page palette on entry; drop it on exit so a later run
+  // re-reads a possibly-changed page.
+  $effect(() => {
+    if (content.mode === "paint") {
+      paintSwatches = harvestPageColors();
+    } else {
+      paintSwatches = [];
+    }
+  });
+
+  /** Apply one color live. Empty value resets that property. */
+  function applyPaint(prop: string, value: string): void {
+    const p = paintPending;
+    if (!p) return;
+    const next = { ...p.cssChanges };
+    if (value.trim()) next[prop] = value.trim();
+    else delete next[prop];
+    paintPending = { ...p, cssChanges: next };
+    const el = p.el;
+    if (!el.isConnected) return;
+    el.style.cssText = p.originalCssText;
+    for (const [k, v] of Object.entries(next)) {
+      try {
+        el.style.setProperty(k, v);
+      } catch {
+        // ignore invalid property/value
+      }
+    }
+  }
+
+  /**
+   * Sample a color from the page. Prefers Chrome's native EyeDropper (any
+   * pixel, including images); falls back to a point-at-an-element sampler
+   * driven by the paint-mode click handler when it isn't available.
+   */
+  async function startEyedrop(): Promise<void> {
+    const Picker = (
+      window as unknown as {
+        EyeDropper?: new () => { open(): Promise<{ sRGBHex: string }> };
+      }
+    ).EyeDropper;
+    if (Picker) {
+      try {
+        paintEyedropping = true;
+        const { sRGBHex } = await new Picker().open();
+        const hex = normalizeColor(sRGBHex);
+        if (hex) paintPicker?.applySampled(hex);
+      } catch {
+        // user pressed Esc / dismissed — nothing to do
+      } finally {
+        paintEyedropping = false;
+      }
+      return;
+    }
+    // No native picker — arm the DOM sampler; the next page click samples
+    // the element under the cursor instead of re-selecting a target.
+    paintEyedropping = true;
+  }
+
+  function submitPaint(): void {
+    const p = paintPending;
+    if (!p) return;
+    if (Object.keys(p.cssChanges).length === 0) {
+      cancelPaint();
+      setMode("idle");
+      return;
+    }
+    const el = p.el;
+    const annId = newAnnId();
+    // Capture WITH the paint applied so outerHTML / computedStyles show
+    // the intended colors (same rule as submitSelect).
+    const target = captureTarget(el);
+    const annotation: Annotation = {
+      id: annId,
+      createdAt: Date.now(),
+      kind: "select",
+      strokes: [],
+      color: "#2563eb",
+      comment: "",
+      cssChanges: p.cssChanges,
+      targets: [target],
+      target,
+      viewport: snapshotViewport(),
+      url: location.href,
+    };
+    chrome.runtime.sendMessage({ type: "annotation.draw-committed", annotation });
+    content.recordAnnotated(
+      annId,
+      el,
+      p.originalCssText,
+      p.originalInnerHtml,
+      target.selector,
+      target.outerHTML,
+      target.nearbyText,
+      location.href,
+    );
+    paintPending = null;
+    paintEyedropping = false;
+    setMode("idle");
+  }
+
+  // Paint-mode pointer handlers: hover to aim, click to select a target
+  // (or, while eyedropping, to sample the pointed element's color).
+  $effect(() => {
+    if (content.mode !== "paint") return;
+    function onMove(e: MouseEvent) {
+      if (paintPending && !paintEyedropping) return;
+      const el = e.target as Element | null;
+      if (!el || el === document.documentElement || el === document.body || isOurNode(el)) {
+        hovered = null;
+        return;
+      }
+      hovered = el;
+    }
+    function onDown(e: MouseEvent) {
+      if (e.button !== 0) return;
+      const el = e.target as Element | null;
+      if (!el || isOurNode(el)) return;
+      if (el === document.documentElement || el === document.body) return;
+      e.preventDefault();
+      e.stopPropagation();
+      // Eyedropper armed → this click samples the element's color and
+      // hands it to the picker rather than re-selecting the target.
+      if (paintEyedropping && paintPending) {
+        const hex = sampleElementColor(el);
+        if (hex) paintPicker?.applySampled(hex);
+        paintEyedropping = false;
+        hovered = null;
+        return;
+      }
+      if (paintPending) {
+        if (paintPending.el === el) return; // already selected
+        if (paintPending.el.isConnected) {
+          paintPending.el.style.cssText = paintPending.originalCssText;
+        }
+      }
+      hovered = null;
+      beginPaint(el as HTMLElement);
+    }
+    function onClickSwallow(e: MouseEvent) {
+      if (isOurNode(e.target as Element | null)) return;
+      e.preventDefault();
+      e.stopPropagation();
+    }
+    function onKey(e: KeyboardEvent) {
+      if (e.key !== "Escape") return;
+      e.preventDefault();
+      e.stopPropagation();
+      if (paintEyedropping) paintEyedropping = false;
+      else if (paintPending) cancelPaint();
+      else setMode("idle");
+    }
+    document.addEventListener("mousemove", onMove, true);
+    document.addEventListener("mousedown", onDown, true);
+    document.addEventListener("click", onClickSwallow, true);
+    document.addEventListener("keydown", onKey, true);
+    return () => {
+      document.removeEventListener("mousemove", onMove, true);
+      document.removeEventListener("mousedown", onDown, true);
+      document.removeEventListener("click", onClickSwallow, true);
+      document.removeEventListener("keydown", onKey, true);
+    };
+  });
+
+  let paintRect = $derived(rectOf(paintPending?.el ?? null));
+
+  // ─── Scale tool (make a widget proportionally bigger / smaller) ──────
+  // Distinct from Resize: Resize sets an explicit width/height box and lets
+  // the content reflow. Scale expresses INTENT — "make this 125% bigger,
+  // every dimension" — and the agent scales the real values (font-size,
+  // box, padding, gaps, radius) in the project's styling system. The
+  // annotation carries NO computed CSS, just the percentage as a plain
+  // instruction; the on-page `transform: scale()` is preview-ONLY so the
+  // user can see the size they're choosing.
+
+  type ScalePending = {
+    el: HTMLElement;
+    originalCssText: string;
+    originalInnerHtml: string;
+    percent: number;
+    /** Unscaled top-left origin + rect, captured at select time — the
+     *  corner-drag gesture measures against this. */
+    baseW: number;
+    baseH: number;
+  };
+  let scalePending = $state<ScalePending | null>(null);
+  let scaleNote = $state("");
+
+  const SCALE_MIN = 25;
+  const SCALE_MAX = 300;
+
+  function applyScalePreview(p: ScalePending): void {
+    const el = p.el;
+    if (!el.isConnected) return;
+    el.style.cssText = p.originalCssText;
+    if (p.percent === 100) return;
+    // Preview only — grows from the element's own top-left so it expands
+    // into the page the way the real change would read.
+    el.style.transformOrigin = "top left";
+    el.style.transform = `scale(${p.percent / 100})`;
+  }
+
+  function setScalePercent(next: number): void {
+    const p = scalePending;
+    if (!p) return;
+    const percent = Math.max(SCALE_MIN, Math.min(SCALE_MAX, Math.round(next)));
+    scalePending = { ...p, percent };
+    applyScalePreview(scalePending);
+  }
+
+  function beginScale(el: HTMLElement): void {
+    const existing = content.findAnnotatedByElement(el);
+    const r = el.getBoundingClientRect();
+    scalePending = {
+      el,
+      originalCssText: existing ? existing.originalCssText : el.style.cssText,
+      originalInnerHtml: existing ? existing.originalInnerHtml : el.innerHTML,
+      percent: 100,
+      baseW: Math.max(1, r.width),
+      baseH: Math.max(1, r.height),
+    };
+  }
+
+  function cancelScale(): void {
+    const p = scalePending;
+    if (p && p.el.isConnected) p.el.style.cssText = p.originalCssText;
+    scalePending = null;
+    scaleNote = "";
+    hovered = null;
+  }
+
+  // Leaving scale mode with an un-submitted pick → roll the preview back.
+  $effect(() => {
+    if (content.mode !== "scale" && scalePending) cancelScale();
+  });
+
+  /** Corner-drag: scale radially from the element's top-left origin, so
+   *  dragging away grows it and dragging in shrinks it. */
+  function onScaleHandleDown(e: PointerEvent): void {
+    const p = scalePending;
+    if (!p || e.button !== 0) return;
+    e.preventDefault();
+    e.stopPropagation();
+    const el = p.el;
+    const rect = el.getBoundingClientRect();
+    const ox = rect.left;
+    const oy = rect.top;
+    const startPercent = p.percent;
+    const d0 = Math.max(8, Math.hypot(e.clientX - ox, e.clientY - oy));
+    const handle = e.currentTarget as HTMLElement;
+    try {
+      handle.setPointerCapture(e.pointerId);
+    } catch {
+      // capture unsupported — pointer events still fire on the handle
+    }
+    function onMove(ev: PointerEvent): void {
+      if (!scalePending) return;
+      const d1 = Math.hypot(ev.clientX - ox, ev.clientY - oy);
+      setScalePercent(startPercent * (d1 / d0));
+    }
+    function onUp(ev: PointerEvent): void {
+      try {
+        handle.releasePointerCapture(ev.pointerId);
+      } catch {
+        // already released
+      }
+      handle.removeEventListener("pointermove", onMove);
+      handle.removeEventListener("pointerup", onUp);
+      handle.removeEventListener("pointercancel", onUp);
+    }
+    handle.addEventListener("pointermove", onMove);
+    handle.addEventListener("pointerup", onUp);
+    handle.addEventListener("pointercancel", onUp);
+  }
+
+  /** The instruction the agent acts on. Deliberately prose, not CSS —
+   *  the agent picks the right expression for the project. */
+  function scaleComment(percent: number, note: string): string {
+    const dir = percent >= 100 ? "bigger" : "smaller";
+    const base =
+      `Scale this element to ${percent}% of its current size — make it ${dir} ` +
+      `proportionally. Grow/shrink EVERY dimension together: font-size, ` +
+      `width/height, padding, margins, gaps, border-radius and any icon sizes. ` +
+      `Apply it as real values in this project's styling system (utility steps, ` +
+      `design tokens, or plain CSS — whatever the file already uses). Do NOT use ` +
+      `a CSS \`transform: scale()\`, and keep the element responsive.`;
+    const extra = note.trim();
+    return extra ? `${base}\n\n${extra}` : base;
+  }
+
+  function submitScale(): void {
+    const p = scalePending;
+    if (!p || p.percent === 100) return;
+    const el = p.el;
+    // Capture from the element's ORIGINAL geometry: the preview transform
+    // would otherwise bake a scaled boundingRect / inline transform into
+    // outerHTML, which is exactly what we're telling the agent NOT to do.
+    const previewCss = el.style.cssText;
+    if (el.isConnected) el.style.cssText = p.originalCssText;
+    const target = captureTarget(el);
+    if (el.isConnected) el.style.cssText = previewCss;
+
+    const annId = newAnnId();
+    const annotation: Annotation = {
+      id: annId,
+      createdAt: Date.now(),
+      kind: "select",
+      strokes: [],
+      color: "#2563eb",
+      comment: scaleComment(p.percent, scaleNote),
+      targets: [target],
+      target,
+      viewport: snapshotViewport(),
+      url: location.href,
+    };
+    chrome.runtime.sendMessage({ type: "annotation.draw-committed", annotation });
+    content.recordAnnotated(
+      annId,
+      el,
+      p.originalCssText,
+      p.originalInnerHtml,
+      target.selector,
+      target.outerHTML,
+      target.nearbyText,
+      location.href,
+    );
+    scalePending = null;
+    scaleNote = "";
+    setMode("idle");
+  }
+
+  // Scale-mode pointer handlers: hover to aim, click to select.
+  $effect(() => {
+    if (content.mode !== "scale") return;
+    function onMove(e: MouseEvent) {
+      if (scalePending) return;
+      const el = e.target as Element | null;
+      if (!el || el === document.documentElement || el === document.body || isOurNode(el)) {
+        hovered = null;
+        return;
+      }
+      hovered = el;
+    }
+    function onDown(e: MouseEvent) {
+      if (e.button !== 0) return;
+      const el = e.target as Element | null;
+      if (!el || isOurNode(el)) return;
+      if (el === document.documentElement || el === document.body) return;
+      e.preventDefault();
+      e.stopPropagation();
+      if (scalePending) {
+        if (scalePending.el === el) return; // already selected
+        if (scalePending.el.isConnected) {
+          scalePending.el.style.cssText = scalePending.originalCssText;
+        }
+        scaleNote = "";
+      }
+      hovered = null;
+      beginScale(el as HTMLElement);
+    }
+    function onClickSwallow(e: MouseEvent) {
+      if (isOurNode(e.target as Element | null)) return;
+      e.preventDefault();
+      e.stopPropagation();
+    }
+    function onKey(e: KeyboardEvent) {
+      if (e.key !== "Escape") return;
+      e.preventDefault();
+      e.stopPropagation();
+      if (scalePending) cancelScale();
+      else setMode("idle");
+    }
+    document.addEventListener("mousemove", onMove, true);
+    document.addEventListener("mousedown", onDown, true);
+    document.addEventListener("click", onClickSwallow, true);
+    document.addEventListener("keydown", onKey, true);
+    return () => {
+      document.removeEventListener("mousemove", onMove, true);
+      document.removeEventListener("mousedown", onDown, true);
+      document.removeEventListener("click", onClickSwallow, true);
+      document.removeEventListener("keydown", onKey, true);
+    };
+  });
+
+  // Live rect of the scaled element — tracks the preview transform so the
+  // picker + corner handle follow it.
+  let scaleRect = $derived.by(() => {
+    void tick;
+    void scalePending?.percent;
+    const p = scalePending;
     if (!p || !p.el.isConnected) return null;
     const r = p.el.getBoundingClientRect();
     return { top: r.top, left: r.left, width: r.width, height: r.height };
@@ -2529,34 +3075,19 @@
     >
       {resizePending.width} × {resizePending.height}
     </div>
-    <!-- Drag handles: right edge (width), bottom edge (height), corner (both). -->
-    <div
-      class="rsz-handle rsz-handle--e"
-      style:top="{resizeRect.top + resizeRect.height / 2 - 7}px"
-      style:left="{resizeRect.left + resizeRect.width - 7}px"
-      onpointerdown={(e) => onResizeHandleDown(e, "e")}
-      role="button"
-      tabindex="0"
-      aria-label="Resize width"
-    ></div>
-    <div
-      class="rsz-handle rsz-handle--s"
-      style:top="{resizeRect.top + resizeRect.height - 7}px"
-      style:left="{resizeRect.left + resizeRect.width / 2 - 7}px"
-      onpointerdown={(e) => onResizeHandleDown(e, "s")}
-      role="button"
-      tabindex="0"
-      aria-label="Resize height"
-    ></div>
-    <div
-      class="rsz-handle rsz-handle--se"
-      style:top="{resizeRect.top + resizeRect.height - 7}px"
-      style:left="{resizeRect.left + resizeRect.width - 7}px"
-      onpointerdown={(e) => onResizeHandleDown(e, "se")}
-      role="button"
-      tabindex="0"
-      aria-label="Resize width and height"
-    ></div>
+    <!-- All 8 handles. Left / top drags move that edge and keep the
+         opposite one anchored (see applyResizePreview). -->
+    {#each RESIZE_HANDLES as h (h.edge)}
+      <div
+        class="rsz-handle rsz-handle--{h.edge}"
+        style:top="{resizeRect.top + resizeRect.height * h.y - 7}px"
+        style:left="{resizeRect.left + resizeRect.width * h.x - 7}px"
+        onpointerdown={(e) => onResizeHandleDown(e, h.edge)}
+        role="button"
+        tabindex="0"
+        aria-label={h.label}
+      ></div>
+    {/each}
     <CommentInput
       anchor={resizeRect}
       title="Resize {describe(resizePending.el)} → {resizePending.width}×{resizePending.height}"
@@ -2564,6 +3095,100 @@
       bind:value={resizeComment}
       onsubmit={submitResize}
       oncancel={cancelResize}
+    />
+  {/if}
+{/if}
+
+{#if content.mode === "paint"}
+  {#if hoverRect && (!paintPending || paintEyedropping)}
+    <div
+      class="hl hl--paint"
+      style:top="{hoverRect.top}px"
+      style:left="{hoverRect.left}px"
+      style:width="{hoverRect.width}px"
+      style:height="{hoverRect.height}px"
+    ></div>
+    <div
+      class="label label--paint"
+      style:top="{Math.max(0, hoverRect.top - 22)}px"
+      style:left="{hoverRect.left}px"
+    >
+      {describe(hovered)} · {paintEyedropping ? "click to sample this color" : "click to paint"}
+    </div>
+  {/if}
+  {#if paintPending && paintRect}
+    <div
+      class="hl hl--selected"
+      style:top="{paintRect.top}px"
+      style:left="{paintRect.left}px"
+      style:width="{paintRect.width}px"
+      style:height="{paintRect.height}px"
+    ></div>
+    <PaintPicker
+      bind:this={paintPicker}
+      anchor={paintRect}
+      title={describe(paintPending.el)}
+      swatches={paintSwatches}
+      initial={paintPending.initial}
+      onpaint={applyPaint}
+      eyedropping={paintEyedropping}
+      onEyedropStart={startEyedrop}
+      onsubmit={submitPaint}
+      oncancel={cancelPaint}
+    />
+  {/if}
+{/if}
+
+{#if content.mode === "scale"}
+  {#if hoverRect && !scalePending}
+    <div
+      class="hl hl--scale"
+      style:top="{hoverRect.top}px"
+      style:left="{hoverRect.left}px"
+      style:width="{hoverRect.width}px"
+      style:height="{hoverRect.height}px"
+    ></div>
+    <div
+      class="label label--scale"
+      style:top="{Math.max(0, hoverRect.top - 22)}px"
+      style:left="{hoverRect.left}px"
+    >
+      {describe(hovered)} · click to scale
+    </div>
+  {/if}
+  {#if scalePending && scaleRect}
+    <div
+      class="hl hl--scale hl--selected"
+      style:top="{scaleRect.top}px"
+      style:left="{scaleRect.left}px"
+      style:width="{scaleRect.width}px"
+      style:height="{scaleRect.height}px"
+    ></div>
+    <div
+      class="rsz-dim scale__badge"
+      style:top="{Math.max(0, scaleRect.top - 22)}px"
+      style:left="{scaleRect.left}px"
+    >
+      {scalePending.percent}%
+    </div>
+    <!-- Corner handle: drag away from the top-left to grow, in to shrink. -->
+    <div
+      class="rsz-handle rsz-handle--se scale__handle"
+      style:top="{scaleRect.top + scaleRect.height - 7}px"
+      style:left="{scaleRect.left + scaleRect.width - 7}px"
+      onpointerdown={onScaleHandleDown}
+      role="button"
+      tabindex="0"
+      aria-label="Drag to scale"
+    ></div>
+    <ScalePicker
+      anchor={scaleRect}
+      title={describe(scalePending.el)}
+      percent={scalePending.percent}
+      bind:note={scaleNote}
+      onpercent={setScalePercent}
+      onsubmit={submitScale}
+      oncancel={cancelScale}
     />
   {/if}
 {/if}
@@ -2627,6 +3252,10 @@
       Delete · click an element to remove it · undo by removing its card in the side panel · Esc to exit
     {:else if content.mode === "resize"}
       Resize · {resizePending ? "drag the handles · Save to keep · Esc to undo" : "click an element to resize"} · Esc to exit
+    {:else if content.mode === "paint"}
+      Paint · {paintEyedropping ? "click anything to sample its color" : paintPending ? "pick a color from the page palette · Esc to undo" : "click an element to recolor it"} · Esc to exit
+    {:else if content.mode === "scale"}
+      Scale · {scalePending ? "drag the corner or pick a % · Save to keep · Esc to undo" : "click a widget to scale it"} · Esc to exit
     {/if}
   </div>
 {/if}
