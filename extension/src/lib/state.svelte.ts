@@ -3455,12 +3455,31 @@ class ExtensionState {
          *  (the companion only replays the active session on reconnect, not
          *  ephemeral module-query sessions). Not persisted. */
         pendingSessionId?: string | null;
+        /** Per-card "how to test" steps (op `tab.cardStepsOp`), keyed by
+         *  card id. Cached so a board refresh never drops them. Mirrors
+         *  Test Pilot's detail-steps / the Report module's how-to-test. */
+        cardSteps?: Record<string, { steps: string[]; askedAt: number }>;
+        /** The card id whose steps fetch is in flight (one at a time). */
+        cardStepsPending?: string | null;
+        /** Last steps-fetch error, surfaced under the expanded card. */
+        cardStepsError?: string | null;
+        /** Multi-start batch: card ids whose ops are still awaiting their
+         *  board response, in dispatch order — [0] is the one the agent is
+         *  handling now, the rest are queued behind it. All submits go out
+         *  up-front (the single agent answers in claim order); each board
+         *  that lands removes its card id. Empty/absent = no batch. */
+        batchRemaining?: string[] | null;
       }
     >
   >({});
 
   /** Per-module op timers, keyed by module id. */
   private moduleOpTimers = new Map<string, ReturnType<typeof setTimeout>>();
+  /** Per-module card-steps timers, keyed by module id. */
+  private moduleCardStepsTimers = new Map<
+    string,
+    ReturnType<typeof setTimeout>
+  >();
 
   /** Recompute the DERIVED `currentRun` from the raw agent run + the
    *  user overlay. Call after every mutation to either input. Snapshots
@@ -4204,6 +4223,10 @@ class ExtensionState {
     pending: { runId: string; startedAt: number; op: string } | null;
     error: string | null;
     pendingSessionId?: string | null;
+    cardSteps?: Record<string, { steps: string[]; askedAt: number }>;
+    cardStepsPending?: string | null;
+    cardStepsError?: string | null;
+    batchRemaining?: string[] | null;
   } {
     if (!this.moduleBoards[moduleId]) {
       this.moduleBoards[moduleId] = { board: null, pending: null, error: null };
@@ -4250,12 +4273,59 @@ class ExtensionState {
     });
   }
 
+  /**
+   * Multi-start: dispatch SEVERAL per-card ops at once. Every submit goes
+   * out immediately — critical for modules whose start op hands the
+   * terminal off to real work (the agent must see the WHOLE batch queued
+   * at the companion before it leaves the Pinta loop, or ops 2..n would
+   * hang until the first task's coding finished). The single agent claims
+   * them in dispatch order; each board that lands removes its card id
+   * from `batchRemaining`, so the UI can show [0] as "starting" and the
+   * rest as "queued".
+   */
+  async runModuleOpBatch(
+    moduleId: string,
+    items: { op: string; cardId: string }[],
+  ): Promise<void> {
+    const slot = this.ensureModuleBoard(moduleId);
+    if (slot.pending || items.length === 0) return;
+    if (!this.client || this.connectionStatus !== "connected") {
+      slot.error =
+        "No companion connected. Start `pinta-companion .` in your project to use this module.";
+      return;
+    }
+    const startedAt = Date.now();
+    slot.pending = { runId: crypto.randomUUID(), startedAt, op: "batch" };
+    slot.pendingSessionId = null;
+    slot.error = null;
+    slot.batchRemaining = items.map((i) => i.cardId);
+    this.armModuleTimeout(moduleId);
+    const settings = $state.snapshot(
+      this.modules[moduleId]?.settings ?? {},
+    ) as Record<string, string | boolean>;
+    for (const item of items) {
+      this.send({
+        type: "module.query.submit",
+        url: this.lastUrl ?? "",
+        moduleId,
+        moduleSettings: settings,
+        queryComment: JSON.stringify({
+          op: item.op,
+          runId: crypto.randomUUID(),
+          settings,
+          cardId: item.cardId,
+        }),
+      });
+    }
+  }
+
   cancelModuleOp(moduleId: string): void {
     const slot = this.moduleBoards[moduleId];
     if (!slot?.pending) return;
     this.clearModuleTimeout(moduleId);
     slot.pending = null;
     slot.pendingSessionId = null;
+    slot.batchRemaining = null;
     slot.error = "Cancelled.";
   }
 
@@ -4284,6 +4354,125 @@ class ExtensionState {
       this.moduleOpTimers.delete(moduleId);
     }
     this.retireAgentWaitNotice();
+  }
+
+  /**
+   * Fetch the per-card "how to test" steps for a board card (the beaker
+   * icon). Dispatches `op` (the manifest's `tab.cardStepsOp`) with the
+   * card id; the agent returns `{ op, cardId, steps }`, routed back to
+   * `handleModuleCardStepsSync` and cached on the board slot. One fetch at
+   * a time per module (a singleton `cardStepsPending`, like the Report
+   * module's how-to-test). Does NOT disturb the board's own `pending`.
+   */
+  async runModuleCardSteps(
+    moduleId: string,
+    op: string,
+    card: { id: string; title?: string; url?: string },
+  ): Promise<void> {
+    const slot = this.ensureModuleBoard(moduleId);
+    if (slot.cardStepsPending) return; // one in flight
+    if (!this.client || this.connectionStatus !== "connected") {
+      slot.cardStepsError =
+        "No companion connected. Start `pinta-companion .` to generate test steps.";
+      return;
+    }
+    slot.cardStepsPending = card.id;
+    slot.cardStepsError = null;
+    this.armModuleCardStepsTimeout(moduleId);
+    const settings = $state.snapshot(
+      this.modules[moduleId]?.settings ?? {},
+    ) as Record<string, string | boolean>;
+    const runId = crypto.randomUUID();
+    const queryComment = JSON.stringify({
+      op,
+      runId,
+      settings,
+      cardId: card.id,
+      ...(card.title ? { title: card.title } : {}),
+      ...(card.url ? { url: card.url } : {}),
+    });
+    this.send({
+      type: "module.query.submit",
+      url: this.lastUrl ?? "",
+      moduleId,
+      moduleSettings: settings,
+      queryComment,
+    });
+  }
+
+  cancelModuleCardSteps(moduleId: string): void {
+    const slot = this.moduleBoards[moduleId];
+    if (!slot?.cardStepsPending) return;
+    this.clearModuleCardStepsTimeout(moduleId);
+    slot.cardStepsPending = null;
+    slot.cardStepsError = "Cancelled.";
+  }
+
+  private armModuleCardStepsTimeout(moduleId: string): void {
+    this.clearModuleCardStepsTimeout(moduleId);
+    this.armAgentWait({
+      softMs: ExtensionState.MODULE_OP_TIMEOUT_MS,
+      what: "generate the test steps",
+      setHandle: (t) => this.moduleCardStepsTimers.set(moduleId, t),
+      stillPending: () => !!this.moduleBoards[moduleId]?.cardStepsPending,
+      giveUp: () => {
+        const slot = this.moduleBoards[moduleId];
+        this.moduleCardStepsTimers.delete(moduleId);
+        if (!slot?.cardStepsPending) return;
+        slot.cardStepsPending = null;
+        slot.cardStepsError = ExtensionState.slowWaitGiveUp(
+          "generate the test steps",
+        );
+      },
+    });
+  }
+
+  private clearModuleCardStepsTimeout(moduleId: string): void {
+    const t = this.moduleCardStepsTimers.get(moduleId);
+    if (t) {
+      clearTimeout(t);
+      this.moduleCardStepsTimers.delete(moduleId);
+    }
+    this.retireAgentWaitNotice();
+  }
+
+  /** Routed from onMessage when a card-steps op session lands (matched by
+   *  the module's `tab.cardStepsOp`). Done → cache the steps under the
+   *  card id; error → surface it under the expanded card. */
+  private handleModuleCardStepsSync(session: Session, moduleId: string): void {
+    const slot = this.ensureModuleBoard(moduleId);
+    const cardId = ExtensionState.queryField(session, "cardId");
+    if (!cardId || slot.cardStepsPending !== cardId) return;
+    if (session.status === "done") {
+      const summary = session.appliedSummary ?? "";
+      // Empty "done" (multi-agent race) — keep pending so a real one lands.
+      if (summary.trim() === "") return;
+      this.clearModuleCardStepsTimeout(moduleId);
+      slot.cardStepsPending = null;
+      try {
+        const payload = JSON.parse(summary) as { steps?: unknown };
+        const steps = Array.isArray(payload.steps)
+          ? payload.steps.filter((s): s is string => typeof s === "string" && s.trim().length > 0)
+          : [];
+        if (steps.length === 0) {
+          slot.cardStepsError =
+            "No test steps came back. Restart `/pinta` if the module's task-steps handler didn't load.";
+          return;
+        }
+        slot.cardSteps = {
+          ...(slot.cardSteps ?? {}),
+          [cardId]: { steps, askedAt: Date.now() },
+        };
+        slot.cardStepsError = null;
+      } catch {
+        slot.cardStepsError = "Couldn't parse the test-steps response.";
+      }
+    } else if (session.status === "error") {
+      this.clearModuleCardStepsTimeout(moduleId);
+      slot.cardStepsPending = null;
+      slot.cardStepsError =
+        session.errorMessage ?? "Couldn't generate test steps for that card.";
+    }
   }
 
   /** Routed from onMessage when a session.synced for an imported
@@ -4330,6 +4519,20 @@ class ExtensionState {
       } catch (err) {
         slot.error = `Couldn't parse the module response: ${(err as Error).message}`;
       }
+      // Multi-start batch: this board answered ONE card's op — retire that
+      // card and stay pending until the whole batch has answered. The
+      // timeout re-arms per response so a long tail doesn't false-fail.
+      const doneCardId = ExtensionState.queryField(session, "cardId");
+      if (slot.batchRemaining?.length && doneCardId) {
+        slot.batchRemaining = slot.batchRemaining.filter(
+          (id) => id !== doneCardId,
+        );
+        if (slot.batchRemaining.length > 0) {
+          this.armModuleTimeout(moduleId);
+          return;
+        }
+        slot.batchRemaining = null;
+      }
       slot.pending = null;
       slot.pendingSessionId = null;
     } else if (session.status === "error") {
@@ -4337,6 +4540,7 @@ class ExtensionState {
       slot.error = session.errorMessage ?? "The module run failed.";
       slot.pending = null;
       slot.pendingSessionId = null;
+      slot.batchRemaining = null;
     } else if (session.status === "applying") {
       slot.error = null;
     }
@@ -7906,6 +8110,18 @@ class ExtensionState {
           ),
         );
         if (importedInteractive) {
+          // A per-card "how to test" fetch carries a cardId just like a
+          // card-action board op does, so tell them apart by the op:
+          // the manifest's `tab.cardStepsOp` routes to the steps handler
+          // (cached per card), everything else refreshes the board.
+          const im = this.installedModules.find(
+            (x) => x.manifest.id === importedInteractive.id,
+          );
+          const stepsOp = im?.manifest.tab?.cardStepsOp;
+          if (stepsOp && ExtensionState.queryOp(msg.session) === stepsOp) {
+            this.handleModuleCardStepsSync(msg.session, importedInteractive.id);
+            return;
+          }
           this.handleModuleBoardSync(msg.session, importedInteractive.id);
           return;
         }

@@ -362,6 +362,15 @@ export type ModuleTab = {
    *  `url` is a plain deep-link. Declared statically in the manifest so the
    *  agent needn't re-emit them on every board build. */
   boardActions?: ModuleBoardCardAction[];
+  /** When set, every board card shows a small "steps" icon (like Test
+   *  Pilot's detail-steps "?"). Clicking it dispatches THIS op with the
+   *  card's id; the agent returns `{ op, cardId, steps: string[] }`, which
+   *  the extension renders inline under the card as a numbered timeline.
+   *  Unlike a card `op` action, it does NOT refresh the board — it's a
+   *  read-only "how to test this" fetch cached per card. */
+  cardStepsOp?: string;
+  /** Tooltip / label for the steps icon (default "How to test"). */
+  cardStepsLabel?: string;
 };
 
 /* ──────────────────────────────────────────────────────────────────────
@@ -436,6 +445,11 @@ export type ModuleBoardCard = {
   tags?: string[];
   /** Highlight this card (e.g. assigned to the current user). */
   highlight?: boolean;
+  /** True when the agent is ACTIVELY working this card right now (e.g.
+   *  the task being coded after Start). The extension renders a pulsing
+   *  "working" border on it — agent-truth, so it survives refreshes and
+   *  distinguishes "being worked" from merely "status: in-progress". */
+  working?: boolean;
   /** External link opened by the default per-card action (back-compat:
    *  used when `actions` is absent). */
   url?: string;

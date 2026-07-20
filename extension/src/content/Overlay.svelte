@@ -15,6 +15,11 @@
     sampleElementColor,
     type Swatch,
   } from "./tools/palette.js";
+  import {
+    applyPreview,
+    rebuildInline,
+    diffAppliedProps,
+  } from "./tools/inline-style.js";
   import Canvas from "./Canvas.svelte";
   import CommentInput from "./CommentInput.svelte";
   import ElementEditor from "./ElementEditor.svelte";
@@ -182,7 +187,7 @@
           // A node Pinta CREATED (text-insert preview) rolls back by
           // removal; a mutated existing element restores its snapshot.
           if (entry.inserted) entry.element.remove();
-          else restoreFromSnapshot(entry);
+          else restoreFromEntry(entry);
           // Multi-target annotations (move / delete with Ctrl-clicked
           // siblings) also preview the extras — restore them too.
           for (const ex of entry.extraPreviews ?? []) restoreFromSnapshot(ex);
@@ -1051,8 +1056,15 @@
   };
   type PendingTextEdit = {
     el: HTMLElement;
+    /** TRUE original inline style / markup — rollback snapshots only. */
     originalCssText: string;
     originalInnerHtml: string;
+    /** Inline style + markup when the text edit began (carries earlier
+     *  tools). Live format preview resets to `baseCssText` so it doesn't
+     *  wipe a prior resize; a cancelled edit rolls back to both, not the
+     *  true original, so it can't undo an earlier tool. */
+    baseCssText: string;
+    baseInnerHtml: string;
     textBefore: string;
     /** Text-formatting overrides from the floating toolbar (font-size,
      *  font-weight, color, text-align, …). Applied live and folded into
@@ -1079,9 +1091,10 @@
   }
 
   // Apply one text-formatting property from the toolbar. Empty value
-  // resets it (drop the key, restore the element's original inline style
-  // then re-apply the remaining overrides). Reassigning cssText doesn't
-  // disturb the contentEditable caret or its text.
+  // resets it (drop the key, then re-layer the remaining overrides on the
+  // edit-start base). Resetting to the base — not the true original —
+  // preserves any earlier tool's edits on the same element. Reassigning
+  // cssText doesn't disturb the contentEditable caret or its text.
   function applyTextFormat(prop: string, value: string): void {
     const p = pendingTextEdit;
     if (!p) return;
@@ -1089,16 +1102,8 @@
     if (value.trim()) next[prop] = value.trim();
     else delete next[prop];
     pendingTextEdit = { ...p, cssChanges: next };
-    const el = p.el;
-    if (!el.isConnected) return;
-    el.style.cssText = p.originalCssText;
-    for (const [k, v] of Object.entries(next)) {
-      try {
-        el.style.setProperty(k, v);
-      } catch {
-        // ignore invalid property/value
-      }
-    }
+    if (!p.el.isConnected) return;
+    applyPreview(p.el, p.baseCssText, next);
   }
 
   type PendingTextInsert = {
@@ -1137,6 +1142,8 @@
       originalInnerHtml: existing
         ? existing.originalInnerHtml
         : el.innerHTML,
+      baseCssText: el.style.cssText,
+      baseInnerHtml: el.innerHTML,
       textBefore: textOf(el),
       cssChanges: {},
       initialStyles: readTextStyles(el),
@@ -1170,9 +1177,11 @@
     const textChanged = textAfter !== p.textBefore;
     const hasFormat = Object.keys(p.cssChanges).length > 0;
     if (!commit || (!textChanged && !hasFormat)) {
-      // Untouched or cancelled — put the original markup + styles back.
-      el.style.cssText = p.originalCssText;
-      el.innerHTML = p.originalInnerHtml;
+      // Untouched or cancelled — roll back to how the element looked when
+      // THIS edit began (base), not the true original, so an earlier tool's
+      // edit on the same element survives.
+      el.style.cssText = p.baseCssText;
+      el.innerHTML = p.baseInnerHtml;
       return;
     }
     const annId = newAnnId();
@@ -1206,6 +1215,7 @@
       target.nearbyText,
       location.href,
     );
+    content.attachPreviewChanges(annId, diffAppliedProps(p.baseCssText, el.style.cssText));
   }
 
   function startTextInsert(clientX: number, clientY: number): void {
@@ -1524,8 +1534,12 @@
 
   type ResizePending = {
     el: HTMLElement;
+    /** TRUE original inline style — rollback snapshot only. */
     originalCssText: string;
     originalInnerHtml: string;
+    /** Inline style when Resize began (carries earlier tools). Preview
+     *  rebuilds from THIS so it doesn't wipe a prior text / paint / scale. */
+    baseCssText: string;
     sourceTarget: AnnotationTarget;
     /** Current previewed size in CSS px (border-box, from the rect). */
     width: number;
@@ -1549,6 +1563,7 @@
       el,
       originalCssText: existing ? existing.originalCssText : el.style.cssText,
       originalInnerHtml: existing ? existing.originalInnerHtml : el.innerHTML,
+      baseCssText: el.style.cssText,
       sourceTarget: captureTarget(el),
       width: Math.round(r.width),
       height: Math.round(r.height),
@@ -1561,7 +1576,9 @@
 
   function cancelResize(): void {
     const p = resizePending;
-    if (p && p.el.isConnected) p.el.style.cssText = p.originalCssText;
+    // Restore to the base (before Resize began), not the true original, so
+    // an earlier tool's edit on the same element survives.
+    if (p && p.el.isConnected) p.el.style.cssText = p.baseCssText;
     resizePending = null;
     resizeComment = "";
     hovered = null;
@@ -1578,7 +1595,7 @@
     const el = p.el;
     if (!el.isConnected) return;
     const orig = p.sourceTarget.boundingRect;
-    el.style.cssText = p.originalCssText;
+    el.style.cssText = p.baseCssText;
     if (Math.round(orig.width) !== p.width) el.style.width = `${p.width}px`;
     if (Math.round(orig.height) !== p.height) el.style.height = `${p.height}px`;
     if (p.offsetX !== 0) {
@@ -1708,6 +1725,7 @@
       target.nearbyText,
       location.href,
     );
+    content.attachPreviewChanges(annId, diffAppliedProps(p.baseCssText, el.style.cssText));
     resizePending = null;
     resizeComment = "";
     setMode("idle");
@@ -1736,9 +1754,10 @@
       e.stopPropagation();
       if (resizePending) {
         if (resizePending.el === el) return; // already selected
-        // Switching target — roll the previous preview back first.
+        // Switching target — roll the previous preview back to its base
+        // (earlier tools intact), not the true original.
         if (resizePending.el.isConnected) {
-          resizePending.el.style.cssText = resizePending.originalCssText;
+          resizePending.el.style.cssText = resizePending.baseCssText;
         }
         resizeComment = "";
       }
@@ -1790,8 +1809,13 @@
 
   type PaintPending = {
     el: HTMLElement;
+    /** TRUE original inline style — the rollback snapshot only. */
     originalCssText: string;
     originalInnerHtml: string;
+    /** The element's inline style when Paint began (already carries any
+     *  earlier tools' edits). Live preview resets to THIS, not the true
+     *  original, so painting doesn't wipe a prior resize / text / scale. */
+    baseCssText: string;
     cssChanges: Record<string, string>;
     initial: Record<PaintProp, string>;
   };
@@ -1821,6 +1845,7 @@
       el,
       originalCssText: existing ? existing.originalCssText : el.style.cssText,
       originalInnerHtml: existing ? existing.originalInnerHtml : el.innerHTML,
+      baseCssText: el.style.cssText,
       cssChanges: {},
       initial: readPaintColors(el),
     };
@@ -1828,7 +1853,10 @@
 
   function cancelPaint(): void {
     const p = paintPending;
-    if (p && p.el.isConnected) p.el.style.cssText = p.originalCssText;
+    // Restore to the base (before Paint began), NOT the true original —
+    // cancelling Paint must not undo an earlier resize / text on the
+    // same element.
+    if (p && p.el.isConnected) p.el.style.cssText = p.baseCssText;
     paintPending = null;
     paintEyedropping = false;
     hovered = null;
@@ -1857,16 +1885,9 @@
     if (value.trim()) next[prop] = value.trim();
     else delete next[prop];
     paintPending = { ...p, cssChanges: next };
-    const el = p.el;
-    if (!el.isConnected) return;
-    el.style.cssText = p.originalCssText;
-    for (const [k, v] of Object.entries(next)) {
-      try {
-        el.style.setProperty(k, v);
-      } catch {
-        // ignore invalid property/value
-      }
-    }
+    if (!p.el.isConnected) return;
+    // Reset to the base (earlier tools' edits intact), then layer colors.
+    applyPreview(p.el, p.baseCssText, next);
   }
 
   /**
@@ -1935,6 +1956,7 @@
       target.nearbyText,
       location.href,
     );
+    content.attachPreviewChanges(annId, diffAppliedProps(p.baseCssText, el.style.cssText));
     paintPending = null;
     paintEyedropping = false;
     setMode("idle");
@@ -1971,8 +1993,10 @@
       }
       if (paintPending) {
         if (paintPending.el === el) return; // already selected
+        // Switch target — restore the previous element to its base
+        // (earlier tools intact), not the true original.
         if (paintPending.el.isConnected) {
-          paintPending.el.style.cssText = paintPending.originalCssText;
+          paintPending.el.style.cssText = paintPending.baseCssText;
         }
       }
       hovered = null;
@@ -2016,8 +2040,13 @@
 
   type ScalePending = {
     el: HTMLElement;
+    /** TRUE original inline style — rollback snapshot only. */
     originalCssText: string;
     originalInnerHtml: string;
+    /** Inline style when Scale began (carries earlier tools). The preview
+     *  transform layers on THIS so it doesn't wipe a prior resize / paint,
+     *  and is peeled back to it before capturing the target. */
+    baseCssText: string;
     percent: number;
     /** Unscaled top-left origin + rect, captured at select time — the
      *  corner-drag gesture measures against this. */
@@ -2033,7 +2062,9 @@
   function applyScalePreview(p: ScalePending): void {
     const el = p.el;
     if (!el.isConnected) return;
-    el.style.cssText = p.originalCssText;
+    // Layer the preview transform on the base (earlier tools intact), not
+    // the true original.
+    el.style.cssText = p.baseCssText;
     if (p.percent === 100) return;
     // Preview only — grows from the element's own top-left so it expands
     // into the page the way the real change would read.
@@ -2056,6 +2087,7 @@
       el,
       originalCssText: existing ? existing.originalCssText : el.style.cssText,
       originalInnerHtml: existing ? existing.originalInnerHtml : el.innerHTML,
+      baseCssText: el.style.cssText,
       percent: 100,
       baseW: Math.max(1, r.width),
       baseH: Math.max(1, r.height),
@@ -2064,7 +2096,8 @@
 
   function cancelScale(): void {
     const p = scalePending;
-    if (p && p.el.isConnected) p.el.style.cssText = p.originalCssText;
+    // Restore the base (before Scale began), not the true original.
+    if (p && p.el.isConnected) p.el.style.cssText = p.baseCssText;
     scalePending = null;
     scaleNote = "";
     hovered = null;
@@ -2133,11 +2166,12 @@
     const p = scalePending;
     if (!p || p.percent === 100) return;
     const el = p.el;
-    // Capture from the element's ORIGINAL geometry: the preview transform
-    // would otherwise bake a scaled boundingRect / inline transform into
-    // outerHTML, which is exactly what we're telling the agent NOT to do.
+    // Capture from the base geometry (earlier tools intact, but WITHOUT
+    // the scale transform): peeling to the base keeps a prior resize/paint
+    // in the captured outerHTML while dropping the transform we tell the
+    // agent not to emit.
     const previewCss = el.style.cssText;
-    if (el.isConnected) el.style.cssText = p.originalCssText;
+    if (el.isConnected) el.style.cssText = p.baseCssText;
     const target = captureTarget(el);
     if (el.isConnected) el.style.cssText = previewCss;
 
@@ -2165,6 +2199,9 @@
       target.nearbyText,
       location.href,
     );
+    // Scale leaves a transform preview on the element — record it so a
+    // rebuild after removing a sibling reinstates (or drops) it correctly.
+    content.attachPreviewChanges(annId, diffAppliedProps(p.baseCssText, el.style.cssText));
     scalePending = null;
     scaleNote = "";
     setMode("idle");
@@ -2192,7 +2229,7 @@
       if (scalePending) {
         if (scalePending.el === el) return; // already selected
         if (scalePending.el.isConnected) {
-          scalePending.el.style.cssText = scalePending.originalCssText;
+          scalePending.el.style.cssText = scalePending.baseCssText;
         }
         scaleNote = "";
       }
@@ -2249,6 +2286,13 @@
   let originalCssText = $state<string | null>(null);
   let originalInnerHtml = $state<string | null>(null);
   let originalText = $state<string | null>(null);
+  // The element's inline style + markup as they were when THIS selection
+  // began — already carrying any earlier tool's edits. Live preview
+  // resets to these (not the true original) so editing an element that was
+  // already resized / painted doesn't wipe that work. `originalCssText`
+  // stays the true original, used only for the rollback snapshot.
+  let previewBaseCss = $state<string | null>(null);
+  let previewBaseInnerHtml = $state<string | null>(null);
   // Plain (non-reactive) flag tracking whether we mutated the text via
   // innerText. Used to know if a restore is needed when the user clears
   // their Content edit.
@@ -2317,10 +2361,16 @@
         originalCssText = (selected as HTMLElement).style.cssText;
         originalInnerHtml = (selected as HTMLElement).innerHTML;
       }
+      // Preview base = the element's CURRENT inline state (includes any
+      // earlier tool's edits), so the live preview layers on top of them.
+      previewBaseCss = (selected as HTMLElement).style.cssText;
+      previewBaseInnerHtml = (selected as HTMLElement).innerHTML;
       originalText = textOf(selected);
     } else {
       originalCssText = null;
       originalInnerHtml = null;
+      previewBaseCss = null;
+      previewBaseInnerHtml = null;
       originalText = null;
     }
     textWasMutated = false;
@@ -2333,9 +2383,11 @@
   // different from the original — otherwise we leave the element's
   // children alone (innerText assignment would destroy nested markup).
   $effect(() => {
-    if (!selected || !selected.isConnected || originalCssText === null) return;
+    if (!selected || !selected.isConnected || previewBaseCss === null) return;
     const el = selected as HTMLElement;
-    el.style.cssText = originalCssText;
+    // Reset to the preview BASE (earlier tools intact), then re-apply this
+    // annotation's edits on top.
+    el.style.cssText = previewBaseCss;
     for (const [prop, val] of Object.entries(selectCssChanges)) {
       try {
         el.style.setProperty(prop, val);
@@ -2350,21 +2402,23 @@
     if (selectContentAfter && selectContentAfter !== originalText) {
       el.innerText = selectContentAfter;
       textWasMutated = true;
-    } else if (textWasMutated && originalInnerHtml !== null) {
-      // User cleared their Content edit — restore the original markup
+    } else if (textWasMutated && previewBaseInnerHtml !== null) {
+      // User cleared their Content edit — restore the base markup
       // (NOT innerText, which would collapse children).
-      el.innerHTML = originalInnerHtml;
+      el.innerHTML = previewBaseInnerHtml;
       textWasMutated = false;
     }
   });
 
   function restoreOriginal() {
-    if (!selected || originalCssText === null) return;
+    if (!selected || previewBaseCss === null) return;
     const el = selected as HTMLElement;
     if (!el.isConnected) return;
-    el.style.cssText = originalCssText;
-    if (textWasMutated && originalInnerHtml !== null) {
-      el.innerHTML = originalInnerHtml;
+    // Roll back to the base (before this selection's edits), not the true
+    // original, so an earlier tool's edit on the same element survives.
+    el.style.cssText = previewBaseCss;
+    if (textWasMutated && previewBaseInnerHtml !== null) {
+      el.innerHTML = previewBaseInnerHtml;
       textWasMutated = false;
     }
   }
@@ -2381,6 +2435,36 @@
     if (el.innerHTML !== entry.originalInnerHtml) {
       el.innerHTML = entry.originalInnerHtml;
     }
+  }
+
+  /**
+   * Roll back ONE removed annotation. When it's the only annotation on the
+   * element, snap to the true original (the simple case — also restores
+   * markup for a content edit). When the element carries OTHER annotations
+   * too (tools were combined on it), rebuild its inline STYLE from the true
+   * original + the survivors' deltas so peeling off this one edit doesn't
+   * drop the others. Markup is left as-is in the survivors path: combined
+   * style tools never touch it, and re-asserting it here would risk
+   * clobbering a sibling's text-content edit.
+   */
+  function restoreFromEntry(entry: {
+    element: Element;
+    originalCssText: string;
+    originalInnerHtml: string;
+    previewChanges?: Record<string, string>;
+  }): void {
+    const el = entry.element as HTMLElement;
+    if (!el?.isConnected) return;
+    const survivors = content.annotatedForElement(el);
+    if (survivors.length === 0) {
+      restoreFromSnapshot(entry);
+      return;
+    }
+    rebuildInline(
+      el,
+      entry.originalCssText,
+      survivors.map((s) => s.previewChanges ?? {}),
+    );
   }
 
   /**
@@ -2460,10 +2544,11 @@
       typeof crypto !== "undefined" && "randomUUID" in crypto
         ? `ann-${crypto.randomUUID()}`
         : `ann-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
-    // Record the snapshot WITH the annotation. If the element was
-    // already annotated (re-edit), recordAnnotated stores another entry
-    // pointing at the same true-original snapshot — that's fine, the
-    // first remove restores fully and subsequent removes are no-ops.
+    // Record the snapshot WITH the annotation. If the element was already
+    // annotated (re-edit / combined tools), recordAnnotated stores another
+    // entry pointing at the same true-original snapshot, plus this edit's
+    // `previewChanges` delta — so removing ONE annotation rebuilds from the
+    // survivors instead of nuking the element back to the true original.
     // Only the primary gets a snapshot — extras are not mutated by the
     // editor, so they don't need rollback bookkeeping.
     if (originalCssText !== null && originalInnerHtml !== null) {
@@ -2476,6 +2561,10 @@
         targets[0]?.outerHTML,
         targets[0]?.nearbyText,
         location.href,
+      );
+      content.attachPreviewChanges(
+        annId,
+        diffAppliedProps(previewBaseCss ?? "", (selected as HTMLElement).style.cssText),
       );
     }
     chrome.runtime.sendMessage({

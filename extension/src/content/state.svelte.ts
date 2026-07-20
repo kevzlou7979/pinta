@@ -155,6 +155,13 @@ class ContentState {
        *  click siblings of a multi-target move / delete). Restored
        *  alongside the primary on removal / session-clear. */
       extraPreviews?: ExtraPreview[];
+      /** The inline-style delta this annotation applied (prop→value; ""
+       *  = property removed). When an element carries SEVERAL annotations
+       *  and one is removed, the survivors' deltas are replayed on top of
+       *  the true original so the removed one's edit is peeled off WITHOUT
+       *  dropping the others. Absent for annotations that didn't mutate
+       *  inline style (plain replays). */
+      previewChanges?: Record<string, string>;
       /** True for Delete-tool entries: the element is hidden
        *  (display:none) rather than pointed at, so the overlay suppresses
        *  its numbered pin badge. Rollback still restores it. */
@@ -333,6 +340,25 @@ class ContentState {
     return this.globalSeq(id);
   }
 
+  /** Record the inline-style delta an annotation applied (see the
+   *  `previewChanges` field). Called by the style tools right after
+   *  `recordAnnotated` so removal can replay the surviving siblings. */
+  attachPreviewChanges(id: string, changes: Record<string, string>): void {
+    const entry = this.annotated.find((a) => a.id === id);
+    if (entry) entry.previewChanges = changes;
+  }
+
+  /** All annotated entries for `el`, oldest-first — the survivors a
+   *  rebuild replays after one annotation on a shared element is removed. */
+  annotatedForElement(el: Element): {
+    previewChanges?: Record<string, string>;
+  }[] {
+    return this.annotated
+      .filter((a) => a.element === el)
+      .sort((a, b) => a.createdAt - b.createdAt)
+      .map((a) => ({ previewChanges: a.previewChanges }));
+  }
+
   /**
    * For every annotated entry whose element is no longer in the DOM,
    * try to re-resolve via three fallback strategies in order:
@@ -420,7 +446,7 @@ class ContentState {
       : null;
   }
 
-  removeAnnotatedById(id: string): { entry: { element: Element; originalCssText: string; originalInnerHtml: string; inserted?: boolean; extraPreviews?: ExtraPreview[] } | null } {
+  removeAnnotatedById(id: string): { entry: { element: Element; originalCssText: string; originalInnerHtml: string; inserted?: boolean; extraPreviews?: ExtraPreview[]; previewChanges?: Record<string, string> } | null } {
     const idx = this.annotated.findIndex((a) => a.id === id);
     if (idx === -1) return { entry: null };
     const entry = this.annotated[idx]!;
@@ -434,6 +460,7 @@ class ContentState {
         originalInnerHtml: entry.originalInnerHtml,
         inserted: entry.inserted,
         extraPreviews: entry.extraPreviews,
+        previewChanges: entry.previewChanges,
       },
     };
   }

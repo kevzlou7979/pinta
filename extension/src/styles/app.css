@@ -64,6 +64,32 @@ div:hover > .pinta-drag-handle {
   }
 }
 
+/* Card "working" border — a pulsing brand-pink ring on a card whose agent
+ * op is queued or in flight (e.g. a multi-start batch on the Tasks board).
+ * Mirrors the content overlay's processing-pulse, scaled down to a card:
+ * the border color + box-shadow ring breathe between dim and bright. The
+ * card keeps its own 1px border underneath; this rides on top via the ring
+ * shadow so layout doesn't shift. */
+.pinta-card-working {
+  animation: pinta-card-working 1.4s ease-in-out infinite;
+  border-color: theme("colors.brand.pink") !important;
+}
+@keyframes pinta-card-working {
+  0%,
+  100% {
+    box-shadow: 0 0 0 1px rgba(255, 61, 110, 0.35);
+  }
+  50% {
+    box-shadow: 0 0 0 2px rgba(255, 61, 110, 0.85);
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  .pinta-card-working {
+    animation: none;
+    box-shadow: 0 0 0 2px rgba(255, 61, 110, 0.7);
+  }
+}
+
 /* Phase 14.1 — chat "Thinking…" dots.
  * Three pulsing dots that bounce between dim and full opacity, each
  * staggered by 150ms via inline `animation-delay` on the elements.

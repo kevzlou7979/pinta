@@ -12,6 +12,7 @@
     ModuleBoardGroup,
   } from "@pinta/shared";
   import { app } from "../lib/state.svelte.js";
+  import StepList from "./StepList.svelte";
 
   type Props = {
     spec: ModuleSpec;
@@ -27,6 +28,89 @@
   const pending = $derived(slot?.pending ?? null);
   const error = $derived(slot?.error ?? null);
 
+  // ── Per-card "how to test" steps (like Test Pilot's detail "?"). Shown
+  // only when the module declares `tab.cardStepsOp`. Cached per card on the
+  // board slot so a refresh keeps them; expanded state is local.
+  const stepsOp = $derived(tab.cardStepsOp);
+  const cardSteps = $derived(slot?.cardSteps ?? {});
+  const cardStepsPending = $derived(slot?.cardStepsPending ?? null);
+  const cardStepsError = $derived(slot?.cardStepsError ?? null);
+  let openSteps = $state<Set<string>>(new Set());
+
+  function toggleSteps(c: ModuleBoardCard): void {
+    const next = new Set(openSteps);
+    if (next.has(c.id)) {
+      next.delete(c.id);
+    } else {
+      next.add(c.id);
+      // Fetch on first open (nothing cached, none in flight).
+      if (stepsOp && !cardSteps[c.id] && !cardStepsPending) {
+        void app.runModuleCardSteps(spec.id, stepsOp, {
+          id: c.id,
+          title: c.title,
+          url: cardUrl(c),
+        });
+      }
+    }
+    openSteps = next;
+  }
+  function retrySteps(c: ModuleBoardCard): void {
+    if (stepsOp && !cardStepsPending) {
+      void app.runModuleCardSteps(spec.id, stepsOp, {
+        id: c.id,
+        title: c.title,
+        url: cardUrl(c),
+      });
+    }
+  }
+
+  // ── Section tabs ────────────────────────────────────────────────────
+  // The featuredSection groups (Up Next / In Progress / Review / Done …)
+  // render as a segmented tab bar so the user flips between them instead of
+  // scrolling one long stack. A "Pickups" tab leads when the board declares
+  // a featured list. Data-driven — whatever sections the board ships become
+  // the tabs.
+  const FEATURED_TAB = "__pickups__";
+  let activeSection = $state<string | null>(null);
+
+  const sectionTabs = $derived.by(() => {
+    const tabs: { id: string; name: string; color?: string; count: number }[] = [];
+    if (board?.featured && board.featured.length) {
+      tabs.push({ id: FEATURED_TAB, name: "Pickups", count: featuredCards().length });
+    }
+    for (const g of sectionGroups()) {
+      tabs.push({
+        id: g.id,
+        name: g.name,
+        color: g.color,
+        count: cardsInGroup(g.id).length,
+      });
+    }
+    return tabs;
+  });
+
+  // Default / validate the active tab whenever the tab set changes. Keep the
+  // user's pick if it still exists (even when it empties out on a refresh);
+  // otherwise land on the first tab that has cards.
+  $effect(() => {
+    const tabs = sectionTabs;
+    if (!tabs.length) {
+      activeSection = null;
+      return;
+    }
+    if (activeSection && tabs.some((t) => t.id === activeSection)) return;
+    activeSection = (tabs.find((t) => t.count > 0) ?? tabs[0]!).id;
+  });
+
+  function activeTabCards(): ModuleBoardCard[] {
+    if (activeSection === FEATURED_TAB) return featuredCards();
+    if (activeSection) return cardsInGroup(activeSection);
+    return [];
+  }
+  function activeTabName(): string {
+    return sectionTabs.find((t) => t.id === activeSection)?.name ?? "";
+  }
+
   let view = $state<"featured" | "board">("featured");
   // Which card + action is mid-flight, so we spinner ONLY that button and
   // suppress the full-width board banner for per-card actions. Set in
@@ -40,6 +124,114 @@
   // Transient confirmation for a client-side handoff (e.g. "Added to Test
   // Pilot → <today>"). Shown as a dismissible notice above the board.
   let notice = $state<string | null>(null);
+
+  // ── Multi-start ────────────────────────────────────────────────────
+  // Tick several cards, hit "Start" once. ALL ops are dispatched up-front
+  // (state.runModuleOpBatch) so the agent sees the whole batch before its
+  // start op hands the terminal off to real work; the single agent answers
+  // them in dispatch order. `slot.batchRemaining` is the source of truth:
+  // [0] is the card the agent is handling NOW (pulsing "Starting…"), the
+  // rest are "Queued". Cards do NOT move groups until the agent actually
+  // flips them — the module only flips the task it's about to work.
+  let selectedIds = $state<Set<string>>(new Set());
+  // How many cards the current batch started with — drives the progress text.
+  let batchTotal = $state(0);
+  const batchIds = $derived(slot?.batchRemaining ?? []);
+  const batchActive = $derived(batchIds.length > 0);
+  const batchLeft = $derived(batchIds.length);
+
+  // The batch button's verb mirrors what the selected cards will actually
+  // DO — their primary-action labels. All "Triage" picks → "Triage 4";
+  // all "Start working" → "Start 4"; a mixed selection is honest about it
+  // ("Run 4 actions") instead of pretending everything starts.
+  const batchLabel = $derived.by(() => {
+    if (!board) return `Start ${selectedIds.size}`;
+    const byId = new Map(board.cards.map((c) => [c.id, c] as const));
+    const labels = new Set<string>();
+    for (const id of selectedIds) {
+      const c = byId.get(id);
+      const a = c ? startAction(c) : undefined;
+      if (a?.op) labels.add(a.label);
+    }
+    const n = selectedIds.size;
+    if (labels.size === 1) {
+      // First word keeps the button tight ("Start working" → "Start").
+      const word = [...labels][0]!.split(/\s+/)[0]!;
+      return `${word} ${n}`;
+    }
+    return `Run ${n} action${n === 1 ? "" : "s"}`;
+  });
+
+  // A card is selectable when its primary action is an agent `op` (a bare
+  // deep-link or a client-only handoff isn't a "start"). Selection is
+  // frozen while a batch runs so the queue can't shift under us.
+  function isSelectable(c: ModuleBoardCard): boolean {
+    return !batchActive && !!startAction(c)?.op;
+  }
+  function isSelected(id: string): boolean {
+    return selectedIds.has(id);
+  }
+  function toggleSelect(id: string): void {
+    const next = new Set(selectedIds);
+    if (next.has(id)) next.delete(id);
+    else next.add(id);
+    selectedIds = next;
+  }
+  function clearSelection(): void {
+    selectedIds = new Set();
+  }
+  // Card batch status: "starting" = the agent is on it now, "queued" =
+  // dispatched, waiting its turn behind the current one.
+  function batchStatus(id: string): "starting" | "queued" | null {
+    const i = batchIds.indexOf(id);
+    if (i === 0) return "starting";
+    if (i > 0) return "queued";
+    return null;
+  }
+  // Pulsing border: the card the agent is handling now, or one the agent
+  // reports as actively being worked (`card.working`, agent-truth that
+  // survives refreshes while a task is being coded).
+  function isWorking(c: ModuleBoardCard): boolean {
+    return batchStatus(c.id) === "starting" || !!c.working;
+  }
+
+  // Kick off a batch from the current selection. All ops dispatch at once;
+  // slot.batchRemaining drives the per-card chips from here on. When any
+  // selected card's action declares a `confirm` (e.g. Complete/approve),
+  // ask ONCE for the whole batch — per-card dialogs would be noise, but
+  // mass-completing with no prompt at all is a footgun.
+  function startSelected(): void {
+    if (!board || batchActive || pending) return;
+    const byId = new Map(board.cards.map((c) => [c.id, c] as const));
+    const items: { cardId: string; op: string }[] = [];
+    let needsConfirm = false;
+    const labels = new Set<string>();
+    for (const id of selectedIds) {
+      const c = byId.get(id);
+      const a = c ? startAction(c) : undefined;
+      if (a?.op) {
+        items.push({ cardId: id, op: a.op });
+        if (a.confirm) needsConfirm = true;
+        labels.add(a.label);
+      }
+    }
+    if (items.length === 0) return;
+    if (needsConfirm) {
+      const verb =
+        labels.size === 1 ? [...labels][0]! : `run their actions on`;
+      if (
+        !globalThis.confirm?.(
+          `${verb} ${items.length} selected task${items.length === 1 ? "" : "s"}?`,
+        )
+      ) {
+        return;
+      }
+    }
+    clearSelection();
+    notice = null;
+    batchTotal = items.length;
+    void app.runModuleOpBatch(spec.id, items);
+  }
 
   // Default to the featured list when the board declares one (e.g. the
   // Workflow module's "today" pickups); else show the full board. Recompute
@@ -57,6 +249,14 @@
         ? "featured"
         : "board";
     notice = null;
+    // A refreshed board may have dropped cards the user had ticked (e.g. one
+    // just started + moved groups). Prune the selection to what still exists
+    // so the "Start N" count can't outlive its cards.
+    if (selectedIds.size) {
+      const live = new Set(board.cards.map((c) => c.id));
+      const next = new Set([...selectedIds].filter((id) => live.has(id)));
+      if (next.size !== selectedIds.size) selectedIds = next;
+    }
   });
 
   // The board headline arrives as a single composite string with the active
@@ -232,15 +432,37 @@
   {@const url = cardUrl(c)}
   {@const start = startAction(c)}
   {@const moreActions = cardActions(c).filter((a) => (a.op || a.clientOp) && a.id !== start?.id)}
+  {@const bstat = batchStatus(c.id)}
   <div
     class="rounded-lg border border-ink-200 dark:border-night-line bg-white dark:bg-night-alt overflow-hidden"
+    class:pinta-card-working={isWorking(c)}
   >
     <div class="flex items-start gap-2 px-3 py-2.5">
-      <!-- Flat card: title / badge / #id (no click-to-expand) -->
+      <!-- Multi-start select box (only for cards whose primary action is an
+           agent op; frozen while a batch runs). -->
+      {#if isSelectable(c)}
+        <label class="shrink-0 pt-0.5 cursor-pointer" title="Select to start">
+          <input
+            type="checkbox"
+            class="w-4 h-4 accent-brand-pink cursor-pointer"
+            checked={isSelected(c.id)}
+            onchange={() => toggleSelect(c.id)}
+            aria-label={`Select ${c.title}`}
+          />
+        </label>
+      {/if}
+      <!-- Flat card: one line — #id · title · link · status badge at the end -->
       <div class="flex-1 min-w-0">
         <div
           class="text-[13.5px] font-semibold leading-snug text-ink-900 dark:text-night-text break-words"
         >
+          <span class="text-ink-400 dark:text-night-mute font-normal tabular-nums">#{c.id}</span>
+          {#if c.badge}
+            <span
+              class="inline-block align-middle mx-0.5 text-[10px] font-semibold px-2 py-0.5 rounded-full"
+              style={`background:${col};color:${textOn(col)}`}>{c.badge}</span
+            >
+          {/if}
           {c.title}{#if url}<a
             href={url}
             target="_blank"
@@ -250,19 +472,47 @@
             aria-label="Open in GitLab"
           ><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6" /><polyline points="15 3 21 3 21 9" /><line x1="10" y1="14" x2="21" y2="3" /></svg></a>{/if}
         </div>
-        {#if c.badge}
-          <span
-            class="inline-block mt-1.5 text-[10px] font-semibold px-2 py-0.5 rounded-full"
-            style={`background:${col};color:${textOn(col)}`}>{c.badge}</span
-          >
+        {#if bstat || c.working}
+          <div class="mt-1.5 flex items-center gap-1.5 flex-wrap">
+            {#if bstat === "starting"}
+              <span class="inline-flex items-center gap-1 text-[10px] font-semibold px-2 py-0.5 rounded-full bg-brand-pink text-white">
+                <svg width="9" height="9" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" class="animate-spin" aria-hidden="true"><path d="M21 12a9 9 0 1 1-6.219-8.56" /></svg>
+                Starting…
+              </span>
+            {:else if bstat === "queued"}
+              <span class="inline-flex items-center gap-1 text-[10px] font-semibold px-2 py-0.5 rounded-full border border-brand-pink/50 text-brand-pink dark:text-brand-pink-light">
+                <svg width="9" height="9" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg>
+                Queued
+              </span>
+            {:else if c.working}
+              <span class="inline-flex items-center gap-1 text-[10px] font-semibold px-2 py-0.5 rounded-full bg-brand-pink text-white">
+                <svg width="9" height="9" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" class="animate-spin" aria-hidden="true"><path d="M21 12a9 9 0 1 1-6.219-8.56" /></svg>
+                Agent working
+              </span>
+            {/if}
+          </div>
         {/if}
-        <div class="mt-1.5 flex items-center gap-1.5 text-[11px] text-ink-400 dark:text-night-mute">
-          <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M20.59 13.41l-7.17 7.17a2 2 0 0 1-2.83 0L2 12V2h10l8.59 8.59a2 2 0 0 1 0 2.82z" /><line x1="7" y1="7" x2="7.01" y2="7" /></svg>
-          <span class="tabular-nums">{c.id}</span>
-        </div>
       </div>
       <!-- Primary action (Start / Triage) — GitLab link sits after the title -->
       <div class="shrink-0 flex items-center gap-1">
+        {#if stepsOp}
+          <!-- "How to test" — beaker icon, mirrors Test Pilot's detail steps. -->
+          <button
+            type="button"
+            class="inline-flex items-center justify-center w-7 h-7 rounded-md border border-ink-200 dark:border-night-line text-ink-500 dark:text-night-mute hover:text-brand-pink hover:border-brand-pink dark:hover:text-brand-pink-light transition-colors disabled:opacity-50"
+            class:text-brand-pink={openSteps.has(c.id)}
+            onclick={() => toggleSteps(c)}
+            aria-pressed={openSteps.has(c.id)}
+            title={tab.cardStepsLabel ?? "How to test"}
+            aria-label={tab.cardStepsLabel ?? "How to test"}
+          >
+            {#if cardStepsPending === c.id}
+              <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round" class="animate-spin" aria-hidden="true"><path d="M21 12a9 9 0 1 1-6.219-8.56" /></svg>
+            {:else}
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M9 3h6M10 3v6.5L5 18a2 2 0 0 0 1.7 3h10.6A2 2 0 0 0 19 18l-5-8.5V3" /></svg>
+            {/if}
+          </button>
+        {/if}
         {#if start}
           <button
             type="button"
@@ -294,6 +544,26 @@
         {#each moreActions as a (a.id)}
           {@render actionButton(c, a)}
         {/each}
+      </div>
+    {/if}
+    {#if stepsOp && openSteps.has(c.id)}
+      <!-- "How to test" steps for this card — numbered timeline via the
+           shared StepList (identical to Test Pilot / Report). -->
+      <div class="px-3 pb-3 pt-2 border-t border-ink-100 dark:border-night-line">
+        {#if cardStepsPending === c.id}
+          <div class="flex items-center gap-2 text-[12px] text-ink-500 dark:text-night-mute">
+            <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" class="animate-spin" aria-hidden="true"><path d="M21 12a9 9 0 1 1-6.219-8.56" /></svg>
+            Working out how to test this…
+            <button type="button" class="underline ml-auto" onclick={() => app.cancelModuleCardSteps(spec.id)}>Cancel</button>
+          </div>
+        {:else if cardSteps[c.id]}
+          <StepList steps={cardSteps[c.id]?.steps ?? []} />
+        {:else if cardStepsError}
+          <div class="text-[12px] text-red-600 dark:text-red-400 flex items-center justify-between gap-2">
+            <span class="min-w-0 break-words">{cardStepsError}</span>
+            <button type="button" class="shrink-0 underline" onclick={() => retrySteps(c)}>Retry</button>
+          </div>
+        {/if}
       </div>
     {/if}
   </div>
@@ -339,7 +609,7 @@
     </div>
   {/if}
 
-  {#if pending && !pendingCardId && !pendingBoardActionId}
+  {#if pending && !pendingCardId && !pendingBoardActionId && !batchActive}
     <!-- Running — board-level refresh only. A per-card action (pendingCardId
          set) spinners its own button instead, leaving the board visible. -->
     <div
@@ -457,50 +727,98 @@
       {/if}
     </header>
 
+    <!-- Multi-start bar — tick cards below, Start them all from here. -->
+    {#if selectedIds.size > 0 || batchActive}
+      <div
+        class="sticky top-0 z-10 flex items-center gap-2 rounded-lg border border-brand-pink/40 bg-brand-pink/5 dark:bg-brand-pink/10 px-3 py-2"
+      >
+        {#if batchActive}
+          <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" class="animate-spin text-brand-pink dark:text-brand-pink-light shrink-0" aria-hidden="true"><path d="M21 12a9 9 0 1 1-6.219-8.56" /></svg>
+          <span class="flex-1 text-[12px] font-medium text-ink-700 dark:text-night-text">
+            Running {batchTotal - batchLeft + 1} of {batchTotal}…
+          </span>
+        {:else}
+          <span class="flex-1 text-[12px] font-medium text-ink-700 dark:text-night-text">
+            {selectedIds.size} selected
+          </span>
+          <button
+            type="button"
+            class="text-[12px] text-ink-500 dark:text-night-mute hover:text-ink-800 dark:hover:text-night-text underline"
+            onclick={clearSelection}>Clear</button
+          >
+          <button
+            type="button"
+            class="inline-flex items-center gap-1.5 text-[12px] font-semibold rounded-md px-3 py-1.5 bg-brand-pink text-white hover:bg-brand-magenta dark:hover:bg-brand-pink-light disabled:opacity-50"
+            disabled={!!pending}
+            onclick={startSelected}
+          >
+            <svg width="11" height="11" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><polygon points="6 4 20 12 6 20 6 4" /></svg>
+            {batchLabel}
+          </button>
+        {/if}
+      </div>
+    {/if}
+
     {#if view === "featured"}
-      {#if featuredCards().length}
-        <div class="space-y-2">
-          {#each featuredCards() as c (c.id)}
-            {@render cardRow(c)}
+      {#if sectionTabs.length}
+        <!-- Section tabs — flip between Up Next / In Progress / Review /
+             Done instead of one long scroll. Horizontally scrollable so
+             more sections never wrap awkwardly in the narrow panel. -->
+        <div
+          class="flex items-center gap-1 overflow-x-auto pb-0.5 -mx-0.5 px-0.5"
+          role="tablist"
+          aria-label="Task sections"
+        >
+          {#each sectionTabs as t (t.id)}
+            <button
+              type="button"
+              role="tab"
+              aria-selected={activeSection === t.id}
+              class="shrink-0 inline-flex items-center gap-1.5 rounded-full px-3 py-1.5 text-[12px] font-medium transition-colors {activeSection ===
+              t.id
+                ? 'bg-brand-pink text-white'
+                : 'text-ink-600 dark:text-night-dim bg-ink-100/70 dark:bg-night-line/50 hover:bg-ink-200 dark:hover:bg-night-line'}"
+              onclick={() => (activeSection = t.id)}
+            >
+              {#if t.color && t.id !== FEATURED_TAB}
+                <span
+                  class="w-2 h-2 rounded-full"
+                  style={`background:${activeSection === t.id ? "currentColor" : t.color}`}
+                ></span>
+              {/if}
+              {t.name}
+              <span
+                class="text-[10px] tabular-nums rounded-full px-1.5 py-0.5 {activeSection ===
+                t.id
+                  ? 'bg-white/25'
+                  : 'bg-ink-200/80 dark:bg-night-alt text-ink-500 dark:text-night-mute'}"
+                >{t.count}</span
+              >
+            </button>
           {/each}
         </div>
-      {:else if !sectionGroups().length}
+
+        <!-- Active section's cards -->
+        {#if activeTabCards().length}
+          <div class="space-y-2">
+            {#each activeTabCards() as c (c.id)}
+              {@render cardRow(c)}
+            {/each}
+          </div>
+        {:else}
+          <div
+            class="rounded-lg border border-dashed border-ink-200 dark:border-night-line text-[12px] text-ink-400 dark:text-night-mute text-center py-7"
+          >
+            Nothing in {activeTabName()}.
+          </div>
+        {/if}
+      {:else}
         <div
           class="rounded-lg border border-dashed border-ink-200 dark:border-night-line text-[12px] text-ink-400 dark:text-night-mute text-center py-7"
         >
           Nothing to pick up right now. Nice and clear.
         </div>
       {/if}
-
-      <!-- Groups that opt into the featured view as their own section
-           (e.g. Review): listed below the pickups, same expandable cards. -->
-      {#each sectionGroups() as g (g.id)}
-        <section class="space-y-2 pt-1">
-          <h3
-            class="flex items-center gap-2 text-[11px] font-semibold uppercase tracking-wide"
-          >
-            <span
-              class="w-2 h-2 rounded-full"
-              style={`background:${g.color ?? "#64748b"}`}
-            ></span>
-            <span style={`color:${g.color ?? "inherit"}`}>{g.name}</span>
-            <span class="text-ink-400 dark:text-night-mute"
-              >{cardsInGroup(g.id).length}</span
-            >
-          </h3>
-          {#if cardsInGroup(g.id).length === 0}
-            <div
-              class="rounded-lg border border-dashed border-ink-200 dark:border-night-line text-[12px] text-ink-400 dark:text-night-mute text-center py-5"
-            >
-              Nothing in {g.name}.
-            </div>
-          {:else}
-            {#each cardsInGroup(g.id) as c (c.id)}
-              {@render cardRow(c)}
-            {/each}
-          {/if}
-        </section>
-      {/each}
     {:else}
       <div class="flex gap-3 overflow-x-auto pb-2">
         {#each board.groups as g (g.id)}
