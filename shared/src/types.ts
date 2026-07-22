@@ -371,6 +371,15 @@ export type ModuleTab = {
   cardStepsOp?: string;
   /** Tooltip / label for the steps icon (default "How to test"). */
   cardStepsLabel?: string;
+  /** When set (requires `cardStepsOp`), the steps expansion offers a
+   *  "Generate screenshots" button dispatching THIS op with the card id +
+   *  its steps. The agent walks the running app step by step, writes one
+   *  PNG per step to `.pinta/report-shots/` (same dir + serving endpoint
+   *  as the Report module's proof shots), and returns
+   *  `{ op, cardId, shots: [{ step, shotKey, ok, note? }] }`. */
+  cardStepsShotsOp?: string;
+  /** Label for the screenshots button (default "Generate screenshots"). */
+  cardStepsShotsLabel?: string;
 };
 
 /* ──────────────────────────────────────────────────────────────────────

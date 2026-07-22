@@ -3463,6 +3463,22 @@ class ExtensionState {
         cardStepsPending?: string | null;
         /** Last steps-fetch error, surfaced under the expanded card. */
         cardStepsError?: string | null;
+        /** Per-card step screenshots (op `tab.cardStepsShotsOp`), keyed by
+         *  card id. Each shot's PNG lives in `.pinta/report-shots/` and is
+         *  served via the same /v1/report-shot endpoint the Report module
+         *  uses. Cached so a board refresh keeps them. */
+        cardShots?: Record<
+          string,
+          {
+            shots: { step: number; shotKey: string; ok: boolean; note?: string }[];
+            capturedAt: number;
+          }
+        >;
+        /** The card id a step-screenshots run is in flight for (one at a
+         *  time — the agent drives the app in a real browser). */
+        cardShotsPending?: string | null;
+        /** Last screenshots-run error, surfaced in the expansion. */
+        cardShotsError?: string | null;
         /** Multi-start batch: card ids whose ops are still awaiting their
          *  board response, in dispatch order — [0] is the one the agent is
          *  handling now, the rest are queued behind it. All submits go out
@@ -3477,6 +3493,11 @@ class ExtensionState {
   private moduleOpTimers = new Map<string, ReturnType<typeof setTimeout>>();
   /** Per-module card-steps timers, keyed by module id. */
   private moduleCardStepsTimers = new Map<
+    string,
+    ReturnType<typeof setTimeout>
+  >();
+  /** Per-module step-screenshots timers, keyed by module id. */
+  private moduleCardShotsTimers = new Map<
     string,
     ReturnType<typeof setTimeout>
   >();
@@ -4226,6 +4247,15 @@ class ExtensionState {
     cardSteps?: Record<string, { steps: string[]; askedAt: number }>;
     cardStepsPending?: string | null;
     cardStepsError?: string | null;
+    cardShots?: Record<
+      string,
+      {
+        shots: { step: number; shotKey: string; ok: boolean; note?: string }[];
+        capturedAt: number;
+      }
+    >;
+    cardShotsPending?: string | null;
+    cardShotsError?: string | null;
     batchRemaining?: string[] | null;
   } {
     if (!this.moduleBoards[moduleId]) {
@@ -4434,6 +4464,155 @@ class ExtensionState {
       this.moduleCardStepsTimers.delete(moduleId);
     }
     this.retireAgentWaitNotice();
+  }
+
+  /**
+   * Generate per-step screenshots for a card's "How to test" steps (the
+   * Generate screenshots button). The agent walks the RUNNING app in a
+   * real browser, performing each step and writing one PNG per step to
+   * `.pinta/report-shots/` (file-path write, never base64 — same rails as
+   * the Report module's proof shots). One run at a time per module.
+   */
+  async runModuleCardShots(
+    moduleId: string,
+    op: string,
+    card: { id: string; title?: string; url?: string },
+    steps: string[],
+  ): Promise<void> {
+    const slot = this.ensureModuleBoard(moduleId);
+    if (slot.cardShotsPending) return;
+    if (!this.client || this.connectionStatus !== "connected") {
+      slot.cardShotsError =
+        "No companion connected. Start `pinta-companion .` to generate screenshots.";
+      return;
+    }
+    slot.cardShotsPending = card.id;
+    slot.cardShotsError = null;
+    this.armModuleCardShotsTimeout(moduleId);
+    const settings = $state.snapshot(
+      this.modules[moduleId]?.settings ?? {},
+    ) as Record<string, string | boolean>;
+    const pageUrl =
+      this.lastUrl && /^https?:\/\//i.test(this.lastUrl)
+        ? this.lastUrl
+        : undefined;
+    this.send({
+      type: "module.query.submit",
+      url: this.lastUrl ?? "",
+      moduleId,
+      moduleSettings: settings,
+      queryComment: JSON.stringify({
+        op,
+        runId: crypto.randomUUID(),
+        settings,
+        cardId: card.id,
+        ...(card.title ? { title: card.title } : {}),
+        ...(pageUrl ? { pageUrl } : {}),
+        steps,
+      }),
+    });
+  }
+
+  cancelModuleCardShots(moduleId: string): void {
+    const slot = this.moduleBoards[moduleId];
+    if (!slot?.cardShotsPending) return;
+    this.clearModuleCardShotsTimeout(moduleId);
+    slot.cardShotsPending = null;
+    slot.cardShotsError = "Cancelled.";
+  }
+
+  private armModuleCardShotsTimeout(moduleId: string): void {
+    this.clearModuleCardShotsTimeout(moduleId);
+    this.armAgentWait({
+      // Walking N steps in a real browser is slower than a text op —
+      // reuse the report screenshot budget rather than the generic op's.
+      softMs: ExtensionState.REPORT_SHOT_TIMEOUT_MS,
+      what: "capture the step screenshots",
+      setHandle: (t) => this.moduleCardShotsTimers.set(moduleId, t),
+      stillPending: () => !!this.moduleBoards[moduleId]?.cardShotsPending,
+      giveUp: () => {
+        const slot = this.moduleBoards[moduleId];
+        this.moduleCardShotsTimers.delete(moduleId);
+        if (!slot?.cardShotsPending) return;
+        slot.cardShotsPending = null;
+        slot.cardShotsError = ExtensionState.slowWaitGiveUp(
+          "capture the step screenshots",
+        );
+      },
+    });
+  }
+
+  private clearModuleCardShotsTimeout(moduleId: string): void {
+    const t = this.moduleCardShotsTimers.get(moduleId);
+    if (t) {
+      clearTimeout(t);
+      this.moduleCardShotsTimers.delete(moduleId);
+    }
+    this.retireAgentWaitNotice();
+  }
+
+  /** Companion URL serving one captured step PNG (same endpoint as the
+   *  Report module's proof shots; `t` busts the cache on re-capture). */
+  moduleCardShotUrl(
+    moduleId: string,
+    cardId: string,
+    shotKey: string,
+  ): string | null {
+    const port = this.selectedCompanion?.port;
+    const rec = this.moduleBoards[moduleId]?.cardShots?.[cardId];
+    if (!port || !rec) return null;
+    return `http://127.0.0.1:${port}/v1/report-shot?key=${encodeURIComponent(shotKey)}&t=${rec.capturedAt}`;
+  }
+
+  /** Routed from onMessage when a card step-screenshots session lands
+   *  (matched by `tab.cardStepsShotsOp`). Done → cache the shot list;
+   *  error → surface it. */
+  private handleModuleCardShotsSync(session: Session, moduleId: string): void {
+    const slot = this.ensureModuleBoard(moduleId);
+    const cardId = ExtensionState.queryField(session, "cardId");
+    if (!cardId || slot.cardShotsPending !== cardId) return;
+    if (session.status === "done") {
+      const summary = session.appliedSummary ?? "";
+      if (summary.trim() === "") return; // empty-done race — keep waiting
+      this.clearModuleCardShotsTimeout(moduleId);
+      slot.cardShotsPending = null;
+      try {
+        const payload = JSON.parse(summary) as { shots?: unknown };
+        const shots = Array.isArray(payload.shots)
+          ? payload.shots
+              .map((s) => s as { step?: unknown; shotKey?: unknown; ok?: unknown; note?: unknown; reason?: unknown })
+              .filter((s) => typeof s.step === "number" && typeof s.shotKey === "string")
+              .map((s) => ({
+                step: s.step as number,
+                shotKey: s.shotKey as string,
+                ok: s.ok !== false,
+                note:
+                  typeof s.note === "string"
+                    ? s.note
+                    : typeof s.reason === "string"
+                      ? s.reason
+                      : undefined,
+              }))
+          : [];
+        if (shots.length === 0) {
+          slot.cardShotsError =
+            "No screenshots came back. Is the app running and reachable from the agent's browser tools?";
+          return;
+        }
+        slot.cardShots = {
+          ...(slot.cardShots ?? {}),
+          [cardId]: { shots, capturedAt: Date.now() },
+        };
+        slot.cardShotsError = null;
+      } catch {
+        slot.cardShotsError = "Couldn't parse the screenshots response.";
+      }
+    } else if (session.status === "error") {
+      this.clearModuleCardShotsTimeout(moduleId);
+      slot.cardShotsPending = null;
+      slot.cardShotsError =
+        session.errorMessage ?? "Couldn't capture the step screenshots.";
+    }
   }
 
   /** Routed from onMessage when a card-steps op session lands (matched by
@@ -8120,6 +8299,11 @@ class ExtensionState {
           const stepsOp = im?.manifest.tab?.cardStepsOp;
           if (stepsOp && ExtensionState.queryOp(msg.session) === stepsOp) {
             this.handleModuleCardStepsSync(msg.session, importedInteractive.id);
+            return;
+          }
+          const shotsOp = im?.manifest.tab?.cardStepsShotsOp;
+          if (shotsOp && ExtensionState.queryOp(msg.session) === shotsOp) {
+            this.handleModuleCardShotsSync(msg.session, importedInteractive.id);
             return;
           }
           this.handleModuleBoardSync(msg.session, importedInteractive.id);

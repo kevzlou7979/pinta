@@ -64,6 +64,23 @@
     }
   }
 
+  // ── Per-step screenshots (Generate screenshots button) ──────────────
+  const shotsOp = $derived(tab.cardStepsShotsOp);
+  const cardShots = $derived(slot?.cardShots ?? {});
+  const cardShotsPending = $derived(slot?.cardShotsPending ?? null);
+  const cardShotsError = $derived(slot?.cardShotsError ?? null);
+
+  function generateShots(c: ModuleBoardCard): void {
+    const steps = cardSteps[c.id]?.steps ?? [];
+    if (!shotsOp || cardShotsPending || steps.length === 0) return;
+    void app.runModuleCardShots(
+      spec.id,
+      shotsOp,
+      { id: c.id, title: c.title, url: cardUrl(c) },
+      steps,
+    );
+  }
+
   // ── Section tabs ────────────────────────────────────────────────────
   // The featuredSection groups (Up Next / In Progress / Review / Done …)
   // render as a segmented tab bar so the user flips between them instead of
@@ -124,6 +141,21 @@
   // Transient confirmation for a client-side handoff (e.g. "Added to Test
   // Pilot → <today>"). Shown as a dismissible notice above the board.
   let notice = $state<string | null>(null);
+
+  // In-panel confirm. Chrome SIDE PANELS silently no-op window.confirm()
+  // (returns undefined without showing a dialog), so every confirm-gated
+  // action (Complete, Move to review, End Day, batch Complete) died with
+  // no visible effect. This renders the question as a bar above the board
+  // instead; the action runs only on an explicit Confirm click.
+  let confirmReq = $state<{ message: string; run: () => void } | null>(null);
+  function askConfirm(message: string, run: () => void): void {
+    confirmReq = { message, run };
+  }
+  function confirmYes(): void {
+    const r = confirmReq;
+    confirmReq = null;
+    r?.run();
+  }
 
   // ── Multi-start ────────────────────────────────────────────────────
   // Tick several cards, hit "Start" once. ALL ops are dispatched up-front
@@ -216,21 +248,21 @@
       }
     }
     if (items.length === 0) return;
+    const go = () => {
+      clearSelection();
+      notice = null;
+      batchTotal = items.length;
+      void app.runModuleOpBatch(spec.id, items);
+    };
     if (needsConfirm) {
-      const verb =
-        labels.size === 1 ? [...labels][0]! : `run their actions on`;
-      if (
-        !globalThis.confirm?.(
-          `${verb} ${items.length} selected task${items.length === 1 ? "" : "s"}?`,
-        )
-      ) {
-        return;
-      }
+      const verb = labels.size === 1 ? [...labels][0]! : "Run the actions of";
+      askConfirm(
+        `${verb} ${items.length} selected task${items.length === 1 ? "" : "s"}?`,
+        go,
+      );
+      return;
     }
-    clearSelection();
-    notice = null;
-    batchTotal = items.length;
-    void app.runModuleOpBatch(spec.id, items);
+    go();
   }
 
   // Default to the featured list when the board declares one (e.g. the
@@ -320,8 +352,7 @@
   // the action and returns a refreshed board), `clientOp` is handled in the
   // extension with no round-trip (e.g. "Add to Test Pilot"), and `url` is a
   // plain deep-link handled by the anchor.
-  function runCardAction(c: ModuleBoardCard, a: ModuleBoardCardAction): void {
-    if (a.confirm && !globalThis.confirm?.(a.confirm)) return;
+  function doCardAction(c: ModuleBoardCard, a: ModuleBoardCardAction): void {
     if (a.op) {
       // Per-card op → spinner just this button (see markup); no banner.
       pendingCardId = c.id;
@@ -334,15 +365,28 @@
       notice = app.runModuleClientOp(a.clientOp, c).message;
     }
   }
+  function runCardAction(c: ModuleBoardCard, a: ModuleBoardCardAction): void {
+    if (a.confirm) {
+      askConfirm(a.confirm, () => doCardAction(c, a));
+      return;
+    }
+    doCardAction(c, a);
+  }
   // Board-level header actions (e.g. "End Day") — like a card op but with no
   // card target: spinner the header button, keep the board visible.
   function runBoardAction(a: ModuleBoardCardAction): void {
     if (!a.op) return;
-    if (a.confirm && !globalThis.confirm?.(a.confirm)) return;
-    pendingCardId = null;
-    pendingActionId = null;
-    pendingBoardActionId = a.id;
-    void app.runModuleOp(spec.id, a.op);
+    const go = () => {
+      pendingCardId = null;
+      pendingActionId = null;
+      pendingBoardActionId = a.id;
+      void app.runModuleOp(spec.id, a.op!);
+    };
+    if (a.confirm) {
+      askConfirm(a.confirm, go);
+      return;
+    }
+    go();
   }
   // Flat-card quick actions (Image #16 layout): a deep-link (GitLab) and the
   // card's primary op, surfaced on the row itself. Both derive from the
@@ -558,6 +602,55 @@
           </div>
         {:else if cardSteps[c.id]}
           <StepList steps={cardSteps[c.id]?.steps ?? []} />
+          {#if shotsOp}
+            <!-- Per-step proof screenshots: agent walks the running app and
+                 captures one PNG after each step (Report-shots rails). -->
+            <div class="mt-2 pt-2 border-t border-ink-100 dark:border-night-line space-y-2">
+              {#if cardShotsPending === c.id}
+                <div class="flex items-center gap-2 text-[12px] text-ink-500 dark:text-night-mute">
+                  <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" class="animate-spin" aria-hidden="true"><path d="M21 12a9 9 0 1 1-6.219-8.56" /></svg>
+                  Driving the app and capturing each step…
+                  <button type="button" class="underline ml-auto" onclick={() => app.cancelModuleCardShots(spec.id)}>Cancel</button>
+                </div>
+              {:else}
+                <div class="flex items-center gap-2">
+                  <button
+                    type="button"
+                    class="inline-flex items-center gap-1.5 text-[12px] font-semibold rounded-md px-2.5 py-1 text-brand-pink dark:text-brand-pink-light border border-ink-200 dark:border-night-line hover:border-brand-pink transition-colors disabled:opacity-50"
+                    disabled={!!cardShotsPending}
+                    onclick={() => generateShots(c)}
+                    title="The agent performs each step in the running app and captures a screenshot per step"
+                  >
+                    <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M14.5 4h-5L7 7H4a2 2 0 0 0-2 2v9a2 2 0 0 0 2 2h16a2 2 0 0 0 2-2V9a2 2 0 0 0-2-2h-3l-2.5-3z"/><circle cx="12" cy="13" r="3"/></svg>
+                    {cardShots[c.id] ? "Re-generate screenshots" : (tab.cardStepsShotsLabel ?? "Generate screenshots")}
+                  </button>
+                  {#if cardShotsError && !cardShots[c.id]}
+                    <span class="text-[11px] text-red-600 dark:text-red-400 min-w-0 break-words">{cardShotsError}</span>
+                  {/if}
+                </div>
+                {#if cardShots[c.id]}
+                  <div class="grid grid-cols-2 gap-2">
+                    {#each cardShots[c.id]?.shots ?? [] as s (s.step + ":" + s.shotKey)}
+                      {@const src = s.ok ? app.moduleCardShotUrl(spec.id, c.id, s.shotKey) : null}
+                      <div class="rounded-md border border-ink-200 dark:border-night-line overflow-hidden bg-ink-50 dark:bg-night-card">
+                        <div class="px-2 py-1 text-[10px] font-semibold text-ink-500 dark:text-night-mute flex items-center justify-between gap-1">
+                          <span>Step {s.step}</span>
+                          {#if !s.ok}<span class="text-red-500 normal-case font-normal truncate" title={s.note}>failed</span>{/if}
+                        </div>
+                        {#if src}
+                          <a href={src} target="_blank" rel="noopener" title={s.note ?? `Open step ${s.step} screenshot`}>
+                            <img {src} alt="Step {s.step} screenshot" class="block w-full h-24 object-cover object-top" loading="lazy" />
+                          </a>
+                        {:else}
+                          <div class="h-24 flex items-center justify-center text-[10px] text-ink-400 dark:text-night-mute px-2 text-center">{s.note ?? "Not captured"}</div>
+                        {/if}
+                      </div>
+                    {/each}
+                  </div>
+                {/if}
+              {/if}
+            </div>
+          {/if}
         {:else if cardStepsError}
           <div class="text-[12px] text-red-600 dark:text-red-400 flex items-center justify-between gap-2">
             <span class="min-w-0 break-words">{cardStepsError}</span>
@@ -579,6 +672,29 @@
         type="button"
         class="shrink-0 underline"
         onclick={() => (app.moduleBoards[spec.id]!.error = null)}>dismiss</button
+      >
+    </div>
+  {/if}
+
+  {#if confirmReq}
+    <!-- In-panel confirm (window.confirm is a silent no-op in side panels). -->
+    <div
+      class="sticky top-0 z-20 rounded-lg border border-amber-400/70 bg-amber-50 dark:border-amber-700/60 dark:bg-amber-950/50 px-3 py-2 flex items-center gap-2"
+      role="alertdialog"
+      aria-label="Confirm action"
+    >
+      <span class="flex-1 min-w-0 text-[12px] font-medium text-amber-900 dark:text-amber-100 break-words">
+        {confirmReq.message}
+      </span>
+      <button
+        type="button"
+        class="shrink-0 text-[12px] text-ink-500 dark:text-night-mute hover:text-ink-800 dark:hover:text-night-text underline"
+        onclick={() => (confirmReq = null)}>Cancel</button
+      >
+      <button
+        type="button"
+        class="shrink-0 inline-flex items-center gap-1 text-[12px] font-semibold rounded-md px-3 py-1 bg-brand-pink text-white hover:bg-brand-magenta dark:hover:bg-brand-pink-light"
+        onclick={confirmYes}>Confirm</button
       >
     </div>
   {/if}
