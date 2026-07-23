@@ -4,6 +4,59 @@ Notable changes shipped on top of the original V1 pipeline. Newest first.
 For the architectural design behind each item, see
 [`spec/SPEC.md`](spec/SPEC.md).
 
+## 0.7.0 — 2026-07-23
+
+### Added
+
+- **Annotation tools — a full toolset beyond draw/select.**
+  - **Move** — drag an existing element to a new spot; auto-detects
+    reorder (relocate the markup block) vs free-position (offset CSS).
+    Ctrl/Cmd+click to multi-select and move several elements together.
+  - **Text** — click text to edit it in place, or click a gap to add a new
+    paragraph. A floating format toolbar (bold/italic/underline, font
+    size, color, alignment, line-height, letter-spacing, transform) rides
+    the inline edit.
+  - **Delete** — click an element to remove it immediately (hidden on the
+    page); undo by removing its side-panel card.
+  - **Resize** — drag any of 8 handles to size a div/grid; left/top edges
+    keep the opposite edge anchored (width/height + margin offset).
+  - **Paint** — recolor Fill / Text / Border from the page's **own
+    palette** (harvested + ranked from the live page), a screen
+    eyedropper, a custom color, or a transparent knock-out.
+  - **Scale** — pick a percentage (drag a corner or use presets); the
+    annotation carries the intent ("scale every dimension to N%"), and the
+    agent applies real values in the project's system — no CSS transform.
+- **Tool mixing is now lossless.** Combining tools on one element
+  (resize → text → paint …) no longer reverts earlier edits, and removing
+  one annotation from a multi-edited element rebuilds from the survivors
+  instead of snapping to the original. Backed by a shared inline-style
+  layering module + 17 DOM tests.
+- **Drift Check (Annotate tab).** After a batch is applied, ask the agent
+  to re-read source and confirm each change actually landed; per-annotation
+  badges flag anything drifted / missing, and "Resubmit N flagged" re-sends
+  them (Send → Resubmit).
+- **Voice Command.** Alt+V dictation into any focused field (offscreen mic
+  + Web Speech recognition), opt-in per project in Settings.
+- **Interactive module boards, greatly expanded** (the generic renderer
+  behind the Tasks module and any board-style plugin):
+  - featuredSection groups render as **segmented tabs** with counts.
+  - **Multi-select + batch actions** with per-card Starting… / Queued
+    chips, a verb-aware button (Start / Triage / Complete N), a pulsing
+    "working" border driven by an agent `working` flag, and an in-panel
+    confirm bar (Chrome side panels no-op `window.confirm`).
+  - **Per-card "How to test"** steps (`cardStepsOp`) rendered inline via
+    the shared StepList, plus **Generate screenshots** (`cardStepsShotsOp`)
+    that drives the running app and captures one PNG per step (reusing the
+    Report proof-shot rails).
+- **`kind: "delete"`, `move`, `text-insert`** annotation kinds and the
+  `ModuleBoardCard.working` / `ModuleTab.cardStepsOp` / `cardStepsShotsOp`
+  contract fields.
+
+### Changed
+
+- Dev/test toolchain bumped to clear a critical advisory: `vite` 5→8,
+  `vitest` 2→4, `@sveltejs/vite-plugin-svelte` 4→7 (dev-only; not shipped).
+
 ## 0.6.0 — 2026-06-24
 
 ### Added

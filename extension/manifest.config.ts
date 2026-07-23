@@ -30,6 +30,17 @@ export default defineManifest({
     service_worker: "src/background/service-worker.ts",
     type: "module",
   },
+  // Chrome Web Store justification for each permission (keep in sync with the
+  // store listing's "Permission justification" fields):
+  //   sidePanel  — Pinta's whole UI is a side panel.
+  //   tabs       — resolve the active tab + its URL to target the annotated page.
+  //   activeTab  — inject the overlay / capture only the tab the user is on.
+  //   scripting  — inject the content-script overlay + measure/scroll for capture.
+  //   storage    — persist settings, modules, and session cache locally.
+  //   offscreen  — Voice Command: hosts the mic + Web Speech recognition in a
+  //                single offscreen document (a service worker can't use the
+  //                Web Speech API). Opt-in per project in Settings; audio never
+  //                leaves the machine.
   permissions: [
     "sidePanel",
     "tabs",

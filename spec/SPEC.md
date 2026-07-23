@@ -98,12 +98,17 @@ type Annotation = {
   id: string;                         // uuid
   createdAt: number;
 
-  // The mark. "image" annotations are pasted/dropped reference images
-  // placed in page-space; "query" annotations carry a JSON-encoded
-  // request from an interactive module (e.g. Test Pilot) and have no
-  // DOM target — see §8 Phase 12.
+  // The mark. Drawing kinds (arrow/rect/circle/freehand/pin) carry only
+  // strokes; "select" is an element pick (styling / content / resize /
+  // paint / scale edits all ride select + cssChanges/contentChange).
+  // "note" is a free-form task with no DOM target; "image" is a
+  // pasted/dropped reference image placed in page-space; "query" carries a
+  // JSON-encoded request from an interactive module (Test Pilot / AuditFlow
+  // / Chat / Tasks) and has no DOM target — see §8 Phase 12. "move"
+  // relocates an existing element (drag & drop); "text-insert" adds a new
+  // paragraph; "delete" removes an element from source.
   kind: 'arrow' | 'rect' | 'circle' | 'freehand' | 'pin' | 'select'
-      | 'image' | 'query';
+      | 'note' | 'image' | 'query' | 'move' | 'text-insert' | 'delete';
   strokes: Point[];                   // page coordinates
   color: string;
 
@@ -1685,6 +1690,34 @@ single-viewport cousin of that parked concept (which renders Mobile/Tablet/
 Laptop side-by-side in one pannable canvas). The Device toolkit toggles
 *one* viewport in place; the canvas shows *all at once*. They can coexist —
 ship the toolkit first.
+
+### Phase 21 — Annotation toolset + Drift Check + board actions — Shipped (0.7.0)
+
+Broadens the annotate surface from draw/select into a full toolset, adds a
+post-apply verification pass, and deepens the generic interactive-board
+renderer. All ride existing wire contracts (`kind: "select"` + `cssChanges`,
+the `module.query.submit` op envelope) — the only new `AnnotationKind`s are
+`move` / `text-insert` / `delete`.
+
+- **Tools** (`extension/src/content/`): **Move** (drag & drop, reorder vs
+  free-position, Ctrl-click multi), **Text** (in-place edit + add paragraph +
+  floating format toolbar), **Delete** (instant remove, undo via card),
+  **Resize** (8 handles), **Paint** (recolor from the page's harvested
+  palette / eyedropper / transparent), **Scale** (percentage intent, no CSS
+  transform). Tool-mixing is lossless — a shared inline-style layering module
+  (`content/tools/inline-style.ts`) resets each preview to the accumulated
+  base, and single-annotation removal rebuilds from the survivors' deltas.
+- **Drift Check** (`op: "drift-check"`): the agent re-reads source for a done
+  batch and returns per-annotation `ok` / `drifted` / `missing` verdicts; the
+  side panel badges each card and offers Resubmit.
+- **Voice Command**: Alt+V dictation via an offscreen mic + Web Speech
+  recognition (the `offscreen` permission), opt-in per project in Settings.
+- **Board renderer** (`sidepanel/ModuleBoardTab.svelte`): `featuredSection`
+  groups → segmented tabs; multi-select batch actions with Starting…/Queued
+  chips + a `ModuleBoardCard.working` pulse; an in-panel confirm bar (Chrome
+  side panels no-op `window.confirm`); per-card **How to test** steps
+  (`ModuleTab.cardStepsOp`, inline StepList) and **Generate screenshots**
+  (`cardStepsShotsOp`, one PNG/step over the Report proof-shot rails).
 
 ---
 

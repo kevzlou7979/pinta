@@ -389,7 +389,8 @@ CWS review time and rejection risk scale with permission breadth.
 The known, justified set is the baseline; **anything beyond it is a
 new ask a reviewer will question** and must be deliberate:
 
-- `permissions`: `sidePanel`, `tabs`, `activeTab`, `scripting`, `storage`
+- `permissions`: `sidePanel`, `tabs`, `activeTab`, `scripting`, `storage`,
+  `offscreen` (Voice Command — offscreen mic + Web Speech; justified 0.7.0)
 - `host_permissions`: `<all_urls>` (needed — Pinta annotates *any*
   app the user is building; this is the single most-scrutinised line,
   so a *narrowing* is good, a *widening* is impossible)
