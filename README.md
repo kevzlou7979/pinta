@@ -37,6 +37,19 @@ matching source files for you.
 
 Recent additions on top of the original V1 pipeline:
 
+- **A full annotation toolset** *(v0.7.0)*. Beyond draw + select: **Move**
+  (drag & drop, multi-select), **Text** (edit in place + add paragraphs +
+  a format toolbar), **Delete**, **Resize** (8 handles), **Paint** (recolor
+  from the page's own palette / eyedropper / transparent), and **Scale**
+  (proportional, intent-based). Combining tools on one element is lossless.
+- **Drift Check** *(v0.7.0)*. After the agent applies a batch, verify each
+  change actually landed — per-annotation ok / drifted / missing badges and
+  one-click **Resubmit** for anything that slipped.
+- **Interactive board modules leveled up** *(v0.7.0)*. Section **tabs**,
+  **multi-select batch actions** with per-card Starting…/Queued/working
+  states, inline **"How to test"** steps, and **Generate screenshots** that
+  drives the running app step by step.
+- **Voice Command** *(v0.7.0)*. Alt+V dictation into any field (opt-in).
 - **Report module — daily / weekly / sprint summaries** *(v0.6.0)*. A
   built-in **Report** tab merges git + GitHub activity with Pinta
   sessions into Read-mode day cards across a day, week, 10-day sprint,
@@ -426,7 +439,7 @@ The slash command is a Claude Code **skill** — it is **not** installed by
 **B1 — npm installer (one command):**
 
 ```bash
-npx pinta-companion@0.6.0 install-skill   # writes ~/.claude/skills/pinta/
+npx pinta-companion@0.7.0 install-skill   # writes ~/.claude/skills/pinta/
 ```
 
 Then **fully restart Claude Code** (skills load at startup — `/clear` is not
