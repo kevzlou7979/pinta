@@ -57,7 +57,8 @@
   style:left="{left}px"
   style:width="{PW}px"
   onkeydown={onKey}
-  role="region"
+  role="dialog"
+  tabindex="-1"
   aria-label="Scale {title}"
 >
   <div class="popup__head"><span>Scale {title}</span></div>

@@ -54,6 +54,9 @@ For the architectural design behind each item, see
 
 ### Changed
 
+- Pasted / dropped **reference images are downscaled + JPEG-encoded** before
+  they ride on an annotation (max 1600px edge), so a big screenshot paste no
+  longer costs thousands of the user's own vision tokens.
 - Dev/test toolchain bumped to clear a critical advisory: `vite` 5→8,
   `vitest` 2→4, `@sveltejs/vite-plugin-svelte` 4→7 (dev-only; not shipped).
 

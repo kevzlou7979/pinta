@@ -3,6 +3,7 @@
   import type { AnnotationImage } from "@pinta/shared";
   import { content } from "./state.svelte.js";
   import MicButton from "../lib/voice/MicButton.svelte";
+  import { downscaleImage } from "../lib/downscale-image.js";
 
   type LiveStyles = {
     fontFamily: string;
@@ -60,19 +61,12 @@
   let cssTextarea: HTMLTextAreaElement | undefined = $state();
   let dropActive = $state(false);
 
-  function readBlob(blob: File | Blob): Promise<string> {
-    return new Promise((resolve, reject) => {
-      const reader = new FileReader();
-      reader.onload = () => resolve(reader.result as string);
-      reader.onerror = () => reject(reader.error ?? new Error("read failed"));
-      reader.readAsDataURL(blob);
-    });
-  }
-
   async function attachImage(blob: File | Blob, name?: string) {
-    const dataUrl = await readBlob(blob);
+    // Downscale + JPEG-encode reference images so a big paste doesn't cost
+    // thousands of the user's own vision tokens (falls back to the original).
+    const { dataUrl, mediaType } = await downscaleImage(blob);
     const id = `image${images.length + 1}`;
-    images = [...images, { id, mediaType: blob.type || "image/png", dataUrl, name }];
+    images = [...images, { id, mediaType, dataUrl, name }];
     insertPlaceholder(`[${id}]`);
   }
 

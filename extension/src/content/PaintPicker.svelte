@@ -118,7 +118,8 @@
   style:left="{left}px"
   style:width="{PW}px"
   onkeydown={onKey}
-  role="region"
+  role="dialog"
+  tabindex="-1"
   aria-label="Paint {title}"
 >
   <div class="popup__head"><span>Paint {title}</span></div>

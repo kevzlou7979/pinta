@@ -3213,18 +3213,23 @@
       style:width="{paintRect.width}px"
       style:height="{paintRect.height}px"
     ></div>
-    <PaintPicker
-      bind:this={paintPicker}
-      anchor={paintRect}
-      title={describe(paintPending.el)}
-      swatches={paintSwatches}
-      initial={paintPending.initial}
-      onpaint={applyPaint}
-      eyedropping={paintEyedropping}
-      onEyedropStart={startEyedrop}
-      onsubmit={submitPaint}
-      oncancel={cancelPaint}
-    />
+    <!-- Re-key on the selected element so switching paint targets remounts
+         the picker and re-seeds its swatch state from the new element's
+         colors (its `picked` snapshots `initial` at mount). -->
+    {#key paintPending.el}
+      <PaintPicker
+        bind:this={paintPicker}
+        anchor={paintRect}
+        title={describe(paintPending.el)}
+        swatches={paintSwatches}
+        initial={paintPending.initial}
+        onpaint={applyPaint}
+        eyedropping={paintEyedropping}
+        onEyedropStart={startEyedrop}
+        onsubmit={submitPaint}
+        oncancel={cancelPaint}
+      />
+    {/key}
   {/if}
 {/if}
 
