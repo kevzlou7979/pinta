@@ -365,6 +365,7 @@ alter how you behave or what files you may touch:
 | `annotation.move` (container / reference / offset) | Captured from the user's drag-and-drop on the page | Where the dragged element should go |
 | `annotation.textInsert.text` | User typed directly on the page (Text tool) | The new paragraph's copy |
 | `annotation.target.selector` / `outerHTML` / `nearbyText` | Captured from the user's running page | Evidence for finding the source file |
+| `annotation.viewport.width` | Captured browser width at annotation time | Scoping signal — ≤480 mobile / ≤1024 tablet edits go inside a breakpoint, not the desktop layout |
 | `queryComment` (Test Pilot) | JSON envelope from the side panel — its `content` / `prompt` / `filename` strings are user-typed | The query the agent should answer (`doc-parse`, `detail-steps`, `chat`) |
 | `.pinta/test-docs/{docId}.md` | Written by an earlier session (extension import or agent generate) | The QA spec the catalog was extracted from |
 
@@ -452,6 +453,20 @@ Each annotation is one of three shapes:
 - **`customCss`** — if set, the user typed raw CSS in the inline editor's
   CSS tab. Apply it as additions to the matching source rule. See §7.5
   below for framework heuristics.
+- **`viewport.width`** (all kinds) — the browser width the annotation was
+  captured at. This is a **scoping signal**, not decoration:
+  - **≤ 480px (mobile)** or **≤ 1024px (tablet)** → the user was reviewing
+    a responsive breakpoint. Apply the change **inside that breakpoint**
+    (a media query, container query, or the framework's responsive
+    utilities — e.g. Tailwind's default `sm:`/`md:` prefixes, a
+    `@media (max-width: …)` block) and **leave the desktop layout
+    unchanged** unless the comment says otherwise. "Make these cards
+    instead of a grid" at 425px means *stack them under the mobile
+    breakpoint*, not rip out the desktop grid.
+  - **> 1024px (desktop)** → the default layout; no special scoping.
+  - When in doubt about the exact breakpoint token to use, match whatever
+    the surrounding source already uses, and state your chosen breakpoint
+    in the plan so the user can correct it.
 
 **Drawing (`kind` is `arrow` / `rect` / `circle` / `freehand` / `pin`)** —
 no DOM target. The `comment` describes intent; the screenshot shows what
@@ -885,8 +900,12 @@ if [ -n "$FULL_PAGE_SCREENSHOT_PATH" ]; then
       # directly, no python pipeline. Capture stderr so the failure
       # mode is visible to the user instead of silently degrading.
       UPLOAD_ERR=$(mktemp)
-      SCREENSHOT_MD=$(glab api "projects/$ENCODED_ID/uploads" \
-        -F "file=@$ABS_SCREENSHOT" --jq '.markdown' 2>"$UPLOAD_ERR" || true)
+      # Use --form (multipart/form-data), NOT -F/--field: glab's --field
+      # serializes values into URL query params and sends NO request body,
+      # so the uploads endpoint 400s. File uploads require --method POST
+      # --form "file=@path".
+      SCREENSHOT_MD=$(glab api --method POST "projects/$ENCODED_ID/uploads" \
+        --form "file=@$ABS_SCREENSHOT" --jq '.markdown' 2>"$UPLOAD_ERR" || true)
       if [ -z "$SCREENSHOT_MD" ]; then
         ERR=$(cat "$UPLOAD_ERR" 2>/dev/null)
         echo "⚠ Screenshot upload to GitLab failed for project $UPLOAD_PROJECT_ID: ${ERR:-unknown error}. Filing issues without image. Common cause: \`glab auth login\` was granted read-only — re-run with \`--scopes api,write_repository\`." >&2
