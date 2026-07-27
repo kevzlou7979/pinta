@@ -2373,36 +2373,6 @@
         </p>
       {/if}
     {:else if !showAssociatePrompt}
-    <div class="flex gap-3 items-start">
-      {#if !floatingToolbarEnabled}
-        <!-- Docked tool rail — the OFF-state look: a vertical icon strip
-             attached to the panel's left edge, sticky so it follows scroll.
-             The annotate content flows to its right. -->
-        <nav
-          class="sticky top-0 shrink-0 flex flex-col gap-1 p-1 rounded-lg border border-ink-200 bg-white dark:border-night-line dark:bg-night-card shadow-md dark:shadow-black/40 self-start z-10"
-          aria-label="Tools"
-        >
-          {#each TOOLS as t, i (t.id)}
-            {#if startsNewGroup(i)}
-              <div class="h-px w-6 mx-auto my-1 bg-ink-200 dark:bg-night-line"></div>
-            {/if}
-            <button
-              type="button"
-              class="w-9 h-9 inline-flex items-center justify-center rounded-md border border-transparent text-ink-600 dark:text-night-dim hover:text-brand-pink hover:bg-ink-50 dark:hover:bg-night-alt transition-colors"
-              class:bg-brand-pink={activeTool === t.id}
-              class:text-white={activeTool === t.id}
-              class:border-brand-pink={activeTool === t.id}
-              onclick={() => setActive(activeTool === t.id ? null : t.id)}
-              aria-pressed={activeTool === t.id}
-              title={`${t.label} — Ctrl+Alt+${t.key}`}
-              aria-label={t.label}
-            >
-              <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">{@html t.svg}</svg>
-            </button>
-          {/each}
-        </nav>
-      {/if}
-      <div class="flex-1 min-w-0 space-y-4">
     <section class="space-y-2">
       <div class="flex items-center justify-between gap-2">
         <h2 class="text-xs uppercase tracking-wide text-ink-500 dark:text-night-mute font-medium">
@@ -2452,8 +2422,32 @@
         <p class="text-[11px] text-ink-500 dark:text-night-dim leading-snug">
           Tools are in the floating palette on the page — drag it anywhere. Turn the floating toolbar off in
           <button type="button" class="underline underline-offset-2" onclick={() => (app.viewingSettings = true)}>Settings</button>
-          to dock the tool rail here instead.
+          to show the tool row here instead.
         </p>
+      {:else}
+        <!-- Docked tool row (OFF-state look): a horizontal icon strip in the
+             TOOL header area, grouped (draw | transform) with a divider. -->
+        <div class="flex flex-wrap items-center gap-1">
+          {#each TOOLS as t, i (t.id)}
+            {#if startsNewGroup(i)}
+              <div class="w-px h-7 bg-ink-200 dark:bg-night-line mx-0.5"></div>
+            {/if}
+            <button
+              type="button"
+              class="w-9 h-9 inline-flex items-center justify-center rounded-md border border-transparent text-ink-600 dark:text-night-dim hover:text-brand-pink hover:bg-ink-50 dark:hover:bg-night-alt transition-colors disabled:opacity-50"
+              class:bg-brand-pink={activeTool === t.id}
+              class:text-white={activeTool === t.id}
+              class:border-brand-pink={activeTool === t.id}
+              disabled={activeTabId == null || sessionPending || allDone}
+              onclick={() => setActive(activeTool === t.id ? null : t.id)}
+              aria-pressed={activeTool === t.id}
+              title={`${t.label} — Ctrl+Alt+${t.key}`}
+              aria-label={t.label}
+            >
+              <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">{@html t.svg}</svg>
+            </button>
+          {/each}
+        </div>
       {/if}
       {#if activeTool}
         <p class="text-[11px] text-ink-500 dark:text-night-dim">
@@ -2844,8 +2838,6 @@
         </ul>
       </section>
     {/if}
-      </div>
-    </div>
     {/if}
 
     {#if app.lastError}

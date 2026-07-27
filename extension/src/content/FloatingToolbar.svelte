@@ -35,21 +35,14 @@
   }
 
   onMount(() => {
+    // Always start docked right-center. We deliberately do NOT restore a
+    // saved position — a stale off-screen value was leaving the palette
+    // "nowhere to find". Dragging still works within the session; resize
+    // (and reload) re-anchor to the guaranteed-visible home.
     anchorRightCenter();
-    try {
-      void chrome.storage?.local?.get(POS_KEY).then((s) => {
-        const p = s?.[POS_KEY] as { x?: number; y?: number } | undefined;
-        if (p && typeof p.x === "number" && typeof p.y === "number") {
-          x = clampX(p.x);
-          y = clampY(p.y);
-        }
-      });
-    } catch {
-      /* storage unavailable — keep the right-center default */
-    }
-    // On any browser/viewport resize, snap back to the right-center so the
-    // toolbar can never end up off-screen (a shrunk viewport would otherwise
-    // leave its saved x beyond the right edge, hiding it).
+    // Measure once more after layout settles, so a tall palette centers with
+    // its real height (offsetHeight is 0 before first paint in some cases).
+    requestAnimationFrame(anchorRightCenter);
     const onResize = () => anchorRightCenter();
     window.addEventListener("resize", onResize);
     return () => window.removeEventListener("resize", onResize);
