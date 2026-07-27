@@ -27,6 +27,8 @@
   import PaintPicker from "./PaintPicker.svelte";
   import ScalePicker from "./ScalePicker.svelte";
   import { voice } from "../lib/voice/controller.js";
+  import FloatingToolbar from "./FloatingToolbar.svelte";
+  import { toolMode, toolForKey, type Tool } from "../lib/tools.js";
 
   let hovered: Element | null = $state(null);
   let selected: Element | null = $state(null);
@@ -100,6 +102,24 @@
     content.setMode(next);
     if (next === "draw" && tool) content.setTool(tool);
     if (next !== "select") clearSelectState();
+  }
+
+  // Floating toolbar / shortcut → activate a tool. Mirrors the side panel's
+  // setActive: Image kicks off the panel's file-picker flow; every other tool
+  // toggles its mode (re-picking the active one exits to idle).
+  function pickTool(t: Tool) {
+    if (t === "image") {
+      chrome.runtime
+        .sendMessage({ type: "toolbar.pick-image" })
+        .catch(() => {});
+      return;
+    }
+    const { mode, tool } = toolMode(t);
+    const active = tool
+      ? content.mode === "draw" && content.tool === tool
+      : content.mode === mode;
+    if (active) setMode("idle");
+    else setMode(mode as Mode, tool as DrawTool | undefined);
   }
 
   // Mirror the content script's active mode back to the side panel so
@@ -328,6 +348,25 @@
         e.preventDefault();
         setMode("idle");
       }
+    }
+    document.addEventListener("keydown", onKey);
+    return () => document.removeEventListener("keydown", onKey);
+  });
+
+  // Single-key tool shortcuts (Photoshop-style: V/A/R/P/N/I/M/T/D/S/B/C) —
+  // ONLY while the floating toolbar is enabled, and never while the user is
+  // typing. That keeps the page's own keys free for anyone who hasn't opted in.
+  onMount(() => {
+    function onKey(e: KeyboardEvent) {
+      if (!content.floatingToolbarEnabled) return;
+      if (e.altKey || e.ctrlKey || e.metaKey || e.shiftKey) return;
+      const ae = document.activeElement as HTMLElement | null;
+      const tag = ae?.tagName;
+      if (tag === "INPUT" || tag === "TEXTAREA" || ae?.isContentEditable) return;
+      const def = toolForKey(e.key);
+      if (!def) return;
+      e.preventDefault();
+      pickTool(def.id);
     }
     document.addEventListener("keydown", onKey);
     return () => document.removeEventListener("keydown", onKey);
@@ -2881,6 +2920,17 @@
   Data is untouched — closing the viewer brings the draft visuals back. -->
 {#if !imported}
   <Canvas />
+{/if}
+
+<!-- Floating on-page toolbar (Settings-gated). Same tools as the side panel;
+  clicking one drives the overlay directly. Hidden while viewing an imported
+  read-only session so the two overlays never fight. -->
+{#if content.floatingToolbarEnabled && !imported}
+  <FloatingToolbar
+    mode={content.mode}
+    tool={content.tool}
+    onpick={pickTool}
+  />
 {/if}
 
 <!-- Imported-session read-only overlay: metadata pill + per-annotation halos & badges -->

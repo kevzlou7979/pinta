@@ -151,6 +151,9 @@ if (!document.querySelector(HOST_TAG)) {
   // Mirror the Voice Command module's enabled/lang from storage so the
   // on-page mic buttons + Alt+V know whether to show / which language.
   content.initVoice();
+  // Mirror the floating-toolbar pref so the on-page toolbar + single-key
+  // shortcuts light up when the user enables it in Settings.
+  content.initFloatingToolbar();
 
   mount(Overlay, { target: root });
 }

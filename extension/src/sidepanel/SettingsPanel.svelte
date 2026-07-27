@@ -31,6 +31,28 @@
 
   let revealedSecrets = $state<Record<string, boolean>>({});
 
+  // Floating toolbar pref — a client-side UI toggle (like Voice), stored under
+  // its own key and mirrored into the content script via storage.onChanged.
+  const FLOATING_TOOLBAR_KEY = "pinta-floating-toolbar";
+  let floatingToolbarOn = $state(false);
+  onMount(() => {
+    try {
+      void chrome.storage?.local
+        ?.get(FLOATING_TOOLBAR_KEY)
+        .then((s) => (floatingToolbarOn = s?.[FLOATING_TOOLBAR_KEY] === true));
+    } catch {
+      /* storage unavailable */
+    }
+  });
+  function toggleFloatingToolbar(on: boolean): void {
+    floatingToolbarOn = on;
+    try {
+      void chrome.storage?.local?.set({ [FLOATING_TOOLBAR_KEY]: on });
+    } catch {
+      /* ignore */
+    }
+  }
+
   // Voice Command (Phase 20) — mic permission is granted to the EXTENSION
   // origin once, from this visible surface (the offscreen recognizer can't
   // show a prompt). Track + drive that grant here.
@@ -284,6 +306,36 @@
     >
       ✕
     </button>
+  </div>
+
+  <div class="space-y-2">
+    <h3 class="text-xs uppercase tracking-wide text-ink-500 dark:text-night-mute font-medium">
+      Interface
+    </h3>
+    <div class="flex items-start justify-between gap-3 rounded-md border border-ink-200 dark:border-night-line p-3">
+      <div class="min-w-0">
+        <p class="text-[13px] font-medium text-ink-900 dark:text-night-text">Floating toolbar</p>
+        <p class="text-[11px] text-ink-500 dark:text-night-mute mt-0.5 leading-snug">
+          A draggable on-page tool palette (Photoshop-style) with the same tools as the side panel, plus single-key shortcuts (V·A·R·P·N·I·M·T·D·S·B·C). Drag the grip to move it; double-click the grip to collapse. The side-panel tools stay too.
+        </p>
+      </div>
+      <button
+        type="button"
+        role="switch"
+        aria-checked={floatingToolbarOn}
+        class="relative shrink-0 w-9 h-5 rounded-full transition-colors"
+        class:bg-brand-pink={floatingToolbarOn}
+        class:bg-ink-300={!floatingToolbarOn}
+        class:dark:bg-night-line={!floatingToolbarOn}
+        onclick={() => toggleFloatingToolbar(!floatingToolbarOn)}
+        aria-label="Toggle floating toolbar"
+      >
+        <span
+          class="absolute top-0.5 left-0.5 w-4 h-4 rounded-full bg-white transition-transform"
+          class:translate-x-4={floatingToolbarOn}
+        ></span>
+      </button>
+    </div>
   </div>
 
   <div class="space-y-2">

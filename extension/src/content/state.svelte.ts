@@ -70,6 +70,27 @@ class ContentState {
   voiceEnabled = $state(false);
   voiceLang = $state("en-US");
 
+  // Floating on-page toolbar (Settings-gated, off by default). Mirrored from
+  // chrome.storage like voice, kept live via storage.onChanged.
+  floatingToolbarEnabled = $state(false);
+
+  /** Load the floating-toolbar pref + subscribe to changes. Called once from
+   *  the content entry (overlay.ts). */
+  initFloatingToolbar(): void {
+    const KEY = "pinta-floating-toolbar";
+    const read = (raw: unknown): void => {
+      this.floatingToolbarEnabled = raw === true;
+    };
+    try {
+      void chrome.storage?.local?.get(KEY).then((s) => read(s?.[KEY]));
+      chrome.storage?.onChanged?.addListener((changes, area) => {
+        if (area === "local" && changes[KEY]) read(changes[KEY].newValue);
+      });
+    } catch {
+      // storage unavailable — toolbar stays off
+    }
+  }
+
   /** Load voice settings from storage and subscribe to changes. Called
    *  once from the content entry (overlay.ts). */
   initVoice(): void {

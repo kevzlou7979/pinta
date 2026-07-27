@@ -25,6 +25,9 @@
   } from "../lib/pinta-file.js";
   import { zipSync, strToU8 } from "fflate";
   import { theme, toggleTheme } from "../lib/theme.svelte.js";
+  // Tool defs (id / label / icon / shortcut) are shared with the on-page
+  // floating toolbar via lib/tools.ts so the two never drift.
+  import { TOOLS, type Tool } from "../lib/tools.js";
   import { matchAny, suggestPattern } from "../lib/url-patterns.js";
   import type { Companion } from "../lib/companions.js";
   import AnnotationCard from "./AnnotationCard.svelte";
@@ -177,86 +180,18 @@
   // agent is gathering tasks.
   const reportBusy = $derived(app.report.pending !== null);
 
-  type Tool = "select" | "arrow" | "rect" | "circle" | "freehand" | "pin" | "image" | "move" | "text" | "delete" | "resize" | "paint" | "scale";
-  type ActiveMode = "idle" | "select" | "draw" | "image" | "move" | "text" | "delete" | "resize" | "paint" | "scale";
 
-  // SVG paths render reliably across fonts/OSes, follow currentColor in
-  // both light + dark mode, and don't depend on unicode glyph coverage.
-  const TOOLS: { id: Tool; label: string; svg: string }[] = [
-    {
-      id: "select",
-      label: "Select",
-      // Lucide mouse-pointer-2 — solid cursor arrow. fill=currentColor
-      // overrides the container's fill="none" so the cursor renders solid.
-      svg: '<path d="M4 4l7 17 2.5-7.5L21 11z" fill="currentColor" stroke="currentColor" stroke-width="1"/>',
-    },
-    {
-      id: "arrow",
-      label: "Arrow",
-      svg: '<path d="M7 17 L17 7"/><path d="M9 7 L17 7 L17 15"/>',
-    },
-    {
-      id: "rect",
-      label: "Rect",
-      svg: '<rect x="3" y="6" width="18" height="12" rx="1.5"/>',
-    },
-    {
-      id: "freehand",
-      label: "Pen",
-      svg: '<path d="M17 3a2.85 2.85 0 0 1 4 4L7.5 20.5 2 22l1.5-5.5z"/>',
-    },
-    {
-      id: "pin",
-      label: "Pin",
-      svg: '<path d="M12 22s7-7 7-12a7 7 0 0 0-14 0c0 5 7 12 7 12z"/><circle cx="12" cy="10" r="3"/>',
-    },
-    {
-      id: "image",
-      label: "Image",
-      // Lucide image-plus — picture frame with a "+" badge so it's
-      // clearly an "insert an image" affordance, not a "view image" one.
-      svg: '<path d="M21 12v7a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h7"/><path d="m3 16 5-5c.928-.893 2.072-.893 3 0l5 5"/><path d="m14 14 1-1c.928-.893 2.072-.893 3 0l3 3"/><circle cx="9" cy="9" r="1.5" fill="currentColor"/><path d="M19 3v4"/><path d="M17 5h4"/>',
-    },
-    {
-      id: "move",
-      label: "Move",
-      // Lucide move — four-way arrows: "drag this element somewhere else".
-      svg: '<path d="M12 2v20"/><path d="M2 12h20"/><path d="m9 5 3-3 3 3"/><path d="m9 19 3 3 3-3"/><path d="m5 9-3 3 3 3"/><path d="m19 9 3 3-3 3"/>',
-    },
-    {
-      id: "text",
-      label: "Text",
-      // Lucide type — click text to edit in place / add a paragraph.
-      svg: '<polyline points="4 7 4 4 20 4 20 7"/><line x1="9" y1="20" x2="15" y2="20"/><line x1="12" y1="4" x2="12" y2="20"/>',
-    },
-    {
-      id: "delete",
-      label: "Delete",
-      // Lucide trash-2 — mark an element (or several, Ctrl/Cmd+click) for
-      // removal from source.
-      svg: '<polyline points="3 6 5 6 21 6"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/><line x1="10" y1="11" x2="10" y2="17"/><line x1="14" y1="11" x2="14" y2="17"/>',
-    },
-    {
-      id: "resize",
-      label: "Resize",
-      // Lucide scaling — a box with a diagonal corner-drag arrow: "drag to
-      // resize this element."
-      svg: '<path d="M21 3 9 15"/><path d="M12 3H3v18h18v-9"/><path d="M16 3h5v5"/><path d="M14 15H9v-5"/>',
-    },
-    {
-      id: "paint",
-      label: "Paint",
-      // Lucide palette — recolor an element from the page's own palette.
-      svg: '<circle cx="13.5" cy="6.5" r=".5" fill="currentColor"/><circle cx="17.5" cy="10.5" r=".5" fill="currentColor"/><circle cx="8.5" cy="7.5" r=".5" fill="currentColor"/><circle cx="6.5" cy="12.5" r=".5" fill="currentColor"/><path d="M12 2C6.5 2 2 6.5 2 12s4.5 10 10 10c.926 0 1.648-.746 1.648-1.688 0-.437-.18-.835-.437-1.125-.29-.289-.438-.652-.438-1.125a1.64 1.64 0 0 1 1.668-1.668h1.996c3.051 0 5.555-2.503 5.555-5.554C21.965 6.012 17.461 2 12 2z"/>',
-    },
-    {
-      id: "scale",
-      label: "Scale",
-      // Lucide maximize-2 — outward diagonal arrows: "make the whole widget
-      // proportionally bigger / smaller" (vs Resize's explicit W/H box).
-      svg: '<polyline points="15 3 21 3 21 9"/><polyline points="9 21 3 21 3 15"/><line x1="21" y1="3" x2="14" y2="10"/><line x1="3" y1="21" x2="10" y2="14"/>',
-    },
-  ];
+  type ActiveMode =
+    | "idle"
+    | "select"
+    | "draw"
+    | "image"
+    | "move"
+    | "text"
+    | "delete"
+    | "resize"
+    | "paint"
+    | "scale";
 
   let pageUrl = $state<string>("");
   let activeTabId = $state<number | null>(null);
@@ -625,6 +560,11 @@
       else if (m.mode === "scale") activeTool = "scale";
       else if (m.mode === "draw") activeTool = (m.tool as Tool | undefined) ?? activeTool;
       else activeTool = null;
+      return;
+    }
+    if (m?.type === "toolbar.pick-image" && sender.tab?.id === activeTabId) {
+      // Floating toolbar's Image button — reuse the side panel's picker flow.
+      void setActive("image");
       return;
     }
     if (m?.type === "annotation.target-selected") {
