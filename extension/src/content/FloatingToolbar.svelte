@@ -1,6 +1,7 @@
 <script lang="ts">
   import { onMount } from "svelte";
   import { TOOLS, type Tool } from "../lib/tools.js";
+  import { PINTA_LOGO } from "./pinta-logo.js";
 
   type Props = {
     /** Current overlay mode (content.mode) + active draw tool, for
@@ -15,14 +16,16 @@
 
   const POS_KEY = "pinta-toolbar-pos";
 
-  // Draggable position (viewport coords). Restored from storage; defaults to
-  // the upper-left so it doesn't collide with the side panel on the right.
+  // Draggable position (viewport coords). Restored from storage; first-run
+  // default is the RIGHT edge of the page (nearest the side panel).
   let x = $state(16);
   let y = $state(96);
   let dragging = $state(false);
   let collapsed = $state(false);
 
   onMount(() => {
+    // First-run default: dock to the right edge.
+    x = clampX(window.innerWidth - 60);
     try {
       void chrome.storage?.local?.get(POS_KEY).then((s) => {
         const p = s?.[POS_KEY] as { x?: number; y?: number } | undefined;
@@ -32,7 +35,7 @@
         }
       });
     } catch {
-      /* storage unavailable — keep defaults */
+      /* storage unavailable — keep the right-edge default */
     }
   });
 
@@ -100,10 +103,17 @@
     onpointermove={onGripMove}
     onpointerup={onGripUp}
     ondblclick={() => (collapsed = !collapsed)}
-    title="Drag to move · double-click to collapse"
-    aria-label="Drag toolbar"
+    title="Pinta — drag to move · double-click to collapse"
+    aria-label="Pinta toolbar — drag to move"
   >
-    <span></span><span></span><span></span>
+    <img
+      class="pfab-logo"
+      src={PINTA_LOGO}
+      alt="Pinta"
+      width="22"
+      height="22"
+      draggable="false"
+    />
   </button>
   {#if !collapsed}
     <div class="pfab-grid">
