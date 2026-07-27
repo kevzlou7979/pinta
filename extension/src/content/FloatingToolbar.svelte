@@ -45,21 +45,35 @@
 
   let dragOffX = 0;
   let dragOffY = 0;
+  // Use pointer capture on the grip itself — NOT window listeners. The
+  // overlay host traps pointerup in the bubble phase before it reaches
+  // window, so a window pointerup never fires when the release lands over
+  // our shadow DOM (you drag but can't drop). With capture, move/up retarget
+  // to the grip element and fire AT_TARGET, ahead of the host's trap.
   function onGripDown(e: PointerEvent): void {
     dragging = true;
     dragOffX = e.clientX - x;
     dragOffY = e.clientY - y;
-    window.addEventListener("pointermove", onMove);
-    window.addEventListener("pointerup", onUp, { once: true });
+    try {
+      (e.currentTarget as HTMLElement).setPointerCapture(e.pointerId);
+    } catch {
+      /* capture unsupported — move/up still fire while over the grip */
+    }
     e.preventDefault();
   }
-  function onMove(e: PointerEvent): void {
+  function onGripMove(e: PointerEvent): void {
+    if (!dragging) return;
     x = clampX(e.clientX - dragOffX);
     y = clampY(e.clientY - dragOffY);
   }
-  function onUp(): void {
+  function onGripUp(e: PointerEvent): void {
+    if (!dragging) return;
     dragging = false;
-    window.removeEventListener("pointermove", onMove);
+    try {
+      (e.currentTarget as HTMLElement).releasePointerCapture?.(e.pointerId);
+    } catch {
+      /* ignore */
+    }
     try {
       void chrome.storage?.local?.set({ [POS_KEY]: { x, y } });
     } catch {
@@ -83,6 +97,8 @@
     type="button"
     class="pfab-grip"
     onpointerdown={onGripDown}
+    onpointermove={onGripMove}
+    onpointerup={onGripUp}
     ondblclick={() => (collapsed = !collapsed)}
     title="Drag to move · double-click to collapse"
     aria-label="Drag toolbar"
