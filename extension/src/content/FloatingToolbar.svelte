@@ -13,8 +13,11 @@
     onpick: (tool: Tool) => void;
     /** Fired for the non-tool actions group (Add task / By CSS selector). */
     onaction: (id: "add-task" | "add-selector") => void;
+    /** Free Transform toggle state (drives the transform button's highlight —
+     *  it's a toggle, not a mode). */
+    transformOn: boolean;
   };
-  let { mode, tool, onpick, onaction }: Props = $props();
+  let { mode, tool, onpick, onaction, transformOn }: Props = $props();
 
   const POS_KEY = "pinta-toolbar-pos";
 
@@ -94,6 +97,7 @@
   }
 
   function isActive(id: Tool, draw?: boolean): boolean {
+    if (id === "transform") return transformOn;
     return draw ? mode === "draw" && tool === id : mode === id;
   }
 </script>

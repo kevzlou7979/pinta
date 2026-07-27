@@ -63,6 +63,10 @@ export type Draft = {
 class ContentState {
   mode = $state<Mode>("idle");
   tool = $state<DrawTool>("arrow");
+  // Free Transform (v2): a TOGGLE independent of `mode`. While on, the user
+  // keeps using the normal tools; the side panel batches every annotation
+  // created during the session into ONE on "Done free transforming".
+  freeTransform = $state(false);
 
   // ─── Voice Command (Phase 20) ──────────────────────────────────────
   // The on-page mic buttons live in the content script, which can't read

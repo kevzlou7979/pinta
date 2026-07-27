@@ -200,6 +200,10 @@
   // When the on-page floating toolbar is enabled, the side-panel TOOL grid
   // hides (the palette replaces it). Mirrored from chrome.storage.
   let floatingToolbarEnabled = $state(false);
+  // Free Transform (v2) — mirrored from the content toggle. While on, every
+  // annotation created is collected; "Done" merges them into ONE.
+  let freeTransform = $state(false);
+  let transformIds = $state<string[]>([]);
   // While floating: the two composers (Add task / CSS selector) are opened
   // on demand from the palette instead of living as always-visible rows.
   let composerOpen = $state<null | "task" | "selector">(null);
@@ -575,6 +579,18 @@
       void setActive("image");
       return;
     }
+    if (m?.type === "transform.state") {
+      // Content toggled Free Transform. true → open a fresh batching session;
+      // false → toggle/Done hit, so finalize (merge the collected ids).
+      if (m.on) {
+        freeTransform = true;
+        transformIds = [];
+      } else if (freeTransform) {
+        freeTransform = false;
+        void doneFreeTransform();
+      }
+      return;
+    }
     if (m?.type === "toolbar.add-task" && sender.tab?.id === activeTabId) {
       app.viewingSettings = false;
       composerOpen = "task";
@@ -623,9 +639,11 @@
         url: m.url,
       };
       app.addAnnotation(annotation);
+      if (freeTransform) transformIds = [...transformIds, annotation.id];
       activeTool = null;
     } else if (m?.type === "annotation.draw-committed" && m.annotation) {
       app.addAnnotation(m.annotation);
+      if (freeTransform) transformIds = [...transformIds, m.annotation.id];
     }
   };
 
@@ -637,6 +655,86 @@
     if (e.key.toLowerCase() !== "v") return;
     if (!app.voiceReady) return;
     if (voice.toggleForFocused(app.voiceLang)) e.preventDefault();
+  }
+
+  // ── Free Transform (v2) ─────────────────────────────────────────────
+  // Ask content to flip the toggle (drives the on-page palette highlight;
+  // content broadcasts transform.state back so this panel reacts uniformly).
+  function toggleTransformOnPage(on: boolean): void {
+    if (activeTabId == null) return;
+    chrome.tabs
+      .sendMessage(activeTabId, { type: "transform.set", on })
+      .catch(() => {});
+  }
+
+  function buildMergedTransform(anns: Annotation[]): Annotation {
+    const targets: AnnotationTarget[] = [];
+    const lines: string[] = [];
+    for (const a of anns) {
+      const ts = a.targets && a.targets.length ? a.targets : a.target ? [a.target] : [];
+      targets.push(...ts);
+      const sel = ts[0]?.selector ?? "element";
+      let op: string;
+      if (a.kind === "delete") op = `delete \`${sel}\``;
+      else if (a.move)
+        op =
+          a.move.drop === "free"
+            ? `move \`${sel}\` by ${a.move.offset?.dx ?? 0},${a.move.offset?.dy ?? 0}px`
+            : `move \`${sel}\` into \`${a.move.container?.selector ?? ""}\``;
+      else if (a.contentChange)
+        op = `edit text of \`${sel}\` → "${a.contentChange.textAfter.slice(0, 40)}"`;
+      else if (a.textInsert)
+        op = `add text near \`${sel}\`: "${a.textInsert.text.slice(0, 40)}"`;
+      else if (a.cssChanges && Object.keys(a.cssChanges).length)
+        op = `style \`${sel}\` (${Object.entries(a.cssChanges).map(([k, v]) => `${k}: ${v}`).join("; ")})`;
+      else op = `\`${sel}\``;
+      const note = a.comment?.trim();
+      lines.push(`• ${op}${note ? ` — ${note}` : ""}`);
+    }
+    const seen = new Set<string>();
+    const uniq: AnnotationTarget[] = [];
+    for (const t of targets) {
+      if (t.selector && !seen.has(t.selector)) {
+        seen.add(t.selector);
+        uniq.push(t);
+      }
+    }
+    return {
+      id: uid("ann"),
+      createdAt: Date.now(),
+      kind: "select",
+      strokes: [],
+      color: "#a855f7",
+      comment: `Free transform — ${anns.length} change${anns.length === 1 ? "" : "s"} applied together:\n${lines.join("\n")}`,
+      targets: uniq.length ? uniq : undefined,
+      target: uniq[0],
+      groupingMode: uniq.length > 1 ? "per-element" : undefined,
+      viewport: anns[0]?.viewport,
+      url: anns[0]?.url ?? pageUrl,
+    };
+  }
+
+  // Finalize: collapse the session's annotations into ONE. The individuals are
+  // dropped from the companion session ONLY (app.removeAnnotation = WS-only),
+  // so their on-page previews stay — the merged card carries the summary.
+  async function doneFreeTransform(): Promise<void> {
+    const ids = transformIds;
+    transformIds = [];
+    if (ids.length === 0) return;
+    const anns = (app.session?.annotations ?? []).filter((a) => ids.includes(a.id));
+    if (anns.length <= 1) return; // 0 or 1 — nothing to merge; leave as-is
+    const merged = buildMergedTransform(anns);
+    await app.addAnnotation(merged);
+    for (const id of ids) await app.removeAnnotation(id);
+  }
+
+  // Cancel: roll back every op on the page (full removeAnnotation) + drop them.
+  async function cancelFreeTransform(): Promise<void> {
+    const ids = transformIds;
+    transformIds = [];
+    for (const id of ids) await removeAnnotation(id);
+    freeTransform = false;
+    toggleTransformOnPage(false);
   }
 
   onMount(async () => {
@@ -767,8 +865,11 @@
   const annotationsHere = $derived.by(() => {
     const sessionUrl = app.session?.url ?? "";
     const here = pageUrl;
+    // During a Free Transform session, its in-progress ops are hidden from the
+    // list (the banner shows the count) — they collapse into one card on Done.
+    const hidden = freeTransform ? new Set(transformIds) : null;
     return annotations.filter(
-      (a) => (a.url ?? sessionUrl) === here,
+      (a) => (a.url ?? sessionUrl) === here && !(hidden && hidden.has(a.id)),
     );
   });
   const otherPages = $derived.by(() => {
@@ -1064,6 +1165,11 @@
 
   async function setActive(tool: Tool | null) {
     if (activeTabId == null) return;
+    if (tool === "transform") {
+      // Free Transform is a toggle, not a mode — flip it via content.
+      toggleTransformOnPage(!freeTransform);
+      return;
+    }
     // Image tool is unusual: instead of switching the page into a "wait
     // for input" mode, we kick off a file picker first. The page only
     // enters image-placement mode once the user has actually picked a
@@ -2435,16 +2541,17 @@
             {#if startsNewGroup(i)}
               <div class="w-px h-7 bg-ink-200 dark:bg-night-line mx-0.5"></div>
             {/if}
+            {@const on = activeTool === t.id || (t.id === "transform" && freeTransform)}
             <button
               type="button"
               class="w-9 h-9 inline-flex items-center justify-center rounded-md border border-transparent text-ink-600 dark:text-night-dim hover:text-brand-pink hover:bg-ink-50 dark:hover:bg-night-alt transition-colors disabled:opacity-50"
-              class:bg-brand-pink={activeTool === t.id}
-              class:text-white={activeTool === t.id}
-              class:border-brand-pink={activeTool === t.id}
+              class:bg-brand-pink={on}
+              class:text-white={on}
+              class:border-brand-pink={on}
               disabled={activeTabId == null || sessionPending || allDone}
-              onclick={() => setActive(activeTool === t.id ? null : t.id)}
-              aria-pressed={activeTool === t.id}
-              title={`${t.label} — Ctrl+Alt+${t.key}`}
+              onclick={() => setActive(t.id === "transform" ? "transform" : activeTool === t.id ? null : t.id)}
+              aria-pressed={on}
+              title={t.id === "transform" ? `${t.label} — toggle, then Done` : `${t.label} — Ctrl+Alt+${t.key}`}
               aria-label={t.label}
             >
               <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">{@html t.svg}</svg>
@@ -2475,6 +2582,35 @@
         </p>
       {/if}
     </section>
+
+    {#if freeTransform}
+      <!-- Free Transform session banner. Its in-progress ops are hidden from
+           the annotation list; Done collapses them into ONE card. -->
+      <div class="rounded-md border border-purple-300 dark:border-purple-800/60 bg-purple-50 dark:bg-purple-950/30 p-2.5 flex items-center gap-2">
+        <svg class="text-purple-600 dark:text-purple-300 shrink-0" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 8V4h4"/><path d="M20 8V4h-4"/><path d="M4 16v4h4"/><path d="M20 16v4h-4"/><rect x="9" y="9" width="6" height="6" rx="1"/></svg>
+        <div class="flex-1 min-w-0">
+          <p class="text-[12px] font-semibold text-purple-800 dark:text-purple-200">Free transforming</p>
+          <p class="text-[11px] text-purple-700/80 dark:text-purple-300/80 leading-snug">
+            {transformIds.length} change{transformIds.length === 1 ? "" : "s"} — keep editing with any tool, then Done to record as one annotation.
+          </p>
+        </div>
+        <button
+          type="button"
+          class="shrink-0 text-[11px] px-2 py-1 rounded border border-purple-300 dark:border-purple-700 text-purple-700 dark:text-purple-200 hover:bg-purple-100 dark:hover:bg-purple-900/40"
+          onclick={cancelFreeTransform}
+        >
+          Cancel
+        </button>
+        <button
+          type="button"
+          class="shrink-0 text-[11px] font-semibold px-2.5 py-1 rounded bg-purple-600 text-white hover:bg-purple-700 disabled:opacity-50"
+          disabled={transformIds.length === 0}
+          onclick={() => toggleTransformOnPage(false)}
+        >
+          Done
+        </button>
+      </div>
+    {/if}
 
     {#snippet taskComposerBody()}
       <NoteComposer

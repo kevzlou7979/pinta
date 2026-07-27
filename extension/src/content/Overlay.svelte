@@ -114,6 +114,16 @@
         .catch(() => {});
       return;
     }
+    if (t === "transform") {
+      // Free Transform is a TOGGLE, not a mode — the user keeps their current
+      // tool active while it's on. Flip it + tell the side panel to open/close
+      // its batching session.
+      content.freeTransform = !content.freeTransform;
+      chrome.runtime
+        .sendMessage({ type: "transform.state", on: content.freeTransform })
+        .catch(() => {});
+      return;
+    }
     const { mode, tool } = toolMode(t);
     const active = tool
       ? content.mode === "draw" && content.tool === tool
@@ -155,7 +165,17 @@
         name?: string;
         imported?: ImportedOverlay;
         annotation?: Annotation;
+        on?: boolean;
       };
+      if (m?.type === "transform.set") {
+        // Side panel flipped Free Transform (its Done/Cancel or its tool
+        // button). Mirror + echo the state so both surfaces stay in sync.
+        content.freeTransform = !!m.on;
+        chrome.runtime
+          .sendMessage({ type: "transform.state", on: content.freeTransform })
+          .catch(() => {});
+        return;
+      }
       if (m?.type === "mode.set" && m.mode) setMode(m.mode, m.tool);
       else if (m?.type === "processing.start") {
         if (typeof (msg as { color?: string }).color === "string") {
@@ -3148,6 +3168,7 @@
   <FloatingToolbar
     mode={content.mode}
     tool={content.tool}
+    transformOn={content.freeTransform}
     onpick={pickTool}
     onaction={(id) =>
       chrome.runtime
