@@ -17,7 +17,8 @@ export type Tool =
   | "delete"
   | "resize"
   | "paint"
-  | "scale";
+  | "scale"
+  | "transform";
 
 export type ToolDef = {
   id: Tool;
@@ -108,6 +109,12 @@ export const TOOLS: ToolDef[] = [
     key: "C",
     svg: '<polyline points="15 3 21 3 21 9"/><polyline points="9 21 3 21 3 15"/><line x1="21" y1="3" x2="14" y2="10"/><line x1="3" y1="21" x2="10" y2="14"/>',
   },
+  {
+    id: "transform",
+    label: "Free transform",
+    key: "F",
+    svg: '<path d="M4 8V4h4"/><path d="M20 8V4h-4"/><path d="M4 16v4h4"/><path d="M20 16v4h-4"/><rect x="9" y="9" width="6" height="6" rx="1"/>',
+  },
 ];
 
 /** Visual grouping in the toolbars: "annotate" = draw/point tools,
@@ -126,6 +133,7 @@ export const TOOL_GROUP: Record<Tool, "annotate" | "transform"> = {
   resize: "transform",
   paint: "transform",
   scale: "transform",
+  transform: "transform",
 };
 
 /** True when TOOLS[i] starts a new group vs TOOLS[i-1] (→ draw a divider). */

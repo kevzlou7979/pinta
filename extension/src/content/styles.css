@@ -1166,6 +1166,18 @@
   margin: 2px 3px;
   background: #34343f;
 }
+
+/* Free Transform move layer — dashed accent box over the selected element;
+   dragging it moves the element. */
+.ft-move {
+  position: fixed;
+  box-sizing: border-box;
+  border: 2px dashed #a855f7;
+  background: rgba(168, 85, 247, 0.06);
+  cursor: move;
+  pointer-events: auto;
+  z-index: 2147483640;
+}
 .pfab-sep {
   height: 1px;
   margin: 1px 2px;

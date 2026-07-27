@@ -1841,6 +1841,222 @@
     return { top: r.top, left: r.left, width: r.width, height: r.height };
   });
 
+  // ─── Free Transform (v1) ────────────────────────────────────────────
+  // Self-contained mode: pick ONE element, then move (drag the box) and
+  // resize (corner handle) it freely — every op accumulates into ONE
+  // annotation. Does NOT touch the other tools' commit paths, so normal
+  // annotating can't regress. Text-edit merges into this next.
+  type TransformPending = {
+    el: HTMLElement;
+    target: AnnotationTarget;
+    annId: string;
+    baseCssText: string; // style at session start (diff base)
+    originalCssText: string; // rollback original for recordAnnotated
+    originalInnerHtml: string;
+  };
+  let transformPending = $state<TransformPending | null>(null);
+  let transformComment = $state("");
+  // Accumulated inline changes (move + resize), re-applied over baseCssText
+  // each update so they layer losslessly (same helper as the other tools).
+  let tChanges: Record<string, string> = $state({});
+  let tTx = $state(0);
+  let tTy = $state(0);
+
+  function beginTransformSelect(el: HTMLElement): void {
+    const existing = content.findAnnotatedByElement(el);
+    transformPending = {
+      el,
+      target: captureTarget(el),
+      annId: newAnnId(),
+      baseCssText: el.style.cssText,
+      originalCssText: existing ? existing.originalCssText : el.style.cssText,
+      originalInnerHtml: existing ? existing.originalInnerHtml : el.innerHTML,
+    };
+    tChanges = {};
+    tTx = 0;
+    tTy = 0;
+  }
+
+  function tApply(): void {
+    const p = transformPending;
+    if (!p || !p.el.isConnected) return;
+    applyPreview(p.el, p.baseCssText, tChanges);
+  }
+
+  function cancelTransform(): void {
+    const p = transformPending;
+    if (p && p.el.isConnected) p.el.style.cssText = p.baseCssText;
+    transformPending = null;
+    transformComment = "";
+    tChanges = {};
+  }
+
+  $effect(() => {
+    if (content.mode !== "transform" && transformPending) cancelTransform();
+  });
+
+  function commitTransform(): void {
+    const p = transformPending;
+    if (!p || !p.el.isConnected) {
+      transformPending = null;
+      return;
+    }
+    const el = p.el;
+    const diff = diffAppliedProps(p.baseCssText, el.style.cssText);
+    const cssChanges: Record<string, string> = {};
+    for (const [k, v] of Object.entries(diff)) if (v) cssChanges[k] = v;
+    if (Object.keys(cssChanges).length === 0 && !transformComment.trim()) {
+      cancelTransform();
+      return;
+    }
+    const annId = p.annId;
+    const annotation: Annotation = {
+      id: annId,
+      createdAt: Date.now(),
+      kind: "select",
+      strokes: [],
+      color: "#a855f7",
+      comment: transformComment.trim(),
+      cssChanges: Object.keys(cssChanges).length ? cssChanges : undefined,
+      targets: [p.target],
+      target: p.target,
+      viewport: snapshotViewport(),
+      url: location.href,
+    };
+    chrome.runtime.sendMessage({ type: "annotation.draw-committed", annotation });
+    content.recordAnnotated(
+      annId,
+      el,
+      p.originalCssText,
+      p.originalInnerHtml,
+      p.target.selector,
+      p.target.outerHTML,
+      p.target.nearbyText,
+      location.href,
+    );
+    content.attachPreviewChanges(annId, diff);
+    transformPending = null;
+    transformComment = "";
+    tChanges = {};
+  }
+
+  // Select-on-click for transform mode (mirrors resize's picker).
+  $effect(() => {
+    if (content.mode !== "transform") return;
+    function onMove(e: MouseEvent) {
+      if (transformPending) return;
+      const el = e.target as Element | null;
+      if (!el || el === document.documentElement || el === document.body || isOurNode(el)) {
+        hovered = null;
+        return;
+      }
+      hovered = el;
+    }
+    function onDown(e: MouseEvent) {
+      if (e.button !== 0) return;
+      const el = e.target as Element | null;
+      if (!el || isOurNode(el)) return;
+      if (el === document.documentElement || el === document.body) return;
+      if (transformPending) return; // already selected — the box owns input
+      e.preventDefault();
+      e.stopPropagation();
+      hovered = null;
+      beginTransformSelect(el as HTMLElement);
+    }
+    function onClickSwallow(e: MouseEvent) {
+      if (isOurNode(e.target as Element | null)) return;
+      e.preventDefault();
+      e.stopPropagation();
+    }
+    function onKey(e: KeyboardEvent) {
+      if (e.key !== "Escape") return;
+      e.preventDefault();
+      e.stopPropagation();
+      if (transformPending) cancelTransform();
+      else setMode("idle");
+    }
+    document.addEventListener("mousemove", onMove, true);
+    document.addEventListener("mousedown", onDown, true);
+    document.addEventListener("click", onClickSwallow, true);
+    document.addEventListener("keydown", onKey, true);
+    return () => {
+      document.removeEventListener("mousemove", onMove, true);
+      document.removeEventListener("mousedown", onDown, true);
+      document.removeEventListener("click", onClickSwallow, true);
+      document.removeEventListener("keydown", onKey, true);
+    };
+  });
+
+  let transformRect = $derived.by(() => {
+    void tick;
+    void tTx;
+    void tTy;
+    void tChanges;
+    const p = transformPending;
+    if (!p || !p.el.isConnected) return null;
+    const r = p.el.getBoundingClientRect();
+    return { top: r.top, left: r.left, width: r.width, height: r.height };
+  });
+
+  // Drag the box body → move via transform: translate. Pointer capture on the
+  // handle element so move/up fire AT_TARGET (the overlay host traps pointerup
+  // in the bubble phase — see the toolbar drag fix).
+  function onTransformMoveDown(e: PointerEvent): void {
+    if (!transformPending) return;
+    e.preventDefault();
+    e.stopPropagation();
+    const tgt = e.currentTarget as HTMLElement;
+    const sx = e.clientX;
+    const sy = e.clientY;
+    const bx = tTx;
+    const by = tTy;
+    tgt.setPointerCapture?.(e.pointerId);
+    const move = (ev: PointerEvent) => {
+      tTx = bx + (ev.clientX - sx);
+      tTy = by + (ev.clientY - sy);
+      tChanges = {
+        ...tChanges,
+        transform: `translate(${Math.round(tTx)}px, ${Math.round(tTy)}px)`,
+      };
+      tApply();
+    };
+    const up = (ev: PointerEvent) => {
+      tgt.releasePointerCapture?.(ev.pointerId);
+      tgt.removeEventListener("pointermove", move);
+      tgt.removeEventListener("pointerup", up);
+    };
+    tgt.addEventListener("pointermove", move);
+    tgt.addEventListener("pointerup", up);
+  }
+
+  // Drag the bottom-right handle → resize width/height.
+  function onTransformResizeDown(e: PointerEvent): void {
+    const p = transformPending;
+    if (!p) return;
+    e.preventDefault();
+    e.stopPropagation();
+    const tgt = e.currentTarget as HTMLElement;
+    const r = p.el.getBoundingClientRect();
+    const sx = e.clientX;
+    const sy = e.clientY;
+    const sw = r.width;
+    const sh = r.height;
+    tgt.setPointerCapture?.(e.pointerId);
+    const move = (ev: PointerEvent) => {
+      const w = Math.max(8, Math.round(sw + (ev.clientX - sx)));
+      const h = Math.max(8, Math.round(sh + (ev.clientY - sy)));
+      tChanges = { ...tChanges, width: `${w}px`, height: `${h}px` };
+      tApply();
+    };
+    const up = (ev: PointerEvent) => {
+      tgt.releasePointerCapture?.(ev.pointerId);
+      tgt.removeEventListener("pointermove", move);
+      tgt.removeEventListener("pointerup", up);
+    };
+    tgt.addEventListener("pointermove", move);
+    tgt.addEventListener("pointerup", up);
+  }
+
   // ─── Paint tool (recolor from the page's own palette) ───────────────
   // Click an element, then pick a color from the swatches harvested off
   // the live page (or point at any element / use the screen eyedropper).
@@ -3244,6 +3460,57 @@
       bind:value={resizeComment}
       onsubmit={submitResize}
       oncancel={cancelResize}
+    />
+  {/if}
+{/if}
+
+{#if content.mode === "transform"}
+  {#if hoverRect && !transformPending}
+    <div
+      class="hl hl--selected"
+      style:top="{hoverRect.top}px"
+      style:left="{hoverRect.left}px"
+      style:width="{hoverRect.width}px"
+      style:height="{hoverRect.height}px"
+    ></div>
+    <div
+      class="label"
+      style:top="{Math.max(0, hoverRect.top - 22)}px"
+      style:left="{hoverRect.left}px"
+    >
+      {describe(hovered)} · click to free-transform
+    </div>
+  {/if}
+  {#if transformPending && transformRect}
+    <!-- Drag the box body → move; drag the corner → resize. Both accumulate
+         into ONE annotation, committed via the comment box's ✓. -->
+    <div
+      class="ft-move"
+      style:top="{transformRect.top}px"
+      style:left="{transformRect.left}px"
+      style:width="{transformRect.width}px"
+      style:height="{transformRect.height}px"
+      onpointerdown={onTransformMoveDown}
+      role="button"
+      tabindex="-1"
+      aria-label="Drag to move"
+    ></div>
+    <div
+      class="rsz-handle rsz-handle--se"
+      style:top="{transformRect.top + transformRect.height - 7}px"
+      style:left="{transformRect.left + transformRect.width - 7}px"
+      onpointerdown={onTransformResizeDown}
+      role="button"
+      tabindex="0"
+      aria-label="Resize"
+    ></div>
+    <CommentInput
+      anchor={transformRect}
+      title="Free transform {describe(transformPending.el)}"
+      allowEmpty={true}
+      bind:value={transformComment}
+      onsubmit={commitTransform}
+      oncancel={cancelTransform}
     />
   {/if}
 {/if}

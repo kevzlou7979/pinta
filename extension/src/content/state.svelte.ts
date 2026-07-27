@@ -13,7 +13,8 @@ export type Mode =
   | "delete"
   | "resize"
   | "paint"
-  | "scale";
+  | "scale"
+  | "transform";
 
 /**
  * A previewed element mutation that must be rolled back when its owning

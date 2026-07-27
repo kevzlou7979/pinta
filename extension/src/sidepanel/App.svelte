@@ -191,7 +191,8 @@
     | "delete"
     | "resize"
     | "paint"
-    | "scale";
+    | "scale"
+    | "transform";
 
   let pageUrl = $state<string>("");
   let activeTabId = $state<number | null>(null);
@@ -564,6 +565,7 @@
       else if (m.mode === "resize") activeTool = "resize";
       else if (m.mode === "paint") activeTool = "paint";
       else if (m.mode === "scale") activeTool = "scale";
+      else if (m.mode === "transform") activeTool = "transform";
       else if (m.mode === "draw") activeTool = (m.tool as Tool | undefined) ?? activeTool;
       else activeTool = null;
       return;
@@ -1086,7 +1088,8 @@
             next === "delete" ||
             next === "resize" ||
             next === "paint" ||
-            next === "scale"
+            next === "scale" ||
+            next === "transform"
           ? next
           : "draw";
     try {
