@@ -18,16 +18,24 @@
 
   const POS_KEY = "pinta-toolbar-pos";
 
-  // Draggable position (viewport coords). Restored from storage; first-run
-  // default is the RIGHT edge of the page (nearest the side panel).
+  // Draggable position (viewport coords). Default + resize anchor is the
+  // RIGHT edge, vertically centered.
   let x = $state(16);
   let y = $state(96);
   let dragging = $state(false);
   let collapsed = $state(false);
+  let fabEl: HTMLDivElement | undefined = $state();
+
+  /** Dock to the right edge, vertically centered — the always-visible home. */
+  function anchorRightCenter(): void {
+    const w = fabEl?.offsetWidth ?? 52;
+    const h = fabEl?.offsetHeight ?? 320;
+    x = Math.max(8, window.innerWidth - w - 12);
+    y = Math.max(8, Math.round((window.innerHeight - h) / 2));
+  }
 
   onMount(() => {
-    // First-run default: dock to the right edge.
-    x = clampX(window.innerWidth - 60);
+    anchorRightCenter();
     try {
       void chrome.storage?.local?.get(POS_KEY).then((s) => {
         const p = s?.[POS_KEY] as { x?: number; y?: number } | undefined;
@@ -37,8 +45,14 @@
         }
       });
     } catch {
-      /* storage unavailable — keep the right-edge default */
+      /* storage unavailable — keep the right-center default */
     }
+    // On any browser/viewport resize, snap back to the right-center so the
+    // toolbar can never end up off-screen (a shrunk viewport would otherwise
+    // leave its saved x beyond the right edge, hiding it).
+    const onResize = () => anchorRightCenter();
+    window.addEventListener("resize", onResize);
+    return () => window.removeEventListener("resize", onResize);
   });
 
   function clampX(v: number): number {
@@ -92,6 +106,7 @@
 </script>
 
 <div
+  bind:this={fabEl}
   class="pinta-fab"
   class:pinta-fab--dragging={dragging}
   style="left:{x}px; top:{y}px;"
