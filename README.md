@@ -22,7 +22,7 @@ matching source files for you.
 > [Roadmap](#roadmap) for what's next.
 
 <p align="center">
-  <a href="https://kevzlou7979.github.io/pinta/"><strong>Website</strong></a>
+  <a href="https://pinta-companion.vercel.app/"><strong>Website</strong></a>
   &nbsp;·&nbsp;
   <a href="https://chromewebstore.google.com/detail/pinta/gnobpbogpbgdcpfjhbajfnbcfpbcnhah">Chrome Web Store</a>
   &nbsp;·&nbsp;
@@ -746,7 +746,7 @@ credentials inside third-party **harnesses** — does **not** apply to Pinta: Pi
 isn't a harness and never touches subscription OAuth; it hands work to the
 interactive Claude Code *you* run. The full breakdown (including a side-by-side of
 the banned pattern vs. how Pinta works) lives on the
-[**Compliance page**](https://kevzlou7979.github.io/pinta/compliance.html).
+[**Compliance page**](https://pinta-companion.vercel.app/compliance.html).
 
 If you deploy Pinta commercially or to a team, review the current
 [Anthropic usage terms](https://www.anthropic.com/legal) and
