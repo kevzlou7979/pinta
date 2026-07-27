@@ -5,41 +5,50 @@
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>Pinta — Privacy Policy</title>
   <meta name="description" content="Pinta privacy policy — what data the Pinta Chrome extension and companion server do (and don't) handle." />
-  <meta name="theme-color" content="#fbf7f5" media="(prefers-color-scheme: light)" />
-  <meta name="theme-color" content="#0F0F12" media="(prefers-color-scheme: dark)" />
+  <meta name="theme-color" content="#ffffff" media="(prefers-color-scheme: light)" />
+  <meta name="theme-color" content="#0B0C0E" media="(prefers-color-scheme: dark)" />
   <link rel="icon" type="image/png" sizes="32x32" href="assets/icons/icon-32.png" />
   <link rel="icon" type="image/png" sizes="16x16" href="assets/icons/icon-16.png" />
   <link rel="preconnect" href="https://fonts.googleapis.com" />
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
-  <link href="https://fonts.googleapis.com/css2?family=Poppins:wght@400;500;600;700&family=JetBrains+Mono:wght@400&display=swap" rel="stylesheet" />
+  <link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@600;700&family=Inter:wght@400;500;600&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet" />
   <style>
+    /* Tokens — mirror index.html's semantic layer, mapped onto this
+       page's legacy variable names. */
     :root {
-      --cream: #fbf7f5;
-      --paper: #ffffff;
-      --line: #ebe0e9;
-      --ink: #16110d;
-      --ink-dim: #5a4f44;
-      --ink-mute: #9a8e7a;
-      --pink: #ff3d6e;
+      color-scheme: light;
+      --cream: #FFFFFF;        /* bg */
+      --cream-soft: #F7F7F8;   /* bg-subtle */
+      --paper: #FFFFFF;        /* surface */
+      --line: #E5E6EA;
+      --ink: #17181C;
+      --ink-dim: #565B66;
+      --ink-mute: #6E7480;
+      --pink: #D6205A;         /* accent (text-safe) */
     }
     [data-theme="dark"] {
-      --cream: #0F0F12;
-      --paper: #1A1A20;
-      --line: #2A2A33;
-      --ink: #ECECF0;
-      --ink-dim: #A8A8B5;
-      --ink-mute: #7A7A88;
+      color-scheme: dark;
+      --cream: #0B0C0E;
+      --cream-soft: #101114;
+      --paper: #131417;
+      --line: #24262B;
+      --ink: #F2F3F5;
+      --ink-dim: #A6ABB5;
+      --ink-mute: #7C828E;
+      --pink: #FF4D7D;
     }
     * { box-sizing: border-box; }
     html, body { margin: 0; padding: 0; }
     body {
       background: var(--cream);
       color: var(--ink);
-      font-family: "Poppins", system-ui, sans-serif;
-      font-size: 16px;
-      line-height: 1.65;
+      font-family: "Inter", system-ui, sans-serif;
+      font-size: 15.5px;
+      line-height: 1.7;
       -webkit-font-smoothing: antialiased;
     }
+    h1, h2, h3 { font-family: "Space Grotesk", "Inter", system-ui, sans-serif; }
+    :focus-visible { outline: 2px solid var(--pink); outline-offset: 2px; border-radius: 2px; }
     .wrap {
       max-width: 720px;
       margin: 0 auto;
@@ -51,7 +60,9 @@
       margin-bottom: 40px;
     }
     .crumb {
-      font-size: 13px;
+      font-family: "JetBrains Mono", ui-monospace, monospace;
+      font-size: 12px;
+      letter-spacing: 0.04em;
       color: var(--ink-mute);
       margin-bottom: 16px;
     }
@@ -64,8 +75,9 @@
       margin: 0 0 8px;
     }
     .sub {
+      font-family: "JetBrains Mono", ui-monospace, monospace;
       color: var(--ink-dim);
-      font-size: 15px;
+      font-size: 13px;
     }
     h2 {
       font-size: 22px;
@@ -85,10 +97,10 @@
     code {
       font-family: "JetBrains Mono", ui-monospace, monospace;
       font-size: 0.88em;
-      background: var(--paper);
+      background: var(--cream-soft);
       border: 1px solid var(--line);
       padding: 1px 6px;
-      border-radius: 4px;
+      border-radius: 6px;
       color: var(--ink);
     }
     .callout {
@@ -116,8 +128,8 @@
       var html = document.documentElement;
       try {
         var stored = localStorage.getItem('pinta-theme');
-        var prefers = window.matchMedia('(prefers-color-scheme: dark)').matches;
-        var theme = stored || (prefers ? 'dark' : 'light');
+        var prefersLight = window.matchMedia('(prefers-color-scheme: light)').matches;
+        var theme = stored || (prefersLight ? 'light' : 'dark');
         if (theme === 'dark') html.setAttribute('data-theme', 'dark');
       } catch (e) {}
     })();
