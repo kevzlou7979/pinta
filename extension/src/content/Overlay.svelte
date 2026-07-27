@@ -353,17 +353,20 @@
     return () => document.removeEventListener("keydown", onKey);
   });
 
-  // Single-key tool shortcuts (Photoshop-style: V/A/R/P/N/I/M/T/D/S/B/C) —
-  // ONLY while the floating toolbar is enabled, and never while the user is
-  // typing. That keeps the page's own keys free for anyone who hasn't opted in.
+  // Tool shortcuts — Ctrl+Alt+<key> (e.g. Ctrl+Alt+R = Rect) while the
+  // floating toolbar is enabled. The Ctrl+Alt combo keeps the page's own
+  // single-key handlers free and won't fire mid-typing. Uses e.code so it's
+  // keyboard-layout independent (Ctrl+Alt can remap letters on some layouts).
   onMount(() => {
     function onKey(e: KeyboardEvent) {
       if (!content.floatingToolbarEnabled) return;
-      if (e.altKey || e.ctrlKey || e.metaKey || e.shiftKey) return;
+      if (!e.ctrlKey || !e.altKey || e.metaKey || e.shiftKey) return;
       const ae = document.activeElement as HTMLElement | null;
       const tag = ae?.tagName;
       if (tag === "INPUT" || tag === "TEXTAREA" || ae?.isContentEditable) return;
-      const def = toolForKey(e.key);
+      const letter =
+        e.code && e.code.startsWith("Key") ? e.code.slice(3) : e.key;
+      const def = toolForKey(letter);
       if (!def) return;
       e.preventDefault();
       pickTool(def.id);
@@ -2930,6 +2933,13 @@
     mode={content.mode}
     tool={content.tool}
     onpick={pickTool}
+    onaction={(id) =>
+      chrome.runtime
+        .sendMessage({
+          type:
+            id === "add-task" ? "toolbar.add-task" : "toolbar.add-selector",
+        })
+        .catch(() => {})}
   />
 {/if}
 

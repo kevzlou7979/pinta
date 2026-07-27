@@ -11,8 +11,10 @@
     /** Fired when a tool button is clicked. Overlay maps it to setMode /
      *  the image picker. */
     onpick: (tool: Tool) => void;
+    /** Fired for the non-tool actions group (Add task / By CSS selector). */
+    onaction: (id: "add-task" | "add-selector") => void;
   };
-  let { mode, tool, onpick }: Props = $props();
+  let { mode, tool, onpick, onaction }: Props = $props();
 
   const POS_KEY = "pinta-toolbar-pos";
 
@@ -136,9 +138,30 @@
             stroke-linejoin="round"
             aria-hidden="true">{@html t.svg}</svg
           >
-          <span class="pfab-tip">{t.label} <kbd>{t.key}</kbd></span>
+          <span class="pfab-tip">{t.label} <kbd>Ctrl+Alt+{t.key}</kbd></span>
         </button>
       {/each}
+    </div>
+    <div class="pfab-sep"></div>
+    <div class="pfab-grid">
+      <button
+        type="button"
+        class="pfab-tool"
+        onclick={() => onaction("add-task")}
+        aria-label="Add a task"
+      >
+        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><line x1="12" y1="5" x2="12" y2="19" /><line x1="5" y1="12" x2="19" y2="12" /></svg>
+        <span class="pfab-tip">Add a task</span>
+      </button>
+      <button
+        type="button"
+        class="pfab-tool"
+        onclick={() => onaction("add-selector")}
+        aria-label="Add by CSS selector"
+      >
+        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="8 6 3 12 8 18" /><polyline points="16 6 21 12 16 18" /></svg>
+        <span class="pfab-tip">Add by CSS selector</span>
+      </button>
     </div>
   {/if}
 </div>

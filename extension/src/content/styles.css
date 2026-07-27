@@ -1161,6 +1161,11 @@
   flex-direction: column;
   gap: 4px;
 }
+.pfab-sep {
+  height: 1px;
+  margin: 1px 2px;
+  background: #2c2c36;
+}
 .pfab-tool {
   position: relative;
   width: 40px;

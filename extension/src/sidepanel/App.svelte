@@ -199,6 +199,9 @@
   // When the on-page floating toolbar is enabled, the side-panel TOOL grid
   // hides (the palette replaces it). Mirrored from chrome.storage.
   let floatingToolbarEnabled = $state(false);
+  // While floating: the two composers (Add task / CSS selector) are opened
+  // on demand from the palette instead of living as always-visible rows.
+  let composerOpen = $state<null | "task" | "selector">(null);
   let selector = $state("");
   let comment = $state("");
   let capturing = $state(false);
@@ -568,6 +571,16 @@
     if (m?.type === "toolbar.pick-image" && sender.tab?.id === activeTabId) {
       // Floating toolbar's Image button — reuse the side panel's picker flow.
       void setActive("image");
+      return;
+    }
+    if (m?.type === "toolbar.add-task" && sender.tab?.id === activeTabId) {
+      app.viewingSettings = false;
+      composerOpen = "task";
+      return;
+    }
+    if (m?.type === "toolbar.add-selector" && sender.tab?.id === activeTabId) {
+      app.viewingSettings = false;
+      composerOpen = "selector";
       return;
     }
     if (m?.type === "annotation.target-selected") {
@@ -2466,23 +2479,15 @@
       {/if}
     </section>
 
-    <details class="rounded-md border border-ink-200 bg-white dark:border-night-line dark:bg-night-card">
-      <summary class="px-3 py-2 text-xs text-ink-600 dark:text-night-dim cursor-pointer flex items-center gap-1.5">
-        <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>
-        Add a task (no element needed)
-      </summary>
+    {#snippet taskComposerBody()}
       <NoteComposer
         disabled={sessionPending || allDone}
         bind:comment={app.noteDraft.comment}
         bind:images={app.noteDraft.images}
         onadd={addNoteFromForm}
       />
-    </details>
-
-    <details class="rounded-md border border-ink-200 bg-white dark:border-night-line dark:bg-night-card">
-      <summary class="px-3 py-2 text-xs text-ink-600 dark:text-night-dim cursor-pointer">
-        Add by CSS selector instead
-      </summary>
+    {/snippet}
+    {#snippet selectorComposerBody()}
       <div class="p-3 pt-0 space-y-2">
         <input
           type="text"
@@ -2507,7 +2512,46 @@
           Add annotation
         </button>
       </div>
-    </details>
+    {/snippet}
+
+    {#if !floatingToolbarEnabled}
+      <details class="rounded-md border border-ink-200 bg-white dark:border-night-line dark:bg-night-card">
+        <summary class="px-3 py-2 text-xs text-ink-600 dark:text-night-dim cursor-pointer flex items-center gap-1.5">
+          <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>
+          Add a task (no element needed)
+        </summary>
+        {@render taskComposerBody()}
+      </details>
+
+      <details class="rounded-md border border-ink-200 bg-white dark:border-night-line dark:bg-night-card">
+        <summary class="px-3 py-2 text-xs text-ink-600 dark:text-night-dim cursor-pointer">
+          Add by CSS selector instead
+        </summary>
+        {@render selectorComposerBody()}
+      </details>
+    {:else}
+      <!-- Migrated to the floating palette: opened on demand from there. -->
+      {#if composerOpen === "task"}
+        <div class="rounded-md border border-ink-200 bg-white dark:border-night-line dark:bg-night-card">
+          <div class="px-3 py-2 flex items-center justify-between gap-2 text-xs text-ink-600 dark:text-night-dim">
+            <span class="inline-flex items-center gap-1.5 font-medium">
+              <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>
+              Add a task
+            </span>
+            <button type="button" class="leading-none px-1 hover:text-ink-900 dark:hover:text-night-text" onclick={() => (composerOpen = null)} aria-label="Close">✕</button>
+          </div>
+          {@render taskComposerBody()}
+        </div>
+      {:else if composerOpen === "selector"}
+        <div class="rounded-md border border-ink-200 bg-white dark:border-night-line dark:bg-night-card">
+          <div class="px-3 py-2 flex items-center justify-between gap-2 text-xs text-ink-600 dark:text-night-dim">
+            <span class="font-medium">Add by CSS selector</span>
+            <button type="button" class="leading-none px-1 hover:text-ink-900 dark:hover:text-night-text" onclick={() => (composerOpen = null)} aria-label="Close">✕</button>
+          </div>
+          {@render selectorComposerBody()}
+        </div>
+      {/if}
+    {/if}
 
     <section class="space-y-2">
       <div class="flex items-center justify-between">

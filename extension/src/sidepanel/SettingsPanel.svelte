@@ -316,7 +316,7 @@
       <div class="min-w-0">
         <p class="text-[13px] font-medium text-ink-900 dark:text-night-text">Floating toolbar</p>
         <p class="text-[11px] text-ink-500 dark:text-night-mute mt-0.5 leading-snug">
-          A draggable on-page tool palette (Photoshop-style) with the same tools as the side panel, plus single-key shortcuts (V·A·R·P·N·I·M·T·D·S·B·C). Drag the grip to move it; double-click the grip to collapse. The side-panel tools stay too.
+          A draggable on-page tool palette (Photoshop-style) with the same tools as the side panel, plus <strong>Ctrl+Alt+key</strong> shortcuts (Ctrl+Alt+V select, R rect, T text…). Drag the Pinta logo to move it; double-click it to collapse. When on, the side-panel tool grid + Add-task / CSS-selector rows move into the palette.
         </p>
       </div>
       <button
