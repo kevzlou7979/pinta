@@ -219,6 +219,57 @@ export type AnnotationImage = {
   placement?: { x: number; y: number; width: number; height: number };
 };
 
+/**
+ * Device class an annotation was captured at, derived purely from the
+ * viewport width. Lets the agent (and the UI chip) tell "make these
+ * cards" at 425px — a mobile-breakpoint intent — apart from the same
+ * words typed at a 1440px desktop window. Breakpoints match Pinta's
+ * device toolkit presets: ≤480 = mobile, ≤1024 = tablet, else desktop.
+ */
+export type DeviceClass = "mobile" | "tablet" | "desktop";
+
+export function deviceClassForWidth(width: number): DeviceClass {
+  if (width <= 480) return "mobile";
+  if (width <= 1024) return "tablet";
+  return "desktop";
+}
+
+/**
+ * Short human chip for an annotation's capture viewport, e.g.
+ * "Mobile · 425px". Returns null when there's no viewport (older
+ * sessions) or — unless `includeDesktop` — when the width reads as a
+ * normal desktop window, so desktop annotations don't sprout a
+ * redundant badge.
+ */
+export function viewportLabel(
+  viewport: { width: number } | undefined,
+  opts: { includeDesktop?: boolean } = {},
+): string | null {
+  if (!viewport || !Number.isFinite(viewport.width)) return null;
+  const cls = deviceClassForWidth(viewport.width);
+  if (cls === "desktop" && !opts.includeDesktop) return null;
+  const name = cls === "mobile" ? "Mobile" : cls === "tablet" ? "Tablet" : "Desktop";
+  return `${name} · ${Math.round(viewport.width)}px`;
+}
+
+/**
+ * Agent-facing sentence telling the agent to scope a narrow-viewport
+ * annotation to its responsive breakpoint instead of the global layout.
+ * Returned by the clipboard/markdown exporters and mirrored in the
+ * skill's own reading of `annotation.viewport`. Null for desktop / no
+ * viewport — desktop is the default layout, no scoping note needed.
+ */
+export function viewportAgentNote(
+  viewport: { width: number } | undefined,
+): string | null {
+  if (!viewport || !Number.isFinite(viewport.width)) return null;
+  const cls = deviceClassForWidth(viewport.width);
+  if (cls === "desktop") return null;
+  const bp = cls === "mobile" ? "mobile breakpoint (≤480px)" : "tablet breakpoint (≤1024px)";
+  const w = Math.round(viewport.width);
+  return `Captured at a ${cls} viewport (${w}px wide) — scope this change to the ${bp} (media query / responsive utilities); keep the desktop layout unchanged unless the comment says otherwise.`;
+}
+
 export type SessionStatus =
   | "drafting"
   | "submitted"
@@ -371,6 +422,10 @@ export type ModuleTab = {
   cardStepsOp?: string;
   /** Tooltip / label for the steps icon (default "How to test"). */
   cardStepsLabel?: string;
+  /** Group ids whose cards should NOT show the "how to test" beaker — e.g.
+   *  the tasks module hides it on its "review" column (those items are
+   *  already being verified). Absent / empty = show it on every card. */
+  cardStepsExcludeGroups?: string[];
   /** When set (requires `cardStepsOp`), the steps expansion offers a
    *  "Generate screenshots" button dispatching THIS op with the card id +
    *  its steps. The agent walks the running app step by step, writes one

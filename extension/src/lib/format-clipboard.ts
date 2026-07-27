@@ -1,4 +1,5 @@
 import type { Annotation } from "@pinta/shared";
+import { viewportAgentNote } from "@pinta/shared";
 
 /**
  * Human sentences for a structural annotation (move / text-insert /
@@ -136,6 +137,10 @@ export function formatSessionAsClipboard(input: {
     for (const change of structuredChangeLines(a)) {
       lines.push(`- **Change:** ${change}`);
     }
+    const vpNote = viewportAgentNote(a.viewport);
+    if (vpNote) {
+      lines.push(`- **Viewport:** ${vpNote}`);
+    }
     lines.push(`- **Comment:** ${a.comment}`);
     lines.push("");
   });
@@ -196,6 +201,10 @@ export function formatSessionAsText(input: {
     }
     for (const change of structuredChangeLines(a)) {
       lines.push(`  Change: ${change.replace(/`/g, "")}`);
+    }
+    const vpNote = viewportAgentNote(a.viewport);
+    if (vpNote) {
+      lines.push(`  Viewport: ${vpNote}`);
     }
     lines.push(`  Comment: ${a.comment}`);
     lines.push("");

@@ -1,5 +1,6 @@
 <script lang="ts">
   import type { Annotation } from "@pinta/shared";
+  import { deviceClassForWidth, viewportLabel } from "@pinta/shared";
   import { app } from "../lib/state.svelte.js";
   import MicButton from "../lib/voice/MicButton.svelte";
 
@@ -66,6 +67,25 @@
         "bg-ink-100 text-ink-700 dark:bg-night-alt dark:text-night-dim",
       title:
         drift.reason ?? "The agent couldn't confirm this change either way.",
+    };
+  });
+
+  // Viewport chip — surfaces the capture width so a mobile/tablet
+  // annotation reads as breakpoint-scoped at a glance (and the agent is
+  // told the same in the payload). Hidden for desktop-width captures so
+  // the common case stays uncluttered.
+  const viewportChip = $derived.by(() => {
+    const label = viewportLabel(annotation.viewport);
+    if (!label) return null;
+    const cls = deviceClassForWidth(annotation.viewport!.width);
+    return {
+      label,
+      icon: cls === "mobile" ? "📱" : "💻",
+      classes:
+        cls === "mobile"
+          ? "bg-violet-100 text-violet-800 dark:bg-violet-950/60 dark:text-violet-200"
+          : "bg-sky-100 text-sky-800 dark:bg-sky-950/60 dark:text-sky-200",
+      title: `Annotated at a ${cls} viewport (${Math.round(annotation.viewport!.width)}px). The agent scopes this change to the ${cls} breakpoint and leaves desktop untouched.`,
     };
   });
 
@@ -176,6 +196,15 @@
           >
             <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M10.29 3.86 1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"/><line x1="12" y1="9" x2="12" y2="13"/><line x1="12" y1="17" x2="12.01" y2="17"/></svg>
             {driftBadge.label}
+          </span>
+        {/if}
+        {#if viewportChip}
+          <span
+            class="inline-flex items-center gap-1 px-1.5 py-0.5 rounded-full text-[10px] font-semibold tracking-wide {viewportChip.classes}"
+            title={viewportChip.title}
+          >
+            <span aria-hidden="true">{viewportChip.icon}</span>
+            {viewportChip.label}
           </span>
         {/if}
         {#if targets.length === 1 && targets[0]?.selector}

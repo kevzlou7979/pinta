@@ -55,6 +55,7 @@ import {
   type ReportShot,
 } from "./report.js";
 import { WsClient, type WsClientStatus } from "./ws-client.js";
+import { classifySyncedSession } from "./session-routing.js";
 import {
   discoverCompanions,
   type Companion,
@@ -388,6 +389,17 @@ function newDraft(url: string): Session {
     status: "drafting",
     producer: "extension",
   };
+}
+
+/** Shallow copy of `rec` without `key` (returns undefined when empty). Used
+ *  to drop a per-card pending/error entry from the module-board slots. */
+function omitKey<V>(
+  rec: Record<string, V> | undefined,
+  key: string,
+): Record<string, V> | undefined {
+  if (!rec || !(key in rec)) return rec;
+  const { [key]: _drop, ...rest } = rec;
+  return Object.keys(rest).length ? rest : undefined;
 }
 
 class ExtensionState {
@@ -3459,10 +3471,13 @@ class ExtensionState {
          *  card id. Cached so a board refresh never drops them. Mirrors
          *  Test Pilot's detail-steps / the Report module's how-to-test. */
         cardSteps?: Record<string, { steps: string[]; askedAt: number }>;
-        /** The card id whose steps fetch is in flight (one at a time). */
-        cardStepsPending?: string | null;
-        /** Last steps-fetch error, surfaced under the expanded card. */
-        cardStepsError?: string | null;
+        /** Card ids whose steps fetch is in flight. Per-card so several
+         *  cards' beakers can spin concurrently (each op round-trips with its
+         *  own cardId; the agent answers them independently). */
+        cardStepsPending?: Record<string, true>;
+        /** Last steps-fetch error, keyed by card id so it shows under the
+         *  card that failed and never blankets the others. */
+        cardStepsError?: Record<string, string>;
         /** Per-card step screenshots (op `tab.cardStepsShotsOp`), keyed by
          *  card id. Each shot's PNG lives in `.pinta/report-shots/` and is
          *  served via the same /v1/report-shot endpoint the Report module
@@ -3474,11 +3489,11 @@ class ExtensionState {
             capturedAt: number;
           }
         >;
-        /** The card id a step-screenshots run is in flight for (one at a
-         *  time — the agent drives the app in a real browser). */
-        cardShotsPending?: string | null;
-        /** Last screenshots-run error, surfaced in the expansion. */
-        cardShotsError?: string | null;
+        /** Card ids a step-screenshots run is in flight for. Per-card so
+         *  multiple cards can capture concurrently. */
+        cardShotsPending?: Record<string, true>;
+        /** Last screenshots-run error, keyed by card id. */
+        cardShotsError?: Record<string, string>;
         /** Multi-start batch: card ids whose ops are still awaiting their
          *  board response, in dispatch order — [0] is the one the agent is
          *  handling now, the rest are queued behind it. All submits go out
@@ -3491,16 +3506,23 @@ class ExtensionState {
 
   /** Per-module op timers, keyed by module id. */
   private moduleOpTimers = new Map<string, ReturnType<typeof setTimeout>>();
-  /** Per-module card-steps timers, keyed by module id. */
+  /** Card-steps timers, keyed per card (`${moduleId}\0${cardId}`) so each
+   *  concurrent fetch times out independently. */
   private moduleCardStepsTimers = new Map<
     string,
     ReturnType<typeof setTimeout>
   >();
-  /** Per-module step-screenshots timers, keyed by module id. */
+  /** Step-screenshots timers, keyed per card (`${moduleId}\0${cardId}`). */
   private moduleCardShotsTimers = new Map<
     string,
     ReturnType<typeof setTimeout>
   >();
+
+  /** Composite key for the per-card timer maps. NUL separator so a card id
+   *  with spaces / colons can't collide across the boundary. */
+  private static cardTimerKey(moduleId: string, cardId: string): string {
+    return `${moduleId} ${cardId}`;
+  }
 
   /** Recompute the DERIVED `currentRun` from the raw agent run + the
    *  user overlay. Call after every mutation to either input. Snapshots
@@ -4390,9 +4412,10 @@ class ExtensionState {
    * Fetch the per-card "how to test" steps for a board card (the beaker
    * icon). Dispatches `op` (the manifest's `tab.cardStepsOp`) with the
    * card id; the agent returns `{ op, cardId, steps }`, routed back to
-   * `handleModuleCardStepsSync` and cached on the board slot. One fetch at
-   * a time per module (a singleton `cardStepsPending`, like the Report
-   * module's how-to-test). Does NOT disturb the board's own `pending`.
+   * `handleModuleCardStepsSync` and cached on the board slot. Per-card:
+   * several cards' beakers can spin at once (each op carries its own cardId
+   * and the agent answers them independently). Does NOT disturb the board's
+   * own `pending`.
    */
   async runModuleCardSteps(
     moduleId: string,
@@ -4400,15 +4423,18 @@ class ExtensionState {
     card: { id: string; title?: string; url?: string },
   ): Promise<void> {
     const slot = this.ensureModuleBoard(moduleId);
-    if (slot.cardStepsPending) return; // one in flight
+    if (slot.cardStepsPending?.[card.id]) return; // this card already in flight
     if (!this.client || this.connectionStatus !== "connected") {
-      slot.cardStepsError =
-        "No companion connected. Start `pinta-companion .` to generate test steps.";
+      slot.cardStepsError = {
+        ...(slot.cardStepsError ?? {}),
+        [card.id]:
+          "No companion connected. Start `pinta-companion .` to generate test steps.",
+      };
       return;
     }
-    slot.cardStepsPending = card.id;
-    slot.cardStepsError = null;
-    this.armModuleCardStepsTimeout(moduleId);
+    slot.cardStepsPending = { ...(slot.cardStepsPending ?? {}), [card.id]: true };
+    slot.cardStepsError = omitKey(slot.cardStepsError, card.id);
+    this.armModuleCardStepsTimeout(moduleId, card.id);
     const settings = $state.snapshot(
       this.modules[moduleId]?.settings ?? {},
     ) as Record<string, string | boolean>;
@@ -4430,38 +4456,45 @@ class ExtensionState {
     });
   }
 
-  cancelModuleCardSteps(moduleId: string): void {
+  cancelModuleCardSteps(moduleId: string, cardId: string): void {
     const slot = this.moduleBoards[moduleId];
-    if (!slot?.cardStepsPending) return;
-    this.clearModuleCardStepsTimeout(moduleId);
-    slot.cardStepsPending = null;
-    slot.cardStepsError = "Cancelled.";
+    if (!slot?.cardStepsPending?.[cardId]) return;
+    this.clearModuleCardStepsTimeout(moduleId, cardId);
+    slot.cardStepsPending = omitKey(slot.cardStepsPending, cardId);
+    slot.cardStepsError = {
+      ...(slot.cardStepsError ?? {}),
+      [cardId]: "Cancelled.",
+    };
   }
 
-  private armModuleCardStepsTimeout(moduleId: string): void {
-    this.clearModuleCardStepsTimeout(moduleId);
+  private armModuleCardStepsTimeout(moduleId: string, cardId: string): void {
+    this.clearModuleCardStepsTimeout(moduleId, cardId);
+    const key = ExtensionState.cardTimerKey(moduleId, cardId);
     this.armAgentWait({
       softMs: ExtensionState.MODULE_OP_TIMEOUT_MS,
       what: "generate the test steps",
-      setHandle: (t) => this.moduleCardStepsTimers.set(moduleId, t),
-      stillPending: () => !!this.moduleBoards[moduleId]?.cardStepsPending,
+      setHandle: (t) => this.moduleCardStepsTimers.set(key, t),
+      stillPending: () =>
+        !!this.moduleBoards[moduleId]?.cardStepsPending?.[cardId],
       giveUp: () => {
         const slot = this.moduleBoards[moduleId];
-        this.moduleCardStepsTimers.delete(moduleId);
-        if (!slot?.cardStepsPending) return;
-        slot.cardStepsPending = null;
-        slot.cardStepsError = ExtensionState.slowWaitGiveUp(
-          "generate the test steps",
-        );
+        this.moduleCardStepsTimers.delete(key);
+        if (!slot?.cardStepsPending?.[cardId]) return;
+        slot.cardStepsPending = omitKey(slot.cardStepsPending, cardId);
+        slot.cardStepsError = {
+          ...(slot.cardStepsError ?? {}),
+          [cardId]: ExtensionState.slowWaitGiveUp("generate the test steps"),
+        };
       },
     });
   }
 
-  private clearModuleCardStepsTimeout(moduleId: string): void {
-    const t = this.moduleCardStepsTimers.get(moduleId);
+  private clearModuleCardStepsTimeout(moduleId: string, cardId: string): void {
+    const key = ExtensionState.cardTimerKey(moduleId, cardId);
+    const t = this.moduleCardStepsTimers.get(key);
     if (t) {
       clearTimeout(t);
-      this.moduleCardStepsTimers.delete(moduleId);
+      this.moduleCardStepsTimers.delete(key);
     }
     this.retireAgentWaitNotice();
   }
@@ -4480,15 +4513,18 @@ class ExtensionState {
     steps: string[],
   ): Promise<void> {
     const slot = this.ensureModuleBoard(moduleId);
-    if (slot.cardShotsPending) return;
+    if (slot.cardShotsPending?.[card.id]) return;
     if (!this.client || this.connectionStatus !== "connected") {
-      slot.cardShotsError =
-        "No companion connected. Start `pinta-companion .` to generate screenshots.";
+      slot.cardShotsError = {
+        ...(slot.cardShotsError ?? {}),
+        [card.id]:
+          "No companion connected. Start `pinta-companion .` to generate screenshots.",
+      };
       return;
     }
-    slot.cardShotsPending = card.id;
-    slot.cardShotsError = null;
-    this.armModuleCardShotsTimeout(moduleId);
+    slot.cardShotsPending = { ...(slot.cardShotsPending ?? {}), [card.id]: true };
+    slot.cardShotsError = omitKey(slot.cardShotsError, card.id);
+    this.armModuleCardShotsTimeout(moduleId, card.id);
     const settings = $state.snapshot(
       this.modules[moduleId]?.settings ?? {},
     ) as Record<string, string | boolean>;
@@ -4513,40 +4549,49 @@ class ExtensionState {
     });
   }
 
-  cancelModuleCardShots(moduleId: string): void {
+  cancelModuleCardShots(moduleId: string, cardId: string): void {
     const slot = this.moduleBoards[moduleId];
-    if (!slot?.cardShotsPending) return;
-    this.clearModuleCardShotsTimeout(moduleId);
-    slot.cardShotsPending = null;
-    slot.cardShotsError = "Cancelled.";
+    if (!slot?.cardShotsPending?.[cardId]) return;
+    this.clearModuleCardShotsTimeout(moduleId, cardId);
+    slot.cardShotsPending = omitKey(slot.cardShotsPending, cardId);
+    slot.cardShotsError = {
+      ...(slot.cardShotsError ?? {}),
+      [cardId]: "Cancelled.",
+    };
   }
 
-  private armModuleCardShotsTimeout(moduleId: string): void {
-    this.clearModuleCardShotsTimeout(moduleId);
+  private armModuleCardShotsTimeout(moduleId: string, cardId: string): void {
+    this.clearModuleCardShotsTimeout(moduleId, cardId);
+    const key = ExtensionState.cardTimerKey(moduleId, cardId);
     this.armAgentWait({
       // Walking N steps in a real browser is slower than a text op —
       // reuse the report screenshot budget rather than the generic op's.
       softMs: ExtensionState.REPORT_SHOT_TIMEOUT_MS,
       what: "capture the step screenshots",
-      setHandle: (t) => this.moduleCardShotsTimers.set(moduleId, t),
-      stillPending: () => !!this.moduleBoards[moduleId]?.cardShotsPending,
+      setHandle: (t) => this.moduleCardShotsTimers.set(key, t),
+      stillPending: () =>
+        !!this.moduleBoards[moduleId]?.cardShotsPending?.[cardId],
       giveUp: () => {
         const slot = this.moduleBoards[moduleId];
-        this.moduleCardShotsTimers.delete(moduleId);
-        if (!slot?.cardShotsPending) return;
-        slot.cardShotsPending = null;
-        slot.cardShotsError = ExtensionState.slowWaitGiveUp(
-          "capture the step screenshots",
-        );
+        this.moduleCardShotsTimers.delete(key);
+        if (!slot?.cardShotsPending?.[cardId]) return;
+        slot.cardShotsPending = omitKey(slot.cardShotsPending, cardId);
+        slot.cardShotsError = {
+          ...(slot.cardShotsError ?? {}),
+          [cardId]: ExtensionState.slowWaitGiveUp(
+            "capture the step screenshots",
+          ),
+        };
       },
     });
   }
 
-  private clearModuleCardShotsTimeout(moduleId: string): void {
-    const t = this.moduleCardShotsTimers.get(moduleId);
+  private clearModuleCardShotsTimeout(moduleId: string, cardId: string): void {
+    const key = ExtensionState.cardTimerKey(moduleId, cardId);
+    const t = this.moduleCardShotsTimers.get(key);
     if (t) {
       clearTimeout(t);
-      this.moduleCardShotsTimers.delete(moduleId);
+      this.moduleCardShotsTimers.delete(key);
     }
     this.retireAgentWaitNotice();
   }
@@ -4570,12 +4615,15 @@ class ExtensionState {
   private handleModuleCardShotsSync(session: Session, moduleId: string): void {
     const slot = this.ensureModuleBoard(moduleId);
     const cardId = ExtensionState.queryField(session, "cardId");
-    if (!cardId || slot.cardShotsPending !== cardId) return;
+    if (!cardId || !slot.cardShotsPending?.[cardId]) return;
+    const setError = (msg: string) => {
+      slot.cardShotsError = { ...(slot.cardShotsError ?? {}), [cardId]: msg };
+    };
     if (session.status === "done") {
       const summary = session.appliedSummary ?? "";
       if (summary.trim() === "") return; // empty-done race — keep waiting
-      this.clearModuleCardShotsTimeout(moduleId);
-      slot.cardShotsPending = null;
+      this.clearModuleCardShotsTimeout(moduleId, cardId);
+      slot.cardShotsPending = omitKey(slot.cardShotsPending, cardId);
       try {
         const payload = JSON.parse(summary) as { shots?: unknown };
         const shots = Array.isArray(payload.shots)
@@ -4595,23 +4643,23 @@ class ExtensionState {
               }))
           : [];
         if (shots.length === 0) {
-          slot.cardShotsError =
-            "No screenshots came back. Is the app running and reachable from the agent's browser tools?";
+          setError(
+            "No screenshots came back. Is the app running and reachable from the agent's browser tools?",
+          );
           return;
         }
         slot.cardShots = {
           ...(slot.cardShots ?? {}),
           [cardId]: { shots, capturedAt: Date.now() },
         };
-        slot.cardShotsError = null;
+        slot.cardShotsError = omitKey(slot.cardShotsError, cardId);
       } catch {
-        slot.cardShotsError = "Couldn't parse the screenshots response.";
+        setError("Couldn't parse the screenshots response.");
       }
     } else if (session.status === "error") {
-      this.clearModuleCardShotsTimeout(moduleId);
-      slot.cardShotsPending = null;
-      slot.cardShotsError =
-        session.errorMessage ?? "Couldn't capture the step screenshots.";
+      this.clearModuleCardShotsTimeout(moduleId, cardId);
+      slot.cardShotsPending = omitKey(slot.cardShotsPending, cardId);
+      setError(session.errorMessage ?? "Couldn't capture the step screenshots.");
     }
   }
 
@@ -4621,36 +4669,41 @@ class ExtensionState {
   private handleModuleCardStepsSync(session: Session, moduleId: string): void {
     const slot = this.ensureModuleBoard(moduleId);
     const cardId = ExtensionState.queryField(session, "cardId");
-    if (!cardId || slot.cardStepsPending !== cardId) return;
+    if (!cardId || !slot.cardStepsPending?.[cardId]) return;
+    const setError = (msg: string) => {
+      slot.cardStepsError = { ...(slot.cardStepsError ?? {}), [cardId]: msg };
+    };
     if (session.status === "done") {
       const summary = session.appliedSummary ?? "";
       // Empty "done" (multi-agent race) — keep pending so a real one lands.
       if (summary.trim() === "") return;
-      this.clearModuleCardStepsTimeout(moduleId);
-      slot.cardStepsPending = null;
+      this.clearModuleCardStepsTimeout(moduleId, cardId);
+      slot.cardStepsPending = omitKey(slot.cardStepsPending, cardId);
       try {
         const payload = JSON.parse(summary) as { steps?: unknown };
         const steps = Array.isArray(payload.steps)
           ? payload.steps.filter((s): s is string => typeof s === "string" && s.trim().length > 0)
           : [];
         if (steps.length === 0) {
-          slot.cardStepsError =
-            "No test steps came back. Restart `/pinta` if the module's task-steps handler didn't load.";
+          setError(
+            "No test steps came back. Restart `/pinta` if the module's task-steps handler didn't load.",
+          );
           return;
         }
         slot.cardSteps = {
           ...(slot.cardSteps ?? {}),
           [cardId]: { steps, askedAt: Date.now() },
         };
-        slot.cardStepsError = null;
+        slot.cardStepsError = omitKey(slot.cardStepsError, cardId);
       } catch {
-        slot.cardStepsError = "Couldn't parse the test-steps response.";
+        setError("Couldn't parse the test-steps response.");
       }
     } else if (session.status === "error") {
-      this.clearModuleCardStepsTimeout(moduleId);
-      slot.cardStepsPending = null;
-      slot.cardStepsError =
-        session.errorMessage ?? "Couldn't generate test steps for that card.";
+      this.clearModuleCardStepsTimeout(moduleId, cardId);
+      slot.cardStepsPending = omitKey(slot.cardStepsPending, cardId);
+      setError(
+        session.errorMessage ?? "Couldn't generate test steps for that card.",
+      );
     }
   }
 
@@ -8377,24 +8430,55 @@ class ExtensionState {
         const flightIdx = this.inFlightBatches.findIndex(
           (b) => b.id === incoming.id,
         );
-        if (flightIdx !== -1) {
+        const previousSessionId = this.session?.id ?? null;
+        // Invariant (Phase 20 async batches): `this.session` is ALWAYS the
+        // live *drafting* session — every in-flight or finished batch lives
+        // in `inFlightBatches` (the "Submitted" tray). So only a `drafting`
+        // broadcast may become the active draft. Adopting a non-draft one
+        // strands the footer on "Submitted — waiting for agent" and freezes
+        // annotating, because `canEditAnnotations` / `canSubmit` both require
+        // status "drafting" — the regression where a just-submitted (or
+        // reconnect-replayed) session sat as the draft. The classifier
+        // (session-routing.ts, unit-tested) decides where each broadcast goes.
+        const route = classifySyncedSession(incoming, {
+          inTray: flightIdx !== -1,
+        });
+        if (route === "tray-update") {
           this.inFlightBatches[flightIdx] = incoming;
           // Reassign so Svelte tracks the array mutation.
           this.inFlightBatches = [...this.inFlightBatches];
           break;
         }
-        const previousSessionId = this.session?.id ?? null;
-        // A terminal-status (done / error) broadcast for a session that's
-        // neither the current draft nor a tracked in-flight batch is stale
-        // — e.g. a late echo for a batch the user already dismissed. Ignore
-        // it so it can't resurrect as a phantom "done" draft and strand the
-        // footer in the all-done state.
-        if (
-          incoming.id !== previousSessionId &&
-          (incoming.status === "done" || incoming.status === "error")
-        ) {
+        if (route === "tray-add" || route === "drop") {
+          // tray-add: an untracked submitted/applying batch (reconnect replay
+          // or a detach we missed) — surface it so its progress shows and it
+          // can be dismissed. drop: a stale terminal echo for a finished /
+          // dismissed batch — ignore it (don't resurrect a phantom "done"
+          // draft). Neither may become `this.session`.
+          if (route === "tray-add") {
+            this.inFlightBatches = [...this.inFlightBatches, incoming];
+            this.ensureReconcileHeartbeat();
+          }
+          // If that batch was somehow still sitting as the current draft,
+          // detach it so the draft slot frees up.
+          if (incoming.id === previousSessionId) this.session = null;
+          // Guarantee the user always has a live draft to annotate into — if
+          // this arrived while we had none (reconnect, or a lost fresh-draft
+          // create), mint one now.
+          if (
+            !this.session &&
+            !this.creatingSession &&
+            this.appMode !== "standalone"
+          ) {
+            this.markCreatingSession(true);
+            this.send({
+              type: "session.create",
+              url: this.lastUrl ?? incoming.url ?? "",
+            });
+          }
           break;
         }
+        // route === "adopt-draft" — a live drafting session becomes the draft.
         this.session = incoming;
         this.markCreatingSession(false);
         this.lastError = null;

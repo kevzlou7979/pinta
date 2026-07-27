@@ -180,6 +180,9 @@
   let draft = $state("");
   let attachedImages = $state<ChatImage[]>([]);
   let pasteHint = $state<string | null>(null);
+  // Full-size image viewer overlaid inside the panel (see the thumbnail
+  // click handler for why a new tab doesn't work here).
+  let lightbox = $state<{ url: string; name?: string } | null>(null);
   let scrollEl = $state<HTMLDivElement | null>(null);
   // Textarea ref used by the auto-grow $effect below. Bound via
   // bind:this on the <textarea> so we can read scrollHeight after the
@@ -576,24 +579,27 @@
                   <div class:font-semibold={!!msg.targetSelector} class:text-[13.5px]={!!msg.targetSelector}>{msg.text}</div>
                 {/if}
                 {#if msg.images && msg.images.length > 0}
-                  <!-- Thumbnail grid below the text. Sized to fit
-                       comfortably in the bubble; click opens the full
-                       dataUrl in a new tab for inspection. -->
+                  <!-- Thumbnail grid below the text. Click opens an in-panel
+                       lightbox — NOT a new tab: Chrome blocks top-level
+                       navigation to data: URLs (it just shows a broken
+                       "Untitled" tab), and blob: URLs are origin-scoped to the
+                       side panel so they won't render in a normal tab either. -->
                   <div class="flex flex-wrap gap-1.5">
                     {#each msg.images as img, i (i)}
-                      <a
-                        href={img.dataUrl}
-                        target="_blank"
-                        rel="noopener noreferrer"
+                      <button
+                        type="button"
                         class="block rounded overflow-hidden border border-white/30 hover:border-white/60 transition-colors"
-                        title={img.name || `Image ${i + 1}`}
+                        title={img.name || `Image ${i + 1} — click to enlarge`}
+                        onclick={() =>
+                          img.dataUrl &&
+                          (lightbox = { url: img.dataUrl, name: img.name })}
                       >
                         <img
                           src={img.dataUrl}
                           alt={img.name || `Pasted image ${i + 1}`}
                           class="block max-w-[140px] max-h-[140px] object-cover"
                         />
-                      </a>
+                      </button>
                     {/each}
                   </div>
                 {/if}
@@ -958,4 +964,31 @@
       {/if}
     </div>
   </div>
+
+  {#if lightbox}
+    <!-- Full-size image viewer. Click anywhere (or Esc) to dismiss. -->
+    <div
+      class="fixed inset-0 z-[120] flex items-center justify-center bg-black/85 p-4 cursor-zoom-out"
+      role="button"
+      tabindex="-1"
+      aria-label="Close image preview"
+      onclick={() => (lightbox = null)}
+      onkeydown={(e) => e.key === "Escape" && (lightbox = null)}
+    >
+      <img
+        src={lightbox.url}
+        alt={lightbox.name ?? "image preview"}
+        class="max-w-full max-h-full object-contain rounded shadow-2xl"
+      />
+      <button
+        type="button"
+        class="absolute top-3 right-3 w-8 h-8 rounded-full bg-white/15 hover:bg-white/25 text-white inline-flex items-center justify-center"
+        onclick={() => (lightbox = null)}
+        aria-label="Close"
+        title="Close"
+      >
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M18 6 6 18" /><path d="m6 6 12 12" /></svg>
+      </button>
+    </div>
+  {/if}
 {/if}

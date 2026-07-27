@@ -33,8 +33,16 @@
   // board slot so a refresh keeps them; expanded state is local.
   const stepsOp = $derived(tab.cardStepsOp);
   const cardSteps = $derived(slot?.cardSteps ?? {});
-  const cardStepsPending = $derived(slot?.cardStepsPending ?? null);
-  const cardStepsError = $derived(slot?.cardStepsError ?? null);
+  // Per-card maps now — several cards' beakers can run at once.
+  const cardStepsPending = $derived(slot?.cardStepsPending ?? {});
+  const cardStepsError = $derived(slot?.cardStepsError ?? {});
+  // Group ids whose cards should NOT show the "how to test" beaker. The
+  // module declares these in `tab.cardStepsExcludeGroups` (e.g. the tasks
+  // module hides it on Review — those items are already being verified).
+  const stepsExcludeGroups = $derived(new Set(tab.cardStepsExcludeGroups ?? []));
+  function cardShowsSteps(c: ModuleBoardCard): boolean {
+    return !!stepsOp && !stepsExcludeGroups.has(c.group);
+  }
   let openSteps = $state<Set<string>>(new Set());
 
   function toggleSteps(c: ModuleBoardCard): void {
@@ -43,8 +51,8 @@
       next.delete(c.id);
     } else {
       next.add(c.id);
-      // Fetch on first open (nothing cached, none in flight).
-      if (stepsOp && !cardSteps[c.id] && !cardStepsPending) {
+      // Fetch on first open (nothing cached, this card not already in flight).
+      if (stepsOp && !cardSteps[c.id] && !cardStepsPending[c.id]) {
         void app.runModuleCardSteps(spec.id, stepsOp, {
           id: c.id,
           title: c.title,
@@ -55,7 +63,7 @@
     openSteps = next;
   }
   function retrySteps(c: ModuleBoardCard): void {
-    if (stepsOp && !cardStepsPending) {
+    if (stepsOp && !cardStepsPending[c.id]) {
       void app.runModuleCardSteps(spec.id, stepsOp, {
         id: c.id,
         title: c.title,
@@ -67,18 +75,37 @@
   // ── Per-step screenshots (Generate screenshots button) ──────────────
   const shotsOp = $derived(tab.cardStepsShotsOp);
   const cardShots = $derived(slot?.cardShots ?? {});
-  const cardShotsPending = $derived(slot?.cardShotsPending ?? null);
-  const cardShotsError = $derived(slot?.cardShotsError ?? null);
+  const cardShotsPending = $derived(slot?.cardShotsPending ?? {});
+  const cardShotsError = $derived(slot?.cardShotsError ?? {});
 
   function generateShots(c: ModuleBoardCard): void {
     const steps = cardSteps[c.id]?.steps ?? [];
-    if (!shotsOp || cardShotsPending || steps.length === 0) return;
+    if (!shotsOp || cardShotsPending[c.id] || steps.length === 0) return;
     void app.runModuleCardShots(
       spec.id,
       shotsOp,
       { id: c.id, title: c.title, url: cardUrl(c) },
       steps,
     );
+  }
+
+  // ── Copy a card: "#id title" + description + link ───────────────────
+  // One paste carries everything an agent / commit message / chat needs.
+  let copiedCardId = $state<string | null>(null);
+  let copiedTimer: ReturnType<typeof setTimeout> | null = null;
+  async function copyCard(c: ModuleBoardCard): Promise<void> {
+    const lines = [`#${c.id} ${c.title}`.trim()];
+    if (c.description?.trim()) lines.push(c.description.trim());
+    const link = cardUrl(c);
+    if (link) lines.push(link);
+    try {
+      await navigator.clipboard.writeText(lines.join("\n"));
+      copiedCardId = c.id;
+      if (copiedTimer) clearTimeout(copiedTimer);
+      copiedTimer = setTimeout(() => (copiedCardId = null), 1500);
+    } catch {
+      // Clipboard blocked (rare in a side panel) — silent no-op.
+    }
   }
 
   // ── Section tabs ────────────────────────────────────────────────────
@@ -539,18 +566,35 @@
       </div>
       <!-- Primary action (Start / Triage) — GitLab link sits after the title -->
       <div class="shrink-0 flex items-center gap-1">
-        {#if stepsOp}
-          <!-- "How to test" — beaker icon, mirrors Test Pilot's detail steps. -->
+        <!-- Copy: #id · title (+ description) · link — paste into a chat / commit -->
+        <button
+          type="button"
+          class="inline-flex items-center justify-center w-7 h-7 rounded-md border border-ink-200 dark:border-night-line text-ink-500 dark:text-night-mute hover:text-brand-pink hover:border-brand-pink dark:hover:text-brand-pink-light transition-colors"
+          class:text-brand-pink={copiedCardId === c.id}
+          onclick={() => copyCard(c)}
+          title="Copy id, description and link"
+          aria-label="Copy id, description and link"
+        >
+          {#if copiedCardId === c.id}
+            <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="20 6 9 17 4 12" /></svg>
+          {:else}
+            <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="9" y="9" width="13" height="13" rx="2" /><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1" /></svg>
+          {/if}
+        </button>
+        {#if cardShowsSteps(c)}
+          <!-- "How to test" — beaker icon, mirrors Test Pilot's detail steps.
+               Turns primary once its steps have been fetched. -->
           <button
             type="button"
             class="inline-flex items-center justify-center w-7 h-7 rounded-md border border-ink-200 dark:border-night-line text-ink-500 dark:text-night-mute hover:text-brand-pink hover:border-brand-pink dark:hover:text-brand-pink-light transition-colors disabled:opacity-50"
-            class:text-brand-pink={openSteps.has(c.id)}
+            class:text-brand-pink={openSteps.has(c.id) || !!cardSteps[c.id]}
+            class:border-brand-pink={!!cardSteps[c.id]}
             onclick={() => toggleSteps(c)}
             aria-pressed={openSteps.has(c.id)}
             title={tab.cardStepsLabel ?? "How to test"}
             aria-label={tab.cardStepsLabel ?? "How to test"}
           >
-            {#if cardStepsPending === c.id}
+            {#if cardStepsPending[c.id]}
               <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round" class="animate-spin" aria-hidden="true"><path d="M21 12a9 9 0 1 1-6.219-8.56" /></svg>
             {:else}
               <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M9 3h6M10 3v6.5L5 18a2 2 0 0 0 1.7 3h10.6A2 2 0 0 0 19 18l-5-8.5V3" /></svg>
@@ -590,15 +634,15 @@
         {/each}
       </div>
     {/if}
-    {#if stepsOp && openSteps.has(c.id)}
+    {#if cardShowsSteps(c) && openSteps.has(c.id)}
       <!-- "How to test" steps for this card — numbered timeline via the
            shared StepList (identical to Test Pilot / Report). -->
       <div class="px-3 pb-3 pt-2 border-t border-ink-100 dark:border-night-line">
-        {#if cardStepsPending === c.id}
+        {#if cardStepsPending[c.id]}
           <div class="flex items-center gap-2 text-[12px] text-ink-500 dark:text-night-mute">
             <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" class="animate-spin" aria-hidden="true"><path d="M21 12a9 9 0 1 1-6.219-8.56" /></svg>
             Working out how to test this…
-            <button type="button" class="underline ml-auto" onclick={() => app.cancelModuleCardSteps(spec.id)}>Cancel</button>
+            <button type="button" class="underline ml-auto" onclick={() => app.cancelModuleCardSteps(spec.id, c.id)}>Cancel</button>
           </div>
         {:else if cardSteps[c.id]}
           <StepList steps={cardSteps[c.id]?.steps ?? []} />
@@ -606,26 +650,26 @@
             <!-- Per-step proof screenshots: agent walks the running app and
                  captures one PNG after each step (Report-shots rails). -->
             <div class="mt-2 pt-2 border-t border-ink-100 dark:border-night-line space-y-2">
-              {#if cardShotsPending === c.id}
+              {#if cardShotsPending[c.id]}
                 <div class="flex items-center gap-2 text-[12px] text-ink-500 dark:text-night-mute">
                   <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" class="animate-spin" aria-hidden="true"><path d="M21 12a9 9 0 1 1-6.219-8.56" /></svg>
                   Driving the app and capturing each step…
-                  <button type="button" class="underline ml-auto" onclick={() => app.cancelModuleCardShots(spec.id)}>Cancel</button>
+                  <button type="button" class="underline ml-auto" onclick={() => app.cancelModuleCardShots(spec.id, c.id)}>Cancel</button>
                 </div>
               {:else}
                 <div class="flex items-center gap-2">
                   <button
                     type="button"
                     class="inline-flex items-center gap-1.5 text-[12px] font-semibold rounded-md px-2.5 py-1 text-brand-pink dark:text-brand-pink-light border border-ink-200 dark:border-night-line hover:border-brand-pink transition-colors disabled:opacity-50"
-                    disabled={!!cardShotsPending}
+                    disabled={!!cardShotsPending[c.id]}
                     onclick={() => generateShots(c)}
                     title="The agent performs each step in the running app and captures a screenshot per step"
                   >
                     <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M14.5 4h-5L7 7H4a2 2 0 0 0-2 2v9a2 2 0 0 0 2 2h16a2 2 0 0 0 2-2V9a2 2 0 0 0-2-2h-3l-2.5-3z"/><circle cx="12" cy="13" r="3"/></svg>
                     {cardShots[c.id] ? "Re-generate screenshots" : (tab.cardStepsShotsLabel ?? "Generate screenshots")}
                   </button>
-                  {#if cardShotsError && !cardShots[c.id]}
-                    <span class="text-[11px] text-red-600 dark:text-red-400 min-w-0 break-words">{cardShotsError}</span>
+                  {#if cardShotsError[c.id] && !cardShots[c.id]}
+                    <span class="text-[11px] text-red-600 dark:text-red-400 min-w-0 break-words">{cardShotsError[c.id]}</span>
                   {/if}
                 </div>
                 {#if cardShots[c.id]}
@@ -651,9 +695,9 @@
               {/if}
             </div>
           {/if}
-        {:else if cardStepsError}
+        {:else if cardStepsError[c.id]}
           <div class="text-[12px] text-red-600 dark:text-red-400 flex items-center justify-between gap-2">
-            <span class="min-w-0 break-words">{cardStepsError}</span>
+            <span class="min-w-0 break-words">{cardStepsError[c.id]}</span>
             <button type="button" class="shrink-0 underline" onclick={() => retrySteps(c)}>Retry</button>
           </div>
         {/if}
