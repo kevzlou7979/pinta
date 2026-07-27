@@ -196,6 +196,9 @@
   let pageUrl = $state<string>("");
   let activeTabId = $state<number | null>(null);
   let activeTool = $state<Tool | null>(null);
+  // When the on-page floating toolbar is enabled, the side-panel TOOL grid
+  // hides (the palette replaces it). Mirrored from chrome.storage.
+  let floatingToolbarEnabled = $state(false);
   let selector = $state("");
   let comment = $state("");
   let capturing = $state(false);
@@ -624,6 +627,22 @@
   onMount(async () => {
     chrome.runtime.onMessage.addListener(runtimeMessageHandler);
     window.addEventListener("keydown", voiceHotkey);
+
+    // Floating-toolbar pref → hide the side-panel TOOL grid when on. Read
+    // once + stay live via storage.onChanged (SettingsPanel writes the key).
+    const FT_KEY = "pinta-floating-toolbar";
+    try {
+      void chrome.storage?.local
+        ?.get(FT_KEY)
+        .then((s) => (floatingToolbarEnabled = s?.[FT_KEY] === true));
+      chrome.storage?.onChanged?.addListener((changes, area) => {
+        if (area === "local" && changes[FT_KEY]) {
+          floatingToolbarEnabled = changes[FT_KEY].newValue === true;
+        }
+      });
+    } catch {
+      /* storage unavailable */
+    }
 
     void loadSharePrefs();
     void loadFooterCollapsedPref();
@@ -2386,6 +2405,13 @@
         onchange={onImageFilePicked}
         aria-hidden="true"
       />
+      {#if floatingToolbarEnabled}
+        <p class="text-[11px] text-ink-500 dark:text-night-dim leading-snug">
+          Tools are in the floating palette on the page — drag it anywhere. Turn the floating toolbar off in
+          <button type="button" class="underline underline-offset-2" onclick={() => (app.viewingSettings = true)}>Settings</button>
+          to bring the grid back here.
+        </p>
+      {:else}
       <div class="grid grid-cols-6 gap-1">
         {#each TOOLS as t (t.id)}
           <button
@@ -2436,6 +2462,7 @@
           {/if}
           Press Esc to cancel.
         </p>
+      {/if}
       {/if}
     </section>
 
