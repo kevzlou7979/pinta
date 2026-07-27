@@ -27,6 +27,35 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
     }
   }
 
+  if (msg?.type === "ensure-content-script") {
+    // MV3 only auto-injects content scripts into tabs loaded AFTER the
+    // extension starts — a tab that was already open has no overlay until
+    // reloaded. Inject it on demand (when Pinta opens / the tab changes) so
+    // the floating toolbar + overlay appear without a manual page reload.
+    // overlay.ts self-guards on its host tag, so re-injection is idempotent.
+    const tabId = msg.tabId ?? sender.tab?.id;
+    if (typeof tabId !== "number") {
+      sendResponse({ ok: false, error: "no tabId" });
+      return false;
+    }
+    const scripts = (chrome.runtime.getManifest().content_scripts ?? []).filter(
+      // Skip the MAIN-world reload-guard (document_start, dev-only HMR hold) —
+      // only the ISOLATED overlay renders the UI.
+      (cs) => cs.world !== "MAIN" && Array.isArray(cs.js) && cs.js.length > 0,
+    );
+    Promise.all(
+      scripts.map((cs) =>
+        chrome.scripting
+          .executeScript({ target: { tabId }, files: cs.js as string[] })
+          .catch(() => {}),
+      ),
+    ).then(
+      () => sendResponse({ ok: true }),
+      (err: Error) => sendResponse({ ok: false, error: err.message }),
+    );
+    return true;
+  }
+
   if (msg?.type === "capture.full-page") {
     const tabId = msg.tabId ?? sender.tab?.id;
     if (typeof tabId !== "number") {

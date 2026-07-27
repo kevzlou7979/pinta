@@ -737,6 +737,17 @@
     toggleTransformOnPage(false);
   }
 
+  // MV3 doesn't inject content scripts into tabs that were already open when
+  // the extension loaded — so on a pre-existing tab the overlay + floating
+  // toolbar are missing until a reload. Ask the background to inject on demand
+  // (idempotent) whenever Pinta opens or the active tab changes.
+  function ensureContentScript(): void {
+    if (activeTabId == null || !/^https?:/i.test(pageUrl)) return;
+    chrome.runtime
+      .sendMessage({ type: "ensure-content-script", tabId: activeTabId })
+      .catch(() => {});
+  }
+
   onMount(async () => {
     chrome.runtime.onMessage.addListener(runtimeMessageHandler);
     window.addEventListener("keydown", voiceHotkey);
@@ -780,6 +791,7 @@
       });
       pageUrl = tab?.url ?? "";
       activeTabId = tab?.id ?? null;
+      ensureContentScript();
     } catch {
       // not running in extension context (e.g. dev preview)
     }
@@ -796,6 +808,7 @@
         });
         pageUrl = tab?.url ?? "";
         activeTabId = tab?.id ?? null;
+        ensureContentScript();
         await app.rescan(pageUrl || null);
       } catch {
         // ignore — likely transient
