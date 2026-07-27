@@ -684,7 +684,7 @@
       <input
         type="date"
         bind:value={draftDate}
-        class={FIELD_CLS}
+        class="{FIELD_CLS} dark:[color-scheme:dark]"
         aria-label="Entry date"
       />
       {@render composerFields(submitGlobalItem)}
@@ -754,7 +754,7 @@
                     type="date"
                     value={app.report.customSince}
                     onchange={onCustomSince}
-                    class="px-1.5 py-1 rounded border border-ink-200 dark:border-night-line bg-white dark:bg-night-bg text-ink-800 dark:text-night-text text-[11px] focus:outline-none focus:ring-1 focus:ring-brand-pink/40"
+                    class="px-1.5 py-1 rounded border border-ink-200 dark:border-night-line bg-white dark:bg-night-bg text-ink-800 dark:text-night-text text-[11px] focus:outline-none focus:ring-1 focus:ring-brand-pink/40 dark:[color-scheme:dark]"
                   />
                 </label>
                 <label class="flex items-center justify-between gap-2 text-[11px] text-ink-600 dark:text-night-dim">
@@ -763,7 +763,7 @@
                     type="date"
                     value={app.report.customUntil}
                     onchange={onCustomUntil}
-                    class="px-1.5 py-1 rounded border border-ink-200 dark:border-night-line bg-white dark:bg-night-bg text-ink-800 dark:text-night-text text-[11px] focus:outline-none focus:ring-1 focus:ring-brand-pink/40"
+                    class="px-1.5 py-1 rounded border border-ink-200 dark:border-night-line bg-white dark:bg-night-bg text-ink-800 dark:text-night-text text-[11px] focus:outline-none focus:ring-1 focus:ring-brand-pink/40 dark:[color-scheme:dark]"
                   />
                 </label>
                 <p class="text-[10px] text-ink-400 dark:text-night-mute">Same date = a single day.</p>
