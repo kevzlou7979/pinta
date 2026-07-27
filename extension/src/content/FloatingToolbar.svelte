@@ -1,6 +1,6 @@
 <script lang="ts">
   import { onMount } from "svelte";
-  import { TOOLS, type Tool } from "../lib/tools.js";
+  import { TOOLS, startsNewGroup, type Tool } from "../lib/tools.js";
   import { PINTA_LOGO } from "./pinta-logo.js";
 
   type Props = {
@@ -119,7 +119,10 @@
   </button>
   {#if !collapsed}
     <div class="pfab-grid">
-      {#each TOOLS as t (t.id)}
+      {#each TOOLS as t, i (t.id)}
+        {#if startsNewGroup(i)}
+          <div class="pfab-sep"></div>
+        {/if}
         <button
           type="button"
           class="pfab-tool"

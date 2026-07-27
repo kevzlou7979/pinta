@@ -27,7 +27,7 @@
   import { theme, toggleTheme } from "../lib/theme.svelte.js";
   // Tool defs (id / label / icon / shortcut) are shared with the on-page
   // floating toolbar via lib/tools.ts so the two never drift.
-  import { TOOLS, type Tool } from "../lib/tools.js";
+  import { TOOLS, startsNewGroup, type Tool } from "../lib/tools.js";
   import { matchAny, suggestPattern } from "../lib/url-patterns.js";
   import type { Companion } from "../lib/companions.js";
   import AnnotationCard from "./AnnotationCard.svelte";
@@ -2382,7 +2382,10 @@
           class="sticky top-0 shrink-0 flex flex-col gap-1 p-1 rounded-lg border border-ink-200 bg-white dark:border-night-line dark:bg-night-card shadow-md dark:shadow-black/40 self-start z-10"
           aria-label="Tools"
         >
-          {#each TOOLS as t (t.id)}
+          {#each TOOLS as t, i (t.id)}
+            {#if startsNewGroup(i)}
+              <div class="h-px w-6 mx-auto my-1 bg-ink-200 dark:bg-night-line"></div>
+            {/if}
             <button
               type="button"
               class="w-9 h-9 inline-flex items-center justify-center rounded-md border border-transparent text-ink-600 dark:text-night-dim hover:text-brand-pink hover:bg-ink-50 dark:hover:bg-night-alt transition-colors"

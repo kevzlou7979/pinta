@@ -110,6 +110,29 @@ export const TOOLS: ToolDef[] = [
   },
 ];
 
+/** Visual grouping in the toolbars: "annotate" = draw/point tools,
+ *  "transform" = direct element edits. Rendered with a divider between groups. */
+export const TOOL_GROUP: Record<Tool, "annotate" | "transform"> = {
+  select: "annotate",
+  arrow: "annotate",
+  rect: "annotate",
+  circle: "annotate",
+  freehand: "annotate",
+  pin: "annotate",
+  image: "annotate",
+  move: "transform",
+  text: "transform",
+  delete: "transform",
+  resize: "transform",
+  paint: "transform",
+  scale: "transform",
+};
+
+/** True when TOOLS[i] starts a new group vs TOOLS[i-1] (→ draw a divider). */
+export function startsNewGroup(i: number): boolean {
+  return i > 0 && TOOL_GROUP[TOOLS[i]!.id] !== TOOL_GROUP[TOOLS[i - 1]!.id];
+}
+
 /** Non-draw tools each map to their own overlay Mode; draw tools map to the
  *  shared "draw" mode carrying the tool id. */
 export function toolMode(t: Tool): { mode: string; tool?: Tool } {

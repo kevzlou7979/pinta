@@ -1163,6 +1163,11 @@
 }
 .pfab-sep {
   height: 1px;
+  margin: 2px 3px;
+  background: #34343f;
+}
+.pfab-sep {
+  height: 1px;
   margin: 1px 2px;
   background: #2c2c36;
 }
