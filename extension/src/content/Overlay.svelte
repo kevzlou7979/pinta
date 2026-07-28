@@ -1008,7 +1008,8 @@
     moveComment = "";
     moveImages = [];
     moveExtras = [];
-    setMode("idle");
+    // Stay in Move — the user keeps annotating with the same tool.
+    // Esc or re-clicking the tool exits.
   }
 
   // Move-mode pointer handlers: hover to aim, mousedown to grab.
@@ -1762,9 +1763,8 @@
     }
     const hasComment = resizeComment.trim().length > 0;
     if (Object.keys(cssChanges).length === 0 && !hasComment) {
-      // Nothing actually changed — treat as a cancel.
+      // Nothing actually changed — treat as a cancel (tool stays armed).
       cancelResize();
-      setMode("idle");
       return;
     }
     const annId = newAnnId();
@@ -1799,7 +1799,7 @@
     content.attachPreviewChanges(annId, diffAppliedProps(p.baseCssText, el.style.cssText));
     resizePending = null;
     resizeComment = "";
-    setMode("idle");
+    // Stay in Resize — the user keeps annotating with the same tool.
   }
 
   // Resize-mode pointer handlers: hover to aim, click to select. Handles
@@ -2210,8 +2210,8 @@
     const p = paintPending;
     if (!p) return;
     if (Object.keys(p.cssChanges).length === 0) {
+      // Nothing changed — treat as a cancel (tool stays armed).
       cancelPaint();
-      setMode("idle");
       return;
     }
     const el = p.el;
@@ -2246,7 +2246,7 @@
     content.attachPreviewChanges(annId, diffAppliedProps(p.baseCssText, el.style.cssText));
     paintPending = null;
     paintEyedropping = false;
-    setMode("idle");
+    // Stay in Paint — the user keeps annotating with the same tool.
   }
 
   // Paint-mode pointer handlers: hover to aim, click to select a target
@@ -2491,7 +2491,7 @@
     content.attachPreviewChanges(annId, diffAppliedProps(p.baseCssText, el.style.cssText));
     scalePending = null;
     scaleNote = "";
-    setMode("idle");
+    // Stay in Scale — the user keeps annotating with the same tool.
   }
 
   // Scale-mode pointer handlers: hover to aim, click to select.
@@ -2925,7 +2925,8 @@
     selectContentAfter = "";
     selectImages = [];
     textWasMutated = false;
-    setMode("idle");
+    // Stay in Select — the user keeps annotating with the same tool.
+    // Esc or re-clicking the tool exits.
   }
   function clearSelectAndCss() {
     restoreOriginal();
