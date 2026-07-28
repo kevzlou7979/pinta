@@ -438,7 +438,7 @@
       <div class="px-4 pb-3 flex items-start gap-3">
         <!-- Avatar — same gradient + sparkle treatment used inline on
              agent messages below. 36x36 here, 28x28 inline. -->
-        <div class="shrink-0 w-9 h-9 rounded-lg bg-gradient-to-br from-brand-pink to-purple-500 inline-flex items-center justify-center shadow-sm">
+        <div class="shrink-0 w-9 h-9 rounded-lg bg-gradient-to-br from-brand-pink to-brand-magenta inline-flex items-center justify-center shadow-sm">
           <svg width="18" height="18" viewBox="0 0 24 24" fill="white" aria-hidden="true">
             <path d="M12 2l1.5 4.5L18 8l-4.5 1.5L12 14l-1.5-4.5L6 8l4.5-1.5L12 2z" />
             <path d="M19 14l.75 2.25L22 17l-2.25.75L19 20l-.75-2.25L16 17l2.25-.75L19 14z" opacity="0.85" />
@@ -519,7 +519,7 @@
                bubble shape as a real agent message so the visual
                vocabulary is consistent the moment a real reply lands. -->
           <div class="flex items-start gap-2">
-            <div class="shrink-0 w-7 h-7 rounded-md bg-gradient-to-br from-brand-pink to-purple-500 inline-flex items-center justify-center shadow-sm mt-0.5">
+            <div class="shrink-0 w-7 h-7 rounded-md bg-gradient-to-br from-brand-pink to-brand-magenta inline-flex items-center justify-center shadow-sm mt-0.5">
               <svg width="14" height="14" viewBox="0 0 24 24" fill="white" aria-hidden="true">
                 <path d="M12 2l1.5 4.5L18 8l-4.5 1.5L12 14l-1.5-4.5L6 8l4.5-1.5L12 2z" />
                 <path d="M19 14l.75 2.25L22 17l-2.25.75L19 20l-.75-2.25L16 17l2.25-.75L19 14z" opacity="0.85" />
@@ -616,7 +616,7 @@
               <!-- Inline avatar to the left of each agent reply.
                    Same gradient sparkle treatment as the header avatar
                    so the visual identity carries through the thread. -->
-              <div class="shrink-0 w-7 h-7 rounded-md bg-gradient-to-br from-brand-pink to-purple-500 inline-flex items-center justify-center shadow-sm mt-0.5">
+              <div class="shrink-0 w-7 h-7 rounded-md bg-gradient-to-br from-brand-pink to-brand-magenta inline-flex items-center justify-center shadow-sm mt-0.5">
                 <svg width="14" height="14" viewBox="0 0 24 24" fill="white" aria-hidden="true">
                   <path d="M12 2l1.5 4.5L18 8l-4.5 1.5L12 14l-1.5-4.5L6 8l4.5-1.5L12 2z" />
                   <path d="M19 14l.75 2.25L22 17l-2.25.75L19 20l-.75-2.25L16 17l2.25-.75L19 14z" opacity="0.85" />
@@ -823,7 +823,7 @@
                is mid-composing this exact slot". Three pulsing dots
                animate via the pinta-chat-dot keyframe in app.css. -->
           <div class="flex items-start gap-2">
-            <div class="shrink-0 w-7 h-7 rounded-md bg-gradient-to-br from-brand-pink to-purple-500 inline-flex items-center justify-center shadow-sm mt-0.5">
+            <div class="shrink-0 w-7 h-7 rounded-md bg-gradient-to-br from-brand-pink to-brand-magenta inline-flex items-center justify-center shadow-sm mt-0.5">
               <svg width="14" height="14" viewBox="0 0 24 24" fill="white" aria-hidden="true">
                 <path d="M12 2l1.5 4.5L18 8l-4.5 1.5L12 14l-1.5-4.5L6 8l4.5-1.5L12 2z" />
                 <path d="M19 14l.75 2.25L22 17l-2.25.75L19 20l-.75-2.25L16 17l2.25-.75L19 14z" opacity="0.85" />

@@ -1944,7 +1944,7 @@
       createdAt: Date.now(),
       kind: "select",
       strokes: [],
-      color: "#a855f7",
+      color: "#FF3D6E",
       comment: transformComment.trim(),
       cssChanges: Object.keys(cssChanges).length ? cssChanges : undefined,
       targets: [p.target],

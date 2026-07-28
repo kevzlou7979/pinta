@@ -846,14 +846,14 @@
 }
 
 /* ── Paint tool ───────────────────────────────────────────────────────
-   Violet family (distinct from pink hover / blue selected / emerald move
-   / red delete) for the aim box, plus the picker's swatch grid. */
+   Brand-pink accent (primary-only palette rule) for the aim box, plus
+   the picker's swatch grid. */
 .hl--paint {
-  border-color: #8b5cf6;
-  background: rgba(139, 92, 246, 0.1);
+  border-color: #ff3d6e;
+  background: rgba(255, 61, 110, 0.1);
 }
 .label--paint {
-  background: #8b5cf6;
+  background: #ff3d6e;
 }
 .paint__props {
   display: flex;
@@ -879,9 +879,9 @@
   background: #eef2f7;
 }
 .paint__prop--on {
-  background: #ede9fe;
-  border-color: #8b5cf6;
-  color: #5b21b6;
+  background: #ffe4ec;
+  border-color: #ff3d6e;
+  color: #c72d7d;
 }
 .paint__prop-dot {
   width: 10px;
@@ -915,7 +915,7 @@
   transform: scale(1.12);
 }
 .paint__swatch--on {
-  outline: 2px solid #8b5cf6;
+  outline: 2px solid #ff3d6e;
   outline-offset: 2px;
 }
 /* Transparent: the standard checkerboard, so "no color" reads instantly
@@ -998,8 +998,8 @@
   background: #e2e8f0;
 }
 .paint__eyedrop--on {
-  background: #8b5cf6;
-  border-color: #8b5cf6;
+  background: #ff3d6e;
+  border-color: #ff3d6e;
   color: white;
 }
 
@@ -1172,8 +1172,8 @@
 .ft-move {
   position: fixed;
   box-sizing: border-box;
-  border: 2px dashed #a855f7;
-  background: rgba(168, 85, 247, 0.06);
+  border: 2px dashed #ff3d6e;
+  background: rgba(255, 61, 110, 0.06);
   cursor: move;
   pointer-events: auto;
   z-index: 2147483640;

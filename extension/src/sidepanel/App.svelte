@@ -709,7 +709,7 @@
       createdAt: Date.now(),
       kind: "select",
       strokes: [],
-      color: "#a855f7",
+      color: "#FF3D6E",
       comment: `Free transform — ${anns.length} change${anns.length === 1 ? "" : "s"} applied together:\n${lines.join("\n")}`,
       targets: uniq.length ? uniq : undefined,
       target: uniq[0],
@@ -2727,24 +2727,24 @@
     {#if freeTransform}
       <!-- Free Transform session banner. Its in-progress ops are hidden from
            the annotation list; Done collapses them into ONE card. -->
-      <div class="rounded-md border border-purple-300 dark:border-purple-800/60 bg-purple-50 dark:bg-purple-950/30 p-2.5 flex items-center gap-2">
-        <svg class="text-purple-600 dark:text-purple-300 shrink-0" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 8V4h4"/><path d="M20 8V4h-4"/><path d="M4 16v4h4"/><path d="M20 16v4h-4"/><rect x="9" y="9" width="6" height="6" rx="1"/></svg>
+      <div class="rounded-md border border-brand-pink/30 dark:border-brand-pink/40 bg-brand-pink/5 dark:bg-brand-pink/10 p-2.5 flex items-center gap-2">
+        <svg class="text-brand-pink dark:text-brand-pink-light shrink-0" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 8V4h4"/><path d="M20 8V4h-4"/><path d="M4 16v4h4"/><path d="M20 16v4h-4"/><rect x="9" y="9" width="6" height="6" rx="1"/></svg>
         <div class="flex-1 min-w-0">
-          <p class="text-[12px] font-semibold text-purple-800 dark:text-purple-200">Free transforming</p>
-          <p class="text-[11px] text-purple-700/80 dark:text-purple-300/80 leading-snug">
+          <p class="text-[12px] font-semibold text-ink-900 dark:text-night-text">Free transforming</p>
+          <p class="text-[11px] text-ink-600 dark:text-night-dim leading-snug">
             {transformIds.length} change{transformIds.length === 1 ? "" : "s"} — keep editing with any tool, then Done to record as one annotation.
           </p>
         </div>
         <button
           type="button"
-          class="shrink-0 text-[11px] px-2 py-1 rounded border border-purple-300 dark:border-purple-700 text-purple-700 dark:text-purple-200 hover:bg-purple-100 dark:hover:bg-purple-900/40"
+          class="shrink-0 text-[11px] px-2 py-1 rounded border border-ink-300 dark:border-night-line2 text-ink-700 dark:text-night-dim hover:bg-ink-100 dark:hover:bg-night-alt"
           onclick={cancelFreeTransform}
         >
           Cancel
         </button>
         <button
           type="button"
-          class="shrink-0 text-[11px] font-semibold px-2.5 py-1 rounded bg-purple-600 text-white hover:bg-purple-700 disabled:opacity-50"
+          class="shrink-0 text-[11px] font-semibold px-2.5 py-1 rounded bg-brand-pink text-white hover:bg-brand-magenta disabled:opacity-50"
           disabled={transformIds.length === 0}
           onclick={() => toggleTransformOnPage(false)}
         >

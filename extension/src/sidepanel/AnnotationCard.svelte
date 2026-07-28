@@ -83,8 +83,8 @@
       icon: cls === "mobile" ? "📱" : "💻",
       classes:
         cls === "mobile"
-          ? "bg-violet-100 text-violet-800 dark:bg-violet-950/60 dark:text-violet-200"
-          : "bg-sky-100 text-sky-800 dark:bg-sky-950/60 dark:text-sky-200",
+          ? "bg-brand-pink/10 text-brand-magenta dark:bg-brand-pink/15 dark:text-brand-pink-light"
+          : "bg-ink-100 text-ink-700 dark:bg-night-alt dark:text-night-dim",
       title: `Annotated at a ${cls} viewport (${Math.round(annotation.viewport!.width)}px). The agent scopes this change to the ${cls} breakpoint and leaves desktop untouched.`,
     };
   });
