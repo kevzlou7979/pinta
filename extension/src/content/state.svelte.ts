@@ -79,6 +79,26 @@ class ContentState {
   // chrome.storage like voice, kept live via storage.onChanged.
   floatingToolbarEnabled = $state(false);
 
+  // Whether the Pinta side panel is currently open. The floating toolbar only
+  // shows while it is (the panel holds a background port for its lifetime).
+  panelOpen = $state(false);
+
+  /** Ask the background whether the panel is open right now (covers the case
+   *  where the overlay mounts AFTER the panel already connected). Live updates
+   *  arrive as `panel.state` messages, handled in Overlay. */
+  initPanelPresence(): void {
+    try {
+      void chrome.runtime
+        ?.sendMessage({ type: "panel.query" })
+        .then((r) => {
+          this.panelOpen = !!(r && (r as { open?: boolean }).open);
+        })
+        .catch(() => {});
+    } catch {
+      // messaging unavailable
+    }
+  }
+
   /** Load the floating-toolbar pref + subscribe to changes. Called once from
    *  the content entry (overlay.ts). */
   initFloatingToolbar(): void {

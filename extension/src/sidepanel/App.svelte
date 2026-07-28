@@ -817,6 +817,15 @@
     window.addEventListener("keydown", voiceHotkey);
     window.addEventListener("keydown", undoRedoHotkey);
 
+    // Long-lived port so the background (and thus the on-page toolbar) knows
+    // the panel is open; it auto-disconnects when the panel closes → the
+    // content script hides the floating toolbar.
+    try {
+      chrome.runtime.connect({ name: "pinta-panel" });
+    } catch {
+      /* not in extension context */
+    }
+
     // Floating-toolbar pref → hide the side-panel TOOL grid when on. Read
     // once + stay live via storage.onChanged (SettingsPanel writes the key).
     const FT_KEY = "pinta-floating-toolbar";

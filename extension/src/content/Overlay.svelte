@@ -166,7 +166,12 @@
         imported?: ImportedOverlay;
         annotation?: Annotation;
         on?: boolean;
+        open?: boolean;
       };
+      if (m?.type === "panel.state") {
+        content.panelOpen = !!m.open;
+        return;
+      }
       if (m?.type === "transform.set") {
         // Side panel flipped Free Transform (its Done/Cancel or its tool
         // button). Mirror + echo the state so both surfaces stay in sync.
@@ -3212,7 +3217,7 @@
 <!-- Floating on-page toolbar (Settings-gated). Same tools as the side panel;
   clicking one drives the overlay directly. Hidden while viewing an imported
   read-only session so the two overlays never fight. -->
-{#if content.floatingToolbarEnabled && !imported}
+{#if content.floatingToolbarEnabled && content.panelOpen && !imported}
   <FloatingToolbar
     mode={content.mode}
     tool={content.tool}

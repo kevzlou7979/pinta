@@ -154,6 +154,9 @@ if (!document.querySelector(HOST_TAG)) {
   // Mirror the floating-toolbar pref so the on-page toolbar + single-key
   // shortcuts light up when the user enables it in Settings.
   content.initFloatingToolbar();
+  // Track whether the Pinta side panel is open — the toolbar hides when it's
+  // closed.
+  content.initPanelPresence();
 
   mount(Overlay, { target: root });
 }

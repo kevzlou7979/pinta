@@ -9,7 +9,42 @@ chrome.runtime.onInstalled.addListener(() => {
     .catch((err) => console.error("[pinta] sidePanel setup failed", err));
 });
 
+// ─── Side-panel presence ─────────────────────────────────────────────
+// The floating toolbar should only show while the Pinta side panel is open.
+// The panel holds a long-lived "pinta-panel" port for its lifetime; when it
+// closes the port disconnects. We track that + broadcast it to content
+// scripts so they can show/hide the on-page toolbar.
+let panelPorts = 0;
+function panelOpen(): boolean {
+  return panelPorts > 0;
+}
+function broadcastPanelState(): void {
+  const open = panelOpen();
+  chrome.tabs.query({}).then((tabs) => {
+    for (const t of tabs) {
+      if (t.id != null) {
+        chrome.tabs
+          .sendMessage(t.id, { type: "panel.state", open })
+          .catch(() => {});
+      }
+    }
+  });
+}
+chrome.runtime.onConnect.addListener((port) => {
+  if (port.name !== "pinta-panel") return;
+  panelPorts += 1;
+  if (panelPorts === 1) broadcastPanelState();
+  port.onDisconnect.addListener(() => {
+    panelPorts = Math.max(0, panelPorts - 1);
+    if (panelPorts === 0) broadcastPanelState();
+  });
+});
+
 chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
+  if (msg?.type === "panel.query") {
+    sendResponse({ open: panelOpen() });
+    return false;
+  }
   // Drop messages that didn't originate from this extension. Chrome's
   // default delivery already enforces this, but pin it down explicitly
   // so adding `externally_connectable` later doesn't quietly open up
