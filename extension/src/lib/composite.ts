@@ -71,7 +71,8 @@ export async function compositeAnnotations(
       drawAnnotation(ctx, a.kind as DrawTool, a.strokes, {
         color,
         opacity: 1,
-        lineWidth: DRAW_LINE_WIDTH,
+        lineWidth: a.style?.width ?? DRAW_LINE_WIDTH,
+        style: a.style,
         translate: { x: 0, y: 0 },
       });
       const anchor = badgeAnchor(a.kind as DrawTool, a.strokes);
@@ -146,7 +147,8 @@ export async function compositeAnnotationsToViewport(
       drawAnnotation(ctx, a.kind as DrawTool, translated, {
         color,
         opacity: 1,
-        lineWidth: DRAW_LINE_WIDTH,
+        lineWidth: a.style?.width ?? DRAW_LINE_WIDTH,
+        style: a.style,
         translate: { x: 0, y: 0 },
       });
       const anchor = badgeAnchor(a.kind as DrawTool, translated);

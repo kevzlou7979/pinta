@@ -74,7 +74,8 @@
       drawAnnotation(ctx, a.kind, a.strokes, {
         color: a.color,
         opacity: COMMITTED_ALPHA,
-        lineWidth: LINE_WIDTH,
+        lineWidth: a.style?.width ?? LINE_WIDTH,
+        style: a.style,
         translate,
       });
       const anchor = badgeAnchor(a.kind, a.strokes);
@@ -98,7 +99,8 @@
         {
           color: content.inProgress.color,
           opacity: IN_PROGRESS_ALPHA,
-          lineWidth: LINE_WIDTH,
+          lineWidth: content.inProgress.style?.width ?? LINE_WIDTH,
+          style: content.inProgress.style,
           translate,
         },
       );
@@ -115,7 +117,7 @@
     e.preventDefault();
     e.stopPropagation();
     drawing = true;
-    content.beginStroke(pageCoords(e), "#FF3D6E");
+    content.beginStroke(pageCoords(e));
   }
   function onMouseMove(e: MouseEvent) {
     if (!drawing) return;

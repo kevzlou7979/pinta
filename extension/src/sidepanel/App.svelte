@@ -27,7 +27,22 @@
   import { theme, toggleTheme } from "../lib/theme.svelte.js";
   // Tool defs (id / label / icon / shortcut) are shared with the on-page
   // floating toolbar via lib/tools.ts so the two never drift.
-  import { TOOLS, startsNewGroup, type Tool } from "../lib/tools.js";
+  import {
+    TOOL_SLOTS,
+    DRAW_SHAPES,
+    slotStartsNewGroup,
+    type Tool,
+    type ToolDef,
+  } from "../lib/tools.js";
+  import {
+    DRAW_COLORS,
+    DRAW_RADII,
+    DRAW_STYLE_DEFAULT,
+    DRAW_STYLE_KEY,
+    DRAW_WIDTHS,
+    readDrawStyle,
+    type DrawStyleState,
+  } from "../lib/draw-style.js";
   import { matchAny, suggestPattern } from "../lib/url-patterns.js";
   import type { Companion } from "../lib/companions.js";
   import AnnotationCard from "./AnnotationCard.svelte";
@@ -340,6 +355,43 @@
   // TOOL-header ⋮ kebab — collapses Undo / Redo / Import into one menu,
   // mirroring the SUBMITTED tray kebab.
   let toolMenuOpen = $state(false);
+
+  // ── Draw flyout + shape style (docked row) ─────────────────────────
+  // The shape tools collapse into one slot whose face is the last-used
+  // shape; the caret opens a shapes popover. The style strip below the
+  // row edits the SHARED draw style — persisted under `pinta-draw-style`
+  // and storage-synced with the on-page floating palette + canvas.
+  const DRAW_SHAPE_IDS: Tool[] = DRAW_SHAPES.map((s) => s.id);
+  let panelLastShape = $state<ToolDef>(DRAW_SHAPES[0]!);
+  let shapesMenuOpen = $state(false);
+  let drawStyle = $state<DrawStyleState>({ ...DRAW_STYLE_DEFAULT });
+  const drawToolActive = $derived(
+    activeTool != null && DRAW_SHAPE_IDS.includes(activeTool),
+  );
+  $effect(() => {
+    const def = DRAW_SHAPES.find((s) => s.id === activeTool);
+    if (def) panelLastShape = def;
+  });
+  try {
+    void chrome.storage?.local
+      ?.get(DRAW_STYLE_KEY)
+      .then((s) => (drawStyle = readDrawStyle(s?.[DRAW_STYLE_KEY])));
+    chrome.storage?.onChanged?.addListener((changes, area) => {
+      if (area === "local" && changes[DRAW_STYLE_KEY]) {
+        drawStyle = readDrawStyle(changes[DRAW_STYLE_KEY].newValue);
+      }
+    });
+  } catch {
+    // storage unavailable — defaults stay, session-only
+  }
+  function setDrawStyle(patch: Partial<DrawStyleState>): void {
+    drawStyle = { ...drawStyle, ...patch };
+    try {
+      void chrome.storage?.local?.set({ [DRAW_STYLE_KEY]: { ...drawStyle } });
+    } catch {
+      // storage unavailable — style is session-only
+    }
+  }
   // Separate open-state for the Annotate list-header export popover, so
   // its dropdown toggles independently of the footer's downloadDropdown
   // (both render the shared `downloadMenuItems` snippet).
@@ -2678,27 +2730,153 @@
         <!-- Docked tool row (OFF-state look): a horizontal icon strip in the
              TOOL header area, grouped (draw | transform) with a divider. -->
         <div class="flex flex-wrap items-center gap-1">
-          {#each TOOLS as t, i (t.id)}
-            {#if startsNewGroup(i)}
+          {#each TOOL_SLOTS as slot, i (slot.kind === "tool" ? slot.def.id : "draw-group")}
+            {#if slotStartsNewGroup(i)}
               <div class="w-px h-7 bg-ink-200 dark:bg-night-line mx-0.5"></div>
             {/if}
-            {@const on = activeTool === t.id || (t.id === "transform" && freeTransform)}
-            <button
-              type="button"
-              class="w-9 h-9 inline-flex items-center justify-center rounded-md border border-transparent text-ink-600 dark:text-night-dim hover:text-brand-pink hover:bg-ink-50 dark:hover:bg-night-alt transition-colors disabled:opacity-50"
-              class:bg-brand-pink={on}
-              class:text-white={on}
-              class:border-brand-pink={on}
-              disabled={activeTabId == null || sessionPending || allDone}
-              onclick={() => setActive(t.id === "transform" ? "transform" : activeTool === t.id ? null : t.id)}
-              aria-pressed={on}
-              title={t.id === "transform" ? `${t.label} — toggle, then Done` : `${t.label} — Ctrl+Alt+${t.key}`}
-              aria-label={t.label}
-            >
-              <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">{@html t.svg}</svg>
-            </button>
+            {#if slot.kind === "draw-group"}
+              <div class="relative" use:clickOutside={() => (shapesMenuOpen = false)}>
+                <button
+                  type="button"
+                  class="w-9 h-9 inline-flex items-center justify-center rounded-md border border-transparent text-ink-600 dark:text-night-dim hover:text-brand-pink hover:bg-ink-50 dark:hover:bg-night-alt transition-colors disabled:opacity-50"
+                  class:bg-brand-pink={drawToolActive}
+                  class:text-white={drawToolActive}
+                  class:border-brand-pink={drawToolActive}
+                  disabled={activeTabId == null || sessionPending || allDone}
+                  onclick={() => setActive(activeTool === panelLastShape.id ? null : panelLastShape.id)}
+                  aria-pressed={drawToolActive}
+                  title={`${panelLastShape.label} — Ctrl+Alt+${panelLastShape.key}`}
+                  aria-label={panelLastShape.label}
+                >
+                  <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">{@html panelLastShape.svg}</svg>
+                </button>
+                <button
+                  type="button"
+                  class="absolute -right-0.5 -bottom-0.5 w-3.5 h-3.5 inline-flex items-end justify-end rounded-sm text-ink-400 dark:text-night-mute hover:text-brand-pink disabled:opacity-50"
+                  class:text-white={drawToolActive}
+                  disabled={activeTabId == null || sessionPending || allDone}
+                  onclick={() => (shapesMenuOpen = !shapesMenuOpen)}
+                  aria-expanded={shapesMenuOpen}
+                  aria-haspopup="menu"
+                  aria-label="More shapes"
+                  title="More shapes"
+                >
+                  <svg width="7" height="7" viewBox="0 0 8 8" fill="currentColor" aria-hidden="true"><path d="M8 8H0L8 0z"/></svg>
+                </button>
+                {#if shapesMenuOpen}
+                  <div class="absolute left-0 top-full mt-1 z-30 flex items-center gap-1 rounded-md border border-ink-200 bg-white shadow-lg dark:border-night-line dark:bg-night-card p-1" role="menu" aria-label="Draw shapes">
+                    {#each DRAW_SHAPES as s (s.id)}
+                      {@const on = activeTool === s.id}
+                      <button
+                        type="button"
+                        class="w-8 h-8 inline-flex items-center justify-center rounded border border-transparent text-ink-600 dark:text-night-dim hover:text-brand-pink hover:bg-ink-50 dark:hover:bg-night-alt"
+                        class:bg-brand-pink={on}
+                        class:text-white={on}
+                        role="menuitem"
+                        onclick={() => { panelLastShape = s; setActive(s.id); shapesMenuOpen = false; }}
+                        title={`${s.label} — Ctrl+Alt+${s.key}`}
+                        aria-label={s.label}
+                      >
+                        <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">{@html s.svg}</svg>
+                      </button>
+                    {/each}
+                  </div>
+                {/if}
+              </div>
+            {:else}
+              {@const t = slot.def}
+              {@const on = activeTool === t.id || (t.id === "transform" && freeTransform)}
+              <button
+                type="button"
+                class="w-9 h-9 inline-flex items-center justify-center rounded-md border border-transparent text-ink-600 dark:text-night-dim hover:text-brand-pink hover:bg-ink-50 dark:hover:bg-night-alt transition-colors disabled:opacity-50"
+                class:bg-brand-pink={on}
+                class:text-white={on}
+                class:border-brand-pink={on}
+                disabled={activeTabId == null || sessionPending || allDone}
+                onclick={() => setActive(t.id === "transform" ? "transform" : activeTool === t.id ? null : t.id)}
+                aria-pressed={on}
+                title={t.id === "transform" ? `${t.label} — toggle, then Done` : `${t.label} — Ctrl+Alt+${t.key}`}
+                aria-label={t.label}
+              >
+                <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">{@html t.svg}</svg>
+              </button>
+            {/if}
           {/each}
         </div>
+        {#if drawToolActive}
+          <!-- Shape style strip — shared draw style (color / width / dash /
+               fill / radius), synced with the floating palette via storage. -->
+          {@const segBase = "text-[10.5px] font-medium px-1.5 h-6 rounded border transition-colors"}
+          {@const segOff = "border-ink-200 dark:border-night-line text-ink-600 dark:text-night-dim hover:bg-ink-100 dark:hover:bg-night-line/50"}
+          {@const segOn = "bg-brand-pink border-brand-pink text-white"}
+          <div class="flex flex-wrap items-center gap-1.5 rounded-md border border-ink-200 dark:border-night-line bg-ink-50/60 dark:bg-night-alt/60 px-2 py-1.5">
+            {#each DRAW_COLORS as c (c.hex)}
+              <button
+                type="button"
+                class="w-5 h-5 rounded border border-black/20 dark:border-white/25 {drawStyle.color === c.hex ? 'outline outline-2 outline-offset-1 outline-brand-pink' : ''}"
+                style="background:{c.hex}"
+                onclick={() => setDrawStyle({ color: c.hex })}
+                title="Stroke color {c.name}"
+                aria-label="Stroke color {c.name}"
+                aria-pressed={drawStyle.color === c.hex}
+              ></button>
+            {/each}
+            <div class="w-px h-5 bg-ink-200 dark:bg-night-line mx-0.5"></div>
+            {#each DRAW_WIDTHS as w (w.value)}
+              <button
+                type="button"
+                class="{segBase} {drawStyle.width === w.value ? segOn : segOff}"
+                onclick={() => setDrawStyle({ width: w.value })}
+                title="Stroke width {w.value}px"
+                aria-pressed={drawStyle.width === w.value}
+              >{w.label}</button>
+            {/each}
+            <button
+              type="button"
+              class="{segBase} {drawStyle.dashed ? segOn : segOff}"
+              onclick={() => setDrawStyle({ dashed: !drawStyle.dashed })}
+              title="Dashed outline"
+              aria-pressed={drawStyle.dashed}
+            >Dash</button>
+            {#if activeTool === "rect" || activeTool === "circle"}
+              <div class="w-px h-5 bg-ink-200 dark:bg-night-line mx-0.5"></div>
+              <button
+                type="button"
+                class="{segBase} {drawStyle.fill === 'none' ? segOn : segOff}"
+                onclick={() => setDrawStyle({ fill: "none" })}
+                title="No fill"
+                aria-pressed={drawStyle.fill === "none"}
+              >No fill</button>
+              <button
+                type="button"
+                class="{segBase} {drawStyle.fill === 'translucent' ? segOn : segOff}"
+                onclick={() => setDrawStyle({ fill: "translucent" })}
+                title="Translucent fill — highlight an area without hiding it"
+                aria-pressed={drawStyle.fill === "translucent"}
+              >Tint</button>
+              <button
+                type="button"
+                class="{segBase} {drawStyle.fill === 'solid' ? segOn : segOff}"
+                onclick={() => setDrawStyle({ fill: "solid" })}
+                title="Solid fill — blocks out what's underneath"
+                aria-pressed={drawStyle.fill === "solid"}
+              >Solid</button>
+            {/if}
+            {#if activeTool === "rect"}
+              <div class="w-px h-5 bg-ink-200 dark:bg-night-line mx-0.5"></div>
+              <span class="text-[10px] uppercase tracking-wide text-ink-500 dark:text-night-mute">R</span>
+              {#each DRAW_RADII as r (r)}
+                <button
+                  type="button"
+                  class="{segBase} {drawStyle.radius === r ? segOn : segOff}"
+                  onclick={() => setDrawStyle({ radius: r })}
+                  title="Corner radius {r}px"
+                  aria-pressed={drawStyle.radius === r}
+                >{r}</button>
+              {/each}
+            {/if}
+          </div>
+        {/if}
       {/if}
       {#if activeTool}
         <p class="text-[11px] text-ink-500 dark:text-night-dim">

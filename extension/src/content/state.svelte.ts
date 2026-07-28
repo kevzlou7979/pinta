@@ -1,7 +1,14 @@
 /// <reference types="chrome" />
 
-import type { Annotation, Point } from "@pinta/shared";
+import type { Annotation, DrawStyle, Point } from "@pinta/shared";
 import type { DrawTool } from "./tools/draw.js";
+import {
+  DRAW_STYLE_DEFAULT,
+  DRAW_STYLE_KEY,
+  readDrawStyle,
+  wireDrawStyle,
+  type DrawStyleState,
+} from "../lib/draw-style.js";
 
 export type Mode =
   | "idle"
@@ -56,6 +63,8 @@ export type Draft = {
   id: string;
   kind: DrawTool;
   color: string;
+  /** Wire style captured at stroke start (non-defaults only). */
+  style?: DrawStyle;
   strokes: Point[];      // page coords
   createdAt: number;
 };
@@ -63,6 +72,38 @@ export type Draft = {
 class ContentState {
   mode = $state<Mode>("idle");
   tool = $state<DrawTool>("arrow");
+  // Current draw style for stroke tools. Persisted + storage-synced so the
+  // side panel's options strip and the floating palette share it.
+  drawStyle = $state<DrawStyleState>({ ...DRAW_STYLE_DEFAULT });
+
+  /** Load the draw style + subscribe to changes (side panel writes the
+   *  same key). Called once from the content entry (overlay.ts). */
+  initDrawStyle(): void {
+    try {
+      void chrome.storage?.local
+        ?.get(DRAW_STYLE_KEY)
+        .then((s) => (this.drawStyle = readDrawStyle(s?.[DRAW_STYLE_KEY])));
+      chrome.storage?.onChanged?.addListener((changes, area) => {
+        if (area === "local" && changes[DRAW_STYLE_KEY]) {
+          this.drawStyle = readDrawStyle(changes[DRAW_STYLE_KEY].newValue);
+        }
+      });
+    } catch {
+      // storage unavailable — defaults stay
+    }
+  }
+
+  /** Update the current draw style and persist it. */
+  setDrawStyle(patch: Partial<DrawStyleState>): void {
+    this.drawStyle = { ...this.drawStyle, ...patch };
+    try {
+      void chrome.storage?.local?.set({
+        [DRAW_STYLE_KEY]: { ...this.drawStyle },
+      });
+    } catch {
+      // storage unavailable — style is session-only
+    }
+  }
   // Free Transform (v2): a TOGGLE independent of `mode`. While on, the user
   // keeps using the normal tools; the side panel batches every annotation
   // created during the session into ONE on "Done free transforming".
@@ -293,11 +334,12 @@ class ContentState {
     if (this.mode !== "draw") this.mode = "draw";
   }
 
-  beginStroke(point: Point, color: string): void {
+  beginStroke(point: Point): void {
     this.inProgress = {
       id: uid(),
       kind: this.tool,
-      color,
+      color: this.drawStyle.color,
+      style: wireDrawStyle(this.drawStyle),
       strokes: [point],
       createdAt: Date.now(),
     };

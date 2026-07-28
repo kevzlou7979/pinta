@@ -68,6 +68,24 @@ export type AnnotationTarget = {
  */
 export type AnnotationStatus = "applying" | "done" | "error";
 
+/**
+ * Optional visual styling for stroke-based drawings (arrow / rect /
+ * circle / freehand / pin). Only non-default fields are set, so the
+ * wire payload stays lean; absent = classic 3px solid outline.
+ */
+export type DrawStyle = {
+  /** Stroke width in px (default 3). */
+  width?: number;
+  /** Stroke opacity 0–1 (default 1; committed strokes still render dimmed on-page). */
+  opacity?: number;
+  /** Fill the shape (rect/circle) with the stroke color. */
+  fill?: "translucent" | "solid";
+  /** Corner radius in px — rect only (default 0). */
+  radius?: number;
+  /** Dashed outline instead of solid. */
+  dashed?: boolean;
+};
+
 export type Annotation = {
   id: string;
   createdAt: number;
@@ -75,6 +93,9 @@ export type Annotation = {
   kind: AnnotationKind;
   strokes: Point[];
   color: string;
+
+  /** Styling for drawn shapes; absent = default 3px solid outline. */
+  style?: DrawStyle;
 
   /**
    * One or more DOM targets the annotation refers to. Multi-select
