@@ -184,6 +184,10 @@
         isProcessing = true;
       }
       else if (m?.type === "processing.end") isProcessing = false;
+      else if (m?.type === "annotated.reapply" && m.annotation) {
+        // Redo / undo-of-remove — re-apply the annotation's preview.
+        reapplyAnnotation(m.annotation);
+      }
       else if (m?.type === "annotated.replay" && m.annotation) {
         // Side panel is rehydrating us after navigation. Re-resolve the
         // selector and stamp a pin badge on the matching element. We
@@ -2758,6 +2762,50 @@
    * silently skip the halo. The side-panel card still appears for the
    * user to edit/remove.
    */
+  // Redo / undo-of-remove: re-resolve the element and RE-APPLY the
+  // annotation's preview (unlike replay, which only re-paints the badge over
+  // the current state). Covers the common kinds — select(cssChanges), delete,
+  // in-place text edit. Move / text-insert fall back to a badge-only replay.
+  function reapplyAnnotation(ann: Annotation): void {
+    if (content.annotated.some((a) => a.id === ann.id)) return; // already live
+    const targets = ann.targets ?? (ann.target ? [ann.target] : []);
+    const primary = targets[0];
+    if (!primary) {
+      return;
+    }
+    const el = content.findElementForEntry({
+      selector: primary.selector,
+      outerHTML: primary.outerHTML,
+      nearbyText: primary.nearbyText,
+    });
+    if (!el) return;
+    const html = el as HTMLElement;
+    const orig = html.style?.cssText ?? "";
+    const origHtml = html.innerHTML;
+    const url = ann.url ?? location.href;
+    if (ann.kind === "delete") {
+      html.style.setProperty("display", "none", "important");
+      content.recordAnnotated(
+        ann.id, el, orig, origHtml,
+        primary.selector, primary.outerHTML, primary.nearbyText,
+        url, false, undefined, true,
+      );
+      return;
+    }
+    const changes = ann.cssChanges ?? {};
+    if (Object.keys(changes).length) applyPreview(html, orig, changes);
+    if (ann.contentChange) {
+      try { html.textContent = ann.contentChange.textAfter; } catch { /* ignore */ }
+    }
+    content.recordAnnotated(
+      ann.id, el, orig, origHtml,
+      primary.selector, primary.outerHTML, primary.nearbyText, url,
+    );
+    if (Object.keys(changes).length) {
+      content.attachPreviewChanges(ann.id, diffAppliedProps(orig, html.style.cssText));
+    }
+  }
+
   function replayAnnotation(ann: Annotation, attempt = 0): void {
     if (ann.kind !== "select") return;
     const targets = ann.targets ?? (ann.target ? [ann.target] : []);

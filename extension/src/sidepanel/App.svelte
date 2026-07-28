@@ -639,10 +639,12 @@
         url: m.url,
       };
       app.addAnnotation(annotation);
+      pushUndo(annotation);
       if (freeTransform) transformIds = [...transformIds, annotation.id];
       activeTool = null;
     } else if (m?.type === "annotation.draw-committed" && m.annotation) {
       app.addAnnotation(m.annotation);
+      pushUndo(m.annotation);
       if (freeTransform) transformIds = [...transformIds, m.annotation.id];
     }
   };
@@ -726,6 +728,10 @@
     const merged = buildMergedTransform(anns);
     await app.addAnnotation(merged);
     for (const id of ids) await app.removeAnnotation(id);
+    // Fold the session into undo history: drop the per-op entries, add the
+    // merged one so a later Undo removes the whole result cleanly.
+    undoStack = [...undoStack.filter((a) => !ids.includes(a.id)), merged];
+    redoStack = [];
   }
 
   // Cancel: roll back every op on the page (full removeAnnotation) + drop them.
@@ -748,9 +754,68 @@
       .catch(() => {});
   }
 
+  // ── Undo / Redo ─────────────────────────────────────────────────────
+  // Stacks of annotations. Adding any annotation pushes it (and clears redo);
+  // Undo removes the most-recent (rolls back its on-page preview) and moves it
+  // to the redo stack; Redo re-adds it + re-applies the preview. Works for
+  // Free Transform too — each op is an annotation, so Undo steps through them.
+  let undoStack = $state<Annotation[]>([]);
+  let redoStack = $state<Annotation[]>([]);
+  const canUndo = $derived(undoStack.length > 0);
+  const canRedo = $derived(redoStack.length > 0);
+
+  function pushUndo(ann: Annotation): void {
+    undoStack = [...undoStack, ann];
+    redoStack = [];
+  }
+
+  async function readdAnnotation(ann: Annotation): Promise<void> {
+    await app.addAnnotation(ann);
+    if (activeTabId != null) {
+      chrome.tabs
+        .sendMessage(activeTabId, { type: "annotated.reapply", annotation: ann })
+        .catch(() => {});
+    }
+  }
+
+  async function undoLast(): Promise<void> {
+    const ann = undoStack.at(-1);
+    if (!ann) return;
+    undoStack = undoStack.slice(0, -1);
+    await removeAnnotation(ann.id); // companion + content rollback
+    if (freeTransform) transformIds = transformIds.filter((i) => i !== ann.id);
+    redoStack = [...redoStack, ann];
+  }
+
+  async function redoLast(): Promise<void> {
+    const ann = redoStack.at(-1);
+    if (!ann) return;
+    redoStack = redoStack.slice(0, -1);
+    await readdAnnotation(ann);
+    if (freeTransform) transformIds = [...transformIds, ann.id];
+    undoStack = [...undoStack, ann];
+  }
+
+  function undoRedoHotkey(e: KeyboardEvent): void {
+    if (!(e.ctrlKey || e.metaKey) || e.altKey) return;
+    // Don't hijack native text undo/redo while typing in a field.
+    const t = e.target as HTMLElement | null;
+    const tag = t?.tagName;
+    if (tag === "INPUT" || tag === "TEXTAREA" || t?.isContentEditable) return;
+    const k = e.key.toLowerCase();
+    if (k === "z" && !e.shiftKey) {
+      e.preventDefault();
+      void undoLast();
+    } else if ((k === "z" && e.shiftKey) || k === "y") {
+      e.preventDefault();
+      void redoLast();
+    }
+  }
+
   onMount(async () => {
     chrome.runtime.onMessage.addListener(runtimeMessageHandler);
     window.addEventListener("keydown", voiceHotkey);
+    window.addEventListener("keydown", undoRedoHotkey);
 
     // Floating-toolbar pref → hide the side-panel TOOL grid when on. Read
     // once + stay live via storage.onChanged (SettingsPanel writes the key).
@@ -823,6 +888,7 @@
   onDestroy(() => {
     chrome.runtime.onMessage.removeListener(runtimeMessageHandler);
     window.removeEventListener("keydown", voiceHotkey);
+    window.removeEventListener("keydown", undoRedoHotkey);
     app.stop();
   });
 
@@ -1306,6 +1372,7 @@
       },
     };
     app.addAnnotation(annotation);
+    pushUndo(annotation);
     selector = "";
     comment = "";
   }
@@ -1326,6 +1393,7 @@
       viewport: snapshotViewport(),
     };
     app.addAnnotation(annotation);
+    pushUndo(annotation);
   }
 
   function removeAnnotation(id: string) {
@@ -2501,6 +2569,26 @@
           Tool
         </h2>
         <div class="flex items-center gap-1.5">
+          <button
+            type="button"
+            class="inline-flex items-center justify-center w-8 h-8 rounded-md border border-ink-200 bg-white text-ink-700 hover:text-brand-pink hover:bg-ink-50 dark:border-night-line dark:bg-night-card dark:text-night-dim dark:hover:text-brand-pink-light dark:hover:bg-night-alt transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
+            disabled={!canUndo}
+            onclick={() => void undoLast()}
+            title="Undo (Ctrl+Z)"
+            aria-label="Undo last annotation"
+          >
+            <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 7v6h6"/><path d="M21 17a9 9 0 0 0-9-9 9 9 0 0 0-6 2.3L3 13"/></svg>
+          </button>
+          <button
+            type="button"
+            class="inline-flex items-center justify-center w-8 h-8 rounded-md border border-ink-200 bg-white text-ink-700 hover:text-brand-pink hover:bg-ink-50 dark:border-night-line dark:bg-night-card dark:text-night-dim dark:hover:text-brand-pink-light dark:hover:bg-night-alt transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
+            disabled={!canRedo}
+            onclick={() => void redoLast()}
+            title="Redo (Ctrl+Shift+Z)"
+            aria-label="Redo"
+          >
+            <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21 7v6h-6"/><path d="M3 17a9 9 0 0 1 9-9 9 9 0 0 1 6 2.3L21 13"/></svg>
+          </button>
           <button
             type="button"
             class="inline-flex items-center justify-center w-8 h-8 rounded-md border border-ink-200 bg-white text-ink-700 hover:text-brand-pink hover:bg-ink-50 dark:border-night-line dark:bg-night-card dark:text-night-dim dark:hover:text-brand-pink-light dark:hover:bg-night-alt transition-colors disabled:opacity-50"
