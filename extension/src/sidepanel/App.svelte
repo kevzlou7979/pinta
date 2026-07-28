@@ -337,6 +337,9 @@
   // SUBMITTED-tray ⋮ kebab (Cancel / Reload / Commit / Commit & push /
   // Clear done) — collapses the tray header actions into one menu.
   let trayMenuOpen = $state(false);
+  // TOOL-header ⋮ kebab — collapses Undo / Redo / Import into one menu,
+  // mirroring the SUBMITTED tray kebab.
+  let toolMenuOpen = $state(false);
   // Separate open-state for the Annotate list-header export popover, so
   // its dropdown toggles independently of the footer's downloadDropdown
   // (both render the shared `downloadMenuItems` snippet).
@@ -2577,41 +2580,69 @@
         <h2 class="text-xs uppercase tracking-wide text-ink-500 dark:text-night-mute font-medium">
           Tool
         </h2>
-        <div class="flex items-center gap-1.5">
+        <!-- Undo / Redo / Import live behind one ⋮ kebab, mirroring the
+             SUBMITTED tray menu. Hotkeys (Ctrl+Z / Ctrl+Shift+Z) still
+             work without opening the menu. -->
+        <div class="relative shrink-0" use:clickOutside={() => (toolMenuOpen = false)}>
           <button
             type="button"
-            class="inline-flex items-center justify-center w-8 h-8 rounded-md border border-ink-200 bg-white text-ink-700 hover:text-brand-pink hover:bg-ink-50 dark:border-night-line dark:bg-night-card dark:text-night-dim dark:hover:text-brand-pink-light dark:hover:bg-night-alt transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
-            disabled={!canUndo}
-            onclick={() => void undoLast()}
-            title="Undo (Ctrl+Z)"
-            aria-label="Undo last annotation"
-          >
-            <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 7v6h6"/><path d="M21 17a9 9 0 0 0-9-9 9 9 0 0 0-6 2.3L3 13"/></svg>
-          </button>
-          <button
-            type="button"
-            class="inline-flex items-center justify-center w-8 h-8 rounded-md border border-ink-200 bg-white text-ink-700 hover:text-brand-pink hover:bg-ink-50 dark:border-night-line dark:bg-night-card dark:text-night-dim dark:hover:text-brand-pink-light dark:hover:bg-night-alt transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
-            disabled={!canRedo}
-            onclick={() => void redoLast()}
-            title="Redo (Ctrl+Shift+Z)"
-            aria-label="Redo"
-          >
-            <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21 7v6h-6"/><path d="M3 17a9 9 0 0 1 9-9 9 9 0 0 1 6 2.3L21 13"/></svg>
-          </button>
-          <button
-            type="button"
-            class="inline-flex items-center justify-center w-8 h-8 rounded-md border border-ink-200 bg-white text-ink-700 hover:text-brand-pink hover:bg-ink-50 dark:border-night-line dark:bg-night-card dark:text-night-dim dark:hover:text-brand-pink-light dark:hover:bg-night-alt transition-colors disabled:opacity-50"
-            onclick={() => importFileInput?.click()}
-            disabled={importBusy}
-            title={importBusy ? "Importing…" : "Import a .pinta or .md file shared by a teammate"}
-            aria-label="Import a .pinta or .md file shared by a teammate"
+            class="w-7 h-7 inline-flex items-center justify-center rounded-full border border-ink-200 bg-white text-ink-600 hover:text-brand-pink hover:border-ink-400 dark:border-night-line dark:bg-night-card dark:text-night-dim dark:hover:text-brand-pink-light transition-colors"
+            onclick={() => (toolMenuOpen = !toolMenuOpen)}
+            aria-haspopup="menu"
+            aria-expanded={toolMenuOpen}
+            aria-label="Tool actions"
+            title="Actions"
           >
             {#if importBusy}
-              <svg class="animate-spin" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21 12a9 9 0 1 1-6.219-8.56"/></svg>
+              <svg class="animate-spin" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21 12a9 9 0 1 1-6.219-8.56"/></svg>
             {:else}
-              <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" y1="3" x2="12" y2="15"/></svg>
+              <svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><circle cx="12" cy="5" r="1.6"/><circle cx="12" cy="12" r="1.6"/><circle cx="12" cy="19" r="1.6"/></svg>
             {/if}
           </button>
+          {#if toolMenuOpen}
+            <div class="absolute right-0 top-full mt-1 z-30 w-52 rounded-md border border-ink-200 bg-white shadow-lg dark:border-night-line dark:bg-night-card py-1" role="menu">
+              <button
+                type="button"
+                class="w-full flex items-center gap-2.5 px-3 py-1.5 text-[12px] text-ink-700 dark:text-night-dim hover:bg-ink-50 dark:hover:bg-night-alt hover:text-ink-900 dark:hover:text-night-text disabled:opacity-50"
+                role="menuitem"
+                disabled={!canUndo}
+                onclick={() => { void undoLast(); toolMenuOpen = false; }}
+                title="Undo the last annotation (Ctrl+Z)"
+              >
+                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 7v6h6"/><path d="M21 17a9 9 0 0 0-9-9 9 9 0 0 0-6 2.3L3 13"/></svg>
+                <span class="flex-1 text-left">Undo</span>
+                <span class="text-[10px] text-ink-400 dark:text-night-mute font-mono">Ctrl+Z</span>
+              </button>
+              <button
+                type="button"
+                class="w-full flex items-center gap-2.5 px-3 py-1.5 text-[12px] text-ink-700 dark:text-night-dim hover:bg-ink-50 dark:hover:bg-night-alt hover:text-ink-900 dark:hover:text-night-text disabled:opacity-50"
+                role="menuitem"
+                disabled={!canRedo}
+                onclick={() => { void redoLast(); toolMenuOpen = false; }}
+                title="Redo (Ctrl+Shift+Z)"
+              >
+                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21 7v6h-6"/><path d="M3 17a9 9 0 0 1 9-9 9 9 0 0 1 6 2.3L21 13"/></svg>
+                <span class="flex-1 text-left">Redo</span>
+                <span class="text-[10px] text-ink-400 dark:text-night-mute font-mono">Ctrl+Shift+Z</span>
+              </button>
+              <div class="my-1 border-t border-ink-100 dark:border-night-line"></div>
+              <button
+                type="button"
+                class="w-full flex items-center gap-2.5 px-3 py-1.5 text-[12px] text-ink-700 dark:text-night-dim hover:bg-ink-50 dark:hover:bg-night-alt hover:text-ink-900 dark:hover:text-night-text disabled:opacity-50"
+                role="menuitem"
+                disabled={importBusy}
+                onclick={() => { importFileInput?.click(); toolMenuOpen = false; }}
+                title="Import a .pinta or .md file shared by a teammate"
+              >
+                {#if importBusy}
+                  <svg class="animate-spin" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21 12a9 9 0 1 1-6.219-8.56"/></svg>
+                {:else}
+                  <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" y1="3" x2="12" y2="15"/></svg>
+                {/if}
+                {importBusy ? "Importing…" : "Import .pinta / .md"}
+              </button>
+            </div>
+          {/if}
         </div>
       </div>
       <input
