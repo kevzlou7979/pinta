@@ -1,4 +1,4 @@
-import type { AnnotationKind, DrawStyle, Point } from "@pinta/shared";
+import type { AnnotationKind, Point } from "@pinta/shared";
 
 // "image" is a placement tool (drag-resize handles) handled by a
 // separate overlay pipeline, not a stroke-based draw tool — exclude
@@ -24,23 +24,7 @@ export type DrawOptions = {
   lineWidth: number;
   /** subtract from page-space points to map into viewport space */
   translate: { x: number; y: number };
-  /** Optional shape styling (fill / radius / dash). `width`/`opacity`
-   *  inside are already resolved into lineWidth/opacity by callers. */
-  style?: DrawStyle;
 };
-
-/** Alpha used when filling a shape with the stroke color. */
-const FILL_ALPHA = { translucent: 0.18, solid: 0.85 } as const;
-
-/** Fill the current path per style, preserving the caller's stroke alpha. */
-function fillPath(ctx: CanvasRenderingContext2D, opts: DrawOptions): void {
-  const fill = opts.style?.fill;
-  if (!fill) return;
-  const prev = ctx.globalAlpha;
-  ctx.globalAlpha = prev * FILL_ALPHA[fill];
-  ctx.fill();
-  ctx.globalAlpha = prev;
-}
 
 const ARROW_HEAD_LEN = 14;
 const ARROW_HEAD_ANGLE = Math.PI / 7;
@@ -60,9 +44,6 @@ export function drawAnnotation(
   ctx.fillStyle = opts.color;
   ctx.globalAlpha = opts.opacity;
   ctx.lineWidth = opts.lineWidth;
-  if (opts.style?.dashed) {
-    ctx.setLineDash([opts.lineWidth * 3, opts.lineWidth * 2]);
-  }
 
   switch (kind) {
     case "arrow":
@@ -132,16 +113,7 @@ function renderRect(
   const y = Math.min(a.y, b.y);
   const w = Math.abs(b.x - a.x);
   const h = Math.abs(b.y - a.y);
-  // Clamp the radius so tiny rects stay well-formed.
-  const r = Math.max(0, Math.min(opts.style?.radius ?? 0, w / 2, h / 2));
-  ctx.beginPath();
-  if (r > 0 && typeof ctx.roundRect === "function") {
-    ctx.roundRect(x, y, w, h, r);
-  } else {
-    ctx.rect(x, y, w, h);
-  }
-  fillPath(ctx, opts);
-  ctx.stroke();
+  ctx.strokeRect(x, y, w, h);
 }
 
 function renderCircle(
@@ -159,7 +131,6 @@ function renderCircle(
   if (rx === 0 || ry === 0) return;
   ctx.beginPath();
   ctx.ellipse(cx, cy, rx, ry, 0, 0, Math.PI * 2);
-  fillPath(ctx, opts);
   ctx.stroke();
 }
 

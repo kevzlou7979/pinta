@@ -157,9 +157,6 @@ if (!document.querySelector(HOST_TAG)) {
   // Track whether the Pinta side panel is open — the toolbar hides when it's
   // closed.
   content.initPanelPresence();
-  // Load the persisted draw style (stroke color / width / fill / radius /
-  // dashed) and keep it live-synced with the side panel's options strip.
-  content.initDrawStyle();
 
   mount(Overlay, { target: root });
 }

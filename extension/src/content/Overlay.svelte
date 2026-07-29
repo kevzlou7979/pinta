@@ -2949,7 +2949,6 @@
       kind: draft.kind,
       strokes: draft.strokes,
       color: draft.color,
-      style: draft.style,
       comment: draftComment.trim(),
       viewport: snapshotViewport(),
       // Resolve the element under the drawing's "target anchor" (arrow

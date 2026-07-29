@@ -54,13 +54,6 @@ export const TOOLS: ToolDef[] = [
     svg: '<rect x="3" y="6" width="18" height="12" rx="1.5"/>',
   },
   {
-    id: "circle",
-    label: "Circle",
-    key: "O",
-    draw: true,
-    svg: '<ellipse cx="12" cy="12" rx="9" ry="7"/>',
-  },
-  {
     id: "freehand",
     label: "Pen",
     key: "P",
@@ -146,46 +139,6 @@ export const TOOL_GROUP: Record<Tool, "annotate" | "transform"> = {
 /** True when TOOLS[i] starts a new group vs TOOLS[i-1] (→ draw a divider). */
 export function startsNewGroup(i: number): boolean {
   return i > 0 && TOOL_GROUP[TOOLS[i]!.id] !== TOOL_GROUP[TOOLS[i - 1]!.id];
-}
-
-/**
- * Toolbar slots — the draw shapes (arrow/rect/circle/pen/pin) collapse
- * into ONE expandable slot (Photoshop-style flyout); every other tool is
- * its own slot. Shared by the side-panel row and the floating palette so
- * the two never drift.
- */
-export type ToolSlot =
-  | { kind: "tool"; def: ToolDef }
-  | { kind: "draw-group"; shapes: ToolDef[] };
-
-export const DRAW_SHAPES: ToolDef[] = TOOLS.filter((t) => t.draw);
-
-export const TOOL_SLOTS: ToolSlot[] = (() => {
-  const slots: ToolSlot[] = [];
-  let grouped = false;
-  for (const t of TOOLS) {
-    if (t.draw) {
-      if (!grouped) {
-        slots.push({ kind: "draw-group", shapes: DRAW_SHAPES });
-        grouped = true;
-      }
-      continue;
-    }
-    slots.push({ kind: "tool", def: t });
-  }
-  return slots;
-})();
-
-/** Group of a slot (draw-group is always "annotate"). */
-export function slotGroup(s: ToolSlot): "annotate" | "transform" {
-  return s.kind === "draw-group" ? "annotate" : TOOL_GROUP[s.def.id];
-}
-
-/** True when TOOL_SLOTS[i] starts a new group vs its predecessor. */
-export function slotStartsNewGroup(i: number): boolean {
-  return (
-    i > 0 && slotGroup(TOOL_SLOTS[i]!) !== slotGroup(TOOL_SLOTS[i - 1]!)
-  );
 }
 
 /** Non-draw tools each map to their own overlay Mode; draw tools map to the
