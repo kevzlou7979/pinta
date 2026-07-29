@@ -1,6 +1,7 @@
 <script lang="ts">
   import { onMount, onDestroy } from "svelte";
   import { app } from "../lib/state.svelte.js";
+  import { confirmDialog } from "../lib/confirm.svelte.js";
 
   // `open` is $bindable so the popover can be driven from outside (the
   // header's ⋮ menu) while keeping its own trigger for standalone use.
@@ -82,16 +83,19 @@
     open = false;
     const result = await app.forkImportedToLocal(id);
     if (result === "would-overwrite") {
-      const ok = confirm(
-        "Forking will replace your current draft annotations on this URL. " +
-          "Continue and lose the current draft?",
-      );
+      const ok = await confirmDialog({
+        title: "Replace current draft?",
+        message:
+          "Forking will replace your current draft annotations on this URL. Continue and lose the current draft?",
+        confirmLabel: "Fork",
+        danger: true,
+      });
       if (!ok) return;
       await app.forkImportedToLocal(id, { allowOverwrite: true });
     }
   }
   async function removeImported(id: string) {
-    if (!confirm("Remove this imported session?")) return;
+    if (!(await confirmDialog({ message: "Remove this imported session?", confirmLabel: "Remove", danger: true }))) return;
     await app.removeImported(id);
   }
 
@@ -106,7 +110,7 @@
       `Clear ${parts.join(" + ")} session${
         summaries.length + app.importedSessions.length === 1 ? "" : "s"
       }? Your active draft (if any) is kept. This can't be undone.`;
-    if (!confirm(msg)) return;
+    if (!(await confirmDialog({ title: "Clear history?", message: msg, confirmLabel: "Clear", danger: true }))) return;
     clearing = true;
     try {
       await app.clearAllHistory();

@@ -12,6 +12,7 @@
 
   import { onMount, tick } from "svelte";
   import { app, type TestPilotTest, type TestPilotStatus, type TestPilotSection } from "../lib/state.svelte.js";
+  import { confirmDialog } from "../lib/confirm.svelte.js";
   import MicButton from "../lib/voice/MicButton.svelte";
   import { parseStep } from "../lib/step-md.js";
   import { highlight } from "../lib/prism-setup.js";
@@ -439,12 +440,14 @@
     sectionKebabOpen = null;
     startEditing(`section:${title}`);
   }
-  function onSectionDelete(title: string) {
+  async function onSectionDelete(title: string) {
     sectionKebabOpen = null;
     if (
-      !confirm(
-        `Delete section "${title}" and all its tests? This can't be undone.`,
-      )
+      !(await confirmDialog({
+        message: `Delete section "${title}" and all its tests? This can't be undone.`,
+        confirmLabel: "Delete",
+        danger: true,
+      }))
     )
       return;
     app.removeTestPilotSection(title);

@@ -23,6 +23,7 @@
     AuditCheckStatus,
   } from "@pinta/shared";
   import { app } from "../lib/state.svelte.js";
+  import { confirmDialog } from "../lib/confirm.svelte.js";
   import { parseStep } from "../lib/step-md.js";
   import { auditProgress, statusGlyph } from "../lib/audit-flow.js";
   import { parseAuditCatalog } from "../lib/audit-catalog-doc.js";
@@ -209,11 +210,15 @@
   function cancelAudit(): void {
     app.cancelAudit();
   }
-  function clearAudit(): void {
+  async function clearAudit(): Promise<void> {
     if (
-      confirm(
-        "Clear this audit run? Your dispositions and custom checks for it will be removed.",
-      )
+      await confirmDialog({
+        title: "Clear audit run?",
+        message:
+          "Clear this audit run? Your dispositions and custom checks for it will be removed.",
+        confirmLabel: "Clear",
+        danger: true,
+      })
     ) {
       app.clearAuditRun();
     }
@@ -469,9 +474,15 @@
   function cancelRenameCategory(): void {
     renamingCategory = null;
   }
-  function onDeleteCategory(categoryId: string): void {
+  async function onDeleteCategory(categoryId: string): Promise<void> {
     categoryKebabOpen = null;
-    if (confirm("Delete this category and its checks from the run?")) {
+    if (
+      await confirmDialog({
+        message: "Delete this category and its checks from the run?",
+        confirmLabel: "Delete",
+        danger: true,
+      })
+    ) {
       app.deleteAuditCategory(categoryId);
     }
   }

@@ -12,6 +12,7 @@
     ModuleBoardGroup,
   } from "@pinta/shared";
   import { app } from "../lib/state.svelte.js";
+  import { confirmDialog } from "../lib/confirm.svelte.js";
   import StepList from "./StepList.svelte";
 
   type Props = {
@@ -169,19 +170,13 @@
   // Pilot → <today>"). Shown as a dismissible notice above the board.
   let notice = $state<string | null>(null);
 
-  // In-panel confirm. Chrome SIDE PANELS silently no-op window.confirm()
-  // (returns undefined without showing a dialog), so every confirm-gated
-  // action (Complete, Move to review, End Day, batch Complete) died with
-  // no visible effect. This renders the question as a bar above the board
-  // instead; the action runs only on an explicit Confirm click.
-  let confirmReq = $state<{ message: string; run: () => void } | null>(null);
+  // Confirm-gated actions (Complete, Move to review, End Day, batch Complete)
+  // route through the shared in-panel modal (native confirm() is a silent
+  // no-op inside Chrome side panels).
   function askConfirm(message: string, run: () => void): void {
-    confirmReq = { message, run };
-  }
-  function confirmYes(): void {
-    const r = confirmReq;
-    confirmReq = null;
-    r?.run();
+    void confirmDialog({ message }).then((ok) => {
+      if (ok) run();
+    });
   }
 
   // ── Multi-start ────────────────────────────────────────────────────
@@ -716,29 +711,6 @@
         type="button"
         class="shrink-0 underline"
         onclick={() => (app.moduleBoards[spec.id]!.error = null)}>dismiss</button
-      >
-    </div>
-  {/if}
-
-  {#if confirmReq}
-    <!-- In-panel confirm (window.confirm is a silent no-op in side panels). -->
-    <div
-      class="sticky top-0 z-20 rounded-lg border border-amber-400/70 bg-amber-50 dark:border-amber-700/60 dark:bg-amber-950/50 px-3 py-2 flex items-center gap-2"
-      role="alertdialog"
-      aria-label="Confirm action"
-    >
-      <span class="flex-1 min-w-0 text-[12px] font-medium text-amber-900 dark:text-amber-100 break-words">
-        {confirmReq.message}
-      </span>
-      <button
-        type="button"
-        class="shrink-0 text-[12px] text-ink-500 dark:text-night-mute hover:text-ink-800 dark:hover:text-night-text underline"
-        onclick={() => (confirmReq = null)}>Cancel</button
-      >
-      <button
-        type="button"
-        class="shrink-0 inline-flex items-center gap-1 text-[12px] font-semibold rounded-md px-3 py-1 bg-brand-pink text-white hover:bg-brand-magenta dark:hover:bg-brand-pink-light"
-        onclick={confirmYes}>Confirm</button
       >
     </div>
   {/if}

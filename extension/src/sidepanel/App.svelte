@@ -31,6 +31,8 @@
   import { matchAny, suggestPattern } from "../lib/url-patterns.js";
   import type { Companion } from "../lib/companions.js";
   import AnnotationCard from "./AnnotationCard.svelte";
+  import ConfirmModal from "./ConfirmModal.svelte";
+  import { confirmDialog } from "../lib/confirm.svelte.js";
   import NoteComposer from "./NoteComposer.svelte";
   import SessionHistory from "./SessionHistory.svelte";
   import SettingsPanel from "./SettingsPanel.svelte";
@@ -741,9 +743,22 @@
   async function cancelFreeTransform(): Promise<void> {
     const ids = transformIds;
     transformIds = [];
-    for (const id of ids) await removeAnnotation(id);
     freeTransform = false;
     toggleTransformOnPage(false);
+    const total = app.session?.annotations.length ?? 0;
+    for (const id of ids) removeAnnotation(id);
+    // Prune these ops from undo history (they're gone).
+    undoStack = undoStack.filter((a) => !ids.includes(a.id));
+    redoStack = [];
+    // Belt-and-suspenders: if the session's ops were the ONLY annotations,
+    // wipe any lingering pin badges the per-id removal may have missed (e.g. an
+    // op that wasn't tracked due to a toggle-broadcast race). Safe because
+    // there's nothing else to keep.
+    if (ids.length >= total && activeTabId != null) {
+      chrome.tabs
+        .sendMessage(activeTabId, { type: "annotated.clear" })
+        .catch(() => {});
+    }
   }
 
   // MV3 doesn't inject content scripts into tabs that were already open when
@@ -3242,10 +3257,13 @@
             onclick={async () => {
               const result = await app.forkImportedToLocal(impFooter.id);
               if (result === "would-overwrite") {
-                const ok = confirm(
-                  "Forking will replace your current draft annotations on this URL. " +
-                    "Continue and lose the current draft?",
-                );
+                const ok = await confirmDialog({
+                  title: "Replace current draft?",
+                  message:
+                    "Forking will replace your current draft annotations on this URL. Continue and lose the current draft?",
+                  confirmLabel: "Fork",
+                  danger: true,
+                });
                 if (!ok) return;
                 await app.forkImportedToLocal(impFooter.id, { allowOverwrite: true });
               }
@@ -3723,3 +3741,6 @@
     {/if}
   </div>
 </div>
+
+<!-- Shared confirmation modal — every confirm() / inline-confirm routes here. -->
+<ConfirmModal />
