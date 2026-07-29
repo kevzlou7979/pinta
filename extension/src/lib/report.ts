@@ -149,6 +149,10 @@ export type ReportDay = {
   /** ISO `yyyy-mm-dd`. */
   date: string;
   items: ReportItem[];
+  /** Human-friendly prose summary of the day, synthesized by the agent —
+   *  ONE natural-language paragraph across all repos, ≤1000 chars. Drives the
+   *  whole-report "summary" export. Absent on runs generated before this. */
+  summary?: string;
   /** Weekend dates whose items were folded into this weekday (display
    *  transparency). Only set after `foldWeekends`. */
   foldedFrom?: string[];
@@ -797,6 +801,42 @@ export function renderReportMarkdown(run: ReportRun): string {
 }
 
 /**
+ * Human-friendly whole-report export: ONE natural-language paragraph per day
+ * (the agent's `summary`), headed `Mon DD (~N chars)`, ≤1000 chars each — the
+ * "read it like a status update" format. Weekend work is folded into the
+ * adjacent weekday (matching the cards), concatenating any weekend summaries.
+ * Falls back to plain item lines for a day the agent didn't summarize.
+ */
+export function renderReportSummaryMarkdown(run: ReportRun): string {
+  const multiProject = reportProjects(run).length > 1;
+  // Weekday → its own summary is preserved by the fold; weekend summaries are
+  // looked up here and appended to the weekday they fold into.
+  const summaryByDate = new Map<string, string>();
+  for (const d of run.days) if (d.summary) summaryByDate.set(d.date, d.summary);
+  const days = foldWeekends(run.days, run.range);
+  const blocks: string[] = [];
+  for (const day of days) {
+    if (day.items.length === 0 && !day.summary) continue;
+    const parts: string[] = [];
+    if (day.summary) parts.push(day.summary.trim());
+    for (const wd of day.foldedFrom ?? []) {
+      const s = summaryByDate.get(wd);
+      if (s) parts.push(s.trim());
+    }
+    const head = formatShortDay(day.date);
+    if (parts.length > 0) {
+      const s = parts.join(" ").slice(0, 1000);
+      blocks.push(`${head} (~${s.length} chars)\n${s}`);
+    } else {
+      // No agent summary — fall back to the plain item lines for this day.
+      const lines = day.items.map((it) => reportItemLine(it, multiProject));
+      blocks.push(`${head}\n${lines.join("\n")}`);
+    }
+  }
+  return blocks.join("\n\n").trimEnd() + "\n";
+}
+
+/**
  * Validate + coerce a raw agent payload into a ReportRun. Accepts a
  * `type` of "report" / "report-run" / "task-report", or any object with
  * a `days` array (the load-bearing field). `ctx` supplies the values the
@@ -832,7 +872,11 @@ export function parseReportPayload(
       const it = coerceItem(rawItems[i], `${date}:${i}`);
       if (it) items.push(it);
     }
-    days.push({ date, items });
+    const summary =
+      typeof dd.summary === "string" && dd.summary.trim()
+        ? dd.summary.trim().slice(0, 1000)
+        : undefined;
+    days.push({ date, items, ...(summary ? { summary } : {}) });
   }
   if (days.length === 0) return null;
 

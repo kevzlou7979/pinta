@@ -43,6 +43,7 @@ import {
   parseShotResult,
   rangeWindow,
   renderReportMarkdown,
+  renderReportSummaryMarkdown,
   shotKeyForItem,
   type ReportCategory,
   type ReportCustomItem,
@@ -6046,6 +6047,15 @@ class ExtensionState {
     // Days are already folded; renderReportMarkdown re-folds harmlessly
     // (no weekend dates remain) and derives the label + project grouping.
     return renderReportMarkdown({ ...run, days: folded });
+  }
+
+  /** Human-friendly whole-report export — ONE prose paragraph per day (the
+   *  agent's `summary`, ≤1000 chars). Passes the TRUE-dated days so the
+   *  renderer folds weekends AND merges their summaries into the weekday. */
+  exportReportSummaryMarkdown(): string {
+    const run = this.report.currentRun;
+    if (!run) return "";
+    return renderReportSummaryMarkdown(run);
   }
 
   /** The exact day buckets the export renders: the run's true-dated days with

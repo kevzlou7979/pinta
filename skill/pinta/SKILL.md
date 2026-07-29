@@ -2727,6 +2727,7 @@ Return shape:
   "days": [
     {
       "date": "2026-06-05",
+      "summary": "Claims-forms review polish: tonalized the submit button and padded cards, plus an npm audit (deps) fix and a merged mid-edit network-error dialog reuse. On AWP 2.0, fixed the camera/viewer-portal drop zone.",
       "items": [
         { "id": "290", "ref": "#290", "url": "https://…/290", "title": "mid-edit network-error dialog reuse", "category": "bug-fix", "source": "pr", "project": "insclix-claim-forms" },
         { "id": "a1b2c3d", "ref": "a1b2c3d", "title": "tonalize submit button + pad card", "category": "polish", "source": "git", "files": ["src/SubmitButton.svelte", "src/Card.svelte", "src/tokens.css"], "fileCount": 5 },
@@ -2751,6 +2752,17 @@ lists (the extension caps stored files at 6 and shows the first 3 + a
 Pinta activity). Bucket every item under its true `date` (yyyy-mm-dd);
 don't pre-fold weekends or pre-group by project — the extension does
 both. Submit via `mark_session_done({id, summary: JSON.stringify(payload)})`.
+
+**Per-day `summary` (required).** Give EACH day a `summary`: ONE
+human-friendly paragraph (**≤1000 chars**) synthesizing that day's work in
+plain language across ALL repos — what shipped and why, grouped by repo/theme,
+NOT a commit list. Write it like a status update a teammate reads: *"Heavy
+claims-forms day (64+ commits, trimmed by the per-repo cap); on the training
+app, added pinned page headers and built out the full test experience."*
+Reference repos by short name, roll trivial chores together, note merge counts
+briefly, and mention when the per-repo cap trimmed a busy day. The extension's
+whole-report **summary export** prints these verbatim, one paragraph per date —
+so make each one readable on its own. Keep it under 1000 characters.
 
 **Token economy (§ build token-performant).** Keep gather bounded:
 date-window the git/gh queries, emit ONE concise line per item (top ~3

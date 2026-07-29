@@ -375,9 +375,11 @@
     // Pull annotation detail for any annotate roll-up day the agent didn't
     // expand, so the markdown carries the children even if never opened.
     await app.prepareReportExport();
+    // Human-friendly export: one prose paragraph per day (≤1000 chars),
+    // falling back to item lines for any day the agent didn't summarize.
     download(
       `pinta-report-${run.range}-${run.anchorDate}.md`,
-      app.exportReportMarkdown(),
+      app.exportReportSummaryMarkdown(),
     );
   }
 
