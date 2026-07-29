@@ -126,17 +126,30 @@ class ContentState {
 
   /** Ask the background whether the panel is open right now (covers the case
    *  where the overlay mounts AFTER the panel already connected). Live updates
-   *  arrive as `panel.state` messages, handled in Overlay. */
+   *  arrive as `panel.state` messages, handled in Overlay. Re-queries when the
+   *  tab becomes visible again — a backgrounded/discarded tab can miss the
+   *  `panel.state` broadcast, and a cold-started service worker can answer
+   *  "closed" a beat before the panel's port reconnects. */
   initPanelPresence(): void {
+    const query = (): void => {
+      try {
+        void chrome.runtime
+          ?.sendMessage({ type: "panel.query" })
+          .then((r) => {
+            this.panelOpen = !!(r && (r as { open?: boolean }).open);
+          })
+          .catch(() => {});
+      } catch {
+        // messaging unavailable
+      }
+    };
+    query();
     try {
-      void chrome.runtime
-        ?.sendMessage({ type: "panel.query" })
-        .then((r) => {
-          this.panelOpen = !!(r && (r as { open?: boolean }).open);
-        })
-        .catch(() => {});
+      document.addEventListener("visibilitychange", () => {
+        if (document.visibilityState === "visible") query();
+      });
     } catch {
-      // messaging unavailable
+      // no document (tests)
     }
   }
 

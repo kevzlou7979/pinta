@@ -875,11 +875,27 @@
     // Long-lived port so the background (and thus the on-page toolbar) knows
     // the panel is open; it auto-disconnects when the panel closes → the
     // content script hides the floating toolbar.
-    try {
-      chrome.runtime.connect({ name: "pinta-panel" });
-    } catch {
-      /* not in extension context */
+    //
+    // MV3 caveat: Chrome suspends the background service worker after ~30s
+    // idle, which kills this port AND wipes the worker's in-memory panel
+    // counter. A page loaded after that asks "is the panel open?" and gets
+    // NO — the floating toolbar never mounts until the user re-toggles the
+    // panel. So on disconnect we RECONNECT after a beat (while this panel
+    // instance lives): the fresh port re-registers presence in the revived
+    // worker, which re-broadcasts `panel.state` to every tab. When the
+    // panel actually closes, this JS context dies with it — no reconnect,
+    // ports drain, toolbar hides as before.
+    function connectPanelPort(): void {
+      try {
+        const port = chrome.runtime.connect({ name: "pinta-panel" });
+        port.onDisconnect.addListener(() => {
+          setTimeout(connectPanelPort, 300);
+        });
+      } catch {
+        /* not in extension context (or extension reloading) — stop */
+      }
     }
+    connectPanelPort();
 
     // Floating-toolbar pref → hide the side-panel TOOL grid when on. Read
     // once + stay live via storage.onChanged (SettingsPanel writes the key).
