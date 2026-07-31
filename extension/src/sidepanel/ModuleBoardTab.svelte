@@ -834,6 +834,12 @@
         <span class="text-[11px] text-ink-400 dark:text-night-mute"
           >updated {fmtTime(board.generatedAt)}</span
         >
+        {#each headline.badges as b (b)}
+          <span
+            class="inline-flex items-center text-[10px] font-medium px-2 py-0.5 rounded-full bg-brand-pink/10 text-brand-pink dark:bg-brand-pink-light/10 dark:text-brand-pink-light"
+            >{b}</span
+          >
+        {/each}
         <span class="flex-1"></span>
         {#each tab.boardActions ?? [] as a (a.id)}
           {#if a.url}
@@ -890,16 +896,6 @@
           </svg>
         </button>
       </div>
-      {#if headline.badges.length}
-        <div class="flex flex-wrap items-center gap-1.5">
-          {#each headline.badges as b (b)}
-            <span
-              class="inline-flex items-center text-[10px] font-medium px-2 py-0.5 rounded-full bg-brand-pink/10 text-brand-pink dark:bg-brand-pink-light/10 dark:text-brand-pink-light"
-              >{b}</span
-            >
-          {/each}
-        </div>
-      {/if}
     </header>
 
     <!-- Multi-start bar — tick cards below, Start them all from here. -->
