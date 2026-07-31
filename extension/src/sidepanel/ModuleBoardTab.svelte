@@ -73,6 +73,35 @@
     }
   }
 
+  // Bulk "Generate all tests" — fetch steps for every eligible card that
+  // doesn't already have them. Fires one agent request per card (they run
+  // concurrently, capped), so it's confirm-gated for token cost.
+  const stepsMissing = $derived(
+    stepsOp && board
+      ? board.cards.filter(
+          (c) => cardShowsSteps(c) && !cardSteps[c.id] && !cardStepsPending[c.id],
+        )
+      : [],
+  );
+  async function generateAllSteps(): Promise<void> {
+    if (!stepsOp) return;
+    const targets = stepsMissing;
+    if (targets.length === 0) return;
+    const ok = await confirmDialog({
+      title: "Generate test steps for all?",
+      message: `Ask the agent to write "how to test" steps for ${targets.length} card${targets.length === 1 ? "" : "s"} — one request per card.`,
+      confirmLabel: "Generate all",
+    });
+    if (!ok) return;
+    for (const c of targets) {
+      void app.runModuleCardSteps(spec.id, stepsOp, {
+        id: c.id,
+        title: c.title,
+        url: cardUrl(c),
+      });
+    }
+  }
+
   // ── Per-step screenshots (Generate screenshots button) ──────────────
   const shotsOp = $derived(tab.cardStepsShotsOp);
   const cardShots = $derived(slot?.cardShots ?? {});
@@ -581,9 +610,12 @@
                Turns primary once its steps have been fetched. -->
           <button
             type="button"
-            class="inline-flex items-center justify-center w-7 h-7 rounded-md border border-ink-200 dark:border-night-line text-ink-500 dark:text-night-mute hover:text-brand-pink hover:border-brand-pink dark:hover:text-brand-pink-light transition-colors disabled:opacity-50"
-            class:text-brand-pink={openSteps.has(c.id) || !!cardSteps[c.id]}
-            class:border-brand-pink={!!cardSteps[c.id]}
+            class="inline-flex items-center justify-center w-7 h-7 rounded-md border transition-colors disabled:opacity-50
+              {openSteps.has(c.id)
+                ? 'bg-brand-pink border-brand-pink text-white'
+                : !!cardSteps[c.id]
+                  ? 'border-brand-pink text-brand-pink dark:text-brand-pink-light hover:bg-brand-pink/10'
+                  : 'border-ink-200 dark:border-night-line text-ink-500 dark:text-night-mute hover:text-brand-pink hover:border-brand-pink dark:hover:text-brand-pink-light'}"
             onclick={() => toggleSteps(c)}
             aria-pressed={openSteps.has(c.id)}
             title={tab.cardStepsLabel ?? "How to test"}
@@ -825,6 +857,17 @@
             </button>
           {/if}
         {/each}
+        {#if stepsOp && stepsMissing.length > 0}
+          <button
+            type="button"
+            class="shrink-0 inline-flex items-center gap-1 text-[11px] font-medium rounded-md px-2 py-1 border border-ink-200 dark:border-night-line text-ink-600 dark:text-night-dim hover:text-brand-pink hover:border-brand-pink dark:hover:text-brand-pink-light transition-colors"
+            title="Generate 'how to test' steps for every card that doesn't have them yet"
+            onclick={generateAllSteps}
+          >
+            <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M9 3h6M10 3v6.5L5 18a2 2 0 0 0 1.7 3h10.6A2 2 0 0 0 19 18l-5-8.5V3" /></svg>
+            Generate tests
+          </button>
+        {/if}
         <button
           type="button"
           class="shrink-0 inline-flex items-center justify-center w-7 h-7 rounded-md text-brand-pink dark:text-brand-pink-light hover:bg-ink-100 dark:hover:bg-night-line transition-colors"
