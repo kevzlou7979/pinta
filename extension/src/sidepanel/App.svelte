@@ -2954,11 +2954,27 @@
         </div>
       {/if}
       {#if annotationsHere.length === 0}
-        <p class="text-xs text-ink-500 dark:text-night-dim italic">
-          {annotations.length === 0
-            ? "No annotations yet. Pick a tool above."
-            : "No annotations on this page. Use the chip above to jump to siblings, or annotate something here."}
-        </p>
+        {#if annotations.length === 0}
+          <!-- Home empty state — centered icon + heading + hint. -->
+          <div class="flex flex-col items-center text-center gap-3 px-6 py-12">
+            <div class="w-14 h-14 rounded-full bg-brand-pink/10 dark:bg-brand-pink-light/10 flex items-center justify-center">
+              <svg class="text-brand-pink dark:text-brand-pink-light" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                <path d="M17 3a2.828 2.828 0 1 1 4 4L7.5 20.5 2 22l1.5-5.5L17 3z" />
+                <path d="M6 4v4M4 6h4" />
+              </svg>
+            </div>
+            <div class="space-y-1">
+              <p class="text-sm font-semibold text-ink-900 dark:text-night-text">Start annotating</p>
+              <p class="text-[12px] text-ink-500 dark:text-night-mute leading-snug max-w-[240px] mx-auto">
+                Hover the page, click an element, and leave a comment. Your notes will appear here.
+              </p>
+            </div>
+          </div>
+        {:else}
+          <p class="text-xs text-ink-500 dark:text-night-dim italic">
+            No annotations on this page. Use the chip above to jump to siblings, or annotate something here.
+          </p>
+        {/if}
       {:else}
         <ul class="space-y-2">
           {#each annotationsHere as annotation, i (`${annotation.id}:${i}`)}
