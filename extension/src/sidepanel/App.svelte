@@ -2699,13 +2699,7 @@
         onchange={onImageFilePicked}
         aria-hidden="true"
       />
-      {#if floatingToolbarEnabled}
-        <p class="text-[11px] text-ink-500 dark:text-night-dim leading-snug">
-          Tools are in the floating palette on the page — drag it anywhere. Turn the floating toolbar off in
-          <button type="button" class="underline underline-offset-2" onclick={() => (app.viewingSettings = true)}>Settings</button>
-          to show the tool row here instead.
-        </p>
-      {:else}
+      {#if !floatingToolbarEnabled}
         <!-- Docked tool row (OFF-state look): a horizontal icon strip in the
              TOOL header area, grouped (draw | transform) with a divider. -->
         <div class="flex flex-wrap items-center gap-1">
@@ -2860,8 +2854,11 @@
 
     <section class="space-y-2">
       <div class="flex items-center justify-between">
-        <h2 class="text-xs uppercase tracking-wide text-ink-500 dark:text-night-mute font-medium">
-          Annotations ({annotationsHere.length}{annotations.length !== annotationsHere.length ? ` / ${annotations.length}` : ""})
+        <h2 class="flex items-center gap-1.5 text-xs uppercase tracking-wide text-ink-500 dark:text-night-mute font-medium">
+          Annotations
+          <span class="inline-flex items-center justify-center min-w-[18px] h-[18px] px-1.5 rounded-full bg-ink-100 dark:bg-night-alt text-ink-600 dark:text-night-dim text-[10px] font-semibold tabular-nums normal-case tracking-normal">
+            {annotationsHere.length}{annotations.length !== annotationsHere.length ? `/${annotations.length}` : ""}
+          </span>
         </h2>
         {#if canEditAnnotations && annotations.length > 0}
           <!-- Header action group — Copy · Export · Clear, mirroring Test
