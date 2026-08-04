@@ -2606,15 +2606,10 @@
         </p>
       {/if}
     {:else if !showAssociatePrompt}
-    <section class="space-y-2">
-      <div class="flex items-center justify-between gap-2">
-        <h2 class="text-xs uppercase tracking-wide text-ink-500 dark:text-night-mute font-medium">
-          Tool
-        </h2>
-        <!-- Undo / Redo / Import live behind one ⋮ kebab, mirroring the
-             SUBMITTED tray menu. Hotkeys (Ctrl+Z / Ctrl+Shift+Z) still
-             work without opening the menu. -->
-        <div class="relative shrink-0" use:clickOutside={() => (toolMenuOpen = false)}>
+    <!-- Undo / Redo / Import behind one ⋮ kebab. Rendered in the Annotations
+         header below; hotkeys (Ctrl+Z / Ctrl+Shift+Z) work without opening it. -->
+    {#snippet toolActionsMenu()}
+      <div class="relative shrink-0" use:clickOutside={() => (toolMenuOpen = false)}>
           <button
             type="button"
             class="w-7 h-7 inline-flex items-center justify-center rounded-full border border-ink-200 bg-white text-ink-600 hover:text-brand-pink hover:border-ink-400 dark:border-night-line dark:bg-night-card dark:text-night-dim dark:hover:text-brand-pink-light transition-colors"
@@ -2675,7 +2670,9 @@
             </div>
           {/if}
         </div>
-      </div>
+    {/snippet}
+
+    <section class="space-y-2">
       <input
         bind:this={importFileInput}
         type="file"
@@ -2853,14 +2850,15 @@
     {/if}
 
     <section class="space-y-2">
-      <div class="flex items-center justify-between">
+      <div class="flex items-center justify-between gap-2">
         <h2 class="flex items-center gap-1.5 text-xs uppercase tracking-wide text-ink-500 dark:text-night-mute font-medium">
           Annotations
           <span class="inline-flex items-center justify-center min-w-[18px] h-[18px] px-1.5 rounded-full bg-ink-100 dark:bg-night-alt text-ink-600 dark:text-night-dim text-[10px] font-semibold tabular-nums normal-case tracking-normal">
             {annotationsHere.length}{annotations.length !== annotationsHere.length ? `/${annotations.length}` : ""}
           </span>
         </h2>
-        {#if canEditAnnotations && annotations.length > 0}
+        <div class="flex items-center gap-1.5 shrink-0">
+          {#if canEditAnnotations && annotations.length > 0}
           <!-- Header action group — Copy · Export · Clear, mirroring Test
                Pilot's segmented icon toolbar. Icon-only; labels live in
                title + aria-label. Export reuses the shared
@@ -2911,7 +2909,9 @@
               <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 6h18"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6"/><path d="M8 6V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/></svg>
             </button>
           </div>
-        {/if}
+          {/if}
+          {@render toolActionsMenu()}
+        </div>
       </div>
       {#if otherPages.length > 0}
         <div class="rounded-md border border-ink-200 dark:border-night-line bg-ink-50/70 dark:bg-night-alt/40">
