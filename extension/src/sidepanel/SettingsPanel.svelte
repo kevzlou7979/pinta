@@ -12,6 +12,8 @@
 
   import { onMount } from "svelte";
   import { app } from "../lib/state.svelte.js";
+  import { theme, setTheme } from "../lib/theme.svelte.js";
+  import { density, setDensity } from "../lib/density.svelte.js";
   import {
     moduleIsConfigured,
     type ModuleSettingSpec,
@@ -104,12 +106,40 @@
     expandedModules[spec.id] = !current;
   }
 
-  // The keyboard-shortcuts reference is a tall static block — collapsed by
-  // default so it doesn't dominate the settings scroll.
-  let showShortcuts = $state(false);
+  // Settings are grouped into collapsible accordion cards. Interface +
+  // Keyboard shortcuts open by default; the denser groups start collapsed.
+  let open = $state<Record<string, boolean>>({
+    interface: true,
+    modules: false,
+    behavior: false,
+    backup: false,
+    shortcuts: true,
+  });
+
+  // Segmented-toggle options for the Interface group.
+  const THEME_OPTS = [
+    { v: "dark", l: "Dark" },
+    { v: "light", l: "Light" },
+  ] as const;
+  const DENSITY_OPTS = [
+    { v: "compact", l: "Compact" },
+    { v: "comfortable", l: "Comfortable" },
+  ] as const;
 
   // All module specs to render — built-ins first, then imported.
   const specs = $derived(app.allModuleSpecs());
+
+  // Collapsed-state subtitle for the Modules accordion: "N of M enabled · …".
+  const enabledSpecs = $derived(specs.filter((s) => app.modules[s.id]?.enabled));
+  const modulesSubtitle = $derived(
+    `${enabledSpecs.length} of ${specs.length} enabled` +
+      (enabledSpecs.length
+        ? ` · ${enabledSpecs
+            .slice(0, 3)
+            .map((s) => s.name)
+            .join(", ")}${enabledSpecs.length > 3 ? "…" : ""}`
+        : ""),
+  );
   // Quick lookup: which specs are imported (vs bundled), keyed by id.
   const importedById = $derived(
     new Map<string, InstalledModule>(
@@ -308,11 +338,90 @@
     </button>
   </div>
 
-  <div class="space-y-2">
-    <h3 class="text-xs uppercase tracking-wide text-ink-500 dark:text-night-mute font-medium">
-      Interface
-    </h3>
-    <div class="flex items-start justify-between gap-3 rounded-md border border-ink-200 dark:border-night-line p-3">
+  <!-- Shared accordion header — pink icon chip + title, with a subtitle
+       shown only when collapsed, and a chevron that flips when open. -->
+  {#snippet accHeader(key: string, title: string, subtitle: string)}
+    <button
+      type="button"
+      class="w-full flex items-center gap-3 p-3 text-left"
+      onclick={() => (open[key] = !open[key])}
+      aria-expanded={open[key]}
+    >
+      <span class="grid place-items-center w-8 h-8 rounded-lg bg-brand-pink/10 text-brand-pink dark:text-brand-pink-light shrink-0" aria-hidden="true">
+        {#if key === "interface"}
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="13.5" cy="6.5" r=".8" fill="currentColor" stroke="none"/><circle cx="17.5" cy="10.5" r=".8" fill="currentColor" stroke="none"/><circle cx="8.5" cy="7.5" r=".8" fill="currentColor" stroke="none"/><circle cx="6.5" cy="12.5" r=".8" fill="currentColor" stroke="none"/><path d="M12 2C6.5 2 2 6.5 2 12s4.5 10 10 10c.9 0 1.6-.7 1.6-1.6 0-.5-.2-.9-.4-1.2-.3-.3-.4-.6-.4-1.1a1.6 1.6 0 0 1 1.6-1.6h1.9c3 0 5.5-2.5 5.5-5.6C22 6 17.5 2 12 2Z"/></svg>
+        {:else if key === "modules"}
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 2 2 7l10 5 10-5-10-5Z"/><path d="m2 17 10 5 10-5"/><path d="m2 12 10 5 10-5"/></svg>
+        {:else if key === "behavior"}
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 2v6h-6"/><path d="M3 12a9 9 0 0 1 15-6.7L21 8"/><path d="M3 22v-6h6"/><path d="M21 12a9 9 0 0 1-15 6.7L3 16"/></svg>
+        {:else if key === "backup"}
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
+        {:else}
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="16 18 22 12 16 6"/><polyline points="8 6 2 12 8 18"/></svg>
+        {/if}
+      </span>
+      <span class="min-w-0 flex-1">
+        <span class="block text-[13px] font-semibold text-ink-900 dark:text-night-text">{title}</span>
+        {#if !open[key] && subtitle}
+          <span class="block text-[11px] text-ink-500 dark:text-night-mute truncate">{subtitle}</span>
+        {/if}
+      </span>
+      <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" class="shrink-0 text-ink-400 dark:text-night-mute transition-transform" class:rotate-180={open[key]} aria-hidden="true"><polyline points="6 9 12 15 18 9"/></svg>
+    </button>
+  {/snippet}
+
+  <!-- Interface accordion — Theme, Density, Floating toolbar, Processing pulse. -->
+  <div class="rounded-xl border border-ink-200 dark:border-night-line bg-white dark:bg-night-card overflow-hidden">
+    {@render accHeader("interface", "Interface", "Theme, density, floating toolbar…")}
+    {#if open.interface}
+    <div class="border-t border-ink-100 dark:border-night-line px-3 divide-y divide-ink-100 dark:divide-night-line">
+      <!-- Theme -->
+      <div class="flex items-center justify-between gap-3 py-3">
+        <p class="text-[13px] font-medium text-ink-900 dark:text-night-text">Theme</p>
+        <div class="shrink-0 inline-flex rounded-lg border border-ink-200 dark:border-night-line p-0.5 bg-ink-50 dark:bg-night-bg">
+          {#each THEME_OPTS as opt (opt.v)}
+            <button
+              type="button"
+              class="px-3 py-1 text-[12px] font-medium rounded-md transition-colors"
+              class:bg-white={theme.value === opt.v}
+              class:dark:bg-night-card={theme.value === opt.v}
+              class:text-ink-900={theme.value === opt.v}
+              class:dark:text-night-text={theme.value === opt.v}
+              class:shadow-sm={theme.value === opt.v}
+              class:text-ink-500={theme.value !== opt.v}
+              class:dark:text-night-mute={theme.value !== opt.v}
+              onclick={() => setTheme(opt.v)}
+              aria-pressed={theme.value === opt.v}
+            >{opt.l}</button>
+          {/each}
+        </div>
+      </div>
+      <!-- Density -->
+      <div class="flex items-center justify-between gap-3 py-3">
+        <div class="min-w-0">
+          <p class="text-[13px] font-medium text-ink-900 dark:text-night-text">Density</p>
+          <p class="text-[11px] text-ink-500 dark:text-night-mute mt-0.5">Compact matches IDE tooling.</p>
+        </div>
+        <div class="shrink-0 inline-flex rounded-lg border border-ink-200 dark:border-night-line p-0.5 bg-ink-50 dark:bg-night-bg">
+          {#each DENSITY_OPTS as opt (opt.v)}
+            <button
+              type="button"
+              class="px-3 py-1 text-[12px] font-medium rounded-md transition-colors"
+              class:bg-white={density.value === opt.v}
+              class:dark:bg-night-card={density.value === opt.v}
+              class:text-ink-900={density.value === opt.v}
+              class:dark:text-night-text={density.value === opt.v}
+              class:shadow-sm={density.value === opt.v}
+              class:text-ink-500={density.value !== opt.v}
+              class:dark:text-night-mute={density.value !== opt.v}
+              onclick={() => setDensity(opt.v)}
+              aria-pressed={density.value === opt.v}
+            >{opt.l}</button>
+          {/each}
+        </div>
+      </div>
+      <!-- Floating toolbar -->
+      <div class="flex items-start justify-between gap-3 py-3">
       <div class="min-w-0">
         <p class="text-[13px] font-medium text-ink-900 dark:text-night-text">Floating toolbar</p>
         <p class="text-[11px] text-ink-500 dark:text-night-mute mt-0.5 leading-snug">
@@ -335,13 +444,93 @@
           class:translate-x-4={floatingToolbarOn}
         ></span>
       </button>
+      </div>
+      <!-- Processing pulse -->
+      <div class="py-3">
+        <div class="flex items-start gap-2">
+          <div class="min-w-0 flex-1">
+            <div class="flex items-center gap-1.5">
+              <span
+                class="inline-flex shrink-0"
+                class:text-brand-pink={app.pulseSettings.enabled}
+                class:dark:text-brand-pink-light={app.pulseSettings.enabled}
+                class:text-ink-400={!app.pulseSettings.enabled}
+                class:dark:text-night-mute={!app.pulseSettings.enabled}
+                aria-hidden="true"
+              >
+                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                  <path d="M2 12a10 10 0 0 1 10-10" opacity="0.4" />
+                  <path d="M5 12a7 7 0 0 1 7-7" opacity="0.7" />
+                  <path d="M9 12a3 3 0 0 1 3-3" />
+                  <circle cx="12" cy="12" r="1.4" fill="currentColor" stroke="none" />
+                </svg>
+              </span>
+              <span class="text-[13px] font-medium text-ink-900 dark:text-night-text">
+                Processing pulse
+              </span>
+            </div>
+            <p class="text-[11px] text-ink-500 dark:text-night-mute mt-0.5 leading-snug">
+              Pulsating glow around the page edges while the agent is applying a
+              session. Off by default.
+            </p>
+          </div>
+          <label class="shrink-0 inline-flex items-center cursor-pointer">
+            <input
+              type="checkbox"
+              class="sr-only peer"
+              checked={app.pulseSettings.enabled}
+              onchange={(e) =>
+                app.setPulseEnabled((e.currentTarget as HTMLInputElement).checked)}
+            />
+            <span
+              class="relative w-9 h-5 bg-ink-300 dark:bg-night-line rounded-full peer-checked:bg-brand-pink dark:peer-checked:bg-brand-pink-light transition-colors"
+              aria-hidden="true"
+            >
+              <span
+                class="absolute top-0.5 left-0.5 w-4 h-4 bg-white rounded-full transition-transform"
+                class:translate-x-4={app.pulseSettings.enabled}
+              ></span>
+            </span>
+          </label>
+        </div>
+        {#if app.pulseSettings.enabled}
+          <div class="pt-2 mt-2 border-t border-ink-100 dark:border-night-line">
+            <span class="block text-[11px] text-ink-700 dark:text-night-dim mb-1.5">
+              Color
+            </span>
+            <div class="flex items-center gap-2 flex-wrap">
+              {#each [
+                { hex: "#3B82F6", name: "Blue" },
+                { hex: "#FF3D6E", name: "Pink" },
+                { hex: "#10B981", name: "Green" },
+                { hex: "#A855F7", name: "Purple" },
+                { hex: "#F59E0B", name: "Orange" },
+              ] as swatch (swatch.hex)}
+                <button
+                  type="button"
+                  class="w-7 h-7 rounded-full border-2 transition-transform hover:scale-110"
+                  class:border-ink-900={app.pulseSettings.color.toLowerCase() === swatch.hex.toLowerCase()}
+                  class:dark:border-night-text={app.pulseSettings.color.toLowerCase() === swatch.hex.toLowerCase()}
+                  class:border-transparent={app.pulseSettings.color.toLowerCase() !== swatch.hex.toLowerCase()}
+                  style:background-color={swatch.hex}
+                  onclick={() => app.setPulseColor(swatch.hex)}
+                  aria-label="{swatch.name} (current: {app.pulseSettings.color.toLowerCase() === swatch.hex.toLowerCase() ? 'selected' : 'click to select'})"
+                  title={swatch.name}
+                ></button>
+              {/each}
+            </div>
+          </div>
+        {/if}
+      </div>
     </div>
+    {/if}
   </div>
 
-  <div class="space-y-2">
-    <h3 class="text-xs uppercase tracking-wide text-ink-500 dark:text-night-mute font-medium">
-      Modules
-    </h3>
+  <!-- Modules accordion -->
+  <div class="rounded-xl border border-ink-200 dark:border-night-line bg-white dark:bg-night-card overflow-hidden">
+    {@render accHeader("modules", "Modules", modulesSubtitle)}
+    {#if open.modules}
+    <div class="border-t border-ink-100 dark:border-night-line p-3 space-y-2">
 
     {#if app.moduleError}
       <div
@@ -661,16 +850,17 @@
         project's <code>.pinta/modules/</code>.
       </p>
     {/if}
+    </div>
+    {/if}
   </div>
 
-  <!-- Backup & restore — one bundle for Test Pilot (with results) + the
-       AuditFlow catalog. Recovers state after a cache clear; ports it
-       between machines. Module config + secrets are never exported. -->
-  <div class="space-y-2">
-    <h3 class="text-xs uppercase tracking-wide text-ink-500 dark:text-night-mute font-medium">
-      Backup &amp; restore
-    </h3>
-    <div class="rounded-md border border-ink-200 dark:border-night-line bg-white dark:bg-night-card p-3 space-y-2.5">
+  <!-- Backup & restore accordion — one bundle for Test Pilot (with results)
+       + the AuditFlow catalog. Module config + secrets are never exported. -->
+  <div class="rounded-xl border border-ink-200 dark:border-night-line bg-white dark:bg-night-card overflow-hidden">
+    {@render accHeader("backup", "Backup & restore", "Export / import pinta-settings.json")}
+    {#if open.backup}
+    <div class="border-t border-ink-100 dark:border-night-line p-3">
+    <div class="space-y-2.5">
       <p class="text-[12px] text-ink-600 dark:text-night-dim leading-snug">
         Export your <strong>Test Pilot</strong> test cases (with results) and
         <strong>AuditFlow</strong> categories to a single
@@ -718,106 +908,17 @@
         onchange={onSettingsFilePicked}
       />
     </div>
-  </div>
-
-  <div class="space-y-2">
-    <h3 class="text-xs uppercase tracking-wide text-ink-500 dark:text-night-mute font-medium">
-      Visual feedback
-    </h3>
-    <div
-      class="rounded-md border border-ink-200 dark:border-night-line bg-white dark:bg-night-card p-3 space-y-2"
-    >
-      <div class="flex items-start gap-2">
-        <div class="min-w-0 flex-1">
-          <div class="flex items-center gap-1.5">
-            <!-- Radio-wave / pulse glyph — colored when enabled, grey
-                 when off. Matches the visual cue the feature provides
-                 around the page edges. -->
-            <span
-              class="inline-flex shrink-0"
-              class:text-brand-pink={app.pulseSettings.enabled}
-              class:dark:text-brand-pink-light={app.pulseSettings.enabled}
-              class:text-ink-400={!app.pulseSettings.enabled}
-              class:dark:text-night-mute={!app.pulseSettings.enabled}
-              aria-hidden="true"
-            >
-              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-                <path d="M2 12a10 10 0 0 1 10-10" opacity="0.4" />
-                <path d="M5 12a7 7 0 0 1 7-7" opacity="0.7" />
-                <path d="M9 12a3 3 0 0 1 3-3" />
-                <circle cx="12" cy="12" r="1.4" fill="currentColor" stroke="none" />
-              </svg>
-            </span>
-            <span class="text-sm font-semibold text-ink-900 dark:text-night-text">
-              Processing pulse
-            </span>
-          </div>
-          <p class="text-[12px] text-ink-700 dark:text-night-dim mt-0.5">
-            Pulsating glow around the page edges while the agent is
-            applying a session. Off by default.
-          </p>
-        </div>
-        <label class="shrink-0 inline-flex items-center cursor-pointer">
-          <input
-            type="checkbox"
-            class="sr-only peer"
-            checked={app.pulseSettings.enabled}
-            onchange={(e) =>
-              app.setPulseEnabled((e.currentTarget as HTMLInputElement).checked)}
-          />
-          <span
-            class="relative w-9 h-5 bg-ink-300 dark:bg-night-line rounded-full peer-checked:bg-brand-pink dark:peer-checked:bg-brand-pink-light transition-colors"
-            aria-hidden="true"
-          >
-            <span
-              class="absolute top-0.5 left-0.5 w-4 h-4 bg-white rounded-full transition-transform"
-              class:translate-x-4={app.pulseSettings.enabled}
-            ></span>
-          </span>
-        </label>
-      </div>
-
-      {#if app.pulseSettings.enabled}
-        <div class="pt-2 border-t border-ink-100 dark:border-night-line">
-          <span class="block text-[11px] text-ink-700 dark:text-night-dim mb-1.5">
-            Color
-          </span>
-          <div class="flex items-center gap-2 flex-wrap">
-            {#each [
-              { hex: "#3B82F6", name: "Blue" },
-              { hex: "#FF3D6E", name: "Pink" },
-              { hex: "#10B981", name: "Green" },
-              { hex: "#A855F7", name: "Purple" },
-              { hex: "#F59E0B", name: "Orange" },
-            ] as swatch (swatch.hex)}
-              <button
-                type="button"
-                class="w-7 h-7 rounded-full border-2 transition-transform hover:scale-110"
-                class:border-ink-900={app.pulseSettings.color.toLowerCase() === swatch.hex.toLowerCase()}
-                class:dark:border-night-text={app.pulseSettings.color.toLowerCase() === swatch.hex.toLowerCase()}
-                class:border-transparent={app.pulseSettings.color.toLowerCase() !== swatch.hex.toLowerCase()}
-                style:background-color={swatch.hex}
-                onclick={() => app.setPulseColor(swatch.hex)}
-                aria-label="{swatch.name} (current: {app.pulseSettings.color.toLowerCase() === swatch.hex.toLowerCase() ? 'selected' : 'click to select'})"
-                title={swatch.name}
-              ></button>
-            {/each}
-          </div>
-        </div>
-      {/if}
     </div>
+    {/if}
   </div>
 
-  <!-- Page reload after the agent applies a batch. Auto reloads for you
-       (skipped when HMR is detected); Manual leaves the page alone so it
-       never refreshes out from under you while you annotate again. -->
-  <div class="space-y-2">
-    <h3 class="text-xs uppercase tracking-wide text-ink-500 dark:text-night-mute font-medium">
-      Page reload
-    </h3>
-    <div
-      class="rounded-md border border-ink-200 dark:border-night-line bg-white dark:bg-night-card p-3"
-    >
+  <!-- Behavior accordion — page reload after the agent applies a batch.
+       Off holds back the dev server's HMR full-refresh so the page can't
+       reload out from under you while you annotate. -->
+  <div class="rounded-xl border border-ink-200 dark:border-night-line bg-white dark:bg-night-card overflow-hidden">
+    {@render accHeader("behavior", "Behavior", app.autoReload ? "Auto-reload on" : "Auto-reload off")}
+    {#if open.behavior}
+    <div class="border-t border-ink-100 dark:border-night-line p-3">
       <div class="flex items-start gap-2">
         <div class="min-w-0 flex-1">
           <div class="flex items-center gap-1.5">
@@ -868,6 +969,7 @@
         </label>
       </div>
     </div>
+    {/if}
   </div>
 
   <!-- Phase 18 — keybindings reference. Read-only; the bindings
@@ -877,23 +979,11 @@
        inventory to flag drift. The sections mirror where the user is
        when the shortcut applies, so they don't try Alt+S inside a
        textarea and wonder why nothing happens. -->
-  <div class="space-y-2">
-    <button
-      type="button"
-      class="w-full flex items-center gap-1.5 text-xs uppercase tracking-wide text-ink-500 dark:text-night-mute font-medium hover:text-ink-700 dark:hover:text-night-dim transition-colors"
-      onclick={() => (showShortcuts = !showShortcuts)}
-      aria-expanded={showShortcuts}
-    >
-      <svg
-        width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"
-        class="shrink-0 transition-transform"
-        class:rotate-90={showShortcuts}
-        aria-hidden="true"
-      ><polyline points="9 18 15 12 9 6" /></svg>
-      Keyboard shortcuts
-    </button>
-    {#if showShortcuts}
-    <div class="rounded-md border border-ink-200 dark:border-night-line bg-white dark:bg-night-card p-3 space-y-3">
+  <!-- Keyboard shortcuts accordion. -->
+  <div class="rounded-xl border border-ink-200 dark:border-night-line bg-white dark:bg-night-card overflow-hidden">
+    {@render accHeader("shortcuts", "Keyboard shortcuts", "On the page · editor · chat")}
+    {#if open.shortcuts}
+    <div class="border-t border-ink-100 dark:border-night-line p-3 space-y-3">
       <div>
         <p class="text-[11px] font-semibold text-ink-900 dark:text-night-text mb-1.5">
           On the page
