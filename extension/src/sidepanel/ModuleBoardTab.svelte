@@ -199,6 +199,22 @@
   // Pilot → <today>"). Shown as a dismissible notice above the board.
   let notice = $state<string | null>(null);
 
+  // Header actions live in one "Actions" dropdown (board ops + Generate
+  // tests + Start Day) instead of a row of loose buttons.
+  let boardMenuOpen = $state(false);
+  // Same capture-phase outside-press dismiss as App.svelte's menus.
+  function clickOutside(node: HTMLElement, onOutside: () => void) {
+    function handle(e: PointerEvent) {
+      if (!node.contains(e.target as Node)) onOutside();
+    }
+    document.addEventListener("pointerdown", handle, true);
+    return {
+      destroy() {
+        document.removeEventListener("pointerdown", handle, true);
+      },
+    };
+  }
+
   // Confirm-gated actions (Complete, Move to review, End Day, batch Complete)
   // route through the shared in-panel modal (native confirm() is a silent
   // no-op inside Chrome side panels).
@@ -841,60 +857,77 @@
           >
         {/each}
         <span class="flex-1"></span>
-        {#each tab.boardActions ?? [] as a (a.id)}
-          {#if a.url}
-            <a
-              href={a.url}
-              target="_blank"
-              rel="noopener"
-              class={actionClass(a.style)}>{a.label}</a
-            >
-          {:else if a.op}
-            <button
-              type="button"
-              class={actionClass(a.style)}
-              disabled={!!pending}
-              onclick={() => runBoardAction(a)}
-            >
-              {#if pending && pendingBoardActionId === a.id}
-                <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" class="animate-spin" aria-hidden="true"><path d="M21 12a9 9 0 1 1-6.219-8.56" /></svg>
-              {/if}
-              {a.label}
-            </button>
-          {/if}
-        {/each}
-        {#if stepsOp && stepsMissing.length > 0}
+        <!-- All header actions in one dropdown: board ops (Report, End Day),
+             Generate tests, and Start Day (the former refresh icon). -->
+        <div class="relative shrink-0" use:clickOutside={() => (boardMenuOpen = false)}>
           <button
             type="button"
-            class="shrink-0 inline-flex items-center gap-1 text-[11px] font-medium rounded-md px-2 py-1 border border-ink-200 dark:border-night-line text-ink-600 dark:text-night-dim hover:text-brand-pink hover:border-brand-pink dark:hover:text-brand-pink-light transition-colors"
-            title="Generate 'how to test' steps for every card that doesn't have them yet"
-            onclick={generateAllSteps}
+            class={actionClass()}
+            aria-haspopup="menu"
+            aria-expanded={boardMenuOpen}
+            onclick={() => (boardMenuOpen = !boardMenuOpen)}
           >
-            <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M9 3h6M10 3v6.5L5 18a2 2 0 0 0 1.7 3h10.6A2 2 0 0 0 19 18l-5-8.5V3" /></svg>
-            Generate tests
+            {#if pending && pendingBoardActionId}
+              <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" class="animate-spin" aria-hidden="true"><path d="M21 12a9 9 0 1 1-6.219-8.56" /></svg>
+            {/if}
+            Actions
+            <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m6 9 6 6 6-6" /></svg>
           </button>
-        {/if}
-        <button
-          type="button"
-          class="shrink-0 inline-flex items-center justify-center w-7 h-7 rounded-md text-brand-pink dark:text-brand-pink-light hover:bg-ink-100 dark:hover:bg-night-line transition-colors"
-          title="Refresh"
-          aria-label="Refresh"
-          onclick={run}
-        >
-          <svg
-            width="15"
-            height="15"
-            viewBox="0 0 24 24"
-            fill="none"
-            stroke="currentColor"
-            stroke-width="2"
-            stroke-linecap="round"
-            stroke-linejoin="round"
-          >
-            <path d="M21 12a9 9 0 1 1-9-9c2.52 0 4.93 1 6.74 2.74L21 8" />
-            <path d="M21 3v5h-5" />
-          </svg>
-        </button>
+          {#if boardMenuOpen}
+            <div
+              class="absolute right-0 top-full mt-1 z-30 w-48 rounded-md border border-ink-200 bg-white shadow-lg dark:border-night-line dark:bg-night-card py-1"
+              role="menu"
+            >
+              <button
+                type="button"
+                class="w-full flex items-center gap-2.5 px-3 py-1.5 text-[12px] text-ink-700 dark:text-night-dim hover:bg-ink-50 dark:hover:bg-night-alt hover:text-ink-900 dark:hover:text-night-text disabled:opacity-50 disabled:cursor-not-allowed"
+                role="menuitem"
+                disabled={!!pending}
+                onclick={() => { boardMenuOpen = false; run(); }}
+              >
+                <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="4"/><path d="M12 2v2"/><path d="M12 20v2"/><path d="m4.93 4.93 1.41 1.41"/><path d="m17.66 17.66 1.41 1.41"/><path d="M2 12h2"/><path d="M20 12h2"/><path d="m6.34 17.66-1.41 1.41"/><path d="m19.07 4.93-1.41 1.41"/></svg>
+                Start Day
+              </button>
+              {#each tab.boardActions ?? [] as a (a.id)}
+                {#if a.url}
+                  <a
+                    href={a.url}
+                    target="_blank"
+                    rel="noopener"
+                    class="w-full flex items-center gap-2.5 px-3 py-1.5 text-[12px] text-ink-700 dark:text-night-dim hover:bg-ink-50 dark:hover:bg-night-alt hover:text-ink-900 dark:hover:text-night-text"
+                    role="menuitem"
+                    onclick={() => (boardMenuOpen = false)}>{a.label}</a
+                  >
+                {:else if a.op}
+                  <button
+                    type="button"
+                    class="w-full flex items-center gap-2.5 px-3 py-1.5 text-[12px] {a.style === 'danger' ? 'text-red-600 dark:text-red-400' : 'text-ink-700 dark:text-night-dim hover:text-ink-900 dark:hover:text-night-text'} hover:bg-ink-50 dark:hover:bg-night-alt disabled:opacity-50 disabled:cursor-not-allowed"
+                    role="menuitem"
+                    disabled={!!pending}
+                    onclick={() => { boardMenuOpen = false; runBoardAction(a); }}
+                  >
+                    {#if pending && pendingBoardActionId === a.id}
+                      <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" class="animate-spin" aria-hidden="true"><path d="M21 12a9 9 0 1 1-6.219-8.56" /></svg>
+                    {/if}
+                    {a.label}
+                  </button>
+                {/if}
+              {/each}
+              {#if stepsOp && stepsMissing.length > 0}
+                <button
+                  type="button"
+                  class="w-full flex items-center gap-2.5 px-3 py-1.5 text-[12px] text-ink-700 dark:text-night-dim hover:bg-ink-50 dark:hover:bg-night-alt hover:text-ink-900 dark:hover:text-night-text"
+                  role="menuitem"
+                  title="Generate 'how to test' steps for every card that doesn't have them yet"
+                  onclick={() => { boardMenuOpen = false; void generateAllSteps(); }}
+                >
+                  <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M9 3h6M10 3v6.5L5 18a2 2 0 0 0 1.7 3h10.6A2 2 0 0 0 19 18l-5-8.5V3" /></svg>
+                  Generate tests
+                </button>
+              {/if}
+            </div>
+          {/if}
+        </div>
       </div>
     </header>
 
