@@ -179,6 +179,25 @@ async function handle(
     return sendJson(res, 403, { error: "forbidden cross-origin write" });
   }
 
+  // Module install/uninstall is the highest-leverage mutation — it can
+  // grant a third-party `agent.md` file-write / run-tool / network
+  // capabilities the /pinta agent will honor. Only the extension's
+  // consent dialog performs it, so require the chrome-extension:// origin
+  // explicitly here (the general gate above also lets *no-Origin* local
+  // callers write, which would let any local process silently install a
+  // capability-bearing module and bypass the consent UI). The agent's CLI
+  // never installs modules, so this doesn't narrow any legitimate path.
+  if (
+    !isReadMethod &&
+    !isExtensionOrigin &&
+    path.startsWith("/v1/modules")
+  ) {
+    log(`rejected ${method} ${path} — module mutation requires extension origin`);
+    return sendJson(res, 403, {
+      error: "module install/uninstall must originate from the Pinta extension",
+    });
+  }
+
   if (method === "GET" && path === "/v1/health") {
     const entry = opts.getRegistryEntry?.() ?? null;
     return sendJson(res, 200, {

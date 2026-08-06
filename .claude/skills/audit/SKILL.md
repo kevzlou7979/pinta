@@ -154,6 +154,67 @@ Walk each item. For every hit, write a finding (`S<n>`) with severity
   Confirm there is no path that ships these to any non-localhost
   endpoint.
 
+### 2.10 AI / prompt-injection threat surface (the whole pipeline)
+
+Pinta's core function — feed annotations + scraped page content +
+screenshots + third-party module `agent.md` into a coding agent that
+edits code and runs commands — makes **indirect prompt injection** its
+top risk (OWASP LLM01, #1 for the third year running). This is the one
+section that deliberately looks **past `extension/`** into
+`companion/src/` and `skill/pinta/SKILL.md`. Write findings `AI<n>`.
+
+**First, refresh the threat landscape** — don't rely on training data:
+
+```
+WebSearch  "OWASP LLM Top 10 <current-year> indirect prompt injection agent"
+WebSearch  "prompt injection coding agent / browser agent <current-year> new techniques"
+```
+
+Fold anything new (multimodal injection, memory poisoning, tool-abuse
+chains, agent-hijack CVEs) into the checks below, and note in the report
+which checks were added this run so the skill can be updated.
+
+- **Untrusted-field coverage.** Every free-form string that reaches the
+  agent must be listed as DATA in `skill/pinta/SKILL.md` §3.6's table.
+  Diff the wire payload the agent reads (`companion/src/store.ts`
+  session shape, `shared/src/types.ts`) against that table — any new
+  field (a new annotation kind, a new `queryComment` shape, a new module
+  op) that carries user/page text and is **not** in §3.6 is a finding.
+- **Multimodal channel.** Screenshots + reference images reach the agent
+  as raw vision input, uninspected by the text secret-scrubber. Confirm
+  §3.6 has an explicit "image-borne text is DATA" rule (rule 6) and that
+  no new image path bypasses it.
+- **autoApply is the only confirm-skip authority.** Grep for every place
+  `autoApply` is set (`companion/src/ws.ts`, `store.ts`). It must come
+  from the extension checkbox only — never inferred from comment / query
+  / `agent.md` / module-settings prose. Query-only sessions
+  (`module.query.submit`) may be `autoApply:true` but must stay
+  read-only per §7 — verify the skill still forbids source edits on a
+  single-`query`-annotation session.
+- **Third-party module sandbox (§7.12 — highest-risk path).** Confirm:
+  module-id path-traversal guard (`assertSafeModuleId`), `agent.md` size
+  cap, **default-deny capability filtering** (a grant is dropped unless
+  the manifest declared it), and that the skill's compliance
+  reassertion + capability gate still treat `agent.md` as DATA that
+  cannot flip `autoApply`, add network/run-tool scope, or escape
+  `projectRoot`.
+- **Companion trust boundary.** The server is unauthenticated and gated
+  only by localhost bind + Origin allowlist. Confirm mutating routes
+  reject cross-origin browser writes, and that **module install/uninstall
+  requires the `chrome-extension://` origin** (not just no-Origin) so a
+  local process can't install a capability-bearing module behind the
+  consent UI. Flag any new write route that a no-Origin caller can reach
+  which grants capability or auto-applies edits.
+- **Secret-scrubbing at capture.** `extension/src/content/capture.ts`
+  `scrubInlineSecrets` must still redact tokens/keys/JWTs from
+  `outerHTML` + `nearbyText` before they leave the page. Flag any new
+  captured field that skips the scrubber.
+- **Enforcement is prompt-level.** Note explicitly that text-injection
+  defense relies on the model honoring §3.6 (there is no out-of-band
+  tagging of untrusted content). Recommend keeping §3.6 / §7.12 concrete
+  and example-driven, and keeping human-in-the-loop (`autoApply` off) as
+  the default for any capability-bearing or cross-boundary action.
+
 ## 3. Performance review checklist
 
 For each, write a finding (`P<n>`) with severity **high / medium / low**.
