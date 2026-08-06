@@ -888,6 +888,30 @@
                 <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="4"/><path d="M12 2v2"/><path d="M12 20v2"/><path d="m4.93 4.93 1.41 1.41"/><path d="m17.66 17.66 1.41 1.41"/><path d="M2 12h2"/><path d="M20 12h2"/><path d="m6.34 17.66-1.41 1.41"/><path d="m19.07 4.93-1.41 1.41"/></svg>
                 Start Day
               </button>
+              <!-- Icon for a manifest board action, keyword-matched on its
+                   id/label so any module's actions get a glyph (default: a
+                   small play triangle). -->
+              {#snippet actionMenuIcon(label: string, id: string)}
+                {@const key = `${id} ${label}`.toLowerCase()}
+                <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="shrink-0" aria-hidden="true">
+                  {#if key.includes("end") || key.includes("stop") || key.includes("finish") || key.includes("close")}
+                    <!-- moon -->
+                    <path d="M12 3a6.4 6.4 0 0 0 9 9 9 9 0 1 1-9-9Z" />
+                  {:else if key.includes("report") || key.includes("summary") || key.includes("log")}
+                    <!-- file-text -->
+                    <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z" /><path d="M14 2v6h6" /><path d="M9 13h6M9 17h6" />
+                  {:else if key.includes("issue") || key.includes("gitlab") || key.includes("ticket") || key.includes("board")}
+                    <!-- external link -->
+                    <path d="M15 3h6v6" /><path d="M10 14 21 3" /><path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6" />
+                  {:else if key.includes("start") || key.includes("today") || key.includes("day") || key.includes("run")}
+                    <!-- sun -->
+                    <circle cx="12" cy="12" r="4" /><path d="M12 2v2M12 20v2M4.9 4.9l1.4 1.4M17.7 17.7l1.4 1.4M2 12h2M20 12h2M6.3 17.7l-1.4 1.4M19.1 4.9l-1.4 1.4" />
+                  {:else}
+                    <!-- play -->
+                    <polygon points="6 3 20 12 6 21 6 3" />
+                  {/if}
+                </svg>
+              {/snippet}
               {#each tab.boardActions ?? [] as a (a.id)}
                 {#if a.url}
                   <a
@@ -896,8 +920,11 @@
                     rel="noopener"
                     class="w-full flex items-center gap-2.5 px-3 py-1.5 text-[12px] text-ink-700 dark:text-night-dim hover:bg-ink-50 dark:hover:bg-night-alt hover:text-ink-900 dark:hover:text-night-text"
                     role="menuitem"
-                    onclick={() => (boardMenuOpen = false)}>{a.label}</a
+                    onclick={() => (boardMenuOpen = false)}
                   >
+                    {@render actionMenuIcon(a.label, a.id)}
+                    {a.label}
+                  </a>
                 {:else if a.op}
                   <button
                     type="button"
@@ -907,7 +934,9 @@
                     onclick={() => { boardMenuOpen = false; runBoardAction(a); }}
                   >
                     {#if pending && pendingBoardActionId === a.id}
-                      <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" class="animate-spin" aria-hidden="true"><path d="M21 12a9 9 0 1 1-6.219-8.56" /></svg>
+                      <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" class="animate-spin shrink-0" aria-hidden="true"><path d="M21 12a9 9 0 1 1-6.219-8.56" /></svg>
+                    {:else}
+                      {@render actionMenuIcon(a.label, a.id)}
                     {/if}
                     {a.label}
                   </button>
