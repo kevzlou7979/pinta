@@ -116,18 +116,32 @@ export function moduleWantsToast(
 }
 
 /** Raise the Chrome notification for a nudge. Safe no-op when the API or
- *  permission is unavailable. */
+ *  permission is unavailable. Errors are surfaced to the console (visible
+ *  in the service-worker inspector) instead of being silently swallowed —
+ *  "badge but no toast" is otherwise undiagnosable. */
 export function raiseWatchToast(title: string, items: WatchNudgeItem[]): void {
   try {
-    void chrome.notifications?.create(`pinta-watch-${Date.now()}`, {
-      type: "basic",
-      iconUrl: chrome.runtime.getURL("icons/icon-128.png"),
-      title: title || "New tasks",
-      message: toastBody(items),
-      priority: 1,
-    });
-  } catch {
-    // badge still shows
+    const create = chrome.notifications?.create as
+      | ((id: string, o: chrome.notifications.NotificationOptions<true>) => Promise<string>)
+      | undefined;
+    if (!create) {
+      console.warn("[pinta] watch toast skipped — notifications API unavailable");
+      return;
+    }
+    create
+      .call(chrome.notifications, `pinta-watch-${Date.now()}`, {
+        type: "basic",
+        iconUrl: chrome.runtime.getURL("icons/icon-128.png"),
+        title: title || "New tasks",
+        message: toastBody(items),
+        priority: 1,
+      })
+      .then((id) => console.info(`[pinta] watch toast created: ${id}`))
+      .catch((err) =>
+        console.warn("[pinta] watch toast FAILED:", (err as Error)?.message ?? err),
+      );
+  } catch (err) {
+    console.warn("[pinta] watch toast threw:", (err as Error)?.message ?? err);
   }
 }
 
