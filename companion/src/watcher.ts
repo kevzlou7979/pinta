@@ -45,6 +45,13 @@ export interface WatchConfig {
   labelPath?: string;
   /** Cap on how many fresh items to surface per notification. */
   max?: number;
+  /**
+   * With numeric, monotonically-increasing tracker ids (GitLab/GitHub),
+   * only notify for ids ABOVE the highest id ever seen. Kills the
+   * "window sliding" false positive: a paginated query (per_page=N)
+   * surfaces OLD items when others close — unseen, but not new.
+   */
+  onlyNewerIds?: boolean;
 }
 
 export interface WatchItem {
@@ -92,6 +99,23 @@ export function diffSeen(
     if (nextSeen.length >= cap) break;
   }
   return { fresh, nextSeen };
+}
+
+/**
+ * Window-sliding guard (`onlyNewerIds`): with numeric ascending tracker
+ * ids, an unseen id LOWER than the historical high-water mark is an old
+ * item that slid into the query window (per_page cutoff shifting as other
+ * items close/reopen) — seed it, don't announce it. Non-numeric ids fail
+ * open (kept). Exposed for tests.
+ */
+export function filterNewerIds(fresh: string[], seen: string[]): string[] {
+  const nums = seen.map(Number).filter(Number.isFinite);
+  if (nums.length === 0) return fresh;
+  const max = Math.max(...nums);
+  return fresh.filter((id) => {
+    const n = Number(id);
+    return !Number.isFinite(n) || n > max;
+  });
 }
 
 function pluck(obj: unknown, path: string): string | null {
@@ -192,7 +216,12 @@ export async function startWatcher(opts: {
     }
     if (fresh.length === 0) return;
 
-    const freshSet = new Set(fresh);
+    // All fresh ids are seeded above; the window-sliding guard only
+    // narrows which ones get ANNOUNCED.
+    const notifyIds = cfg.onlyNewerIds ? filterNewerIds(fresh, seen) : fresh;
+    if (notifyIds.length === 0) return;
+
+    const freshSet = new Set(notifyIds);
     const freshItems = items
       .filter((i) => freshSet.has(i.id))
       .slice(0, cfg.max ?? 20);

@@ -2,7 +2,7 @@ import { describe, it, expect, beforeEach, afterEach } from "vitest";
 import { mkdtemp, mkdir, rm, writeFile, readFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { diffSeen, parseItems, startWatcher, type WatcherHandle } from "./watcher.js";
+import { diffSeen, parseItems, filterNewerIds, startWatcher, type WatcherHandle } from "./watcher.js";
 
 describe("diffSeen", () => {
   it("treats everything as fresh against an empty seen list", () => {
@@ -68,6 +68,23 @@ describe("parseItems", () => {
       {},
     );
     expect(out).toEqual([{ id: "1", title: "1" }]);
+  });
+});
+
+describe("filterNewerIds (window-sliding guard)", () => {
+  it("drops unseen ids below the historical high-water mark", () => {
+    // 195... slid into the window when another issue closed; 197... is new.
+    expect(filterNewerIds(["195616488", "197295395"], ["197294150", "196187156"])).toEqual([
+      "197295395",
+    ]);
+  });
+
+  it("keeps everything when nothing was ever seen", () => {
+    expect(filterNewerIds(["1", "2"], [])).toEqual(["1", "2"]);
+  });
+
+  it("fails open for non-numeric ids", () => {
+    expect(filterNewerIds(["abc-1", "5"], ["100"])).toEqual(["abc-1"]);
   });
 });
 
