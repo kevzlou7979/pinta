@@ -48,6 +48,7 @@ export default defineManifest({
     "scripting",
     "storage",
     "offscreen",
+    "notifications",
   ],
   host_permissions: ["<all_urls>"],
   content_scripts: [

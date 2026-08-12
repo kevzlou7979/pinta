@@ -10,7 +10,8 @@ import {
 import { homedir } from "node:os";
 import { startServer } from "./server.js";
 import { SessionStore } from "./store.js";
-import { attachWebSocket } from "./ws.js";
+import { attachWebSocket, broadcastAll } from "./ws.js";
+import { startWatcher } from "./watcher.js";
 import { registerEntry, unregister, type RegistryEntry } from "./registry.js";
 import { readProjectConfig } from "./project-config.js";
 
@@ -173,7 +174,18 @@ async function main(): Promise<void> {
     log,
     getRegistryEntry: () => registryEntry,
   });
-  attachWebSocket({ server, store, log });
+  const wss = attachWebSocket({ server, store, log });
+
+  // Opt-in task watcher (`.pinta/watch.json`). A dumb shell poll — no
+  // agent, no Claude tokens — that broadcasts `watch.new` when the tracker
+  // gains items, so the extension can nudge the user. Inert unless the
+  // config exists and is enabled.
+  const watcher = await startWatcher({
+    projectRoot: args.projectRoot,
+    log,
+    onNew: ({ label, title, items }) =>
+      broadcastAll(wss, { type: "watch.new", label, title, items }),
+  });
 
   registryEntry = await registerEntry({
     port,
@@ -198,6 +210,7 @@ async function main(): Promise<void> {
     shuttingDown = true;
     process.stderr.write(`\n[pinta] received ${signal}, shutting down\n`);
     try {
+      watcher.stop();
       if (registryEntry) await unregister(registryEntry.id);
     } catch (err) {
       process.stderr.write(

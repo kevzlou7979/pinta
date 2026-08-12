@@ -120,6 +120,19 @@ export function selectReconnectReplaySessions(
   return [...latestByModule.values()];
 }
 
+/** Fan a server message out to every open client (used by the watcher). */
+export function broadcastAll(wss: WebSocketServer, msg: ServerMessage): void {
+  const payload = JSON.stringify(msg);
+  for (const client of wss.clients) {
+    if (client.readyState !== WebSocket.OPEN) continue;
+    try {
+      client.send(payload);
+    } catch {
+      // skip a dead/closing socket
+    }
+  }
+}
+
 export function attachWebSocket(opts: AttachOptions): WebSocketServer {
   const { server, store } = opts;
   const log = opts.log ?? (() => {});

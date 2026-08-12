@@ -2454,6 +2454,7 @@
             class:dark:text-night-mute={activeTab !== s.id}
             onclick={() => {
               activeTab = s.id;
+              app.clearNewTasks();
               void chrome.storage?.local?.set({ "pinta-active-tab": s.id });
             }}
             title={s.tab?.name}
@@ -2473,6 +2474,13 @@
               </svg>
             {/if}
             {s.tab?.name}
+            {#if app.newTaskCount > 0}
+              <!-- Task-watcher badge: new tracker items since last visit. -->
+              <span
+                class="inline-flex items-center justify-center min-w-[16px] h-[16px] px-1 rounded-full bg-brand-pink text-white text-[9px] font-semibold tabular-nums"
+                title={`${app.newTaskCount} new`}
+              >{app.newTaskCount > 99 ? "99+" : app.newTaskCount}</span>
+            {/if}
           </button>
         {/each}
       </nav>

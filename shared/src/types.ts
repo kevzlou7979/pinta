@@ -896,4 +896,18 @@ export type ServerMessage =
       moduleId: string;
       session: Session;
     }
+  | {
+      /**
+       * The companion's opt-in task watcher (`.pinta/watch.json`) detected
+       * new items on the tracker (e.g. issues David just posted). Purely a
+       * heads-up: the extension raises a desktop notification + a Tasks-tab
+       * badge. It NEVER invokes the agent — the user clicks through and
+       * builds the board interactively, keeping Pinta bring-your-own-Claude
+       * and spending zero agent tokens on the watch itself.
+       */
+      type: "watch.new";
+      label: string;
+      title: string;
+      items: { id: string; title: string }[];
+    }
   | { type: "error"; message: string };

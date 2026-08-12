@@ -711,6 +711,7 @@ class ExtensionState {
     void this.refreshImported();
     void this.loadModules();
     void this.loadPulseSettings();
+    void this.loadTaskNotifyPref();
     void this.loadAutoReload();
     void this.loadStandaloneOrigins();
     void this.loadGlobalChat();
@@ -8509,9 +8510,88 @@ class ExtensionState {
           this.session.appliedSummary = msg.summary;
         }
         break;
+      case "watch.new":
+        this.handleWatchNew(msg);
+        break;
       case "error":
         this.lastError = msg.message;
         break;
+    }
+  }
+
+  // ─── Task watcher (companion `.pinta/watch.json` → desktop nudge) ────
+  /** Count of new tracker items the watcher has surfaced since the user
+   *  last visited the Tasks board. Drives the Tasks-tab badge. */
+  newTaskCount = $state(0);
+  /** Most-recent fresh items, for the notification body. */
+  newTaskItems = $state<{ id: string; title: string }[]>([]);
+  /** User pref — show a desktop notification on `watch.new`. Persisted. */
+  taskNotificationsEnabled = $state(true);
+  private static readonly TASK_NOTIFY_KEY = "pinta-task-notifications";
+
+  async loadTaskNotifyPref(): Promise<void> {
+    try {
+      const s = await chrome.storage?.local?.get(
+        ExtensionState.TASK_NOTIFY_KEY,
+      );
+      const v = s?.[ExtensionState.TASK_NOTIFY_KEY];
+      if (typeof v === "boolean") this.taskNotificationsEnabled = v;
+    } catch {
+      /* storage unavailable — default on */
+    }
+  }
+
+  setTaskNotificationsEnabled(on: boolean): void {
+    this.taskNotificationsEnabled = on;
+    try {
+      void chrome.storage?.local?.set({
+        [ExtensionState.TASK_NOTIFY_KEY]: on,
+      });
+    } catch {
+      /* ignore */
+    }
+  }
+
+  /** User opened / built the Tasks board — clear the pending badge. */
+  clearNewTasks(): void {
+    this.newTaskCount = 0;
+    this.newTaskItems = [];
+  }
+
+  private handleWatchNew(msg: {
+    label: string;
+    title: string;
+    items: { id: string; title: string }[];
+  }): void {
+    if (!msg.items?.length) return;
+    // Accumulate; the badge shows the running count until the user visits
+    // the board. De-dupe by id so repeat broadcasts don't double-count.
+    const seen = new Set(this.newTaskItems.map((i) => i.id));
+    const merged = [...this.newTaskItems];
+    for (const it of msg.items) {
+      if (seen.has(it.id)) continue;
+      seen.add(it.id);
+      merged.push(it);
+    }
+    this.newTaskItems = merged;
+    this.newTaskCount = merged.length;
+
+    if (!this.taskNotificationsEnabled) return;
+    try {
+      const body =
+        msg.items
+          .slice(0, 4)
+          .map((i) => `#${i.id} ${i.title}`)
+          .join("\n") + (msg.items.length > 4 ? "\n…" : "");
+      void chrome.notifications?.create(`pinta-watch-${Date.now()}`, {
+        type: "basic",
+        iconUrl: chrome.runtime.getURL("icons/icon-128.png"),
+        title: msg.title || "New tasks",
+        message: body,
+        priority: 1,
+      });
+    } catch {
+      // notifications permission missing or API unavailable — badge still shows
     }
   }
 
