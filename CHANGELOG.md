@@ -4,6 +4,74 @@ Notable changes shipped on top of the original V1 pipeline. Newest first.
 For the architectural design behind each item, see
 [`spec/SPEC.md`](spec/SPEC.md).
 
+## 0.8.0 — 2026-08-12
+
+### Added
+
+- **Task watcher — desktop notifications for new tracker items.** An
+  opt-in, module-scoped companion poll (`.pinta/watch.json`) runs a plain
+  tracker query on an interval (no agent, zero Claude tokens) and raises a
+  Chrome desktop notification plus a count badge on the owning module's
+  tab AND the toolbar icon. Works with the side panel closed: the service
+  worker polls `GET /v1/watch/events` once a minute (new `notifications` +
+  `alarms` permissions). Items toast exactly once; clicking the
+  notification opens the side panel; visiting the board clears the badges.
+- **Floating toolbar** — a draggable, Photoshop-style on-page tool palette
+  (Settings-gated): Pinta-logo grip, `Ctrl+Alt+key` shortcuts, hover
+  tooltips, annotate/transform grouping, Add-task + CSS-selector entries,
+  right-center default that survives window resizes. When off, the side
+  panel shows a docked horizontal tool row instead.
+- **Free Transform** — a toggle that batches move / resize / edit / delete
+  of one element into a SINGLE annotation, with a "Free transforming"
+  banner and Done / Cancel.
+- **Undo / redo for annotations** (`Ctrl+Z` / `Ctrl+Shift+Z`), including
+  Free Transform batches.
+- **Settings accordion** — settings regrouped into collapsible cards
+  (Interface / Modules / Behavior / Backup & restore / Keyboard
+  shortcuts) with new **Theme** (Dark/Light) and **Density**
+  (Compact/Comfortable) controls.
+- **Viewport metadata on annotations** — a mobile/tablet chip on cards and
+  a breakpoint-scoping note for the agent, so a phone-width annotation
+  edits the mobile layout, not the desktop one.
+- **Tasks board** — bulk **Generate tests**, header actions consolidated
+  into one **Actions** dropdown (with icons), inline header badges, and a
+  pink toggle on the test icon while its steps are expanded.
+- **Report prose export** — the whole-report download now renders one
+  human-friendly paragraph (≤1000 chars) per day instead of raw item
+  lists.
+- **In-panel confirmation modal** — all confirmations route through one
+  styled modal (`window.confirm` is a silent no-op inside Chrome side
+  panels); richer "Start annotating" empty state + a count badge on the
+  Annotations header.
+
+### Changed
+
+- Brand-pink-only accents — purple/violet retired across the UI.
+- Landing + docs pages redesigned on the shared token system.
+- The side panel's TOOL section header is gone; Undo / Redo / Import live
+  in the Annotations header's ⋮ menu.
+
+### Fixed
+
+- Floating toolbar: auto-injects on first load (no page reload needed),
+  drag-drop works via pointer capture, re-anchors on window resize instead
+  of vanishing, styles render inside the shadow DOM, and it hides when the
+  side panel closes.
+- Annotating no longer freezes while a batch is being sent to the agent
+  (submitted sessions no longer adopt the active-draft slot).
+- Dark-mode datepicker (`color-scheme: dark`), chat image lightbox, and
+  Free Transform cancel no longer strands pin badges on the page.
+
+### Security
+
+- **Prompt-injection hardening for the page→agent pipeline** (OWASP LLM01):
+  image-borne text in screenshots is now explicitly DATA (SKILL §3.6
+  rule 6 — multimodal injection), module install/uninstall requires the
+  extension origin (a local process can't bypass the consent dialog), and
+  `/audit` gained a dedicated AI-threat pass (§2.10) that refreshes the
+  threat landscape on every run.
+- Dependency audit clean: 0 high / 0 critical.
+
 ## 0.7.0 — 2026-07-23
 
 ### Added

@@ -1272,7 +1272,7 @@
     <div class="container">
       <img class="hero-logo" src="assets/icons/icon-256.png" alt="Pinta logo" width="84" height="84" />
       <div>
-        <span class="version-chip"><span class="dot" aria-hidden="true"></span> <strong>v0.7.0</strong>&nbsp;— full annotation toolset + Drift Check</span>
+        <span class="version-chip"><span class="dot" aria-hidden="true"></span> <strong>v0.8.0</strong>&nbsp;— task watcher + floating toolbar + Free Transform</span>
       </div>
       <h1 class="hero-title">
         <span class="mark-wrap"><span class="mark-box" aria-hidden="true"><i class="h tl"></i><i class="h tr"></i><i class="h bl"></i><i class="h br"></i><span class="mark-pin">1</span></span>Annotate</span> your running app.<br />
@@ -1366,11 +1366,25 @@
   <section id="features">
     <div class="container">
       <div class="section-head">
-        <span class="eyebrow">What Pinta includes &middot; v0.7.0</span>
+        <span class="eyebrow">What Pinta includes &middot; v0.8.0</span>
         <h2>The whole loop, shipped.</h2>
         <p class="sub">The core annotate → submit → edit loop plus the polish phases (inline editing, protocol, standalone, share files) — and five built-in modules: GitLab Issues, Test Pilot, AuditFlow, Chat, and Report. See <a href="https://github.com/kevzlou7979/pinta/blob/main/spec/SPEC.md">the spec</a> for the phase-by-phase breakdown.</p>
       </div>
       <div class="features">
+        <div class="feature">
+          <div class="ico">
+            <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 8V4h4"/><path d="M20 8V4h-4"/><path d="M4 16v4h4"/><path d="M20 16v4h-4"/><rect x="9" y="9" width="6" height="6" rx="1"/></svg>
+          </div>
+          <h3>Floating toolbar + Free Transform</h3>
+          <p>A draggable on-page palette with <code>Ctrl+Alt</code> shortcuts — and a Free Transform toggle that batches move, resize, edit, and delete of one element into a single annotation. Undo / redo included. <span class="pill">v0.8</span></p>
+        </div>
+        <div class="feature">
+          <div class="ico">
+            <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M18 8A6 6 0 0 0 6 8c0 7-3 9-3 9h18s-3-2-3-9"/><path d="M13.73 21a2 2 0 0 1-3.46 0"/></svg>
+          </div>
+          <h3>Task notifications</h3>
+          <p>The companion watches your tracker with a plain poll — no agent, zero Claude tokens — and fires a Chrome notification + badge when new tasks land, even with the panel closed. Module-scoped and opt-in. <span class="pill">v0.8</span></p>
+        </div>
         <div class="feature">
           <div class="ico">
             <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="18" height="18" rx="3"/><path d="M3 9h18"/><path d="M9 21V9"/></svg>
@@ -1783,7 +1797,7 @@
 npx pinta-companion .
 
 # 3. Install the /pinta skill, then fully restart Claude Code
-npx pinta-companion@0.7.0 install-skill
+npx pinta-companion@0.8.0 install-skill
 
 # 4. Open Pinta in your browser, annotate, hit Submit
 #    Then in Claude Code:  /pinta
@@ -1889,6 +1903,28 @@ npx pinta-companion@0.7.0 install-skill
           <div class="timeline-card">
             <h3>Agent role routing</h3>
             <p>Open four <code>/pinta</code> terminals, give each one a job. <code>--annotate</code>, <code>--test-pilot</code>, <code>--audit</code>, <code>--chat</code> flags dedicate each Claude Code window to its own workload so a long audit run doesn't block your next annotation. Companion-enforced via 403 on cross-role claims — agents can't cross lanes even if they try.</p>
+            <span class="timeline-status is-shipped">Shipped</span>
+          </div>
+        </div>
+        <div class="timeline-item">
+          <div class="timeline-node" aria-label="Phase 19">
+            <span class="node-label">Phase</span>
+            <span class="node-num">19</span>
+          </div>
+          <div class="timeline-card">
+            <h3>Importable modules</h3>
+            <p>A Module SDK — third parties ship their own Pinta module as a single <code>.pinta-module.json</code> (manifest + agent instructions). Consent dialog with per-capability grants, default-deny gating, and the agent treats module instructions as data, never as a system prompt.</p>
+            <span class="timeline-status is-shipped">Shipped</span>
+          </div>
+        </div>
+        <div class="timeline-item">
+          <div class="timeline-node" aria-label="Phase 20">
+            <span class="node-label">Phase</span>
+            <span class="node-num">20</span>
+          </div>
+          <div class="timeline-card">
+            <h3>Floating toolkit</h3>
+            <p>A draggable Photoshop-style palette on the page itself — every tool one keystroke away (<code>Ctrl+Alt</code>), plus Free Transform: batch move / resize / edit / delete of one element into a single annotation, with undo / redo.</p>
             <span class="timeline-status is-shipped">Shipped</span>
           </div>
         </div>

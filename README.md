@@ -37,6 +37,19 @@ matching source files for you.
 
 Recent additions on top of the original V1 pipeline:
 
+- **Task watcher — desktop notifications for new tracker items** *(v0.8.0)*.
+  An opt-in, module-scoped companion poll (`.pinta/watch.json`) fires a
+  Chrome notification + tab/toolbar badges when new tasks land — even with
+  the side panel closed. Plain HTTP polling: no agent, zero Claude tokens.
+- **Floating toolbar + Free Transform** *(v0.8.0)*. A draggable on-page
+  palette with `Ctrl+Alt` shortcuts; Free Transform batches move / resize /
+  edit / delete of one element into ONE annotation. Undo / redo
+  (`Ctrl+Z` / `Ctrl+Shift+Z`) across all annotations.
+- **Settings accordion + Theme & Density** *(v0.8.0)*, viewport metadata on
+  annotations (mobile edits scope to the mobile breakpoint), a unified
+  in-panel confirmation modal, and prompt-injection hardening for the
+  page→agent pipeline (multimodal DATA rule, module-install origin gate,
+  AI-threat pass in `/audit`).
 - **A full annotation toolset** *(v0.7.0)*. Beyond draw + select: **Move**
   (drag & drop, multi-select), **Text** (edit in place + add paragraphs +
   a format toolbar), **Delete**, **Resize** (8 handles), **Paint** (recolor
@@ -439,7 +452,7 @@ The slash command is a Claude Code **skill** — it is **not** installed by
 **B1 — npm installer (one command):**
 
 ```bash
-npx pinta-companion@0.7.0 install-skill   # writes ~/.claude/skills/pinta/
+npx pinta-companion@0.8.0 install-skill   # writes ~/.claude/skills/pinta/
 ```
 
 Then **fully restart Claude Code** (skills load at startup — `/clear` is not
