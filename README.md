@@ -40,7 +40,7 @@ Recent additions on top of the original V1 pipeline:
 - **Task watcher — desktop notifications for new tracker items** *(v0.8.0)*.
   An opt-in, module-scoped companion poll (`.pinta/watch.json`) fires a
   Chrome notification + tab/toolbar badges when new tasks land — even with
-  the side panel closed. Plain HTTP polling: no agent, zero Claude tokens.
+  the side panel closed. Plain HTTP polling: no agent, zero Claude tokens. (v0.8.1: toast delivery is diagnosable in the SW console — Windows DND is the usual suppressor.)
 - **Floating toolbar + Free Transform** *(v0.8.0)*. A draggable on-page
   palette with `Ctrl+Alt` shortcuts; Free Transform batches move / resize /
   edit / delete of one element into ONE annotation. Undo / redo
@@ -452,7 +452,7 @@ The slash command is a Claude Code **skill** — it is **not** installed by
 **B1 — npm installer (one command):**
 
 ```bash
-npx pinta-companion@0.8.0 install-skill   # writes ~/.claude/skills/pinta/
+npx pinta-companion@0.8.1 install-skill   # writes ~/.claude/skills/pinta/
 ```
 
 Then **fully restart Claude Code** (skills load at startup — `/clear` is not

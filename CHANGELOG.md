@@ -4,6 +4,16 @@ Notable changes shipped on top of the original V1 pipeline. Newest first.
 For the architectural design behind each item, see
 [`spec/SPEC.md`](spec/SPEC.md).
 
+## 0.8.1 — 2026-08-12
+
+### Fixed
+
+- Task-watcher toast failures are no longer silent: the service worker
+  logs `[pinta] watch toast created: <id>` / `FAILED: <reason>` so
+  "badge but no toast" is diagnosable in seconds. (Field-verified: the
+  usual culprit is Windows **Do Not Disturb** swallowing the banner —
+  check Win+N and Settings → System → Notifications → Google Chrome.)
+
 ## 0.8.0 — 2026-08-12
 
 ### Added

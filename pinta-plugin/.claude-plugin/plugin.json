@@ -1,7 +1,7 @@
 {
   "name": "pinta",
   "description": "Annotate your running app visually and turn UI changes into source edits — the /pinta workflow for the Pinta Chrome extension and companion.",
-  "version": "0.8.0",
+  "version": "0.8.1",
   "author": {
     "name": "kevzlou7979",
     "url": "https://github.com/kevzlou7979/pinta"
