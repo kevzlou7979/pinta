@@ -23,6 +23,14 @@ import { exec } from "node:child_process";
 export interface WatchConfig {
   /** Master switch — the watcher is inert unless this is exactly `true`. */
   enabled?: boolean;
+  /**
+   * The interactive module this watch belongs to (e.g.
+   * "insclix.workflow-tasks"). The extension only surfaces nudges when
+   * this module is installed + enabled — the watch is a MODULE feature,
+   * not a core-Pinta one. Required in practice: without it the extension
+   * drops the broadcast.
+   */
+  moduleId?: string;
   /** Short id echoed to the extension, e.g. "tasks". */
   label?: string;
   /** Desktop-notification title, e.g. "New tasks for today". */
@@ -112,7 +120,12 @@ export interface WatcherHandle {
 export async function startWatcher(opts: {
   projectRoot: string;
   log?: (m: string) => void;
-  onNew: (p: { label: string; title: string; items: WatchItem[] }) => void;
+  onNew: (p: {
+    moduleId?: string;
+    label: string;
+    title: string;
+    items: WatchItem[];
+  }) => void;
 }): Promise<WatcherHandle> {
   const log = opts.log ?? (() => {});
   const cfgPath = join(opts.projectRoot, ".pinta", "watch.json");
@@ -168,6 +181,7 @@ export async function startWatcher(opts: {
       .slice(0, cfg.max ?? 20);
     log(`task watcher: ${freshItems.length} new item(s)`);
     opts.onNew({
+      moduleId: cfg.moduleId,
       label: cfg.label ?? "tasks",
       title: cfg.title ?? "New items",
       items: freshItems,

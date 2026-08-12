@@ -711,7 +711,6 @@ class ExtensionState {
     void this.refreshImported();
     void this.loadModules();
     void this.loadPulseSettings();
-    void this.loadTaskNotifyPref();
     void this.loadAutoReload();
     void this.loadStandaloneOrigins();
     void this.loadGlobalChat();
@@ -8519,64 +8518,59 @@ class ExtensionState {
     }
   }
 
-  // ─── Task watcher (companion `.pinta/watch.json` → desktop nudge) ────
-  /** Count of new tracker items the watcher has surfaced since the user
-   *  last visited the Tasks board. Drives the Tasks-tab badge. */
+  // ─── Task watcher (module-scoped `.pinta/watch.json` → nudge) ────────
+  // NOT a core-Pinta feature: a `watch.new` broadcast is dropped unless
+  // its `moduleId` names an installed + enabled interactive module (e.g.
+  // insclix.workflow-tasks). The toast opt-out lives in that module's own
+  // settings form (`watchNotifications`), not in Pinta's Settings.
+  /** Count of new tracker items since the user last visited the owning
+   *  module's tab. Drives that tab's badge. */
   newTaskCount = $state(0);
   /** Most-recent fresh items, for the notification body. */
   newTaskItems = $state<{ id: string; title: string }[]>([]);
-  /** User pref — show a desktop notification on `watch.new`. Persisted. */
-  taskNotificationsEnabled = $state(true);
-  private static readonly TASK_NOTIFY_KEY = "pinta-task-notifications";
+  /** The module tab the current nudges belong to (watch.json `moduleId`). */
+  newTasksModuleId = $state<string | null>(null);
 
-  async loadTaskNotifyPref(): Promise<void> {
-    try {
-      const s = await chrome.storage?.local?.get(
-        ExtensionState.TASK_NOTIFY_KEY,
-      );
-      const v = s?.[ExtensionState.TASK_NOTIFY_KEY];
-      if (typeof v === "boolean") this.taskNotificationsEnabled = v;
-    } catch {
-      /* storage unavailable — default on */
-    }
-  }
-
-  setTaskNotificationsEnabled(on: boolean): void {
-    this.taskNotificationsEnabled = on;
-    try {
-      void chrome.storage?.local?.set({
-        [ExtensionState.TASK_NOTIFY_KEY]: on,
-      });
-    } catch {
-      /* ignore */
-    }
-  }
-
-  /** User opened / built the Tasks board — clear the pending badge. */
-  clearNewTasks(): void {
+  /** User opened the owning module's board — clear its pending badge. */
+  clearNewTasks(moduleId: string): void {
+    if (this.newTasksModuleId !== moduleId) return;
     this.newTaskCount = 0;
     this.newTaskItems = [];
+    this.newTasksModuleId = null;
   }
 
   private handleWatchNew(msg: {
+    moduleId?: string;
     label: string;
     title: string;
     items: { id: string; title: string }[];
   }): void {
     if (!msg.items?.length) return;
+    // Module-scoped: no owning module, or module not installed/enabled/
+    // ready → drop. Pinta itself has no generic tasks surface.
+    const moduleId = msg.moduleId;
+    if (!moduleId) return;
+    if (!this.interactiveTabSpecs().some((s) => s.id === moduleId)) return;
+
     // Accumulate; the badge shows the running count until the user visits
     // the board. De-dupe by id so repeat broadcasts don't double-count.
     const seen = new Set(this.newTaskItems.map((i) => i.id));
-    const merged = [...this.newTaskItems];
+    const merged =
+      this.newTasksModuleId === moduleId ? [...this.newTaskItems] : [];
     for (const it of msg.items) {
       if (seen.has(it.id)) continue;
       seen.add(it.id);
       merged.push(it);
     }
+    this.newTasksModuleId = moduleId;
     this.newTaskItems = merged;
     this.newTaskCount = merged.length;
 
-    if (!this.taskNotificationsEnabled) return;
+    // Toast opt-out is the module's own boolean setting (default on via
+    // the manifest's `"default": true`; only an explicit false mutes).
+    if (this.modules[moduleId]?.settings?.["watchNotifications"] === false) {
+      return;
+    }
     try {
       const body =
         msg.items

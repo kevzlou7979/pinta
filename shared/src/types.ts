@@ -900,12 +900,19 @@ export type ServerMessage =
       /**
        * The companion's opt-in task watcher (`.pinta/watch.json`) detected
        * new items on the tracker (e.g. issues David just posted). Purely a
-       * heads-up: the extension raises a desktop notification + a Tasks-tab
-       * badge. It NEVER invokes the agent — the user clicks through and
-       * builds the board interactively, keeping Pinta bring-your-own-Claude
-       * and spending zero agent tokens on the watch itself.
+       * heads-up: the extension raises a desktop notification + a badge on
+       * the OWNING MODULE's tab. It NEVER invokes the agent — the user
+       * clicks through and builds the board interactively, keeping Pinta
+       * bring-your-own-Claude and spending zero agent tokens on the watch.
+       *
+       * Module-scoped by design: `moduleId` names the interactive module
+       * (e.g. a workflow-tasks board) the nudge belongs to. Pinta itself
+       * has no generic "tasks" surface — the extension DROPS the message
+       * unless that module is installed + enabled, so core Pinta stays
+       * plumbing-only and the feature ships with the module.
        */
       type: "watch.new";
+      moduleId?: string;
       label: string;
       title: string;
       items: { id: string; title: string }[];

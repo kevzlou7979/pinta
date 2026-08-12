@@ -968,55 +968,6 @@
           </span>
         </label>
       </div>
-
-      <!-- Task notifications — desktop toast when the companion's opt-in
-           watcher (.pinta/watch.json) sees new tracker items. -->
-      <div class="flex items-start gap-2 pt-3 mt-3 border-t border-ink-100 dark:border-night-line">
-        <div class="min-w-0 flex-1">
-          <div class="flex items-center gap-1.5">
-            <span
-              class="inline-flex shrink-0"
-              class:text-brand-pink={app.taskNotificationsEnabled}
-              class:dark:text-brand-pink-light={app.taskNotificationsEnabled}
-              class:text-ink-400={!app.taskNotificationsEnabled}
-              class:dark:text-night-mute={!app.taskNotificationsEnabled}
-              aria-hidden="true"
-            >
-              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-                <path d="M18 8A6 6 0 0 0 6 8c0 7-3 9-3 9h18s-3-2-3-9" />
-                <path d="M13.73 21a2 2 0 0 1-3.46 0" />
-              </svg>
-            </span>
-            <span class="text-sm font-semibold text-ink-900 dark:text-night-text">
-              Task notifications
-            </span>
-          </div>
-          <p class="text-[12px] text-ink-700 dark:text-night-dim mt-0.5">
-            Desktop toast + a Tasks-tab badge when new tracker items appear.
-            The companion polls on its own (no agent, no tokens) — enable it
-            per project with a <code class="font-mono text-[10.5px] bg-ink-100 dark:bg-night-alt px-1 rounded">.pinta/watch.json</code>.
-            Toasts show while the Pinta panel is open.
-          </p>
-        </div>
-        <label class="shrink-0 inline-flex items-center cursor-pointer">
-          <input
-            type="checkbox"
-            class="sr-only peer"
-            checked={app.taskNotificationsEnabled}
-            onchange={(e) =>
-              app.setTaskNotificationsEnabled((e.currentTarget as HTMLInputElement).checked)}
-          />
-          <span
-            class="relative w-9 h-5 bg-ink-300 dark:bg-night-line rounded-full peer-checked:bg-brand-pink dark:peer-checked:bg-brand-pink-light transition-colors"
-            aria-hidden="true"
-          >
-            <span
-              class="absolute top-0.5 left-0.5 w-4 h-4 bg-white rounded-full transition-transform"
-              class:translate-x-4={app.taskNotificationsEnabled}
-            ></span>
-          </span>
-        </label>
-      </div>
     </div>
     {/if}
   </div>

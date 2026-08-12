@@ -179,12 +179,15 @@ async function main(): Promise<void> {
   // Opt-in task watcher (`.pinta/watch.json`). A dumb shell poll — no
   // agent, no Claude tokens — that broadcasts `watch.new` when the tracker
   // gains items, so the extension can nudge the user. Inert unless the
-  // config exists and is enabled.
+  // config exists and is enabled. Module-scoped: the config's `moduleId`
+  // names the interactive module that owns the nudge (the extension drops
+  // it unless that module is installed + enabled) — core Pinta is only
+  // the relay.
   const watcher = await startWatcher({
     projectRoot: args.projectRoot,
     log,
-    onNew: ({ label, title, items }) =>
-      broadcastAll(wss, { type: "watch.new", label, title, items }),
+    onNew: ({ moduleId, label, title, items }) =>
+      broadcastAll(wss, { type: "watch.new", moduleId, label, title, items }),
   });
 
   registryEntry = await registerEntry({
