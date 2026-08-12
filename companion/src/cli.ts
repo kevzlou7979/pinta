@@ -11,7 +11,7 @@ import { homedir } from "node:os";
 import { startServer } from "./server.js";
 import { SessionStore } from "./store.js";
 import { attachWebSocket, broadcastAll } from "./ws.js";
-import { startWatcher } from "./watcher.js";
+import { startWatcher, type WatchEvent } from "./watcher.js";
 import { registerEntry, unregister, type RegistryEntry } from "./registry.js";
 import { readProjectConfig } from "./project-config.js";
 
@@ -167,12 +167,18 @@ async function main(): Promise<void> {
   // listen() and updates it again after registry write.
   let registryEntry: RegistryEntry | null = null;
 
+  // In-memory ring of recent watcher events, served via
+  // GET /v1/watch/events so the extension's service worker can raise
+  // Chrome notifications while the side panel (and its WS) is closed.
+  const watchEvents: WatchEvent[] = [];
+
   const { port, server } = await startServer({
     port: args.port,
     autoAllocatePort: !args.portExplicit,
     store,
     log,
     getRegistryEntry: () => registryEntry,
+    getWatchEvents: () => watchEvents,
   });
   const wss = attachWebSocket({ server, store, log });
 
@@ -186,8 +192,13 @@ async function main(): Promise<void> {
   const watcher = await startWatcher({
     projectRoot: args.projectRoot,
     log,
-    onNew: ({ moduleId, label, title, items }) =>
-      broadcastAll(wss, { type: "watch.new", moduleId, label, title, items }),
+    onNew: ({ moduleId, label, title, items }) => {
+      // Ring-buffer for the service worker's poll (cap 50), then the
+      // instant path for an open side panel.
+      watchEvents.push({ at: Date.now(), moduleId, label, title, items });
+      if (watchEvents.length > 50) watchEvents.splice(0, watchEvents.length - 50);
+      broadcastAll(wss, { type: "watch.new", moduleId, label, title, items });
+    },
   });
 
   registryEntry = await registerEntry({

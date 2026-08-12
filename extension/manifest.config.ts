@@ -49,6 +49,7 @@ export default defineManifest({
     "storage",
     "offscreen",
     "notifications",
+    "alarms",
   ],
   host_permissions: ["<all_urls>"],
   content_scripts: [

@@ -391,7 +391,9 @@ new ask a reviewer will question** and must be deliberate:
 
 - `permissions`: `sidePanel`, `tabs`, `activeTab`, `scripting`, `storage`,
   `offscreen` (Voice Command — offscreen mic + Web Speech; justified 0.7.0),
-  `notifications` (task-watcher desktop toast on `watch.new`; justified 0.8.0)
+  `notifications` (task-watcher desktop toast on `watch.new`; justified 0.8.0),
+  `alarms` (service-worker background poll of `/v1/watch/events` so the
+  toast fires with the panel closed; justified 0.8.0)
 - `host_permissions`: `<all_urls>` (needed — Pinta annotates *any*
   app the user is building; this is the single most-scrutinised line,
   so a *narrowing* is good, a *widening* is impossible)

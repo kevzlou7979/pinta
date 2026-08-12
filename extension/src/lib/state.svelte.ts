@@ -58,6 +58,17 @@ import {
 import { WsClient, type WsClientStatus } from "./ws-client.js";
 import { classifySyncedSession } from "./session-routing.js";
 import {
+  WATCH_PENDING_KEY,
+  WATCH_TOASTED_KEY,
+  filterUntoasted,
+  appendToasted,
+  mergePending,
+  raiseWatchToast,
+  setIconBadge,
+  recordWatchPort,
+  type WatchPending,
+} from "./watch-notify.js";
+import {
   discoverCompanions,
   type Companion,
 } from "./companions.js";
@@ -711,6 +722,7 @@ class ExtensionState {
     void this.refreshImported();
     void this.loadModules();
     void this.loadPulseSettings();
+    void this.loadWatchPending();
     void this.loadAutoReload();
     void this.loadStandaloneOrigins();
     void this.loadGlobalChat();
@@ -7821,6 +7833,9 @@ class ExtensionState {
       this.connectionStatus = "disconnected";
       return;
     }
+    // Remember the port so the service worker's background watch poll
+    // knows which companions to check while the panel is closed.
+    void recordWatchPort(companion.port);
     this.client = new WsClient({
       url: `ws://127.0.0.1:${companion.port}/`,
       onMessage: (msg) => this.onMessage(msg),
@@ -8531,12 +8546,35 @@ class ExtensionState {
   /** The module tab the current nudges belong to (watch.json `moduleId`). */
   newTasksModuleId = $state<string | null>(null);
 
-  /** User opened the owning module's board — clear its pending badge. */
+  /** User opened the owning module's board — clear its pending badge
+   *  (panel state, persisted state, and the toolbar-icon count). */
   clearNewTasks(moduleId: string): void {
     if (this.newTasksModuleId !== moduleId) return;
     this.newTaskCount = 0;
     this.newTaskItems = [];
     this.newTasksModuleId = null;
+    setIconBadge(0);
+    try {
+      void chrome.storage?.local?.remove(WATCH_PENDING_KEY);
+    } catch {
+      /* ignore */
+    }
+  }
+
+  /** Restore badge state persisted by the service worker's background
+   *  poll (or a previous panel lifetime). */
+  async loadWatchPending(): Promise<void> {
+    try {
+      const s = await chrome.storage?.local?.get(WATCH_PENDING_KEY);
+      const p = s?.[WATCH_PENDING_KEY] as WatchPending | null | undefined;
+      if (p?.moduleId && Array.isArray(p.items) && p.items.length > 0) {
+        this.newTasksModuleId = p.moduleId;
+        this.newTaskItems = p.items;
+        this.newTaskCount = p.items.length;
+      }
+    } catch {
+      /* storage unavailable */
+    }
   }
 
   private handleWatchNew(msg: {
@@ -8554,38 +8592,51 @@ class ExtensionState {
 
     // Accumulate; the badge shows the running count until the user visits
     // the board. De-dupe by id so repeat broadcasts don't double-count.
-    const seen = new Set(this.newTaskItems.map((i) => i.id));
-    const merged =
-      this.newTasksModuleId === moduleId ? [...this.newTaskItems] : [];
-    for (const it of msg.items) {
-      if (seen.has(it.id)) continue;
-      seen.add(it.id);
-      merged.push(it);
-    }
-    this.newTasksModuleId = moduleId;
-    this.newTaskItems = merged;
-    this.newTaskCount = merged.length;
+    const merged = mergePending(
+      this.newTasksModuleId
+        ? { moduleId: this.newTasksModuleId, items: this.newTaskItems }
+        : null,
+      moduleId,
+      msg.items,
+    );
+    this.newTasksModuleId = merged.moduleId;
+    this.newTaskItems = merged.items;
+    this.newTaskCount = merged.items.length;
+    setIconBadge(merged.items.length);
 
-    // Toast opt-out is the module's own boolean setting (default on via
-    // the manifest's `"default": true`; only an explicit false mutes).
-    if (this.modules[moduleId]?.settings?.["watchNotifications"] === false) {
-      return;
-    }
+    // Toast + persist share the SW's storage keys so an item is toasted
+    // exactly once whichever side (WS or background poll) sees it first.
+    void this.persistAndToastWatch(moduleId, msg.title, msg.items, merged);
+  }
+
+  private async persistAndToastWatch(
+    moduleId: string,
+    title: string,
+    items: { id: string; title: string }[],
+    pending: WatchPending,
+  ): Promise<void> {
     try {
-      const body =
-        msg.items
-          .slice(0, 4)
-          .map((i) => `#${i.id} ${i.title}`)
-          .join("\n") + (msg.items.length > 4 ? "\n…" : "");
-      void chrome.notifications?.create(`pinta-watch-${Date.now()}`, {
-        type: "basic",
-        iconUrl: chrome.runtime.getURL("icons/icon-128.png"),
-        title: msg.title || "New tasks",
-        message: body,
-        priority: 1,
+      const s = await chrome.storage?.local?.get(WATCH_TOASTED_KEY);
+      const toasted = Array.isArray(s?.[WATCH_TOASTED_KEY])
+        ? (s[WATCH_TOASTED_KEY] as string[])
+        : [];
+      const fresh = filterUntoasted(items, toasted);
+      await chrome.storage?.local?.set({
+        [WATCH_PENDING_KEY]: pending,
+        [WATCH_TOASTED_KEY]: appendToasted(
+          toasted,
+          fresh.map((i) => i.id),
+        ),
       });
+      if (fresh.length === 0) return;
+      // Toast opt-out is the module's own boolean setting (default on via
+      // the manifest's `"default": true`; only an explicit false mutes).
+      if (this.modules[moduleId]?.settings?.["watchNotifications"] === false) {
+        return;
+      }
+      raiseWatchToast(title, fresh);
     } catch {
-      // notifications permission missing or API unavailable — badge still shows
+      // storage unavailable — in-panel badge already updated
     }
   }
 

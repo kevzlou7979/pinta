@@ -52,6 +52,20 @@ export interface WatchItem {
   title: string;
 }
 
+/**
+ * One "fresh items detected" occurrence, kept in a small in-memory ring
+ * so the extension's service worker can poll `GET /v1/watch/events` and
+ * raise a Chrome notification even while the side panel (and its WS) is
+ * closed. Ephemeral by design — a companion restart drops the backlog.
+ */
+export interface WatchEvent {
+  at: number;
+  moduleId?: string;
+  label: string;
+  title: string;
+  items: WatchItem[];
+}
+
 const MIN_INTERVAL_SEC = 60;
 const CMD_TIMEOUT_MS = 20_000;
 const MAX_OUTPUT_BYTES = 4_000_000;

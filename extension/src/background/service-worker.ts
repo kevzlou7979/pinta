@@ -1,12 +1,104 @@
 /// <reference types="chrome" />
 
 import { captureFullPage } from "./screenshot.js";
+import {
+  WATCH_PORTS_KEY,
+  WATCH_TOASTED_KEY,
+  WATCH_PENDING_KEY,
+  MODULES_STORE_KEY,
+  filterUntoasted,
+  appendToasted,
+  mergePending,
+  moduleWantsToast,
+  raiseWatchToast,
+  setIconBadge,
+  fetchWatchEvents,
+  type WatchPending,
+} from "../lib/watch-notify.js";
 
 // Always show the side panel button on the extension toolbar action.
 chrome.runtime.onInstalled.addListener(() => {
   chrome.sidePanel
     .setPanelBehavior({ openPanelOnActionClick: true })
     .catch((err) => console.error("[pinta] sidePanel setup failed", err));
+});
+
+// ─── Task-watcher background poll ────────────────────────────────────
+// The side panel's WS delivers watch nudges instantly while it's OPEN;
+// this alarm covers the panel-CLOSED case: poll each known companion's
+// `GET /v1/watch/events` and raise the Chrome notification + toolbar
+// badge from here. Both paths share the `pinta-watch-toasted` id set so
+// an item is toasted exactly once. The poll is a couple of localhost
+// GETs a minute — no agent, no tokens, battery-negligible.
+const WATCH_ALARM = "pinta-watch-poll";
+chrome.alarms?.create(WATCH_ALARM, { periodInMinutes: 1 });
+
+chrome.alarms?.onAlarm.addListener((alarm) => {
+  if (alarm.name !== WATCH_ALARM) return;
+  void pollWatchEvents();
+});
+
+async function pollWatchEvents(): Promise<void> {
+  try {
+    const s = await chrome.storage.local.get([
+      WATCH_PORTS_KEY,
+      WATCH_TOASTED_KEY,
+      WATCH_PENDING_KEY,
+      MODULES_STORE_KEY,
+    ]);
+    const ports = Array.isArray(s[WATCH_PORTS_KEY])
+      ? (s[WATCH_PORTS_KEY] as number[])
+      : [];
+    if (ports.length === 0) return;
+    let toasted = Array.isArray(s[WATCH_TOASTED_KEY])
+      ? (s[WATCH_TOASTED_KEY] as string[])
+      : [];
+    let pending = (s[WATCH_PENDING_KEY] ?? null) as WatchPending | null;
+    const modules = s[MODULES_STORE_KEY] as
+      | Record<string, { enabled?: boolean; settings?: Record<string, string | boolean> }>
+      | undefined;
+
+    let dirty = false;
+    for (const port of ports) {
+      for (const ev of await fetchWatchEvents(port)) {
+        // Module-scoped: drop nudges without an installed+enabled owner.
+        if (!ev.moduleId || !modules?.[ev.moduleId]?.enabled) continue;
+        const fresh = filterUntoasted(ev.items, toasted);
+        if (fresh.length === 0) continue;
+        toasted = appendToasted(
+          toasted,
+          fresh.map((i) => i.id),
+        );
+        pending = mergePending(pending, ev.moduleId, fresh);
+        dirty = true;
+        if (moduleWantsToast(modules, ev.moduleId)) {
+          raiseWatchToast(ev.title, fresh);
+        }
+      }
+    }
+    if (dirty) {
+      await chrome.storage.local.set({
+        [WATCH_TOASTED_KEY]: toasted,
+        [WATCH_PENDING_KEY]: pending,
+      });
+      setIconBadge(pending?.items.length ?? 0);
+    }
+  } catch (err) {
+    console.warn("[pinta] watch poll failed", err);
+  }
+}
+
+// Clicking the nudge opens the side panel (a notification click is a user
+// gesture, which sidePanel.open requires).
+chrome.notifications?.onClicked.addListener((id) => {
+  if (!id.startsWith("pinta-watch")) return;
+  chrome.notifications.clear(id);
+  chrome.windows
+    .getLastFocused()
+    .then((w) => {
+      if (w.id != null) return chrome.sidePanel.open({ windowId: w.id });
+    })
+    .catch(() => {});
 });
 
 // ─── Side-panel presence ─────────────────────────────────────────────

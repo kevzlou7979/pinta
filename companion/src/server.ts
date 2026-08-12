@@ -8,6 +8,7 @@ import type {
   SessionStatus,
 } from "@pinta/shared";
 import { SessionStore } from "./store.js";
+import type { WatchEvent } from "./watcher.js";
 import {
   snapshot as registrySnapshot,
   updateUrlPatterns as updateRegistryUrlPatterns,
@@ -33,6 +34,12 @@ export type ServerOptions = {
    * urlPatterns + the entry id (used by POST /v1/url-patterns).
    */
   getRegistryEntry?: () => RegistryEntry | null;
+  /**
+   * Recent task-watcher events (in-memory ring, set by the CLI). Lets the
+   * extension's service worker poll for nudges while the side panel's WS
+   * is closed. Read-only; absent when the watcher is off.
+   */
+  getWatchEvents?: () => WatchEvent[];
 };
 
 const POLL_TIMEOUT_MS = 25_000;
@@ -217,6 +224,21 @@ async function handle(
   if (method === "GET" && path === "/v1/registry") {
     const snap = await registrySnapshot();
     return sendJson(res, 200, snap);
+  }
+
+  // Recent task-watcher events (module-scoped nudges). Polled by the
+  // extension's service worker so Chrome notifications fire even while
+  // the side panel's WS is closed. `?since=<ms>` filters older events;
+  // the extension additionally dedupes by item id, so replays are safe.
+  if (method === "GET" && path === "/v1/watch/events") {
+    const events = opts.getWatchEvents?.() ?? [];
+    const sinceRaw = url.searchParams.get("since");
+    const since = sinceRaw ? Number(sinceRaw) : 0;
+    return sendJson(res, 200, {
+      events: Number.isFinite(since)
+        ? events.filter((e) => e.at > since)
+        : events,
+    });
   }
 
   // Serve a per-entry "proof" screenshot the /pinta agent captured for the
