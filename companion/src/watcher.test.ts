@@ -1,5 +1,8 @@
-import { describe, it, expect } from "vitest";
-import { diffSeen, parseItems } from "./watcher.js";
+import { describe, it, expect, beforeEach, afterEach } from "vitest";
+import { mkdtemp, mkdir, rm, writeFile, readFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { diffSeen, parseItems, startWatcher, type WatcherHandle } from "./watcher.js";
 
 describe("diffSeen", () => {
   it("treats everything as fresh against an empty seen list", () => {
@@ -65,5 +68,112 @@ describe("parseItems", () => {
       {},
     );
     expect(out).toEqual([{ id: "1", title: "1" }]);
+  });
+});
+
+describe("startWatcher (integration, real command via temp project)", () => {
+  let root: string;
+  let handle: WatcherHandle | null = null;
+  const events: { moduleId?: string; items: { id: string; title: string }[] }[] = [];
+
+  // The watch command reads items.json from the project root, so tests
+  // mutate that file between ticks to simulate the tracker changing.
+  async function seedProject(items: unknown[], cfg: Record<string, unknown> = {}) {
+    await mkdir(join(root, ".pinta"), { recursive: true });
+    await writeFile(join(root, "items.json"), JSON.stringify(items), "utf8");
+    await writeFile(
+      join(root, "read-items.cjs"),
+      'process.stdout.write(require("fs").readFileSync("items.json", "utf8"));',
+      "utf8",
+    );
+    await writeFile(
+      join(root, ".pinta", "watch.json"),
+      JSON.stringify({
+        enabled: true,
+        moduleId: "insclix.workflow-tasks",
+        title: "New tasks",
+        command: "node read-items.cjs",
+        intervalSec: 60,
+        ...cfg,
+      }),
+      "utf8",
+    );
+  }
+
+  beforeEach(async () => {
+    root = await mkdtemp(join(tmpdir(), "pinta-watch-"));
+    events.length = 0;
+  });
+
+  afterEach(async () => {
+    handle?.stop();
+    handle = null;
+    await rm(root, { recursive: true, force: true });
+  });
+
+  it("is a no-op without an enabled config", async () => {
+    const logs: string[] = [];
+    handle = await startWatcher({
+      projectRoot: root, // no .pinta/watch.json at all
+      log: (m) => logs.push(m),
+      onNew: (p) => events.push(p),
+    });
+    expect(logs.join(" ")).toContain("off");
+    expect(handle.tickNow).toBeUndefined();
+    expect(events).toHaveLength(0);
+  });
+
+  it("seeds the backlog silently, notifies only for later items, then dedupes", async () => {
+    await seedProject([{ id: "1", title: "Existing task" }]);
+    handle = await startWatcher({
+      projectRoot: root,
+      onNew: (p) => events.push(p),
+    });
+
+    // Boot tick: existing backlog seeds watch-state.json, no notification.
+    expect(events).toHaveLength(0);
+    const state = JSON.parse(
+      await readFile(join(root, ".pinta", "watch-state.json"), "utf8"),
+    ) as { seen: string[] };
+    expect(state.seen).toContain("1");
+
+    // David posts a new task → next tick notifies with ONLY the new item.
+    await writeFile(
+      join(root, "items.json"),
+      JSON.stringify([
+        { id: "1", title: "Existing task" },
+        { id: "2", title: "New task from David" },
+      ]),
+      "utf8",
+    );
+    await handle.tickNow!();
+    expect(events).toHaveLength(1);
+    expect(events[0].moduleId).toBe("insclix.workflow-tasks");
+    expect(events[0].items).toEqual([{ id: "2", title: "New task from David" }]);
+
+    // Same data again → no duplicate notification.
+    await handle.tickNow!();
+    expect(events).toHaveLength(1);
+  });
+
+  it("goes quiet when the config is disabled between ticks (no restart)", async () => {
+    await seedProject([{ id: "1", title: "A" }]);
+    handle = await startWatcher({
+      projectRoot: root,
+      onNew: (p) => events.push(p),
+    });
+    // Disable in place — the watcher re-reads the config each tick.
+    await writeFile(
+      join(root, ".pinta", "watch.json"),
+      JSON.stringify({ enabled: false, command: "node read-items.cjs" }),
+      "utf8",
+    );
+    await writeFile(
+      join(root, "items.json"),
+      JSON.stringify([{ id: "1", title: "A" }, { id: "2", title: "B" }]),
+      "utf8",
+    );
+    await handle.tickNow!();
+    expect(events).toHaveLength(0);
   });
 });

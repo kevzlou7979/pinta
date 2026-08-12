@@ -124,6 +124,9 @@ export function parseItems(stdout: string, cfg: WatchConfig): WatchItem[] {
 
 export interface WatcherHandle {
   stop: () => void;
+  /** Run one poll cycle immediately (tests / diagnostics). Absent when
+   *  the watcher is off. */
+  tickNow?: () => Promise<void>;
 }
 
 /**
@@ -211,6 +214,7 @@ export async function startWatcher(opts: {
       stopped = true;
       clearInterval(timer);
     },
+    tickNow: tick,
   };
 }
 
