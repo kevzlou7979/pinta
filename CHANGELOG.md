@@ -4,6 +4,16 @@ Notable changes shipped on top of the original V1 pipeline. Newest first.
 For the architectural design behind each item, see
 [`spec/SPEC.md`](spec/SPEC.md).
 
+## 0.8.2 — 2026-08-21
+
+### Fixed
+
+- Task watcher: `onlyNewerIds` config kills window-sliding phantom
+  notifications — with a `per_page`-limited query, old items surfacing
+  when others close are seeded silently instead of announced as new.
+  With numeric ascending tracker ids (GitLab/GitHub), only ids above the
+  historical high-water mark notify; non-numeric ids fail open.
+
 ## 0.8.1 — 2026-08-12
 
 ### Fixed
