@@ -556,7 +556,9 @@ async function handle(
       body.role === "annotate" ||
       body.role === "test-pilot" ||
       body.role === "audit" ||
-      body.role === "chat"
+      body.role === "chat" ||
+      body.role === "variants" ||
+      body.role === "review"
         ? body.role
         : null;
     let result;

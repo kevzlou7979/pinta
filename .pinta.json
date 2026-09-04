@@ -1,5 +1,7 @@
 {
   "urlPatterns": [
-    "http://localhost:5173/claims/*"
+    "http://localhost:5173/claims/*",
+    "file:///C:/rnd/ux-design-app/docs/*",
+    "https://pinta-companion.vercel.app/*"
   ]
 }

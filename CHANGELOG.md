@@ -4,6 +4,25 @@ Notable changes shipped on top of the original V1 pipeline. Newest first.
 For the architectural design behind each item, see
 [`spec/SPEC.md`](spec/SPEC.md).
 
+## Unreleased
+
+### Added
+
+- **Devices module (Phase 24) — multi-device canvas.** A full-tab
+  simulator page showing your running app in many live, interactive
+  device frames at once (iPhone / Pixel / iPad / Surface / laptop /
+  Full HD / QHD / 4K), each with model picker, rotate, per-frame zoom,
+  and reload — plus global zoom, a target-URL bar with an open-tabs
+  picker, and Refresh all. Media queries respond to each frame's real
+  width. Purely in-browser (no companion/agent); enable in Settings →
+  Devices, launch from the new Devices tab. Custom sizes via the
+  `customDevices` JSON setting. Frames are freely draggable on the
+  canvas (grab the header bar) and remember their positions. The device
+  picker also adds whole groups at once — All Mobile / All Tablets /
+  All Laptops / All Desktops. A toolbar **Sync** toggle mirrors
+  navigation: click a link in one frame and every other frame follows
+  (the frame you navigated in never reloads).
+
 ## 0.8.2 — 2026-08-21
 
 ### Fixed

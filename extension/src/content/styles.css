@@ -1236,3 +1236,53 @@
 .pfab-tool:hover .pfab-tip {
   opacity: 1;
 }
+
+/* ─── Phase 22 — Design Variants ──────────────────────────────────────
+   On-page pill shown while a variant is live-previewed. Lives in the
+   shadow root, so rules MUST be here (scoped Svelte styles never reach
+   it). Brand pink accents per the primary-color rule. */
+.pinta-variant-bar {
+  position: fixed;
+  left: 50%;
+  bottom: 18px;
+  transform: translateX(-50%);
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 12px;
+  border-radius: 999px;
+  background: #0b0b0f;
+  color: #fff;
+  font-size: 12px;
+  line-height: 1;
+  box-shadow: 0 6px 24px rgba(0, 0, 0, 0.45);
+  pointer-events: auto;
+  z-index: 2147483647;
+}
+.pinta-variant-bar__label {
+  max-width: 320px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.pinta-variant-bar__btn {
+  appearance: none;
+  border: 1px solid #3a3a44;
+  background: #1b1b22;
+  color: #fff;
+  font-size: 12px;
+  line-height: 1;
+  padding: 6px 10px;
+  border-radius: 999px;
+  cursor: pointer;
+}
+.pinta-variant-bar__btn:hover {
+  background: #26262e;
+}
+.pinta-variant-bar__btn--primary {
+  border-color: var(--pinta-accent, #FF3D6E);
+  background: var(--pinta-accent, #FF3D6E);
+}
+.pinta-variant-bar__btn--primary:hover {
+  filter: brightness(0.9);
+}

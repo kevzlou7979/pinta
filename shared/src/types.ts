@@ -645,20 +645,28 @@ export type InstalledModule = {
  * cross-role claims (18b enforcement). Generalists (no flag) omit `role`
  * entirely and fall through to first-wins.
  */
-export type SessionRole = "annotate" | "test-pilot" | "audit" | "chat";
+export type SessionRole =
+  | "annotate"
+  | "test-pilot"
+  | "audit"
+  | "chat"
+  | "variants"
+  | "review";
 
 /**
- * Derive the role a session "belongs to" from its modules[]. The chat,
- * audit-flow, and test-pilot modules are mutually exclusive on a given
- * submit (each is created by its own state.svelte.ts code path), so
- * precedence below only matters as a defensive fallback. A session with
- * no specialized module is annotate work (the base flow + GitLab Issues).
+ * Derive the role a session "belongs to" from its modules[]. The
+ * specialized modules are mutually exclusive on a given submit (each is
+ * created by its own state.svelte.ts code path), so precedence below
+ * only matters as a defensive fallback. A session with no specialized
+ * module is annotate work (the base flow + GitLab Issues).
  */
 export function expectedSessionRole(session: Session): SessionRole {
   const ids = session.modules?.map((m) => m.id) ?? [];
   if (ids.includes("chat")) return "chat";
   if (ids.includes("audit-flow")) return "audit";
   if (ids.includes("test-pilot")) return "test-pilot";
+  if (ids.includes("design-variants")) return "variants";
+  if (ids.includes("code-review")) return "review";
   return "annotate";
 }
 

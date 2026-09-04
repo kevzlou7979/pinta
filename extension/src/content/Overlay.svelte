@@ -29,6 +29,7 @@
   import { voice } from "../lib/voice/controller.js";
   import FloatingToolbar from "./FloatingToolbar.svelte";
   import { toolMode, toolForKey, type Tool } from "../lib/tools.js";
+  import { sanitizeVariantHtml } from "../lib/design-variants.js";
 
   let hovered: Element | null = $state(null);
   let selected: Element | null = $state(null);
@@ -167,6 +168,11 @@
         annotation?: Annotation;
         on?: boolean;
         open?: boolean;
+        // Phase 22 — Design Variants preview payload.
+        variantId?: string;
+        label?: string;
+        target?: AnnotationTarget;
+        swap?: { cssChanges?: Record<string, string>; html?: string };
       };
       if (m?.type === "panel.state") {
         content.panelOpen = !!m.open;
@@ -270,6 +276,25 @@
         imported = m.imported;
       } else if (m?.type === "imported.hide") {
         imported = null;
+      } else if (m?.type === "variants.pick-element") {
+        // Phase 22 — one-shot Design Variants element pick.
+        setMode("variant-pick");
+      } else if (m?.type === "variants.pick-cancel") {
+        if (content.mode === "variant-pick") setMode("idle");
+      } else if (m?.type === "variants.preview" && m.target && m.swap) {
+        previewVariant(
+          m as {
+            variantId: string;
+            label?: string;
+            target: AnnotationTarget;
+            swap: { cssChanges?: Record<string, string>; html?: string };
+          },
+        );
+      } else if (m?.type === "variants.restore") {
+        // Panel-initiated restore — no echo back (the panel already
+        // cleared its own previewing state; a late echo would clobber a
+        // NEWER preview selection it made since).
+        restoreVariantPreviewLocal(false);
       }
     };
     chrome.runtime.onMessage.addListener(handler);
@@ -307,6 +332,25 @@
       if (mutationTimer) return;
       mutationTimer = setTimeout(() => {
         mutationTimer = null;
+        // A Design Variants live swap mutates the page on purpose —
+        // skip the re-resolve pass so the swap doesn't cause churn. But
+        // if a framework re-render already clobbered the swap node, the
+        // preview is dead: clear it (and tell the panel) instead of
+        // suppressing re-resolution indefinitely.
+        if (content.variantPreviewActive) {
+          // Self-heal BOTH modes: a framework re-render that removed the
+          // swap node (swap mode) or the styled element itself (css
+          // mode) means the preview is dead — clear it instead of
+          // suppressing annotation re-resolution indefinitely.
+          const dead =
+            variantPreview?.mode === "swap"
+              ? !variantPreview.replacement?.isConnected
+              : variantPreview
+                ? !variantPreview.original.isConnected
+                : true;
+          if (dead) restoreVariantPreviewLocal(true);
+          return;
+        }
         if (content.annotated.length === 0) return;
         content.reresolveDetached();
         // Force a layout-tick bump so rectOf re-runs for entries whose
@@ -598,6 +642,186 @@
       }
     };
   });
+
+  // ─── Phase 22 — Design Variants ─────────────────────────────────────
+
+  // One-shot element pick: hover highlight, single click captures the
+  // target and returns to idle. A slimmed clone of the select-mode picker
+  // above — no multi-select, no inline editor, no disabled-control
+  // plumbing (variants target visible components, not dead controls).
+  $effect(() => {
+    if (content.mode !== "variant-pick") return;
+    function onMove(e: MouseEvent) {
+      const el = e.target as Element | null;
+      if (el === hovered) return; // pointer still inside the same element
+      if (!el || el === document.documentElement || el === document.body) {
+        hovered = null;
+        return;
+      }
+      if (isOurNode(el)) return;
+      hovered = el;
+    }
+    function onClickSwallow(e: MouseEvent) {
+      const el = e.target as Element | null;
+      if (!el || isOurNode(el)) return;
+      e.preventDefault();
+      e.stopPropagation();
+      const target = captureTarget(el);
+      hovered = null;
+      setMode("idle");
+      chrome.runtime
+        .sendMessage({ type: "variants.picked", target })
+        .catch(() => {});
+    }
+    function onKey(e: KeyboardEvent) {
+      if (e.key !== "Escape") return;
+      hovered = null;
+      setMode("idle");
+      chrome.runtime
+        .sendMessage({ type: "variants.pick-cancelled" })
+        .catch(() => {});
+    }
+    document.addEventListener("mousemove", onMove, true);
+    document.addEventListener("click", onClickSwallow, true);
+    document.addEventListener("keydown", onKey, true);
+    return () => {
+      document.removeEventListener("mousemove", onMove, true);
+      document.removeEventListener("click", onClickSwallow, true);
+      document.removeEventListener("keydown", onKey, true);
+    };
+  });
+
+  /** The single active live preview. `original` keeps the detached node
+   *  for swap-mode so restore can put it back; css-mode restores the
+   *  snapshot cssText. Transient by design — a framework re-render that
+   *  clobbers the swap simply loses the preview (isConnected guards). */
+  let variantPreview: {
+    variantId: string;
+    label: string;
+    mode: "css" | "swap";
+    original: HTMLElement;
+    originalCssText: string;
+    replacement: HTMLElement | null;
+  } | null = $state(null);
+
+  function previewVariant(m: {
+    variantId: string;
+    label?: string;
+    target: AnnotationTarget;
+    swap: { cssChanges?: Record<string, string>; html?: string };
+  }): void {
+    // Switching between variants = replace the active preview.
+    restoreVariantPreviewLocal(false);
+    const el = content.findElementForEntry({
+      selector: m.target.selector,
+      outerHTML: m.target.outerHTML,
+      nearbyText: m.target.nearbyText,
+    }) as HTMLElement | null;
+    if (!el || !el.isConnected) {
+      chrome.runtime
+        .sendMessage({ type: "variants.preview-failed", variantId: m.variantId })
+        .catch(() => {});
+      return;
+    }
+    content.variantPreviewActive = true;
+    const originalCssText = el.style.cssText ?? "";
+    const previewFailed = () => {
+      content.variantPreviewActive = false;
+      chrome.runtime
+        .sendMessage({ type: "variants.preview-failed", variantId: m.variantId })
+        .catch(() => {});
+    };
+    if (m.swap.html) {
+      // Structural swap. Sanitize AGAIN in the isolated world — the
+      // message could come from anywhere; the sanitizer is load-bearing
+      // here (the page has no sandbox). <template> parsing never
+      // executes scripts, and the sanitizer already removed them.
+      const tpl = document.createElement("template");
+      tpl.innerHTML = sanitizeVariantHtml(m.swap.html);
+      // First ELEMENT child that isn't a <style> — a leading <style>
+      // would otherwise become the replacement node and the element
+      // would simply vanish from the page.
+      const node = (Array.from(tpl.content.children).find(
+        (c) => c.tagName.toUpperCase() !== "STYLE",
+      ) ?? null) as HTMLElement | null;
+      if (!node) {
+        // Sanitizer stripped everything renderable — tell the panel so
+        // its "previewing" toggle un-lights (mirrors the not-found path).
+        previewFailed();
+        return;
+      }
+      node.setAttribute("data-pinta-variant", m.variantId);
+      el.replaceWith(node);
+      variantPreview = {
+        variantId: m.variantId,
+        label: m.label ?? m.variantId,
+        mode: "swap",
+        original: el,
+        originalCssText,
+        replacement: node,
+      };
+    } else if (m.swap.cssChanges) {
+      applyPreview(el, originalCssText, m.swap.cssChanges);
+      variantPreview = {
+        variantId: m.variantId,
+        label: m.label ?? m.variantId,
+        mode: "css",
+        original: el,
+        originalCssText,
+        replacement: null,
+      };
+    } else {
+      // No usable swap payload at all — same failure surface as above.
+      previewFailed();
+      return;
+    }
+    tick += 1;
+  }
+
+  /** Undo the live preview. `notifyPanel` distinguishes a user-initiated
+   *  restore (pill / Esc — tell the panel so its toggle un-lights) from a
+   *  panel-initiated one (variants.restore — no echo needed). */
+  function restoreVariantPreviewLocal(notifyPanel: boolean): void {
+    const p = variantPreview;
+    variantPreview = null;
+    if (p) {
+      if (p.mode === "swap") {
+        // If a framework re-render already replaced our node, the swap is
+        // gone with it — restoring would throw, so guard on isConnected.
+        if (p.replacement?.isConnected) {
+          p.replacement.replaceWith(p.original);
+          p.original.style.cssText = p.originalCssText;
+        }
+      } else if (p.original.isConnected) {
+        p.original.style.cssText = p.originalCssText;
+      }
+    }
+    content.variantPreviewActive = false;
+    if (notifyPanel && p) {
+      chrome.runtime
+        .sendMessage({ type: "variants.preview-restored", variantId: p.variantId })
+        .catch(() => {});
+    }
+    tick += 1;
+  }
+
+  // Esc while a variant preview is live — restore. Guarded on idle mode:
+  // every non-idle mode registers its own capture-phase Esc handler and
+  // BOTH would fire on one press (no stopPropagation anywhere), so
+  // without the mode check "Esc to exit select mode" would also silently
+  // revert the preview the user meant to keep comparing.
+  $effect(() => {
+    if (!variantPreview) return;
+    function onKey(e: KeyboardEvent) {
+      if (e.key !== "Escape") return;
+      if (content.mode !== "idle") return;
+      restoreVariantPreviewLocal(true);
+    }
+    document.addEventListener("keydown", onKey, true);
+    return () => document.removeEventListener("keydown", onKey, true);
+  });
+
+  // ─── /Phase 22 ──────────────────────────────────────────────────────
 
   // Draw-mode escape handling (Canvas owns mouse).
   $effect(() => {
@@ -3367,6 +3591,57 @@
   {/if}
 {/if}
 
+{#if content.mode === "variant-pick"}
+  {#if hoverRect}
+    <div
+      class="hl hl--hover"
+      style:top="{hoverRect.top}px"
+      style:left="{hoverRect.left}px"
+      style:width="{hoverRect.width}px"
+      style:height="{hoverRect.height}px"
+    ></div>
+    <div
+      class="label"
+      style:top="{Math.max(0, hoverRect.top - 22)}px"
+      style:left="{hoverRect.left}px"
+    >
+      {describe(hovered)} · click to pick for variants · Esc cancels
+    </div>
+  {/if}
+{/if}
+
+{#if variantPreview}
+  <div class="pinta-variant-bar" role="status">
+    <span class="pinta-variant-bar__label">Previewing: {variantPreview.label}</span>
+    <button
+      class="pinta-variant-bar__btn"
+      onclick={() => restoreVariantPreviewLocal(true)}
+    >Restore</button>
+    <button
+      class="pinta-variant-bar__btn pinta-variant-bar__btn--primary"
+      onclick={() => {
+        const id = variantPreview?.variantId;
+        if (!id) return;
+        // Ask the panel FIRST — it owns the confirm dialog + agent run.
+        // Only restore the preview once the panel acknowledged; with the
+        // side panel closed there is no listener, the promise rejects,
+        // and we keep the preview + pill so nothing silently vanishes.
+        chrome.runtime
+          .sendMessage({ type: "variants.preview-apply", variantId: id })
+          .then(() => restoreVariantPreviewLocal(true))
+          .catch(() => {
+            if (variantPreview) {
+              variantPreview = {
+                ...variantPreview,
+                label: `${variantPreview.label} — open the Pinta panel to apply`,
+              };
+            }
+          });
+      }}
+    >Use this variant</button>
+  </div>
+{/if}
+
 {#if content.mode === "move"}
   {#if hoverRect && !pendingMove}
     <div
@@ -3752,6 +4027,8 @@
       Paint · {paintEyedropping ? "click anything to sample its color" : paintPending ? "pick a color from the page palette · Esc to undo" : "click an element to recolor it"} · Esc to exit
     {:else if content.mode === "scale"}
       Scale · {scalePending ? "drag the corner or pick a % · Save to keep · Esc to undo" : "click a widget to scale it"} · Esc to exit
+    {:else if content.mode === "variant-pick"}
+      Design Variants · click the element you want 3 design options for · Esc to cancel
     {/if}
   </div>
 {/if}

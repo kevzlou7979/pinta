@@ -253,6 +253,100 @@ const VOICE_COMMAND: ModuleSpec = {
   ],
 };
 
+/**
+ * Design Variants (Phase 22) — "3 UI options" without leaving Pinta.
+ *
+ * The user picks an element on their running app (or "whole page") and the
+ * agent returns 3 design variants that stay inside the project's design
+ * system. The tab renders them as sandboxed preview cards (switchable
+ * across device widths), offers a live in-page swap preview for
+ * element-scope variants, and applies the chosen one to source via a
+ * second op. A Pages gallery renders the LIVE dev-server routes side by
+ * side at device widths — a mockup sheet backed by the real app.
+ *
+ * Both settings are optional, so the module is ready the moment it's
+ * enabled. `designSystemPath` points the agent at tokens / design-system
+ * source; blank = infer from the codebase each run. `devicePresets` is a
+ * JSON override for the built-in Mobile/Tablet/Laptop/Desktop widths.
+ */
+const DESIGN_VARIANTS: ModuleSpec = {
+  id: "design-variants",
+  name: "Design Variants",
+  description:
+    "Pick an element (or a whole page) and get 3 design variants that stay inside your design system — previewed as cards at any device width, live-swappable on the page, and applied to source with one click. Includes a Pages gallery: your app's key routes side by side at Mobile / Tablet / Laptop / Desktop widths.",
+  mode: "interactive",
+  sessionCheckboxLabel: "",
+  sessionCheckboxHint: "",
+  settings: [
+    {
+      key: "designSystemPath",
+      type: "string",
+      label: "Design system path (optional)",
+      hint: "File or folder with your tokens / design-system source (e.g. src/styles/tokens.css or tailwind.config.ts). Leave blank to let the agent infer it from the codebase.",
+      placeholder: "src/styles/tokens.css",
+    },
+    {
+      key: "devicePresets",
+      type: "string",
+      label: "Device presets (optional)",
+      hint: 'JSON array of {"label","width","height"} overriding the built-in Mobile 390×844 / Tablet 768×1024 / Laptop 1280×800 / Desktop 1440×900. Leave blank for the defaults.',
+      placeholder: '[{"label":"Mobile","width":390,"height":844}]',
+    },
+  ],
+};
+
+/**
+ * Code Review (Phase 23) — gamified review of your own change set.
+ *
+ * The agent gathers the uncommitted working-tree diff (or the last
+ * commit when the tree is clean) and splits it into review cards — one
+ * per LOGICAL change, each with a plain-words title + description and a
+ * bounded diff. The tab plays them as a one-card-at-a-time deck:
+ * Pass/Fail (keyboard shortcuts), a streak, a grade at the end. "Learn"
+ * opens the shared ChatSheet where the agent explains how the changed
+ * code works with usage examples; failed cards get a one-click agent
+ * fix (op `review-fix` — the module's only writing op).
+ *
+ * No settings — ready the moment it's enabled (like AuditFlow/Report).
+ */
+const CODE_REVIEW: ModuleSpec = {
+  id: "code-review",
+  name: "Code Review",
+  description:
+    "Play your uncommitted changes (or last commit) as a review deck — one card per logical change, Pass/Fail with keyboard shortcuts, a streak, and a grade at the end. Learn opens a chat that explains the change; failed cards get a one-click agent fix.",
+  mode: "interactive",
+  sessionCheckboxLabel: "",
+  sessionCheckboxHint: "",
+  settings: [],
+};
+
+/**
+ * Devices (Phase 24) — multi-device canvas. A full-tab simulator page
+ * (Mobile-View-style) rendering the user's running app in many live,
+ * interactive device frames at once — per-frame model / zoom / rotate /
+ * refresh plus a global zoom and target URL. Purely in-browser: no
+ * companion op, no agent side, nothing on the wire. The side-panel tab
+ * is a slim launcher that opens the canvas via chrome.tabs.create.
+ */
+const DEVICES: ModuleSpec = {
+  id: "devices",
+  name: "Devices",
+  description:
+    "Preview and test your running app on many devices at once — a full-tab canvas of live, interactive frames (iPhone, Pixel, iPad, laptop, desktop) with per-frame zoom and rotate. Purely in-browser; no agent involved.",
+  mode: "interactive",
+  sessionCheckboxLabel: "",
+  sessionCheckboxHint: "",
+  settings: [
+    {
+      key: "customDevices",
+      type: "string",
+      label: "Custom devices (optional)",
+      hint: 'JSON array of {"label","width","height","class"} added to the built-in catalog. class is one of Mobile / Tablet / Laptop / Small Desktop / Large Desktop (defaults to Custom).',
+      placeholder: '[{"label":"Kiosk","width":1080,"height":1920}]',
+    },
+  ],
+};
+
 export const BUILTIN_MODULES: ModuleSpec[] = [
   GITLAB_ISSUES,
   TEST_PILOT,
@@ -260,6 +354,9 @@ export const BUILTIN_MODULES: ModuleSpec[] = [
   AUDIT_FLOW,
   REPORT,
   VOICE_COMMAND,
+  DESIGN_VARIANTS,
+  CODE_REVIEW,
+  DEVICES,
 ];
 
 export function getModuleSpec(id: string): ModuleSpec | null {

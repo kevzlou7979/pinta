@@ -114,6 +114,31 @@ import {
   composeSettingsBundle,
   type PintaSettingsBundle,
 } from "./pinta-settings.js";
+import {
+  DEFAULT_VARIANT_COUNT,
+  MAX_VARIANTS,
+  normalizeDirection,
+  parseApplyResult,
+  parseDiscussResult,
+  parsePagesResult,
+  parseVariantsResult,
+  sanitizeVariantHtml,
+  validateVariantRun,
+  type DesignVariant,
+  type PageEntry,
+  type VariantRun,
+  type VariantScope,
+} from "./design-variants.js";
+import {
+  nextStreak,
+  normalizeTopic,
+  parseFixResult,
+  parseLearnReply,
+  parseReviewRun,
+  type ReviewFixResult,
+  type ReviewRun,
+  type ReviewVerdict,
+} from "./code-review.js";
 
 const SELECTED_KEY = "pinta-selected-companion";
 
@@ -667,6 +692,12 @@ class ExtensionState {
   private creatingSessionTimer: ReturnType<typeof setTimeout> | null = null;
   private static readonly CREATE_SESSION_TIMEOUT_MS = 10_000;
   private lastUrl: string | null = null;
+
+  /** Read-only view of the last active-tab URL (Phase 22 — the Pages
+   *  gallery derives its frame origin from this when no run is stored). */
+  get lastKnownUrl(): string | null {
+    return this.lastUrl;
+  }
   /** Origin currently driving the standalone-mode session (IDB key). */
   private currentOrigin: string | null = null;
 
@@ -733,6 +764,9 @@ class ExtensionState {
     void this.loadAuditFiledIssues();
     void this.loadReportRun();
     void this.loadModuleBoards();
+    void this.loadVariantsState();
+    void this.loadVariantChats();
+    void this.loadReviewState();
     // Stage the legacy global catalog (if any) for the first companion
     // to claim. The actual per-project load happens inside connectTo.
     void this.readLegacyTestPilot();
@@ -3462,6 +3496,1418 @@ class ExtensionState {
   }>({ pending: null, results: {}, error: null, checkedAt: null, resubmitting: false });
   private driftTimer: ReturnType<typeof setTimeout> | null = null;
 
+  // ─── Phase 22 — Design Variants ─────────────────────────────────────
+  //
+  // Interactive module: pick an element (or whole page), the agent
+  // returns 3 on-system design variants, the tab renders them as
+  // sandboxed cards + optional live in-page swap, and the chosen one is
+  // applied to source via a second op. A Pages gallery iframes the LIVE
+  // dev-server routes at device widths (no agent involvement to render).
+  // Mirrors the AuditFlow op/sync lifecycle; zero companion changes.
+
+  /** Persisted run + gallery prefs — one key, one value. */
+  private static readonly VARIANTS_KEY = "pinta-variants-current-run";
+  /** Generating 3 variants reads the design system + one component;
+   *  applying edits one component (plus an optional bounded visual
+   *  check). Cheaper than a full audit, pricier than a chat turn. */
+  private static readonly VARIANTS_TIMEOUT_MS = 240_000;
+
+  variants = $state<{
+    /** Last completed generate run (plus apply outcome once applied). */
+    currentRun: VariantRun | null;
+    /** In-flight op metadata. `sessionId` is pinned from
+     *  `module.query.created` so reconcileVariants() can recover a run
+     *  whose session.synced(done) was missed during a WS blip. `scope`
+     *  snapshots the scope SUBMITTED with a generate — the result must
+     *  be stored against what was sent, never against whatever the UI
+     *  shows minutes later when the run completes. */
+    pending: {
+      runId: string;
+      startedAt: number;
+      op: "variants-generate" | "variants-apply" | "variants-discover-pages";
+      sessionId?: string | null;
+      variantId?: string;
+      scope?: VariantScope;
+    } | null;
+    error: string | null;
+    /** Scope the NEXT generate run will use. */
+    scopeKind: "element" | "page";
+    /** Element picked on the page (variant-pick mode), when scopeKind
+     *  is "element". Captured before any preview mutates the DOM. */
+    pickedTarget: AnnotationTarget | null;
+    /** True while the content script is in variant-pick mode. */
+    picking: boolean;
+    /** Variant currently live-previewed on the page, if any. */
+    previewingVariantId: string | null;
+    /** Pages gallery routes (persisted). */
+    pages: PageEntry[];
+    /** Selected device preset label (persisted). */
+    device: string;
+    /** Bumped by refreshGallery() — re-keys the gallery iframes. */
+    galleryNonce: number;
+    /** How many variants the NEXT generate asks for (2..MAX_VARIANTS,
+     *  persisted). */
+    count: number;
+    /** Optional free-text art direction for the NEXT generate (e.g.
+     *  "glassy, more compact"). Not persisted — per-run intent. */
+    direction: string;
+    /** Per-variant Discuss threads (op variants-discuss), keyed by
+     *  variant id. Persisted separately (VARIANTS_CHATS_KEY). */
+    variantChats: Record<string, ChatMessage[]>;
+    /** In-flight Discuss sends, keyed by variant id (concurrent).
+     *  `true` until module.query.created pins the session id (string) —
+     *  both truthy, so UI spinners read `!!map[id]`; the string form
+     *  lets the reconcile heartbeat recover a missed done-broadcast. */
+    pendingDiscuss: Record<string, string | boolean>;
+    /** Which variant's Discuss ChatSheet is open (null = closed). */
+    discussVariantId: string | null;
+    /** Tab that holds the live on-page preview — restore must target
+     *  THIS tab, not whatever tab is active when restore fires. */
+    previewingTabId: number | null;
+  }>({
+    currentRun: null,
+    pending: null,
+    error: null,
+    scopeKind: "element",
+    pickedTarget: null,
+    picking: false,
+    previewingVariantId: null,
+    pages: [],
+    device: "Mobile",
+    galleryNonce: 0,
+    count: DEFAULT_VARIANT_COUNT,
+    direction: "",
+    variantChats: {},
+    pendingDiscuss: {},
+    discussVariantId: null,
+    previewingTabId: null,
+  });
+  private variantsTimer: ReturnType<typeof setTimeout> | null = null;
+  /** Per-variant Discuss timers (`variants-discuss:${variantId}`). */
+  private variantsOpTimers = new Map<string, ReturnType<typeof setTimeout>>();
+  private static readonly VARIANTS_CHATS_KEY = "pinta-variants:chats";
+
+  async loadVariantsState(): Promise<void> {
+    try {
+      const stored = await chrome.storage?.local?.get(
+        ExtensionState.VARIANTS_KEY,
+      );
+      const raw = stored?.[ExtensionState.VARIANTS_KEY] as
+        | {
+            currentRun?: VariantRun | null;
+            pages?: PageEntry[];
+            device?: string;
+          }
+        | undefined;
+      if (!raw || typeof raw !== "object") return;
+      if (
+        raw.currentRun &&
+        typeof raw.currentRun === "object" &&
+        Array.isArray(raw.currentRun.variants)
+      ) {
+        this.variants.currentRun = raw.currentRun;
+      }
+      if (Array.isArray(raw.pages)) {
+        this.variants.pages = raw.pages.filter(
+          (p): p is PageEntry =>
+            !!p &&
+            typeof p.path === "string" &&
+            p.path.startsWith("/") &&
+            typeof p.label === "string",
+        );
+      }
+      if (typeof raw.device === "string" && raw.device) {
+        this.variants.device = raw.device;
+      }
+      const count = (raw as { count?: unknown }).count;
+      if (
+        typeof count === "number" &&
+        Number.isInteger(count) &&
+        count >= 2 &&
+        count <= MAX_VARIANTS
+      ) {
+        this.variants.count = count;
+      }
+    } catch {
+      // storage missing (test env) — defaults are fine
+    }
+  }
+
+  private async saveVariantsState(): Promise<void> {
+    try {
+      await chrome.storage?.local?.set({
+        [ExtensionState.VARIANTS_KEY]: {
+          currentRun: this.variants.currentRun
+            ? $state.snapshot(this.variants.currentRun)
+            : null,
+          pages: $state.snapshot(this.variants.pages),
+          device: this.variants.device,
+          count: this.variants.count,
+        },
+      });
+    } catch (err) {
+      if (ExtensionState.isQuotaExceeded(err)) {
+        this.variants.error =
+          "Browser storage is full — the variants run couldn't save.";
+      }
+    }
+  }
+
+  /** Active tab id for content-script messaging. The side panel tracks
+   *  its own copy in App.svelte; the state class queries fresh so these
+   *  methods stay callable from any surface. */
+  private static async currentTabId(): Promise<number | null> {
+    try {
+      const [tab] = await chrome.tabs.query({
+        active: true,
+        currentWindow: true,
+      });
+      return tab?.id ?? null;
+    } catch {
+      return null; // not in extension context (dev preview / tests)
+    }
+  }
+
+  /** Send to the active tab's content script, self-healing a dead
+   *  script first: after an extension reload the copy injected into an
+   *  already-open tab is gone ("Receiving end does not exist") — ask
+   *  the background to re-inject (idempotent) and retry once. */
+  private static async sendToTabWithInject(
+    tabId: number,
+    msg: unknown,
+  ): Promise<boolean> {
+    try {
+      await chrome.tabs.sendMessage(tabId, msg);
+      return true;
+    } catch {
+      // fall through to the inject-and-retry path
+    }
+    try {
+      await chrome.runtime.sendMessage({ type: "ensure-content-script", tabId });
+      await new Promise((r) => setTimeout(r, 200)); // let it boot
+      await chrome.tabs.sendMessage(tabId, msg);
+      return true;
+    } catch {
+      return false;
+    }
+  }
+
+  /** Ask the content script to enter one-shot variant-pick mode. The
+   *  picked element comes back as a `variants.picked` runtime message. */
+  async startVariantPick(): Promise<void> {
+    const tabId = await ExtensionState.currentTabId();
+    if (tabId == null) return;
+    this.variants.error = null;
+    const ok = await ExtensionState.sendToTabWithInject(tabId, {
+      type: "variants.pick-element",
+    });
+    if (ok) {
+      // Set AFTER the send: a freshly injected content script broadcasts
+      // mode.changed("idle") on mount, and the App handler clears
+      // `picking` on any non-pick mode — flipping it first would let
+      // that mount broadcast desync the pick UI.
+      this.variants.picking = true;
+    } else {
+      this.variants.picking = false;
+      this.variants.error =
+        "Couldn't reach the page — reload the app tab (F5) and try again.";
+    }
+  }
+
+  async cancelVariantPick(): Promise<void> {
+    this.variants.picking = false;
+    const tabId = await ExtensionState.currentTabId();
+    if (tabId != null) {
+      void chrome.tabs.sendMessage(tabId, { type: "variants.pick-cancel" }).catch(() => {});
+    }
+  }
+
+  clearPickedTarget(): void {
+    this.variants.pickedTarget = null;
+  }
+
+  setVariantScopeKind(kind: "element" | "page"): void {
+    this.variants.scopeKind = kind;
+  }
+
+  /** Kick off a variants-generate run for the current scope. */
+  async runVariantsGenerate(): Promise<void> {
+    if (this.variants.pending) return;
+    if (!this.client || this.connectionStatus !== "connected") {
+      this.variants.error =
+        "No companion connected. Start `pinta-companion .` in your project to use Design Variants.";
+      return;
+    }
+    const scope: VariantScope | null =
+      this.variants.scopeKind === "page"
+        ? { kind: "page" }
+        : this.variants.pickedTarget
+          ? {
+              kind: "element",
+              target: $state.snapshot(this.variants.pickedTarget),
+            }
+          : null;
+    if (!scope) {
+      this.variants.error = "Pick an element first (or switch to Whole page).";
+      return;
+    }
+    const runId = crypto.randomUUID();
+    // A new generate supersedes the previous run — clear its cards (and
+    // any live preview) so stale variants never sit under the spinner.
+    if (this.variants.currentRun) {
+      this.restoreVariantPreview();
+      this.variants.currentRun = null;
+      void this.saveVariantsState();
+    }
+    this.variants.pending = {
+      runId,
+      startedAt: Date.now(),
+      op: "variants-generate",
+      sessionId: null,
+      scope,
+    };
+    this.variants.error = null;
+    this.claimNotice = null;
+    this.armVariantsTimeout("generate design variants");
+    const settings = this.modules["design-variants"]?.settings ?? {};
+    const direction = normalizeDirection(this.variants.direction);
+    const queryComment = JSON.stringify({
+      op: "variants-generate",
+      runId,
+      scope,
+      url: this.lastUrl ?? "",
+      designSystemPath:
+        typeof settings.designSystemPath === "string"
+          ? settings.designSystemPath
+          : "",
+      count: this.variants.count,
+      ...(direction ? { direction } : {}),
+    });
+    this.send({
+      type: "module.query.submit",
+      url: this.lastUrl ?? "",
+      moduleId: "design-variants",
+      moduleSettings: settings,
+      queryComment,
+    });
+  }
+
+  /** Apply the chosen variant to source. Stateless on the agent side —
+   *  everything it needs (target + variant spec) rides in the payload. */
+  async applyVariant(variantId: string): Promise<void> {
+    if (this.variants.pending) return;
+    const run = this.variants.currentRun;
+    const variant = run?.variants.find((v) => v.id === variantId);
+    if (!run || !variant) return;
+    if (!this.client || this.connectionStatus !== "connected") {
+      this.variants.error =
+        "No companion connected. Start `pinta-companion .` in your project to apply the variant.";
+      return;
+    }
+    // Never leave a live preview behind while the agent rewrites source.
+    this.restoreVariantPreview();
+    const runId = crypto.randomUUID();
+    this.variants.pending = {
+      runId,
+      startedAt: Date.now(),
+      op: "variants-apply",
+      sessionId: null,
+      variantId,
+    };
+    this.variants.error = null;
+    this.claimNotice = null;
+    this.armVariantsTimeout("apply the variant");
+    const settings = this.modules["design-variants"]?.settings ?? {};
+    const { previewHtml: _omit, ...lean } = $state.snapshot(variant);
+    const queryComment = JSON.stringify({
+      op: "variants-apply",
+      runId,
+      variantId,
+      scope: $state.snapshot(run.scope),
+      url: run.url,
+      designSystemPath:
+        typeof settings.designSystemPath === "string"
+          ? settings.designSystemPath
+          : "",
+      variant: lean,
+    });
+    this.send({
+      type: "module.query.submit",
+      url: this.lastUrl ?? "",
+      moduleId: "design-variants",
+      moduleSettings: settings,
+      queryComment,
+    });
+  }
+
+  /** Seed the Pages gallery from the project's router config. */
+  async discoverPages(): Promise<void> {
+    if (this.variants.pending) return;
+    if (!this.client || this.connectionStatus !== "connected") {
+      this.variants.error =
+        "No companion connected. Start `pinta-companion .` in your project to discover pages.";
+      return;
+    }
+    const runId = crypto.randomUUID();
+    this.variants.pending = {
+      runId,
+      startedAt: Date.now(),
+      op: "variants-discover-pages",
+      sessionId: null,
+    };
+    this.variants.error = null;
+    this.armVariantsTimeout("discover the app's pages");
+    this.send({
+      type: "module.query.submit",
+      url: this.lastUrl ?? "",
+      moduleId: "design-variants",
+      moduleSettings: this.modules["design-variants"]?.settings ?? {},
+      queryComment: JSON.stringify({
+        op: "variants-discover-pages",
+        runId,
+        url: this.lastUrl ?? "",
+      }),
+    });
+  }
+
+  addPage(path: string, label?: string): void {
+    const clean = path.trim();
+    if (!clean.startsWith("/")) return;
+    if (this.variants.pages.some((p) => p.path === clean)) return;
+    this.variants.pages = [
+      ...this.variants.pages,
+      { path: clean, label: label?.trim() || clean },
+    ];
+    void this.saveVariantsState();
+  }
+
+  removePage(path: string): void {
+    this.variants.pages = this.variants.pages.filter((p) => p.path !== path);
+    void this.saveVariantsState();
+  }
+
+  setVariantsDevice(label: string): void {
+    this.variants.device = label;
+    void this.saveVariantsState();
+  }
+
+  setVariantsDirection(text: string): void {
+    this.variants.direction = text;
+  }
+
+  setVariantsCount(n: number): void {
+    if (!Number.isInteger(n) || n < 2 || n > MAX_VARIANTS) return;
+    this.variants.count = n;
+    void this.saveVariantsState();
+  }
+
+  refreshGallery(): void {
+    this.variants.galleryNonce++;
+  }
+
+  /** "New run" — discard the stored run (and persist the clear, so a
+   *  panel reload doesn't resurrect it) and reset the scope pick. */
+  clearVariantsRun(): void {
+    // Never clear under an in-flight op — the apply-done handler needs
+    // currentRun to record the result; clearing here would surface a
+    // bogus "unrecognized response" and lose the applied-files list.
+    if (this.variants.pending) {
+      this.variants.error =
+        "A request is still running — wait for it (or Cancel) before starting a new run.";
+      return;
+    }
+    this.restoreVariantPreview();
+    this.variants.currentRun = null;
+    this.variants.pickedTarget = null;
+    this.variants.error = null;
+    this.variants.variantChats = {};
+    this.variants.discussVariantId = null;
+    void this.saveVariantsState();
+    void this.saveVariantChats();
+  }
+
+  /** User clicked Cancel on a stuck variants op. */
+  cancelVariants(): void {
+    if (!this.variants.pending) return;
+    this.clearVariantsTimeout();
+    this.variants.pending = null;
+    this.claimNotice = null;
+    this.variants.error = "Design Variants request cancelled.";
+  }
+
+  /** Live-swap a variant onto the page (element scope only). The swap
+   *  HTML is sanitized HERE as well as in the content script — this side
+   *  because the payload came from the agent, that side because messages
+   *  can come from anywhere. */
+  async previewVariantOnPage(variantId: string): Promise<void> {
+    const run = this.variants.currentRun;
+    const variant = run?.variants.find((v) => v.id === variantId);
+    if (!run || !variant || run.scope.kind !== "element") return;
+    const tabId = await ExtensionState.currentTabId();
+    if (tabId == null) return;
+    const swap = variant.swap
+      ? {
+          cssChanges: variant.swap.cssChanges
+            ? $state.snapshot(variant.swap.cssChanges)
+            : undefined,
+          html: variant.swap.html
+            ? sanitizeVariantHtml(variant.swap.html)
+            : undefined,
+        }
+      : null;
+    if (!swap || (!swap.cssChanges && !swap.html)) {
+      this.variants.error =
+        "This variant has no in-page preview — use the card preview.";
+      return;
+    }
+    this.variants.previewingVariantId = variantId;
+    this.variants.previewingTabId = tabId;
+    void ExtensionState.sendToTabWithInject(tabId, {
+      type: "variants.preview",
+      variantId,
+      label: variant.label,
+      target: $state.snapshot(run.scope.target),
+      swap,
+    }).then((ok) => {
+      if (!ok) {
+        this.variants.previewingVariantId = null;
+        this.variants.error =
+          "Couldn't reach the page — reload the app tab (F5) and try again.";
+      }
+    });
+  }
+
+  /** Restore the original element after a live preview. Safe to call
+   *  when nothing is being previewed. Targets the tab that HOLDS the
+   *  preview (pinned at preview time) — the active tab may have changed
+   *  since, and messaging it would strand the mutated DOM. */
+  restoreVariantPreview(): void {
+    if (!this.variants.previewingVariantId) return;
+    this.variants.previewingVariantId = null;
+    const pinned = this.variants.previewingTabId;
+    this.variants.previewingTabId = null;
+    const sendRestore = (tabId: number | null): void => {
+      if (tabId != null) {
+        void chrome.tabs
+          .sendMessage(tabId, { type: "variants.restore" })
+          .catch(() => {});
+      }
+    };
+    if (pinned != null) {
+      sendRestore(pinned);
+    } else {
+      void ExtensionState.currentTabId().then(sendRestore);
+    }
+  }
+
+  private async loadVariantChats(): Promise<void> {
+    try {
+      const stored = await chrome.storage?.local?.get(
+        ExtensionState.VARIANTS_CHATS_KEY,
+      );
+      const raw = stored?.[ExtensionState.VARIANTS_CHATS_KEY] as
+        | Record<string, ChatMessage[]>
+        | undefined;
+      if (raw && typeof raw === "object" && !Array.isArray(raw)) {
+        this.variants.variantChats = raw;
+      }
+    } catch {
+      // storage missing (test env) — defaults are fine
+    }
+  }
+
+  private async saveVariantChats(): Promise<void> {
+    try {
+      await chrome.storage?.local?.set({
+        [ExtensionState.VARIANTS_CHATS_KEY]: $state.snapshot(
+          this.variants.variantChats,
+        ),
+      });
+    } catch (err) {
+      if (ExtensionState.isQuotaExceeded(err)) {
+        this.variants.error =
+          "Browser storage is full — the Discuss thread couldn't save.";
+      }
+    }
+  }
+
+  openVariantDiscuss(variantId: string | null): void {
+    this.variants.discussVariantId = variantId;
+  }
+
+  /** Discuss / refine one variant. The agent replies conversationally
+   *  and MAY return an `updatedVariant` (e.g. "add a background color
+   *  to the heading") which is merged into the card in place. */
+  async sendVariantDiscuss(variantId: string, prompt: string): Promise<void> {
+    const run = this.variants.currentRun;
+    const variant = run?.variants.find((v) => v.id === variantId);
+    if (!run || !variant) return;
+    const text = prompt.trim();
+    if (text === "") return;
+    if (this.variants.pendingDiscuss[variantId]) return;
+    if (!this.client || this.connectionStatus !== "connected") {
+      this.variants.error =
+        "No companion connected. Start `pinta-companion .` in your project to use Discuss.";
+      return;
+    }
+    const userMsg: ChatMessage = {
+      id: crypto.randomUUID(),
+      role: "user",
+      text,
+      at: Date.now(),
+    };
+    this.variants.variantChats[variantId] = [
+      ...(this.variants.variantChats[variantId] ?? []),
+      userMsg,
+    ];
+    this.variants.error = null;
+    void this.saveVariantChats();
+    const settings = this.modules["design-variants"]?.settings ?? {};
+    const history = (this.variants.variantChats[variantId] ?? [])
+      .slice(-6)
+      .map((m) => ({ role: m.role, text: m.text }));
+    this.variants.pendingDiscuss[variantId] = true;
+    this.armVariantsOpTimer(variantId, this.variants.pendingDiscuss);
+    this.send({
+      type: "module.query.submit",
+      url: this.lastUrl ?? "",
+      moduleId: "design-variants",
+      moduleSettings: settings,
+      queryComment: JSON.stringify({
+        op: "variants-discuss",
+        runId: run.runId,
+        variantId,
+        prompt: text,
+        history,
+        scope: $state.snapshot(run.scope),
+        designSystemPath:
+          typeof settings.designSystemPath === "string"
+            ? settings.designSystemPath
+            : "",
+        variant: $state.snapshot(variant),
+      }),
+    });
+  }
+
+  private armVariantsOpTimer(
+    variantId: string,
+    pendingMap: Record<string, string | boolean>,
+  ): void {
+    const key = `variants-discuss:${variantId}`;
+    this.clearVariantsOpTimer(variantId);
+    this.armAgentWait({
+      softMs: 120_000,
+      what: "respond",
+      setHandle: (t) => this.variantsOpTimers.set(key, t),
+      stillPending: () => !!pendingMap[variantId],
+      giveUp: () => {
+        this.variantsOpTimers.delete(key);
+        delete pendingMap[variantId];
+        this.variants.error = ExtensionState.slowWaitGiveUp("respond");
+      },
+    });
+  }
+
+  private clearVariantsOpTimer(variantId: string): void {
+    const key = `variants-discuss:${variantId}`;
+    const t = this.variantsOpTimers.get(key);
+    if (t) {
+      clearTimeout(t);
+      this.variantsOpTimers.delete(key);
+    }
+    this.retireAgentWaitNotice();
+  }
+
+  private handleVariantsDiscussSync(session: Session, variantId: string): void {
+    const hadPending = !!this.variants.pendingDiscuss[variantId];
+    if (session.status === "done") {
+      this.clearVariantsOpTimer(variantId);
+      const parsed = parseDiscussResult(session.appliedSummary ?? "");
+      if (parsed) {
+        const thread = this.variants.variantChats[variantId] ?? [];
+        const lastUser = [...thread].reverse().find((m) => m.role === "user");
+        const now = Date.now();
+        this.variants.variantChats[variantId] = [
+          ...thread,
+          {
+            id: crypto.randomUUID(),
+            role: "agent",
+            text: parsed.reply,
+            at: now,
+            elapsedMs: lastUser ? now - lastUser.at : undefined,
+          },
+        ];
+        void this.saveVariantChats();
+        // Merge a returned refinement into the card in place — the
+        // srcdoc map derives from currentRun, so the preview updates
+        // immediately. Re-clamp previewHtml at the scope's cap.
+        const run = this.variants.currentRun;
+        const idx = run?.variants.findIndex((v) => v.id === variantId) ?? -1;
+        if (parsed.updatedVariant && run && idx >= 0) {
+          const merged = { ...run.variants[idx]!, ...parsed.updatedVariant };
+          run.variants[idx] = validateVariantRun([merged], run.scope.kind)[0]!;
+          run.variants = [...run.variants];
+          void this.saveVariantsState();
+        }
+        this.variants.error = null;
+      } else {
+        this.variants.error = "Agent returned an empty Discuss response.";
+      }
+      if (hadPending) delete this.variants.pendingDiscuss[variantId];
+    } else if (session.status === "error") {
+      this.clearVariantsOpTimer(variantId);
+      this.variants.error =
+        session.errorMessage ?? "Discuss failed for this variant.";
+      if (hadPending) delete this.variants.pendingDiscuss[variantId];
+    }
+  }
+
+  private armVariantsTimeout(what: string): void {
+    this.clearVariantsTimeout();
+    this.armAgentWait({
+      softMs: ExtensionState.VARIANTS_TIMEOUT_MS,
+      what,
+      setHandle: (t) => {
+        this.variantsTimer = t;
+      },
+      stillPending: () => !!this.variants.pending,
+      giveUp: () => {
+        if (!this.variants.pending) return;
+        this.variants.pending = null;
+        this.variants.error = ExtensionState.slowWaitGiveUp(what);
+      },
+    });
+  }
+
+  private clearVariantsTimeout(): void {
+    if (this.variantsTimer) {
+      clearTimeout(this.variantsTimer);
+      this.variantsTimer = null;
+    }
+    this.retireAgentWaitNotice();
+  }
+
+  /** Routed from `onMessage` for design-variants query sessions. Lenient
+   *  on the payload `type` (see parse helpers) so SKILL.md / extension
+   *  version skew degrades to a readable error, not a crash. */
+  private handleVariantsSync(session: Session): void {
+    const pending = this.variants.pending;
+    if (!pending) return;
+    // A late completion from a DIFFERENT session (e.g. a cancelled run
+    // finishing after the user started a new op) must not consume this
+    // pending slot — its payload would mis-parse and clear the slot,
+    // silently dropping the real result when it lands. The sessionId is
+    // pinned by module.query.created; before the pin arrives (broadcast
+    // race) accept by op-route as before.
+    if (
+      pending.sessionId &&
+      session.id !== pending.sessionId &&
+      (session.status === "done" || session.status === "error")
+    ) {
+      return;
+    }
+    if (session.status === "done") {
+      const summary = session.appliedSummary ?? "";
+      // Ignore an empty "done" (multi-agent race) — keep pending + the
+      // timeout so a valid response can still land.
+      if (summary.trim() === "") return;
+      this.clearVariantsTimeout();
+      if (pending.op === "variants-generate") {
+        const parsed = parseVariantsResult(summary);
+        if (parsed) {
+          // Store against the scope SUBMITTED with this run — the UI's
+          // scope toggle / picked target may have changed during the
+          // multi-minute wait.
+          const scope: VariantScope = pending.scope
+            ? pending.scope
+            : { kind: "page" };
+          this.variants.currentRun = {
+            runId: parsed.runId ?? pending.runId,
+            createdAt: Date.now(),
+            scope,
+            url: this.lastUrl ?? "",
+            variants: validateVariantRun(parsed.variants, scope.kind),
+          };
+          // New deck of variants — the old run's Discuss threads must
+          // not attach to new cards (agents reuse ids v1/v2/v3, so a
+          // stale thread would also ship as bogus agent context).
+          this.variants.variantChats = {};
+          this.variants.discussVariantId = null;
+          void this.saveVariantsState();
+          void this.saveVariantChats();
+        } else {
+          this.variants.error = ExtensionState.variantsBadPayload(summary);
+        }
+      } else if (pending.op === "variants-apply") {
+        const parsed = parseApplyResult(summary);
+        if (parsed && this.variants.currentRun) {
+          this.variants.currentRun.appliedVariantId =
+            parsed.variantId ?? pending.variantId;
+          this.variants.currentRun.applySummary = parsed.summary;
+          this.variants.currentRun.appliedFiles = parsed.files;
+          void this.saveVariantsState();
+          // The source changed — a gallery refresh shows the new look.
+          this.refreshGallery();
+        } else {
+          this.variants.error = ExtensionState.variantsBadPayload(summary);
+        }
+      } else {
+        const pages = parsePagesResult(summary);
+        if (pages) {
+          // Merge — keep user-added routes, add newly discovered ones.
+          const known = new Set(this.variants.pages.map((p) => p.path));
+          this.variants.pages = [
+            ...this.variants.pages,
+            ...pages.filter((p) => !known.has(p.path)),
+          ];
+          void this.saveVariantsState();
+        } else {
+          this.variants.error = ExtensionState.variantsBadPayload(summary);
+        }
+      }
+      this.variants.pending = null;
+    } else if (session.status === "error") {
+      this.clearVariantsTimeout();
+      this.variants.error =
+        session.errorMessage ?? "Design Variants request failed.";
+      this.variants.pending = null;
+    } else if (session.status === "applying") {
+      // Claim landed — agent is on it. Clear any early error.
+      this.variants.error = null;
+    }
+  }
+
+  private static variantsBadPayload(summary: string): string {
+    const preview = summary.slice(0, 200);
+    return (
+      "Agent returned an unrecognized response. " +
+      "Restart `/pinta` in your project (the SKILL.md §7.16 design-variants handler may not have loaded yet). " +
+      (preview ? `Agent said: "${preview}${summary.length > 200 ? "…" : ""}"` : "")
+    );
+  }
+
+  /** Fetch one pinned session and feed it to a terminal-status handler.
+   *  Shared by the run-level and per-item reconcile paths. */
+  private async reconcilePinnedSession(
+    sessionId: string,
+    handle: (session: Session) => void,
+  ): Promise<void> {
+    const base = this.httpBase();
+    if (!base) return;
+    try {
+      const res = await ExtensionState.fetchWithTimeout(
+        `${base}/v1/sessions/${encodeURIComponent(sessionId)}`,
+      );
+      if (!res.ok) return;
+      const session = (await res.json()) as Session;
+      if (session.status === "done" || session.status === "error") {
+        handle(session);
+      }
+    } catch {
+      // Companion unreachable / transient — the timeout recovers it.
+    }
+  }
+
+  /** HTTP fallback for variants work whose done-broadcast was missed
+   *  during a WS blip: the run-level pending AND per-variant Discuss. */
+  private async reconcileVariants(): Promise<void> {
+    const pending = this.variants.pending;
+    if (pending?.sessionId) {
+      await this.reconcilePinnedSession(pending.sessionId, (s) =>
+        this.handleVariantsSync(s),
+      );
+    }
+    for (const [vid, sid] of ExtensionState.pinnedIds(
+      this.variants.pendingDiscuss,
+    )) {
+      await this.reconcilePinnedSession(sid, (s) =>
+        this.handleVariantsDiscussSync(s, vid),
+      );
+    }
+  }
+
+  // ─── /Phase 22 ──────────────────────────────────────────────────────
+
+  // ─── Phase 23 — Code Review ─────────────────────────────────────────
+  //
+  // Gamified review deck: the agent gathers the change set (working
+  // tree, falling back to the last commit) as cards; the extension owns
+  // all scoring (pass/fail verdicts, streak, grade — pure fns in
+  // lib/code-review.ts). Learn = per-card ChatSheet (op review-learn);
+  // Fix = per-card agent edit (op review-fix, the only writing op).
+  // Mirrors the hardened variants lifecycle + audit per-check op maps.
+
+  private static readonly REVIEW_KEY = "pinta-code-review:current";
+  private static readonly REVIEW_CHATS_KEY = "pinta-code-review:chats";
+  /** Gathering = one git diff/show + card writing; learn/fix are single
+   *  per-card round-trips. */
+  private static readonly REVIEW_WAIT_MS = 180_000;
+  private static readonly REVIEW_OP_TIMEOUT_MS = 120_000;
+
+  review = $state<{
+    currentRun: ReviewRun | null;
+    /** Per-run verdicts, keyed by card id. Wiped on every gather — a
+     *  regather is a NEW diff, stale verdicts would lie. */
+    verdicts: Record<string, ReviewVerdict>;
+    /** Optional one-line note recorded with a fail verdict. */
+    failNotes: Record<string, string>;
+    deckIndex: number;
+    /** Consecutive passes THIS run. */
+    streak: number;
+    pending: {
+      runId: string;
+      startedAt: number;
+      op: "review-gather";
+      sessionId: string | null;
+      /** Topic-mode gather: the focus prompt submitted with this run —
+       *  stamped onto the stored run (an older agent may omit it). */
+      topic?: string;
+    } | null;
+    /** In-flight Learn sends, keyed by card id (concurrent). `true`
+     *  until module.query.created pins the session id (string) — both
+     *  truthy; the string form powers reconcile-on-reconnect. */
+    pendingLearn: Record<string, string | boolean>;
+    /** In-flight Fix sends, keyed by card id (concurrent, same shape). */
+    pendingFix: Record<string, string | boolean>;
+    /** Per-card Learn threads (persisted separately, like checkChats). */
+    cardChats: Record<string, ChatMessage[]>;
+    /** Which card's Learn ChatSheet is open (null = closed). */
+    learnCardId: string | null;
+    /** Applied-fix results, keyed by card id. */
+    fixes: Record<string, ReviewFixResult>;
+    error: string | null;
+    /** Lifetime gamification stats — the only thing that survives a
+     *  regather. */
+    stats: { totalReviewed: number; bestStreak: number; runsCompleted: number };
+  }>({
+    currentRun: null,
+    verdicts: {},
+    failNotes: {},
+    deckIndex: 0,
+    streak: 0,
+    pending: null,
+    pendingLearn: {},
+    pendingFix: {},
+    cardChats: {},
+    learnCardId: null,
+    fixes: {},
+    error: null,
+    stats: { totalReviewed: 0, bestStreak: 0, runsCompleted: 0 },
+  });
+  private reviewTimer: ReturnType<typeof setTimeout> | null = null;
+  /** Per-card op timers (`${op}:${cardId}`), like auditOpTimers. */
+  private reviewOpTimers = new Map<string, ReturnType<typeof setTimeout>>();
+
+  async loadReviewState(): Promise<void> {
+    try {
+      const stored = await chrome.storage?.local?.get(
+        ExtensionState.REVIEW_KEY,
+      );
+      const raw = stored?.[ExtensionState.REVIEW_KEY] as
+        | {
+            currentRun?: ReviewRun | null;
+            verdicts?: Record<string, ReviewVerdict>;
+            failNotes?: Record<string, string>;
+            deckIndex?: number;
+            streak?: number;
+            fixes?: Record<string, ReviewFixResult>;
+            stats?: { totalReviewed: number; bestStreak: number; runsCompleted: number };
+          }
+        | undefined;
+      if (raw && typeof raw === "object") {
+        if (
+          raw.currentRun &&
+          typeof raw.currentRun === "object" &&
+          Array.isArray(raw.currentRun.cards)
+        ) {
+          this.review.currentRun = raw.currentRun;
+        }
+        if (raw.verdicts && typeof raw.verdicts === "object") {
+          this.review.verdicts = raw.verdicts;
+        }
+        if (raw.failNotes && typeof raw.failNotes === "object") {
+          this.review.failNotes = raw.failNotes;
+        }
+        if (typeof raw.deckIndex === "number" && raw.deckIndex >= 0) {
+          this.review.deckIndex = Math.round(raw.deckIndex);
+        }
+        if (typeof raw.streak === "number" && raw.streak >= 0) {
+          this.review.streak = Math.round(raw.streak);
+        }
+        if (raw.fixes && typeof raw.fixes === "object") {
+          this.review.fixes = raw.fixes;
+        }
+        if (
+          raw.stats &&
+          typeof raw.stats === "object" &&
+          typeof raw.stats.totalReviewed === "number"
+        ) {
+          this.review.stats = {
+            totalReviewed: raw.stats.totalReviewed,
+            bestStreak: raw.stats.bestStreak ?? 0,
+            runsCompleted: raw.stats.runsCompleted ?? 0,
+          };
+        }
+      }
+    } catch {
+      // storage missing (test env) — defaults are fine
+    }
+    try {
+      const stored = await chrome.storage?.local?.get(
+        ExtensionState.REVIEW_CHATS_KEY,
+      );
+      const raw = stored?.[ExtensionState.REVIEW_CHATS_KEY] as
+        | Record<string, ChatMessage[]>
+        | undefined;
+      if (raw && typeof raw === "object" && !Array.isArray(raw)) {
+        this.review.cardChats = raw;
+      }
+    } catch {
+      // storage missing — defaults stand
+    }
+  }
+
+  private async persistReview(): Promise<void> {
+    try {
+      await chrome.storage?.local?.set({
+        [ExtensionState.REVIEW_KEY]: {
+          currentRun: this.review.currentRun
+            ? $state.snapshot(this.review.currentRun)
+            : null,
+          verdicts: $state.snapshot(this.review.verdicts),
+          failNotes: $state.snapshot(this.review.failNotes),
+          deckIndex: this.review.deckIndex,
+          streak: this.review.streak,
+          fixes: $state.snapshot(this.review.fixes),
+          stats: $state.snapshot(this.review.stats),
+        },
+      });
+    } catch (err) {
+      if (ExtensionState.isQuotaExceeded(err)) {
+        this.review.error =
+          "Browser storage is full — the review run couldn't save.";
+      }
+    }
+  }
+
+  private async saveReviewChats(): Promise<void> {
+    try {
+      await chrome.storage?.local?.set({
+        [ExtensionState.REVIEW_CHATS_KEY]: $state.snapshot(
+          this.review.cardChats,
+        ),
+      });
+    } catch (err) {
+      if (ExtensionState.isQuotaExceeded(err)) {
+        this.review.error =
+          "Browser storage is full — the Learn thread couldn't save.";
+      }
+    }
+  }
+
+  /** Deal a new deck. Default = the current change set (working tree /
+   *  last commit). With a `topic` (e.g. "MFA authentication") the agent
+   *  instead gathers the RELEVANT CODE SECTIONS for that topic. Wipes
+   *  the previous run's verdicts/notes/chats/fixes either way. */
+  async gatherReview(topic = ""): Promise<void> {
+    if (this.review.pending) return;
+    if (!this.client || this.connectionStatus !== "connected") {
+      this.review.error =
+        "No companion connected. Start `pinta-companion .` in your project to review your changes.";
+      return;
+    }
+    const cleanTopic = normalizeTopic(topic);
+    const runId = crypto.randomUUID();
+    this.review.pending = {
+      runId,
+      startedAt: Date.now(),
+      op: "review-gather",
+      sessionId: null,
+      ...(cleanTopic !== "" ? { topic: cleanTopic } : {}),
+    };
+    this.review.error = null;
+    this.claimNotice = null;
+    this.armReviewTimeout(
+      cleanTopic !== ""
+        ? `find the ${cleanTopic} code`
+        : "gather the change set",
+    );
+    this.send({
+      type: "module.query.submit",
+      url: this.lastUrl ?? "",
+      moduleId: "code-review",
+      moduleSettings: this.modules["code-review"]?.settings ?? {},
+      queryComment: JSON.stringify({
+        op: "review-gather",
+        runId,
+        url: this.lastUrl ?? "",
+        ...(cleanTopic !== "" ? { topic: cleanTopic } : {}),
+      }),
+    });
+  }
+
+  /** Record a verdict on the current card and advance the deck. All the
+   *  math is delegated to the pure lib so UI and tests can't drift. */
+  private recordVerdict(cardId: string, verdict: ReviewVerdict, note?: string): void {
+    const run = this.review.currentRun;
+    if (!run || !run.cards.some((c) => c.id === cardId)) return;
+    const isNew = !this.review.verdicts[cardId];
+    this.review.verdicts[cardId] = verdict;
+    if (note && note.trim() !== "") {
+      this.review.failNotes[cardId] = note.trim();
+    } else if (verdict === "pass") {
+      delete this.review.failNotes[cardId];
+    }
+    this.review.streak = nextStreak(this.review.streak, verdict);
+    if (isNew) this.review.stats.totalReviewed++;
+    if (this.review.streak > this.review.stats.bestStreak) {
+      this.review.stats.bestStreak = this.review.streak;
+    }
+    // Advance to the next unverdicted card (wrapping forward only).
+    const idx = run.cards.findIndex((c) => c.id === cardId);
+    for (let i = idx + 1; i < run.cards.length; i++) {
+      if (!this.review.verdicts[run.cards[i]!.id]) {
+        this.review.deckIndex = i;
+        void this.persistReview();
+        return;
+      }
+    }
+    // Nothing left ahead — deck complete (the tab shows the end card
+    // when every card has a verdict).
+    if (run.cards.every((c) => this.review.verdicts[c.id])) {
+      this.review.stats.runsCompleted++;
+    }
+    this.review.deckIndex = Math.min(idx + 1, run.cards.length);
+    void this.persistReview();
+  }
+
+  passCard(cardId: string): void {
+    this.recordVerdict(cardId, "pass");
+  }
+
+  failCard(cardId: string, note = ""): void {
+    this.recordVerdict(cardId, "fail", note);
+  }
+
+  setDeckIndex(i: number): void {
+    const n = this.review.currentRun?.cards.length ?? 0;
+    if (i < 0 || i >= n) return;
+    this.review.deckIndex = i;
+  }
+
+  clearReviewRun(): void {
+    this.review.currentRun = null;
+    this.review.verdicts = {};
+    this.review.failNotes = {};
+    this.review.deckIndex = 0;
+    this.review.streak = 0;
+    this.review.cardChats = {};
+    this.review.learnCardId = null;
+    this.review.fixes = {};
+    this.review.error = null;
+    void this.persistReview();
+    void this.saveReviewChats();
+  }
+
+  cancelReviewPending(): void {
+    if (!this.review.pending) return;
+    this.clearReviewTimeout();
+    this.review.pending = null;
+    this.claimNotice = null;
+    this.review.error = "Review gather cancelled.";
+  }
+
+  openReviewLearn(cardId: string | null): void {
+    this.review.learnCardId = cardId;
+    // First open with an empty thread auto-asks the default explainer.
+    if (
+      cardId &&
+      (this.review.cardChats[cardId] ?? []).length === 0 &&
+      !this.review.pendingLearn[cardId]
+    ) {
+      void this.sendReviewLearn(cardId);
+    }
+  }
+
+  /** Ask the agent about one card. No `question` = the default "how it
+   *  works / where used / one example" explainer (first open). */
+  async sendReviewLearn(cardId: string, question = ""): Promise<void> {
+    const card = this.review.currentRun?.cards.find((c) => c.id === cardId);
+    if (!card) return;
+    if (this.review.pendingLearn[cardId]) return;
+    if (!this.client || this.connectionStatus !== "connected") {
+      this.review.error =
+        "No companion connected. Start `pinta-companion .` in your project to use Learn.";
+      return;
+    }
+    const text = question.trim();
+    if (text !== "") {
+      const userMsg: ChatMessage = {
+        id: crypto.randomUUID(),
+        role: "user",
+        text,
+        at: Date.now(),
+      };
+      this.review.cardChats[cardId] = [
+        ...(this.review.cardChats[cardId] ?? []),
+        userMsg,
+      ];
+      void this.saveReviewChats();
+    }
+    this.review.error = null;
+    const history = (this.review.cardChats[cardId] ?? [])
+      .slice(-6)
+      .map((m) => ({ role: m.role, text: m.text }));
+    this.review.pendingLearn[cardId] = true;
+    this.armReviewOpTimer("review-learn", cardId, this.review.pendingLearn);
+    this.send({
+      type: "module.query.submit",
+      url: this.lastUrl ?? "",
+      moduleId: "code-review",
+      moduleSettings: this.modules["code-review"]?.settings ?? {},
+      queryComment: JSON.stringify({
+        op: "review-learn",
+        runId: this.review.currentRun?.runId,
+        cardId,
+        ...(text !== "" ? { question: text } : {}),
+        history,
+        card: {
+          title: card.title,
+          description: card.description,
+          file: card.file,
+          diff: card.diff,
+        },
+      }),
+    });
+  }
+
+  /** Fix one FAILED card in place. Stateless — the card + fail note ride
+   *  the payload; the agent has no memory of the gather run. */
+  async sendReviewFix(cardId: string): Promise<void> {
+    const card = this.review.currentRun?.cards.find((c) => c.id === cardId);
+    if (!card) return;
+    if (this.review.verdicts[cardId] !== "fail") return;
+    if (this.review.pendingFix[cardId]) return;
+    if (this.review.fixes[cardId]) return; // already fixed
+    if (!this.client || this.connectionStatus !== "connected") {
+      this.review.error =
+        "No companion connected. Start `pinta-companion .` in your project to fix this card.";
+      return;
+    }
+    this.review.error = null;
+    this.review.pendingFix[cardId] = true;
+    this.armReviewOpTimer("review-fix", cardId, this.review.pendingFix);
+    this.send({
+      type: "module.query.submit",
+      url: this.lastUrl ?? "",
+      moduleId: "code-review",
+      moduleSettings: this.modules["code-review"]?.settings ?? {},
+      queryComment: JSON.stringify({
+        op: "review-fix",
+        runId: this.review.currentRun?.runId,
+        cardId,
+        failNote: this.review.failNotes[cardId] ?? "",
+        card: {
+          title: card.title,
+          description: card.description,
+          file: card.file,
+          diff: card.diff,
+        },
+      }),
+    });
+  }
+
+  private armReviewTimeout(what: string): void {
+    this.clearReviewTimeout();
+    this.armAgentWait({
+      softMs: ExtensionState.REVIEW_WAIT_MS,
+      what,
+      setHandle: (t) => {
+        this.reviewTimer = t;
+      },
+      stillPending: () => !!this.review.pending,
+      giveUp: () => {
+        if (!this.review.pending) return;
+        this.review.pending = null;
+        this.review.error = ExtensionState.slowWaitGiveUp(what);
+      },
+    });
+  }
+
+  private clearReviewTimeout(): void {
+    if (this.reviewTimer) {
+      clearTimeout(this.reviewTimer);
+      this.reviewTimer = null;
+    }
+    this.retireAgentWaitNotice();
+  }
+
+  /** Per-card op timeout (Learn / Fix) — keyed map, like auditOpTimers. */
+  private armReviewOpTimer(
+    op: string,
+    cardId: string,
+    pendingMap: Record<string, string | boolean>,
+  ): void {
+    const key = `${op}:${cardId}`;
+    this.clearReviewOpTimer(op, cardId);
+    this.armAgentWait({
+      softMs: ExtensionState.REVIEW_OP_TIMEOUT_MS,
+      what: "respond",
+      setHandle: (t) => this.reviewOpTimers.set(key, t),
+      stillPending: () => !!pendingMap[cardId],
+      giveUp: () => {
+        this.reviewOpTimers.delete(key);
+        delete pendingMap[cardId];
+        this.review.error = ExtensionState.slowWaitGiveUp("respond");
+      },
+    });
+  }
+
+  private clearReviewOpTimer(op: string, cardId: string): void {
+    const key = `${op}:${cardId}`;
+    const t = this.reviewOpTimers.get(key);
+    if (t) {
+      clearTimeout(t);
+      this.reviewOpTimers.delete(key);
+    }
+    this.retireAgentWaitNotice();
+  }
+
+  /** Routed from `onMessage` for review-gather sessions. Same guards as
+   *  handleVariantsSync: session-id mismatch, empty-done race, lenient
+   *  payload parse with a readable error on skew. */
+  private handleReviewSync(session: Session): void {
+    const pending = this.review.pending;
+    if (!pending) return;
+    if (
+      pending.sessionId &&
+      session.id !== pending.sessionId &&
+      (session.status === "done" || session.status === "error")
+    ) {
+      return;
+    }
+    if (session.status === "done") {
+      const summary = session.appliedSummary ?? "";
+      if (summary.trim() === "") return; // multi-agent race — keep waiting
+      this.clearReviewTimeout();
+      const parsed = parseReviewRun(summary, pending.runId);
+      if (parsed) {
+        // New deck: wipe the previous run's play state (per-run by
+        // design); lifetime stats survive. A topic gather is stamped
+        // with the submitted topic even when an older agent omits it.
+        this.review.currentRun = {
+          ...parsed,
+          ...(pending.topic && !parsed.topic
+            ? { topic: pending.topic, source: "topic" as const }
+            : {}),
+          createdAt: Date.now(),
+        };
+        this.review.verdicts = {};
+        this.review.failNotes = {};
+        this.review.deckIndex = 0;
+        this.review.streak = 0;
+        this.review.cardChats = {};
+        this.review.learnCardId = null;
+        this.review.fixes = {};
+        void this.persistReview();
+        void this.saveReviewChats();
+      } else {
+        const preview = summary.slice(0, 200);
+        this.review.error =
+          "Agent returned an unrecognized response. " +
+          "Restart `/pinta` in your project (the SKILL.md §7.17 code-review handler may not have loaded yet). " +
+          (preview
+            ? `Agent said: "${preview}${summary.length > 200 ? "…" : ""}"`
+            : "");
+      }
+      this.review.pending = null;
+    } else if (session.status === "error") {
+      this.clearReviewTimeout();
+      this.review.error = session.errorMessage ?? "Gathering the deck failed.";
+      this.review.pending = null;
+    } else if (session.status === "applying") {
+      this.review.error = null;
+    }
+  }
+
+  private handleReviewLearnSync(session: Session, cardId: string): void {
+    const hadPending = !!this.review.pendingLearn[cardId];
+    if (session.status === "done") {
+      this.clearReviewOpTimer("review-learn", cardId);
+      const reply = parseLearnReply(session.appliedSummary ?? "");
+      if (reply) {
+        const thread = this.review.cardChats[cardId] ?? [];
+        const lastUser = [...thread].reverse().find((m) => m.role === "user");
+        const now = Date.now();
+        this.review.cardChats[cardId] = [
+          ...thread,
+          {
+            id: crypto.randomUUID(),
+            role: "agent",
+            text: reply,
+            at: now,
+            elapsedMs: lastUser ? now - lastUser.at : undefined,
+          },
+        ];
+        this.review.error = null;
+        void this.saveReviewChats();
+      } else {
+        this.review.error = "Agent returned an empty Learn response.";
+      }
+      if (hadPending) delete this.review.pendingLearn[cardId];
+    } else if (session.status === "error") {
+      this.clearReviewOpTimer("review-learn", cardId);
+      this.review.error = session.errorMessage ?? "Learn failed for this card.";
+      if (hadPending) delete this.review.pendingLearn[cardId];
+    }
+  }
+
+  private handleReviewFixSync(session: Session, cardId: string): void {
+    const hadPending = !!this.review.pendingFix[cardId];
+    if (session.status === "done") {
+      this.clearReviewOpTimer("review-fix", cardId);
+      const parsed = parseFixResult(session.appliedSummary ?? "");
+      if (parsed) {
+        this.review.fixes[cardId] = { ...parsed, cardId };
+        this.review.error = null;
+        void this.persistReview();
+      } else {
+        this.review.error =
+          "Couldn't apply this fix — the agent didn't confirm the change.";
+      }
+      if (hadPending) delete this.review.pendingFix[cardId];
+    } else if (session.status === "error") {
+      this.clearReviewOpTimer("review-fix", cardId);
+      this.review.error = session.errorMessage ?? "Fixing this card failed.";
+      if (hadPending) delete this.review.pendingFix[cardId];
+    }
+  }
+
+  /** HTTP fallback for review work whose done-broadcast was missed
+   *  during a WS blip: the gather AND per-card Learn/Fix. */
+  private async reconcileReview(): Promise<void> {
+    const pending = this.review.pending;
+    if (pending?.sessionId) {
+      await this.reconcilePinnedSession(pending.sessionId, (s) =>
+        this.handleReviewSync(s),
+      );
+    }
+    for (const [cid, sid] of ExtensionState.pinnedIds(
+      this.review.pendingLearn,
+    )) {
+      await this.reconcilePinnedSession(sid, (s) =>
+        this.handleReviewLearnSync(s, cid),
+      );
+    }
+    for (const [cid, sid] of ExtensionState.pinnedIds(this.review.pendingFix)) {
+      await this.reconcilePinnedSession(sid, (s) =>
+        this.handleReviewFixSync(s, cid),
+      );
+    }
+  }
+
+  // ─── /Phase 23 ──────────────────────────────────────────────────────
+
   /** Boards for imported INTERACTIVE modules (Phase 19 dynamic tabs),
    *  keyed by module id. Each slot mirrors the audit slot: the agent's
    *  returned board, an in-flight op marker, and the last error. Fully
@@ -3774,7 +5220,7 @@ class ExtensionState {
   private armAuditOpTimer(
     op: string,
     checkId: string,
-    pendingMap: Record<string, boolean>,
+    pendingMap: Record<string, string | boolean>,
   ): void {
     const key = `${op}:${checkId}`;
     this.clearAuditOpTimer(op, checkId);
@@ -4972,8 +6418,25 @@ class ExtensionState {
    *  Phase 16 report slot too, not just batches. (Module boards reconcile
    *  on reconnect only; the report slot opts into the heartbeat because a
    *  report can finish long after submit, well inside a half-open window.) */
+  /** Session ids pinned into a per-item pending map (string values). */
+  private static pinnedIds(
+    map: Record<string, string | boolean>,
+  ): [itemId: string, sessionId: string][] {
+    return Object.entries(map).filter(
+      (e): e is [string, string] => typeof e[1] === "string",
+    );
+  }
+
   private hasReconcilableWork(): boolean {
-    return this.hasReconcilableBatches() || !!this.report.pending?.sessionId;
+    return (
+      this.hasReconcilableBatches() ||
+      !!this.report.pending?.sessionId ||
+      !!this.variants.pending?.sessionId ||
+      !!this.review.pending?.sessionId ||
+      ExtensionState.pinnedIds(this.variants.pendingDiscuss).length > 0 ||
+      ExtensionState.pinnedIds(this.review.pendingLearn).length > 0 ||
+      ExtensionState.pinnedIds(this.review.pendingFix).length > 0
+    );
   }
 
   /** Start the reconcile heartbeat if a batch or report is pending and it
@@ -4988,6 +6451,8 @@ class ExtensionState {
       }
       void this.reconcileInFlightBatches();
       void this.reconcileReport();
+      void this.reconcileVariants();
+      void this.reconcileReview();
     }, ExtensionState.RECONCILE_HEARTBEAT_MS);
   }
 
@@ -6802,18 +8267,32 @@ class ExtensionState {
    *  message can name the right `/pinta --flag` to start. */
   private static sessionRoleKind(
     session: Session,
-  ): "annotate" | "test-pilot" | "audit" | "chat" {
+  ):
+    | "annotate"
+    | "test-pilot"
+    | "audit"
+    | "chat"
+    | "design-variants"
+    | "code-review" {
     const ids = session.modules?.map((m) => m.id) ?? [];
     if (ids.includes("audit-flow")) return "audit";
     if (ids.includes("test-pilot")) return "test-pilot";
     if (ids.includes("chat")) return "chat";
+    if (ids.includes("design-variants")) return "design-variants";
+    if (ids.includes("code-review")) return "code-review";
     return "annotate";
   }
 
   /** Compose the unclaimed-session hint. References the role flag the
    *  user would set on a `/pinta` terminal to handle this kind. */
   private static composeClaimWarning(
-    kind: "annotate" | "test-pilot" | "audit" | "chat",
+    kind:
+      | "annotate"
+      | "test-pilot"
+      | "audit"
+      | "chat"
+      | "design-variants"
+      | "code-review",
   ): string {
     const flagHint = {
       annotate:
@@ -6824,6 +8303,10 @@ class ExtensionState {
         "If none is running, start `/pinta --audit` (or `/pinta`, no flag = generalist) in this project's terminal.",
       chat:
         "If none is running, start `/pinta --chat` (or `/pinta`, no flag = generalist) in this project's terminal.",
+      "design-variants":
+        "If none is running, start `/pinta --variants` (or `/pinta`, no flag = generalist) in this project's terminal.",
+      "code-review":
+        "If none is running, start `/pinta --review` (or `/pinta`, no flag = generalist) in this project's terminal.",
     }[kind];
     const secs = ExtensionState.CLAIM_WARNING_MS / 1000;
     const waited =
@@ -6871,6 +8354,18 @@ class ExtensionState {
           if (
             this.chat.pendingGlobal ||
             Object.keys(this.chat.pendingAnnotateBatch).length > 0
+          ) {
+            this.claimNotice = notice;
+          }
+          break;
+        case "design-variants":
+          if (this.variants.pending) this.claimNotice = notice;
+          break;
+        case "code-review":
+          if (
+            this.review.pending ||
+            Object.keys(this.review.pendingLearn).length > 0 ||
+            Object.keys(this.review.pendingFix).length > 0
           ) {
             this.claimNotice = notice;
           }
@@ -7861,6 +9356,8 @@ class ExtensionState {
           void this.reconcileModuleBoards();
           void this.reconcileInFlightBatches();
           void this.reconcileReport();
+          void this.reconcileVariants();
+          void this.reconcileReview();
           this.ensureReconcileHeartbeat();
         }
       },
@@ -8208,6 +9705,55 @@ class ExtensionState {
         ) {
           this.drift.pending.sessionId = msg.session.id;
         }
+        // Phase 22 — pin the Design Variants ephemeral session so
+        // reconcileVariants() can recover a run whose done-broadcast was
+        // missed during a WS blip (mirrors the report pin above). The
+        // run-level pin is op-guarded so a concurrent per-variant
+        // Discuss ack can't steal it.
+        if (msg.moduleId === "design-variants") {
+          const op = ExtensionState.queryOp(msg.session);
+          if (
+            op !== "variants-discuss" &&
+            this.variants.pending &&
+            !this.variants.pending.sessionId
+          ) {
+            this.variants.pending.sessionId = msg.session.id;
+            this.ensureReconcileHeartbeat();
+          }
+          if (op === "variants-discuss") {
+            const vid = ExtensionState.queryField(msg.session, "variantId");
+            if (vid && this.variants.pendingDiscuss[vid] === true) {
+              this.variants.pendingDiscuss[vid] = msg.session.id;
+              this.ensureReconcileHeartbeat();
+            }
+          }
+        }
+        // Phase 23 — pin the Code Review sessions for reconcileReview():
+        // the gather into the run-level pending, Learn/Fix into their
+        // per-card maps (string value = pinned session id, still truthy
+        // for the spinners).
+        if (msg.moduleId === "code-review") {
+          const op = ExtensionState.queryOp(msg.session);
+          if (
+            op === "review-gather" &&
+            this.review.pending &&
+            !this.review.pending.sessionId
+          ) {
+            this.review.pending.sessionId = msg.session.id;
+            this.ensureReconcileHeartbeat();
+          }
+          if (op === "review-learn" || op === "review-fix") {
+            const cid = ExtensionState.queryField(msg.session, "cardId");
+            const map =
+              op === "review-learn"
+                ? this.review.pendingLearn
+                : this.review.pendingFix;
+            if (cid && map[cid] === true) {
+              map[cid] = msg.session.id;
+              this.ensureReconcileHeartbeat();
+            }
+          }
+        }
         break;
       }
       case "session.created":
@@ -8239,6 +9785,68 @@ class ExtensionState {
         if (ExtensionState.queryOp(msg.session) === "drift-check") {
           this.handleDriftCheckSync(msg.session);
           return;
+        }
+
+        // Phase 22 — Design Variants ops. Routed by op (before any
+        // module-id branch) so the ephemeral query session never lands
+        // in the annotation draft. Belt-and-suspenders module-id check
+        // below covers intermediate statuses arriving before the op is
+        // readable. Every branch MUST return (see chat-branch rationale).
+        {
+          const dvOp = ExtensionState.queryOp(msg.session);
+          // Per-variant Discuss rides its own handler keyed by
+          // variantId — must be routed BEFORE the run-level ops so it
+          // never consumes the singleton pending slot.
+          if (dvOp === "variants-discuss") {
+            const variantId = ExtensionState.queryField(
+              msg.session,
+              "variantId",
+            );
+            if (variantId) this.handleVariantsDiscussSync(msg.session, variantId);
+            return;
+          }
+          if (
+            dvOp === "variants-generate" ||
+            dvOp === "variants-apply" ||
+            dvOp === "variants-discover-pages"
+          ) {
+            this.handleVariantsSync(msg.session);
+            return;
+          }
+          const isVariantsSession =
+            msg.session.modules?.some((m) => m.id === "design-variants") ??
+            false;
+          if (isVariantsSession) {
+            this.handleVariantsSync(msg.session);
+            return;
+          }
+        }
+
+        // Phase 23 — Code Review ops. Same discipline: op-routed first
+        // (per-card ops carry a cardId), module-id belt-and-suspenders
+        // after, every branch returns.
+        {
+          const crOp = ExtensionState.queryOp(msg.session);
+          if (crOp === "review-gather") {
+            this.handleReviewSync(msg.session);
+            return;
+          }
+          if (crOp === "review-learn") {
+            const cardId = ExtensionState.queryField(msg.session, "cardId");
+            if (cardId) this.handleReviewLearnSync(msg.session, cardId);
+            return;
+          }
+          if (crOp === "review-fix") {
+            const cardId = ExtensionState.queryField(msg.session, "cardId");
+            if (cardId) this.handleReviewFixSync(msg.session, cardId);
+            return;
+          }
+          const isReviewSession =
+            msg.session.modules?.some((m) => m.id === "code-review") ?? false;
+          if (isReviewSession) {
+            this.handleReviewSync(msg.session);
+            return;
+          }
         }
 
         // Phase 16e — per-day "fetch more commits". Routed by op (before

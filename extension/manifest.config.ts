@@ -69,5 +69,16 @@ export default defineManifest({
       world: "MAIN",
       all_frames: false,
     },
+    {
+      // Phase 24 — Devices nav-sync reporter: an inert message listener in
+      // every frame, activated only by the Devices canvas (verified by the
+      // extension origin of the activation message). Declared here because
+      // scripting.executeScript can't target a tab whose TOP frame is the
+      // extension's own canvas page. See nav-reporter.ts.
+      matches: ["http://*/*", "https://*/*"],
+      js: ["src/content/nav-reporter.ts"],
+      run_at: "document_idle",
+      all_frames: true,
+    },
   ],
 });

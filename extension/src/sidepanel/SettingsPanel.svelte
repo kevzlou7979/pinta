@@ -605,6 +605,13 @@
                   <path d="M20.59 13.41 13.42 20.58a2 2 0 0 1-2.83 0L2 12V2h10l8.59 8.59a2 2 0 0 1 0 2.82z" />
                   <line x1="7" y1="7" x2="7.01" y2="7" />
                 </svg>
+              {:else if spec.id === "devices"}
+                <!-- Monitor + phone — many screen sizes (Phase 24) -->
+                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                  <rect x="2" y="3" width="13" height="10" rx="2"/>
+                  <rect x="16" y="8" width="6" height="12" rx="2"/>
+                  <line x1="5" y1="17" x2="11" y2="17"/>
+                </svg>
               {:else}
                 <!-- Generic puzzle-piece fallback for future modules -->
                 <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">

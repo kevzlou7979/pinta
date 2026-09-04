@@ -15,6 +15,9 @@ export default defineConfig({
         // at runtime via chrome.offscreen.createDocument; listed here so
         // the page + its module script are emitted to the build output.
         offscreen: "src/offscreen/offscreen.html",
+        // Full-tab device canvas (Phase 24) — opened by the side panel
+        // via chrome.runtime.getURL("src/devices/index.html").
+        devices: "src/devices/index.html",
       },
     },
   },

@@ -39,6 +39,9 @@
   import TestPilotTab from "./TestPilotTab.svelte";
   import AuditFlowTab from "./AuditFlowTab.svelte";
   import ReportTab from "./ReportTab.svelte";
+  import DesignVariantsTab from "./DesignVariantsTab.svelte";
+  import CodeReviewTab from "./CodeReviewTab.svelte";
+  import DevicesTab from "./DevicesTab.svelte";
   import ModuleBoardTab from "./ModuleBoardTab.svelte";
   import ChatSheet from "./ChatSheet.svelte";
   import MicButton from "../lib/voice/MicButton.svelte";
@@ -149,6 +152,9 @@
     | "test-pilot"
     | "audit-flow"
     | "report"
+    | "design-variants"
+    | "code-review"
+    | "devices"
     | (string & {});
   // Active tab in the main panel area. Persists across side-panel
   // re-opens via chrome.storage.local (`pinta-active-tab`). The
@@ -181,6 +187,25 @@
   // Report tab busy state — spinner replaces the doc glyph while the
   // agent is gathering tasks.
   const reportBusy = $derived(app.report.pending !== null);
+  // Design Variants tab busy state — generate / apply / discover-pages,
+  // or any per-variant Discuss, in flight.
+  const designVariantsBusy = $derived(
+    app.variants.pending !== null ||
+      Object.values(app.variants.pendingDiscuss).some(Boolean),
+  );
+  // Code Review tab busy state — gather, or any per-card Learn/Fix.
+  const codeReviewBusy = $derived(
+    app.review.pending !== null ||
+      Object.values(app.review.pendingLearn).some(Boolean) ||
+      Object.values(app.review.pendingFix).some(Boolean),
+  );
+  // Leaving the Variants tab while a live on-page preview is active
+  // restores the page — a preview should never outlive its controls.
+  $effect(() => {
+    if (activeTab !== "design-variants" && app.variants.previewingVariantId) {
+      app.restoreVariantPreview();
+    }
+  });
 
 
   type ActiveMode =
@@ -194,7 +219,8 @@
     | "resize"
     | "paint"
     | "scale"
-    | "transform";
+    | "transform"
+    | "variant-pick";
 
   let pageUrl = $state<string>("");
   let activeTabId = $state<number | null>(null);
@@ -302,6 +328,8 @@
      *  page. `tool` is only carried when mode === "draw". */
     mode?: ActiveMode;
     tool?: Tool;
+    /** Phase 22 — Design Variants preview round-trips. */
+    variantId?: string;
   };
 
   /** Selector-resolution count for the currently-viewed imported session,
@@ -577,6 +605,13 @@
       else if (m.mode === "transform") activeTool = "transform";
       else if (m.mode === "draw") activeTool = (m.tool as Tool | undefined) ?? activeTool;
       else activeTool = null;
+      // Phase 22 — ANY mode change away from variant-pick ends the pick
+      // (panel toolbar, Alt-hotkeys, floating-toolbar shortcuts all call
+      // setMode without echoing variants.pick-cancelled). Without this
+      // the tab's "Click an element…" spinner would stay up forever.
+      if (m.mode !== "variant-pick" && app.variants.picking) {
+        app.variants.picking = false;
+      }
       return;
     }
     if (m?.type === "toolbar.pick-image" && sender.tab?.id === activeTabId) {
@@ -599,6 +634,55 @@
     if (m?.type === "toolbar.add-task" && sender.tab?.id === activeTabId) {
       app.viewingSettings = false;
       composerOpen = "task";
+      return;
+    }
+    // Phase 22 — Design Variants pick / preview round-trips.
+    if (m?.type === "variants.picked" && sender.tab?.id === activeTabId) {
+      if (m.target) {
+        app.variants.pickedTarget = m.target;
+        app.variants.scopeKind = "element";
+      }
+      app.variants.picking = false;
+      return;
+    }
+    if (m?.type === "variants.pick-cancelled" && sender.tab?.id === activeTabId) {
+      app.variants.picking = false;
+      return;
+    }
+    if (m?.type === "variants.preview-restored" && sender.tab?.id === activeTabId) {
+      // A late echo (async restore racing a NEW preview click) must not
+      // clobber the newer selection — only clear when it's the same
+      // variant (or the message doesn't say which, for older scripts).
+      if (!m.variantId || app.variants.previewingVariantId === m.variantId) {
+        app.variants.previewingVariantId = null;
+        app.variants.previewingTabId = null;
+      }
+      return;
+    }
+    if (m?.type === "variants.preview-failed" && sender.tab?.id === activeTabId) {
+      app.variants.previewingVariantId = null;
+      app.variants.error =
+        "Couldn't find that element on the page any more — refresh and re-pick, or use the card preview.";
+      return;
+    }
+    if (m?.type === "variants.preview-apply" && sender.tab?.id === activeTabId) {
+      app.variants.previewingVariantId = null;
+      // Same consent gate as the tab's "Use this variant" button — a
+      // source-editing agent run must never start from a single click
+      // on the on-page pill.
+      const variantId = m.variantId;
+      if (variantId) {
+        const label =
+          app.variants.currentRun?.variants.find((v) => v.id === variantId)
+            ?.label ?? variantId;
+        void confirmDialog({
+          title: "Apply this variant?",
+          message: `The agent will edit your source files to apply "${label}". Your dev server hot-reloads the change.`,
+          confirmLabel: "Apply to source",
+        }).then((ok) => {
+          if (ok) void app.applyVariant(variantId);
+        });
+      }
       return;
     }
     if (m?.type === "toolbar.add-selector" && sender.tab?.id === activeTabId) {
@@ -2311,7 +2395,7 @@
       </div>
     {/if}
 
-    {#if !app.viewingSettings && !app.viewingImportedId && !showAssociatePrompt && (app.moduleReady("test-pilot") || app.moduleReady("audit-flow") || app.moduleReady("report") || app.interactiveTabSpecs().length > 0)}
+    {#if !app.viewingSettings && !app.viewingImportedId && !showAssociatePrompt && (app.moduleReady("test-pilot") || app.moduleReady("audit-flow") || app.moduleReady("report") || app.moduleReady("design-variants") || app.moduleReady("code-review") || app.moduleReady("devices") || app.interactiveTabSpecs().length > 0)}
       <nav class="sticky -top-4 z-20 bg-ink-50 dark:bg-night-bg flex items-center gap-1 border-b border-ink-200 dark:border-night-line -mx-4 px-4 pt-4 mb-1">
         <button
           type="button"
@@ -2439,6 +2523,91 @@
             Report
           </button>
         {/if}
+        {#if app.moduleReady("design-variants")}
+          <button
+            type="button"
+            class="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium border-b-2 -mb-px transition-colors"
+            class:border-brand-pink={activeTab === "design-variants"}
+            class:text-brand-pink={activeTab === "design-variants"}
+            class:dark:text-brand-pink-light={activeTab === "design-variants"}
+            class:border-transparent={activeTab !== "design-variants"}
+            class:text-ink-500={activeTab !== "design-variants"}
+            class:dark:text-night-mute={activeTab !== "design-variants"}
+            onclick={() => {
+              activeTab = "design-variants";
+              void chrome.storage?.local?.set({ "pinta-active-tab": "design-variants" });
+            }}
+          >
+            {#if designVariantsBusy}
+              <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="animate-spin" aria-label="Design Variants working">
+                <path d="M21 12a9 9 0 1 1-6.219-8.56" />
+              </svg>
+            {:else}
+              <!-- Layers glyph — reads as "stacked design options". -->
+              <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                <polygon points="12 2 2 7 12 12 22 7 12 2"/>
+                <polyline points="2 17 12 22 22 17"/>
+                <polyline points="2 12 12 17 22 12"/>
+              </svg>
+            {/if}
+            Variants
+          </button>
+        {/if}
+        {#if app.moduleReady("code-review")}
+          <button
+            type="button"
+            class="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium border-b-2 -mb-px transition-colors"
+            class:border-brand-pink={activeTab === "code-review"}
+            class:text-brand-pink={activeTab === "code-review"}
+            class:dark:text-brand-pink-light={activeTab === "code-review"}
+            class:border-transparent={activeTab !== "code-review"}
+            class:text-ink-500={activeTab !== "code-review"}
+            class:dark:text-night-mute={activeTab !== "code-review"}
+            onclick={() => {
+              activeTab = "code-review";
+              void chrome.storage?.local?.set({ "pinta-active-tab": "code-review" });
+            }}
+          >
+            {#if codeReviewBusy}
+              <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="animate-spin" aria-label="Code Review working">
+                <path d="M21 12a9 9 0 1 1-6.219-8.56" />
+              </svg>
+            {:else}
+              <!-- Stacked-cards glyph — reads as "a deck to play". -->
+              <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                <rect x="7" y="3" width="14" height="14" rx="2"/>
+                <path d="M17 21H5a2 2 0 0 1-2-2V7"/>
+                <polyline points="11 10 13 12 17 8"/>
+              </svg>
+            {/if}
+            Review
+          </button>
+        {/if}
+        {#if app.moduleReady("devices")}
+          <button
+            type="button"
+            class="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium border-b-2 -mb-px transition-colors"
+            class:border-brand-pink={activeTab === "devices"}
+            class:text-brand-pink={activeTab === "devices"}
+            class:dark:text-brand-pink-light={activeTab === "devices"}
+            class:border-transparent={activeTab !== "devices"}
+            class:text-ink-500={activeTab !== "devices"}
+            class:dark:text-night-mute={activeTab !== "devices"}
+            onclick={() => {
+              activeTab = "devices";
+              void chrome.storage?.local?.set({ "pinta-active-tab": "devices" });
+            }}
+          >
+            <!-- Monitor + phone glyph — reads as "many screen sizes".
+                 No spinner branch: the tab is a launcher, nothing async. -->
+            <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+              <rect x="2" y="3" width="13" height="10" rx="2"/>
+              <rect x="16" y="8" width="6" height="12" rx="2"/>
+              <line x1="5" y1="17" x2="11" y2="17"/>
+            </svg>
+            Devices
+          </button>
+        {/if}
         <!-- Phase 19 — DYNAMIC tabs: one per imported interactive module
              that declares a `tab` in its manifest. Nothing is hardcoded;
              id / label / icon all come from the plugin. -->
@@ -2495,6 +2664,12 @@
       <AuditFlowTab />
     {:else if !app.viewingImportedId && !showAssociatePrompt && activeTab === "report" && app.moduleReady("report")}
       <ReportTab />
+    {:else if !app.viewingImportedId && !showAssociatePrompt && activeTab === "design-variants" && app.moduleReady("design-variants")}
+      <DesignVariantsTab />
+    {:else if !app.viewingImportedId && !showAssociatePrompt && activeTab === "code-review" && app.moduleReady("code-review")}
+      <CodeReviewTab />
+    {:else if !app.viewingImportedId && !showAssociatePrompt && activeTab === "devices" && app.moduleReady("devices")}
+      <DevicesTab />
     {:else if !app.viewingImportedId && !showAssociatePrompt && app.interactiveTabSpecs().some((s) => s.id === activeTab)}
       <!-- Phase 19 — generic renderer for an imported interactive tab. -->
       <ModuleBoardTab

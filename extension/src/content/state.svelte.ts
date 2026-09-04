@@ -14,7 +14,10 @@ export type Mode =
   | "resize"
   | "paint"
   | "scale"
-  | "transform";
+  | "transform"
+  // Phase 22 — one-shot Design Variants element pick: hover highlight,
+  // one click captures the target and returns to idle.
+  | "variant-pick";
 
 /**
  * A previewed element mutation that must be rolled back when its owning
@@ -78,6 +81,12 @@ class ContentState {
   // Floating on-page toolbar (Settings-gated, off by default). Mirrored from
   // chrome.storage like voice, kept live via storage.onChanged.
   floatingToolbarEnabled = $state(false);
+
+  // Phase 22 — true while a Design Variants live preview is mutating the
+  // page. The annotated-elements MutationObserver skips its re-resolve
+  // pass while set, so a variant swap doesn't trigger churn. Plain field
+  // (no reactivity needed — read inside the observer callback only).
+  variantPreviewActive = false;
 
   // Whether the Pinta side panel is currently open. The floating toolbar only
   // shows while it is (the panel holds a background port for its lifetime).

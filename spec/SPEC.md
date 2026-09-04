@@ -1686,10 +1686,11 @@ block in `SettingsPanel.svelte`, and toolkit settings in `state.svelte.ts`.
 No companion or agent involvement — a pure in-browser tool.
 
 **Relation to the Multi-Device Canvas idea:** this is the lightweight,
-single-viewport cousin of that parked concept (which renders Mobile/Tablet/
+single-viewport cousin of that concept (which renders Mobile/Tablet/
 Laptop side-by-side in one pannable canvas). The Device toolkit toggles
-*one* viewport in place; the canvas shows *all at once*. They can coexist —
-ship the toolkit first.
+*one* viewport in place; the canvas shows *all at once*. They can coexist.
+*Update:* the canvas half shipped as **Phase 24 — Devices module**; the
+single-viewport toolkit remains unbuilt.
 
 ### Phase 21 — Annotation toolset + Drift Check + board actions — Shipped (0.7.0)
 
@@ -1718,6 +1719,178 @@ the `module.query.submit` op envelope) — the only new `AnnotationKind`s are
   side panels no-op `window.confirm`); per-card **How to test** steps
   (`ModuleTab.cardStepsOp`, inline StepList) and **Generate screenshots**
   (`cardStepsShotsOp`, one PNG/step over the Report proof-shot rails).
+
+### Phase 22 — Design Variants module — Built (unreleased)
+
+Replaces the "paste a screenshot into claude.ai and ask for 3 options"
+loop. A built-in interactive module (`design-variants`): the user picks
+an element on their running app (one-shot `variant-pick` content mode)
+or chooses "whole page", and the agent returns **3 design variants that
+stay inside the project's design system** (§7.16 in SKILL.md — ops
+`variants-generate` / `variants-apply` / `variants-discover-pages`, all
+on the existing `module.query.submit` envelope; **zero companion
+changes**).
+
+- **Variant cards** (`sidepanel/DesignVariantsTab.svelte`): each variant's
+  self-contained `previewHtml` renders in an iframe with the EMPTY
+  `sandbox` attribute (no scripts / no origin), additionally passed
+  through the inbound sanitizer. A device chip row (Mobile / Tablet /
+  Laptop / Desktop; overridable via the `devicePresets` module setting)
+  renders any card at that viewport width, scale-clipped.
+- **Live in-page preview** (element scope): "Preview on page" swaps the
+  real element — style-only variants via `applyPreview` (inline-style
+  layering), structural variants via a sanitized `<template>` parse +
+  `replaceWith`, with snapshot restore, an on-page pill (Restore / Use
+  this variant), Esc-to-restore, and a MutationObserver suspend flag.
+  Transient by design: a framework re-render clobbers it harmlessly
+  (`isConnected` guards); host-page CSP may block inline styles.
+- **Generate options**: the user picks how many variants (2-5, default
+  3) and can type an optional free-text **art direction** (≤280 chars,
+  `normalizeDirection`) that rides on `variants-generate` as
+  `direction` — the agent must honor it while staying on-system
+  (SKILL §7.16). Starting a new generate clears the previous run
+  (cards + any live preview) so stale variants never sit under the
+  spinner.
+- **Apply**: stateless `variants-apply` resends the target + chosen
+  variant spec; the agent edits source (dev server hot-reloads) with an
+  optional **bounded** (≤2 extra passes) visual fidelity check when a
+  browser MCP is available. Result badges the card and lists the files.
+- **Pages gallery**: the app's key routes (seeded by
+  `variants-discover-pages` or typed manually) render side by side as
+  LIVE dev-server iframes at the selected device width — a mockup sheet
+  backed by the real app, doubling as the post-apply review. Requires
+  the dev app not to send `X-Frame-Options` / `frame-ancestors` denials.
+- **Security — new trust edge**: agent-generated HTML entering the
+  user's page. `sanitizeVariantHtml` (`lib/design-variants.ts`,
+  unit-tested) drops `script/iframe/object/embed/link/meta/base/form`,
+  strips `on*` handlers, `javascript:`/`data:` URLs, and `url(`-bearing
+  style attributes; it runs on BOTH the panel side (before messaging)
+  and in the content script's isolated world (before DOM insertion).
+- **Non-goals (v1)**: full-page in-page preview (cards only), per-variant
+  Discuss (stubbed "coming soon" — will reuse ChatSheet), variant
+  history across runs.
+
+### Phase 23 — Code Review module — Built (unreleased)
+
+Gamified review of the user's own change set. Built-in interactive
+module (`code-review`, no settings): the agent gathers the uncommitted
+working-tree diff — falling back to `git show HEAD` when clean — and
+returns a deck of review cards (§7.17: ops `review-gather` /
+`review-learn` / `review-fix`, all on `module.query.submit`; **zero
+companion changes**). **Topic mode**: an optional focus prompt (≤120
+chars, e.g. "MFA authentication") makes the gather skip git and deal
+the RELEVANT CODE SECTIONS for that topic instead (2-3 greps, ≤40 files
+skimmed, `source:"topic"`, excerpts rendered as context lines).
+
+- **Cards**: one per LOGICAL change (grouped hunks, never per-line),
+  plain-words `title` (≤60) + `description` (≤2 sentences) + unified
+  `diff` (≤4 KB, truncation marker) + optional `risk`. Cap 25/run,
+  overflow counted in `dropped`. Parser (`lib/code-review.ts`,
+  unit-tested) is alias-tolerant and re-enforces every cap.
+- **Deck play** (`sidepanel/CodeReviewTab.svelte`): one card at a time,
+  Pass (P) / Fail (F) / Learn (L) + ←/→ navigation, progress bar,
+  consecutive-pass streak, source chip. Fail reveals an optional
+  one-line note (MicButton). End card: grade **S(100)/A(≥90)/B(≥75)/
+  C(≥60)/D** over reviewed cards, run stats + lifetime stats
+  (totalReviewed / bestStreak / runsCompleted, chrome.storage), failed
+  list with per-card Fix. Verdicts are per-run (a regather wipes them);
+  lifetime stats persist.
+- **Learn**: shared ChatSheet per card — first open auto-asks the
+  default explainer (how it works / where used / one example, one grep,
+  ≤250 words); follow-up questions ride `review-learn` with last-6
+  history. Read-only.
+- **Fix**: `review-fix` is the module's only writing op — stateless
+  (card + failNote resent), minimal edits, vague notes answered with a
+  request for specifics instead of guesses.
+- **Diff rendering**: no new deps — `splitDiffLines` + CSS-tinted line
+  spans (add/del/hunk), horizontal scroll inside the card.
+- **State** (`state.svelte.ts` `review` slot) mirrors the hardened
+  Phase 22 lifecycle: op-routed early returns, session-id mismatch +
+  empty-done guards, amber→red `armAgentWait`, reconcile heartbeat,
+  claim-warning role kind.
+- **Non-goals (v1)**: batch "fix all failed", branch-vs-main / MR
+  targets (future GitLab pairing), review history across runs.
+
+---
+
+### Phase 24 — Devices module (multi-device canvas) — Built (unreleased)
+
+The Multi-Device Canvas idea from Phase 20, shipped as a module: a
+Mobile-View-style simulator that renders the user's running app in many
+live, interactive device frames at once. **Purely client-side — no
+companion op, no agent, nothing on the wire, no SKILL.md changes.**
+
+- **Surface**: a full-tab extension page (`extension/src/devices/`,
+  Vite entry `src/devices/index.html`). The side-panel **Devices tab**
+  (`DevicesTab.svelte`) is a slim launcher — `chrome.tabs.create` with
+  the current app URL as `?url=`. Module `devices` registered in
+  `modules.ts` (`mode: "interactive"`, one optional `customDevices`
+  setting → ready the instant it's enabled).
+- **Canvas** (`DevicesApp.svelte`): sticky toolbar — target URL input +
+  "open tabs" picker (`chrome.tabs.query`, lastAccessed-sorted, never
+  `{active:true}` — that's the page itself), Refresh all, global zoom
+  25–200%, model picker + "+ Device" (soft cap 12 frames; the picker
+  also offers bulk groups — All Mobile / All Tablets / All Laptops /
+  All Desktops via `modelsForGroup`, partial add when the cap hits).
+  Dotted
+  canvas is the scroll surface (both axes, toolbar fixed) with
+  **free-drag positioning**: drag a frame by its header bar (pointer
+  capture keeps the drag alive across other frames' iframes),
+  last-touched frame renders on top, positions persist; frames without
+  a position (first run / pre-drag state) are auto-placed row-wrap via
+  `layoutUnplacedFrames`, and "+ Device" drops below everything placed.
+  Dismissible error banner.
+- **Frames** (`DeviceFrame.svelte`): header (index, grouped model
+  `<select>`, rendered dims, rotate, per-frame zoom steps, reload,
+  remove) over a dark bezel wrapping the iframe at real device width,
+  `transform: scale()` — same recipe as the Variants gallery but
+  **interactive** (no `pointer-events-none`; scrolling/clicking happen
+  natively inside) and `sandbox="allow-same-origin allow-scripts
+  allow-forms allow-popups allow-modals"` (no `allow-top-navigation`).
+  Media queries respond to each frame's real width — the advantage of
+  the iframe posture over Phase 20's in-page resize (and CDP emulation
+  stays rejected per Phase 20).
+- **Nav sync** (toolbar "Sync" toggle, persisted): navigating inside
+  one frame drives the others. Mechanism: a declared content script
+  (`src/content/nav-reporter.ts`, `all_frames: true`, http/https) that
+  is INERT everywhere — one message listener — until the canvas
+  activates it with a `pinta-nav-start` ping, which the reporter only
+  accepts from the extension origin (`event.origin` check); it then
+  polls `location.href` (isolated world can't observe page history
+  patching) and posts `{type: "pinta-nav", url}` addressed ONLY to the
+  extension origin. `executeScript` was tried first and rejected: it
+  cannot target a tab whose TOP frame is the extension's own page.
+  Activation pings repeat on a 2s interval while sync is on (idempotent;
+  covers content-script timing, reloads, late-added frames). Incoming
+  reports are untrusted: shape-validated, http(s)-only, identity-matched
+  against the registered iframe elements. Per-frame `frameSrc` entries
+  let sync navigate the OTHER frames while never reloading the
+  originator; a frame's first report after (re)load is recorded but
+  never propagated (no storm when sync turns on over frames already
+  open). Scroll-sync remains out of scope (cross-origin
+  `contentWindow`).
+  Mobile / Tablet / Laptop / Small Desktop / Large Desktop (iPhone
+  SE/16 Pro/Pro Max, Pixel 8, Galaxy S24, iPads, Surface Pro, laptops,
+  Full HD, QHD, 4K); symmetric rotate (`dimsFor`); class-default zooms;
+  `customDevices` JSON setting parsed tolerantly (`parseCustomDevices`,
+  mirrors `parseDevicePresets`) and merged by label.
+- **State**: the page's own small runes store
+  (`devices-state.svelte.ts`) — deliberately does NOT import
+  `state.svelte.ts` (which boots the whole side-panel singleton).
+  Persists `{frames, globalZoom, url}` under
+  `chrome.storage.local["pinta-devices"]` (tolerant re-parse via
+  `parseStoredDevicesState`; frame dims are snapshotted so frames
+  survive a deleted custom model); reads `pinta-modules` (read-only)
+  for the custom catalog. `?url=` from the launcher wins over the
+  persisted URL.
+- **Known limits** (surfaced as a static caveat on the canvas):
+  X-Frame-Options / CSP `frame-ancestors` apps refuse to render;
+  cookie/SameSite logins may not persist inside frames (third-party
+  storage partitioning). Token/localStorage auth on localhost dev apps
+  generally works.
+- **Non-goals (v1)**: screenshots, scroll-sync (impossible — the
+  `chrome-extension://` top page can't reach cross-origin iframe
+  `contentWindow`), UA/DPR emulation.
 
 ---
 

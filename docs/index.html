@@ -684,7 +684,7 @@
     .step:hover { border-color: var(--border-strong); box-shadow: var(--shadow-md); }
     .step-num {
       width: 34px; height: 34px;
-      border-radius: 50% 50% 50% 4px; /* pin silhouette */
+      border-radius: 50%;
       display: inline-flex; align-items: center; justify-content: center;
       font-family: var(--font-mono);
       font-weight: 500; font-size: 14px;
@@ -1201,6 +1201,11 @@
     }
     .js .reveal.is-visible { opacity: 1; transform: none; }
 
+    /* Step cards enter as a sequential grid show — each card rises and
+       scales in, one after the other (stagger set in the reveal script) */
+    .js .steps .step.reveal { transform: translateY(28px) scale(0.94); }
+    .js .steps .step.reveal.is-visible { transform: none; }
+
     @media (prefers-reduced-motion: reduce) {
       .js .reveal, .js .reveal.is-visible { opacity: 1; transform: none; transition: none; }
       .js .mark-box, .js .mark-pin,
@@ -1339,7 +1344,7 @@
     <div class="container">
       <div class="section-head">
         <span class="eyebrow">How it works</span>
-        <h2>Annotate. Submit. Ship.</h2>
+        <h2>Point at the pixel. Ship the change.</h2>
         <p class="sub">The extension talks only to the companion. The companion talks to any agent. Nothing is hard-wired to a vendor.</p>
       </div>
       <div class="steps">
@@ -2047,7 +2052,7 @@ npx pinta-companion@0.8.2 install-skill
       // markup stays clean and no-JS users see the page fully visible.
       var groups = [
         { sel: '.section-head',      stagger: 0  },
-        { sel: '.steps .step',       stagger: 70 },
+        { sel: '.steps .step',       stagger: 160 },
         { sel: '.features .feature', stagger: 50 },
         { sel: '.modules .module',   stagger: 70 },
         { sel: '.arch-card',         stagger: 0  },
