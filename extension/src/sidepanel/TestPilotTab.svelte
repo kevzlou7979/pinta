@@ -109,6 +109,15 @@
   // all three chat surfaces (Test Pilot FAB, Annotate Just Ask, global
   // header icon). Off by default — users opt in.
   const chatEnabled = $derived(app.moduleReady("chat"));
+  const gitlabReady = $derived(app.moduleReady("gitlab-issues"));
+  /** Smoke vs Thorough generation depth — the `thorough_tests` module
+   *  setting, toggleable inline so the choice sits next to Generate. */
+  const thoroughOn = $derived(
+    app.modules["test-pilot"]?.settings?.thorough_tests === true,
+  );
+  function setThorough(on: boolean): void {
+    app.setModuleSetting("test-pilot", "thorough_tests", on);
+  }
   // True while the chat-bound row has a chat ask in flight.
   // Drives the send-button spinner.
   const chatPending = $derived(
@@ -1052,6 +1061,51 @@
       Get a UAT-style test catalog for your app. Let the agent generate one from project context,
       or import a hand-written markdown spec.
     </p>
+    <!-- Depth — Smoke (quick happy paths) vs Thorough (every feature,
+         edge + negative cases). Persists as the thorough_tests setting. -->
+    <div class="rounded-md border border-ink-200 dark:border-night-line bg-white dark:bg-night-card p-2.5 space-y-1.5">
+      <div class="flex rounded-full bg-ink-100 dark:bg-night-alt p-0.5">
+        <button
+          type="button"
+          class="flex-1 py-1 rounded-full text-[11.5px] font-medium transition-colors"
+          class:bg-white={!thoroughOn}
+          class:dark:bg-night-card={!thoroughOn}
+          class:text-brand-pink={!thoroughOn}
+          class:dark:text-brand-pink-light={!thoroughOn}
+          class:shadow-sm={!thoroughOn}
+          class:ring-1={!thoroughOn}
+          class:ring-brand-pink={!thoroughOn}
+          class:text-ink-500={thoroughOn}
+          class:dark:text-night-mute={thoroughOn}
+          aria-pressed={!thoroughOn}
+          onclick={() => setThorough(false)}
+        >
+          Smoke test
+        </button>
+        <button
+          type="button"
+          class="flex-1 py-1 rounded-full text-[11.5px] font-medium transition-colors"
+          class:bg-white={thoroughOn}
+          class:dark:bg-night-card={thoroughOn}
+          class:text-brand-pink={thoroughOn}
+          class:dark:text-brand-pink-light={thoroughOn}
+          class:shadow-sm={thoroughOn}
+          class:ring-1={thoroughOn}
+          class:ring-brand-pink={thoroughOn}
+          class:text-ink-500={!thoroughOn}
+          class:dark:text-night-mute={!thoroughOn}
+          aria-pressed={thoroughOn}
+          onclick={() => setThorough(true)}
+        >
+          Thorough test
+        </button>
+      </div>
+      <p class="text-[10.5px] text-ink-500 dark:text-night-mute leading-snug">
+        {thoroughOn
+          ? "Thorough: exhaustive coverage — every feature, edge cases, negative paths. Slower, more tokens."
+          : "Smoke: a quick happy-path catalog of the core flows. Fast and cheap."}
+      </p>
+    </div>
     <button
       type="button"
       class="w-full inline-flex items-center justify-center gap-1.5 rounded-md bg-brand-pink text-white text-sm font-medium px-3 py-2.5 hover:bg-brand-magenta dark:hover:bg-brand-pink-light"
@@ -1537,6 +1591,24 @@
           aria-label="Clear all Pass/Fail marks"
         >
           <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 6h18"/><path d="M8 6V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/><path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6"/></svg>
+        </button>
+        <button
+          type="button"
+          class="inline-flex items-center justify-center w-8 h-8 text-ink-700 dark:text-night-dim hover:text-brand-pink dark:hover:text-brand-pink-light hover:bg-ink-50 dark:hover:bg-night-alt disabled:opacity-40 disabled:cursor-not-allowed disabled:hover:bg-transparent disabled:hover:text-ink-700 dark:disabled:hover:text-night-dim"
+          onclick={() => void app.fileFailedTestsToGitLab()}
+          disabled={t.fail === 0 || app.testPilot.pendingFileIssues}
+          title={t.fail === 0
+            ? "File failed tests — no failures marked yet"
+            : gitlabReady
+              ? `File ${t.fail} failed test${t.fail === 1 ? "" : "s"} as GitLab issues (one per test, via glab)`
+              : `File ${t.fail} failed test${t.fail === 1 ? "" : "s"} — GitLab Issues module is off, entries land in .pinta/tasks.md`}
+          aria-label="File failed tests as issues"
+        >
+          {#if app.testPilot.pendingFileIssues}
+            <svg class="animate-spin" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21 12a9 9 0 1 1-6.219-8.56" /></svg>
+          {:else}
+            <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M20.59 13.41 13.42 20.58a2 2 0 0 1-2.83 0L2 12V2h10l8.59 8.59a2 2 0 0 1 0 2.82z"/><line x1="7" y1="7" x2="7.01" y2="7"/></svg>
+          {/if}
         </button>
         <div class="relative" data-pinta-export-menu>
           <button
@@ -2243,6 +2315,31 @@
                             </svg>
                           {/if}
                         </button>
+                      {/if}
+
+                      <!-- Filed indicator — this failed row already has a
+                           tracker issue (GitLab link) or a tasks.md entry. -->
+                      {#if app.testPilot.filedIssues[test.id]}
+                        {@const filed = app.testPilot.filedIssues[test.id]!}
+                        {#if filed.target === "gitlab" && filed.url}
+                          <a
+                            href={filed.url}
+                            target="_blank"
+                            rel="noreferrer"
+                            class="shrink-0 w-8 h-9 inline-flex items-center justify-center rounded-full text-emerald-600 dark:text-emerald-400 hover:bg-ink-50 dark:hover:bg-night-alt"
+                            title={`Filed to GitLab${filed.title ? `: ${filed.title}` : ""} — open issue`}
+                            aria-label={`Open the GitLab issue for ${test.id}`}
+                          >
+                            <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"/><polyline points="15 3 21 3 21 9"/><line x1="10" y1="14" x2="21" y2="3"/></svg>
+                          </a>
+                        {:else}
+                          <span
+                            class="shrink-0 w-8 h-9 inline-flex items-center justify-center text-emerald-600 dark:text-emerald-400"
+                            title={`Filed locally${filed.path ? ` → ${filed.path}` : " → .pinta/tasks.md"}`}
+                          >
+                            <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M20.59 13.41 13.42 20.58a2 2 0 0 1-2.83 0L2 12V2h10l8.59 8.59a2 2 0 0 1 0 2.82z"/><line x1="7" y1="7" x2="7.01" y2="7"/></svg>
+                          </span>
+                        {/if}
                       {/if}
 
                       <!-- Ask icon — spinner while fetching, pink once

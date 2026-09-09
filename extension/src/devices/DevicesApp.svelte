@@ -15,6 +15,8 @@
   } from "../lib/devices.js";
 
   let addModelId = $state("iphone-16-pro");
+  let customW = $state(480);
+  let customH = $state(800);
   let urlDraft = $state("");
   let hydrated = $state(false);
 
@@ -53,7 +55,9 @@
   );
 
   function addSelected(): void {
-    if (addModelId.startsWith("group:")) {
+    if (addModelId === "custom") {
+      devices.addCustomFrame(Number(customW), Number(customH));
+    } else if (addModelId.startsWith("group:")) {
       devices.addGroup(addModelId.slice("group:".length) as DeviceGroup);
     } else {
       devices.addFrame(addModelId);
@@ -83,6 +87,14 @@
     urlDraft = url;
     devices.setUrl(url);
     urlDraft = devices.state.url;
+  }
+
+  function clearAll(): void {
+    const n = devices.state.frames.length;
+    if (n === 0) return;
+    if (window.confirm(`Remove all ${n} device frames from the canvas?`)) {
+      devices.clearFrames();
+    }
   }
 </script>
 
@@ -130,6 +142,29 @@
       >
         <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="23 4 23 10 17 10"/><polyline points="1 20 1 14 7 14"/><path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"/></svg>
         Refresh all
+      </button>
+    </div>
+
+    <div class="flex items-center gap-1.5 shrink-0">
+      <button
+        type="button"
+        class="inline-flex items-center gap-1 rounded-lg border border-ink-200 dark:border-night-line px-2.5 py-1.5 text-[11px] font-medium text-ink-600 dark:text-night-dim hover:text-brand-pink disabled:opacity-50"
+        title="Auto-align every frame into a tidy masonry layout"
+        disabled={devices.state.frames.length === 0}
+        onclick={() => devices.rearrange()}
+      >
+        <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="3" y="3" width="7" height="12" rx="1"/><rect x="14" y="3" width="7" height="7" rx="1"/><rect x="14" y="14" width="7" height="7" rx="1"/><rect x="3" y="19" width="7" height="2" rx="1"/></svg>
+        Rearrange
+      </button>
+      <button
+        type="button"
+        class="inline-flex items-center gap-1 rounded-lg border border-ink-200 dark:border-night-line px-2.5 py-1.5 text-[11px] font-medium text-ink-600 dark:text-night-dim hover:text-red-500 hover:border-red-300 disabled:opacity-50"
+        title="Remove every device frame from the canvas"
+        disabled={devices.state.frames.length === 0}
+        onclick={clearAll}
+      >
+        <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="3 6 5 6 21 6"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/></svg>
+        Clear all
       </button>
     </div>
 
@@ -207,7 +242,33 @@
             {/each}
           </optgroup>
         {/each}
+        <optgroup label="Responsive config">
+          <option value="custom">Custom size…</option>
+        </optgroup>
       </select>
+      {#if addModelId === "custom"}
+        <div class="flex items-center gap-1">
+          <input
+            type="number"
+            class="w-[64px] rounded-lg border border-ink-200 dark:border-night-line bg-white dark:bg-night-card px-1.5 py-1.5 text-[11.5px] tabular-nums text-ink-900 dark:text-night-text focus:outline-none focus:border-brand-pink"
+            min="200"
+            max="4000"
+            bind:value={customW}
+            aria-label="Custom width (px)"
+            title="Width (px)"
+          />
+          <span class="text-[11px] text-ink-400 dark:text-night-mute">×</span>
+          <input
+            type="number"
+            class="w-[64px] rounded-lg border border-ink-200 dark:border-night-line bg-white dark:bg-night-card px-1.5 py-1.5 text-[11.5px] tabular-nums text-ink-900 dark:text-night-text focus:outline-none focus:border-brand-pink"
+            min="200"
+            max="4000"
+            bind:value={customH}
+            aria-label="Custom height (px)"
+            title="Height (px)"
+          />
+        </div>
+      {/if}
       <button
         type="button"
         class="inline-flex items-center gap-1 rounded-lg bg-brand-pink px-3 py-1.5 text-[11.5px] font-semibold text-white hover:bg-brand-pink/90 disabled:opacity-50"
@@ -245,6 +306,13 @@
           device frame renders it live — scroll, click, and test in each one.
         </p>
       </div>
+    {:else if devices.state.frames.length === 0 && hydrated}
+      <div class="mx-auto mt-24 max-w-md rounded-xl border border-dashed border-ink-300 dark:border-night-line bg-white/70 dark:bg-night-card/70 p-6 text-center space-y-2">
+        <p class="text-sm font-semibold">The canvas is empty</p>
+        <p class="text-[12px] text-ink-500 dark:text-night-mute leading-snug">
+          Pick a device (or a whole group) in the toolbar and hit + Device.
+        </p>
+      </div>
     {:else}
       <!-- Free-drag surface: frames position themselves absolutely;
            the container is sized to fit them all so the page scrolls. -->
@@ -257,7 +325,7 @@
         {/each}
       </div>
     {/if}
-    <p class="mt-8 max-w-2xl text-[10.5px] text-ink-400 dark:text-night-mute leading-snug">
+    <p class="mt-8 mx-auto max-w-2xl text-center text-[10.5px] text-ink-400 dark:text-night-mute leading-snug">
       Frames are live iframes of your app — media queries respond to each
       device's real width. Apps that send X-Frame-Options / CSP
       frame-ancestors will refuse to render here, and cookie-based logins

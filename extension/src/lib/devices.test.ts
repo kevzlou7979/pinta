@@ -5,6 +5,7 @@ import {
   DEVICE_CLASSES,
   FRAME_MIN_W,
   classDefaultZoom,
+  customSizeModel,
   defaultDevicesState,
   dimsFor,
   effectiveScale,
@@ -16,8 +17,10 @@ import {
   naturalOrientation,
   newFrame,
   normalizeTargetUrl,
+  packPosition,
   parseCustomDevices,
   parseStoredDevicesState,
+  rearrangeFrames,
   stepGlobalZoom,
   stepZoom,
   type DeviceModel,
@@ -219,6 +222,25 @@ describe("newFrame", () => {
   });
 });
 
+describe("customSizeModel", () => {
+  it("builds a Custom-class model with rounded dims", () => {
+    expect(customSizeModel(480.4, 800.6)).toEqual({
+      id: "size:480x801",
+      label: "480×801",
+      class: "Custom",
+      width: 480,
+      height: 801,
+    });
+  });
+
+  it("rejects out-of-range and non-finite sizes", () => {
+    expect(customSizeModel(199, 800)).toBeNull();
+    expect(customSizeModel(480, 4001)).toBeNull();
+    expect(customSizeModel(NaN, 800)).toBeNull();
+    expect(customSizeModel(Infinity, 800)).toBeNull();
+  });
+});
+
 describe("modelsForGroup", () => {
   it("returns every model of the class, and Desktops spans both desktop classes", () => {
     const mobile = modelsForGroup(DEVICE_CATALOG, "Mobile");
@@ -262,13 +284,51 @@ describe("canvas layout", () => {
     expect(frames[2]!.y).toBeGreaterThan(frames[0]!.y!);
   });
 
-  it("layoutUnplacedFrames starts below already-placed frames and leaves them alone", () => {
+  it("layoutUnplacedFrames masonry-fills free space and leaves placed frames alone", () => {
+    // Placed frame sits far right — the new one takes the free top-left
+    // spot instead of dropping below everything.
     const placed = { ...newFrame(phone), x: 500, y: 40 };
     const fresh = newFrame(phone);
     layoutUnplacedFrames([placed, fresh], 100, 5000);
     expect(placed.x).toBe(500);
     expect(placed.y).toBe(40);
-    expect(fresh.y).toBeGreaterThan(40 + frameOuterSize(placed, 100).h);
+    expect(fresh.x).toBe(CANVAS_GAP);
+    expect(fresh.y).toBe(CANVAS_GAP);
+  });
+
+  it("packPosition opens a second column beside a tall frame", () => {
+    const w = frameOuterSize(newFrame(phone), 100).w;
+    const pos = packPosition([{ x: CANVAS_GAP, y: CANVAS_GAP, w, h: 900 }], w, 5000);
+    expect(pos).toEqual({ x: CANVAS_GAP + w + CANVAS_GAP, y: CANVAS_GAP });
+  });
+
+  it("packPosition stacks below when nothing fits beside", () => {
+    const w = frameOuterSize(newFrame(phone), 100).w;
+    const pos = packPosition([{ x: CANVAS_GAP, y: CANVAS_GAP, w, h: 900 }], w, w + 2 * CANVAS_GAP);
+    expect(pos).toEqual({ x: CANVAS_GAP, y: CANVAS_GAP + 900 + CANVAS_GAP });
+  });
+
+  it("rearrangeFrames re-packs everything without overlaps, from the top-left", () => {
+    const frames = [
+      { ...newFrame(phone), x: 900, y: 700 },
+      { ...newFrame(phone), x: 40, y: 1200 },
+      { ...newFrame(phone), x: 2000, y: 10 },
+    ];
+    rearrangeFrames(frames, 100, 5000);
+    expect(frames[0]!.x).toBe(CANVAS_GAP);
+    expect(frames[0]!.y).toBe(CANVAS_GAP);
+    for (let i = 0; i < frames.length; i++) {
+      for (let j = i + 1; j < frames.length; j++) {
+        const a = frames[i]!;
+        const b = frames[j]!;
+        const ao = frameOuterSize(a, 100);
+        const bo = frameOuterSize(b, 100);
+        const apart =
+          a.x! + ao.w <= b.x! || b.x! + bo.w <= a.x! ||
+          a.y! + ao.h <= b.y! || b.y! + bo.h <= a.y!;
+        expect(apart).toBe(true);
+      }
+    }
   });
 });
 

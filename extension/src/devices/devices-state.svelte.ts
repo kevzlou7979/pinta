@@ -6,15 +6,17 @@
 // settings (read-only, for the customDevices catalog additions).
 
 import {
-  CANVAS_GAP,
+  CUSTOM_SIZE_MAX,
+  CUSTOM_SIZE_MIN,
+  customSizeModel,
   DEVICE_CATALOG,
   defaultDevicesState,
-  frameOuterSize,
   layoutUnplacedFrames,
   mergeCatalog,
   modelsForGroup,
   newFrame,
   normalizeTargetUrl,
+  rearrangeFrames,
   parseCustomDevices,
   parseStoredDevicesState,
   stepGlobalZoom,
@@ -48,6 +50,10 @@ class DevicesPageState {
   openTabs = $state<{ title: string; url: string }[]>([]);
   /** Last-touched frame renders on top (drag/click raises it). */
   frontId = $state<string | null>(null);
+  /** Frame currently expanded to fill the viewport (null = none).
+   *  Style-only overlay on the SAME element, so the iframe never
+   *  reloads on expand/restore. */
+  expandedId = $state<string | null>(null);
   /** Per-frame iframe src. Sync updates individual entries so the frame
    *  that originated a navigation is never reloaded. */
   frameSrc = $state<Record<string, string>>({});
@@ -140,23 +146,55 @@ class DevicesPageState {
     const model =
       this.catalog.find((m) => m.id === modelId) ?? this.catalog[0];
     if (!model) return;
-    const frame = newFrame(model);
-    // Drop the new frame below everything placed so it never lands
-    // hidden under an existing one.
-    let maxBottom = 0;
-    for (const f of this.state.frames) {
-      if (f.x != null && f.y != null) {
-        maxBottom = Math.max(
-          maxBottom,
-          f.y + frameOuterSize(f, this.state.globalZoom).h,
-        );
-      }
+    this.pushFrame(model);
+  }
+
+  /** Responsive config: add a frame from a typed Width × Height. */
+  addCustomFrame(width: number, height: number): void {
+    if (this.state.frames.length >= MAX_FRAMES) {
+      this.error = `Up to ${MAX_FRAMES} frames at once — remove one first.`;
+      return;
     }
-    frame.x = CANVAS_GAP;
-    frame.y = maxBottom > 0 ? maxBottom + CANVAS_GAP : CANVAS_GAP;
+    const model = customSizeModel(width, height);
+    if (!model) {
+      this.error = `Enter a size between ${CUSTOM_SIZE_MIN} and ${CUSTOM_SIZE_MAX} px per side.`;
+      return;
+    }
+    this.pushFrame(model);
+  }
+
+  /** Shared add path: pushed unplaced, then masonry-packed into the
+   *  nearest free spot. */
+  private pushFrame(model: DeviceModel): void {
+    const frame = newFrame(model);
     this.state.frames.push(frame);
     this.frameSrc[frame.id] = this.state.url;
+    layoutUnplacedFrames(
+      this.state.frames,
+      this.state.globalZoom,
+      Math.max(600, window.innerWidth),
+    );
     this.frontId = frame.id;
+    this.save();
+  }
+
+  /** Clear the whole canvas. */
+  clearFrames(): void {
+    this.state.frames = [];
+    this.frameSrc = {};
+    this.frameUrl.clear();
+    this.frontId = null;
+    this.expandedId = null;
+    this.save();
+  }
+
+  /** Rearrange Workspace — re-pack every frame into masonry. */
+  rearrange(): void {
+    rearrangeFrames(
+      this.state.frames,
+      this.state.globalZoom,
+      Math.max(600, window.innerWidth),
+    );
     this.save();
   }
 
@@ -205,7 +243,13 @@ class DevicesPageState {
     delete this.frameSrc[id];
     this.iframeEls.delete(id);
     this.frameUrl.delete(id);
+    if (this.expandedId === id) this.expandedId = null;
     this.save();
+  }
+
+  toggleExpand(id: string): void {
+    this.expandedId = this.expandedId === id ? null : id;
+    if (this.expandedId) this.frontId = id;
   }
 
   /** Switch a frame's model — re-snapshot dims/label, reset orientation

@@ -124,6 +124,13 @@ const TEST_PILOT: ModuleSpec = {
       hint: "Off (default) — short, tester-friendly steps. Uses fewer tokens. On — deeper steps with technical context (URLs, payloads, code blocks). Slower and more expensive.",
       default: false,
     },
+    {
+      key: "thorough_tests",
+      type: "boolean",
+      label: "Thorough test generation",
+      hint: "Off (default) — Smoke: a quick happy-path catalog. On — Thorough: exhaustive coverage of every feature incl. edge cases and negative paths (more tokens, slower). Also toggleable from the Test Pilot tab.",
+      default: false,
+    },
   ],
 };
 

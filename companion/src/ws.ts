@@ -328,7 +328,7 @@ async function dispatch(
       store.addAnnotation(session.id, queryAnnotation);
       const submitted = await store.submit(
         session.id,
-        "", // no screenshot
+        msg.screenshot ?? "", // optional query image (e.g. variants look-reference)
         true, // autoApply — agent should not wait for confirmation
         [{ id: msg.moduleId, settings: msg.moduleSettings }],
       );

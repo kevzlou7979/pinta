@@ -1831,15 +1831,22 @@ companion op, no agent, nothing on the wire, no SKILL.md changes.**
   `{active:true}` — that's the page itself), Refresh all, global zoom
   25–200%, model picker + "+ Device" (soft cap 12 frames; the picker
   also offers bulk groups — All Mobile / All Tablets / All Laptops /
-  All Desktops via `modelsForGroup`, partial add when the cap hits).
+  All Desktops via `modelsForGroup`, partial add when the cap hits —
+  and "Custom size…", a W×H responsive-config entry via
+  `customSizeModel`, 200–4000px per side). Each frame header has an
+  expand button: the SAME element goes fixed-fullscreen (style-only, so
+  the iframe never reloads), fit-scaled ≤1×, Esc/↙ restores.
   Dotted
   canvas is the scroll surface (both axes, toolbar fixed) with
   **free-drag positioning**: drag a frame by its header bar (pointer
   capture keeps the drag alive across other frames' iframes),
   last-touched frame renders on top, positions persist; frames without
-  a position (first run / pre-drag state) are auto-placed row-wrap via
-  `layoutUnplacedFrames`, and "+ Device" drops below everything placed.
-  Dismissible error banner.
+  a position (first run / pre-drag state) are masonry-packed via
+  `layoutUnplacedFrames`/`packPosition` (skyline top-left), and
+  "+ Device" packs into the nearest free spot. Toolbar also has
+  **Rearrange** (re-pack the whole canvas into masonry, array order
+  kept) and **Clear all** (confirm → empty canvas). Dismissible error
+  banner.
 - **Frames** (`DeviceFrame.svelte`): header (index, grouped model
   `<select>`, rendered dims, rotate, per-frame zoom steps, reload,
   remove) over a dark bezel wrapping the iframe at real device width,

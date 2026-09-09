@@ -180,6 +180,63 @@
       return "Applying the variant to your source…";
     return "Discovering your app's pages…";
   });
+
+  /** Why Generate is disabled right now — shown under the button so the
+   *  user never has to guess. Null = ready. */
+  const generateBlockedReason = $derived(
+    !connected
+      ? "Connect the companion first (run pinta-companion in your project)"
+      : app.variants.scopeKind === "element" && !app.variants.pickedTarget
+        ? "Pick an element on the page first — or switch to Whole page"
+        : null,
+  );
+
+  /** Downscale a pasted image to ≤900px / JPEG 0.8 before it rides the
+   *  wire — the agent reads it from disk, but keep the payload lean. */
+  async function downscaleImage(file: Blob): Promise<string> {
+    const url = URL.createObjectURL(file);
+    try {
+      const img = new Image();
+      await new Promise<void>((res, rej) => {
+        img.onload = () => res();
+        img.onerror = () => rej(new Error("bad image"));
+        img.src = url;
+      });
+      const MAX = 900;
+      const scale = Math.min(1, MAX / Math.max(img.width, img.height));
+      const canvas = document.createElement("canvas");
+      canvas.width = Math.max(1, Math.round(img.width * scale));
+      canvas.height = Math.max(1, Math.round(img.height * scale));
+      canvas.getContext("2d")!.drawImage(img, 0, 0, canvas.width, canvas.height);
+      // PNG, not JPEG: the companion stores every session screenshot as
+      // `.pinta/sessions/{id}.png` — bytes must match the extension the
+      // agent Reads. (composite.ts is PNG for the same reason.)
+      return canvas.toDataURL("image/png");
+    } finally {
+      URL.revokeObjectURL(url);
+    }
+  }
+
+  function onDirectionPaste(e: ClipboardEvent): void {
+    const item = Array.from(e.clipboardData?.items ?? []).find((i) =>
+      i.type.startsWith("image/"),
+    );
+    if (!item) return;
+    e.preventDefault();
+    const file = item.getAsFile();
+    if (!file) return;
+    void downscaleImage(file)
+      .then((dataUrl) => app.setVariantRefImage(dataUrl))
+      .catch(() => {
+        app.variants.error = "Couldn't read the pasted image.";
+      });
+  }
+
+  function scrollToVariant(id: string): void {
+    document
+      .getElementById(`variant-card-${id}`)
+      ?.scrollIntoView({ behavior: "smooth", block: "start" });
+  }
 </script>
 
 <section class="space-y-3">
@@ -373,15 +430,36 @@
       <span class="text-[12px] font-semibold text-ink-900 dark:text-night-text">Direction</span>
       <span class="text-[11px] text-ink-400 dark:text-night-mute">· optional</span>
     </div>
-    <input
-      type="text"
-      class="w-full px-2.5 py-1.5 rounded-lg text-[12px] border border-ink-200 dark:border-night-line bg-white dark:bg-night-alt text-ink-800 dark:text-night-text placeholder:text-ink-400 dark:placeholder:text-night-mute focus:outline-none focus:border-brand-pink"
-      placeholder="Describe a look — glassy, more compact, bolder…"
+    <textarea
+      rows="2"
+      class="w-full px-2.5 py-1.5 rounded-lg text-[12px] border border-ink-200 dark:border-night-line bg-white dark:bg-night-alt text-ink-800 dark:text-night-text placeholder:text-ink-400 dark:placeholder:text-night-mute focus:outline-none focus:border-brand-pink resize-y leading-snug"
+      placeholder="Describe a look — glassy, more compact, bolder… or paste a screenshot of the look you want"
       maxlength={MAX_DIRECTION_CHARS}
       value={app.variants.direction}
       oninput={(e) => app.setVariantsDirection(e.currentTarget.value)}
+      onpaste={onDirectionPaste}
       disabled={!!pending}
-    />
+    ></textarea>
+    {#if app.variants.refImage}
+      <div class="flex items-center gap-2 rounded-lg border border-dashed border-brand-pink/50 bg-brand-pink/5 dark:bg-brand-pink/10 px-2 py-1.5">
+        <img
+          src={app.variants.refImage}
+          alt="Pasted look reference"
+          class="h-10 w-10 rounded object-cover shrink-0"
+        />
+        <span class="flex-1 text-[10.5px] text-ink-600 dark:text-night-dim leading-snug">
+          Reference look attached — the agent steers every variant toward
+          this image. New paste replaces it.
+        </span>
+        <button
+          type="button"
+          class="shrink-0 text-ink-400 hover:text-ink-700 dark:text-night-mute dark:hover:text-night-text leading-none px-1"
+          onclick={() => app.clearVariantRefImage()}
+          aria-label="Remove reference image"
+          title="Remove"
+        >✕</button>
+      </div>
+    {/if}
     <div class="flex items-center gap-1.5 flex-wrap">
       {#each DIRECTION_CHIPS as chip (chip)}
         <button
@@ -412,9 +490,15 @@
       <svg width="13" height="13" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M12 2l2.2 6.6a1.5 1.5 0 0 0 .95.95L21.75 12l-6.6 2.2a1.5 1.5 0 0 0-.95.95L12 21.75l-2.2-6.6a1.5 1.5 0 0 0-.95-.95L2.25 12l6.6-2.2a1.5 1.5 0 0 0 .95-.95L12 2.25z"/></svg>
       Generate {app.variants.count} variants
     </button>
-    <p class="text-center text-[10.5px] text-ink-400 dark:text-night-mute">
-      Variants stay inside your design system tokens
-    </p>
+    {#if generateBlockedReason && !pending}
+      <p class="text-center text-[10.5px] text-amber-700 dark:text-amber-400">
+        {generateBlockedReason}
+      </p>
+    {:else}
+      <p class="text-center text-[10.5px] text-ink-400 dark:text-night-mute">
+        Variants stay inside your design system tokens
+      </p>
+    {/if}
   </div>
 
   {#if pending}
@@ -477,29 +561,73 @@
         </button>
       </div>
     </div>
-    {#each run.variants as v (v.id)}
+    <!-- Compare strip — every variant at a glance; click jumps to its card. -->
+    {#if run.variants.length > 1}
+      <div class="flex gap-2 overflow-x-auto pb-1 -mx-1 px-1">
+        {#each run.variants as v, i (v.id)}
+          {@const stripApplied = run.appliedVariantId === v.id}
+          <button
+            type="button"
+            class="shrink-0 w-[120px] text-left rounded-md border overflow-hidden bg-white hover:border-brand-pink transition-colors"
+            class:border-brand-pink={stripApplied}
+            class:border-ink-200={!stripApplied}
+            class:dark:border-night-line={!stripApplied}
+            title={`Jump to ${v.label}`}
+            onclick={() => scrollToVariant(v.id)}
+          >
+            <div class="h-[72px] overflow-hidden pointer-events-none">
+              <iframe
+                sandbox=""
+                srcdoc={srcdocs.get(v.id) ?? ""}
+                referrerpolicy="no-referrer"
+                loading="lazy"
+                scrolling="no"
+                tabindex="-1"
+                title={`Thumbnail: ${v.label}`}
+                class="border-0 pointer-events-none"
+                style="width: {device.width}px; height: {Math.ceil(72 / frameScale(device.width, 120))}px; transform: scale({frameScale(device.width, 120)}); transform-origin: top left;"
+              ></iframe>
+            </div>
+            <p class="px-1.5 py-1 text-[9.5px] font-medium text-ink-600 dark:text-night-dim truncate bg-ink-50 dark:bg-night-alt/50">
+              {i + 1} · {v.label}
+            </p>
+          </button>
+        {/each}
+      </div>
+    {/if}
+    {#each run.variants as v, vi (v.id)}
       {@const applied = run.appliedVariantId === v.id}
       {@const previewing = app.variants.previewingVariantId === v.id}
       <div
+        id={`variant-card-${v.id}`}
         class="rounded-md border overflow-hidden"
         class:border-brand-pink={applied || previewing}
         class:border-ink-200={!applied && !previewing}
         class:dark:border-night-line={!applied && !previewing}
       >
         <div class="flex items-center justify-between gap-2 px-3 py-2 bg-ink-50 dark:bg-night-alt/50 border-b border-ink-200 dark:border-night-line">
-          <div class="min-w-0">
-            <h3 class="text-[12.5px] font-semibold text-ink-900 dark:text-night-text truncate">
-              {v.label}
-            </h3>
-            {#if v.rationale}
-              <p class="text-[10.5px] text-ink-500 dark:text-night-mute leading-snug">
-                {v.rationale}
-              </p>
-            {/if}
+          <div class="min-w-0 flex items-start gap-2">
+            <span class="mt-0.5 w-5 h-5 shrink-0 inline-flex items-center justify-center rounded-full bg-brand-pink/10 text-[10.5px] font-semibold text-brand-pink dark:text-brand-pink-light">
+              {vi + 1}
+            </span>
+            <div class="min-w-0">
+              <h3 class="text-[12.5px] font-semibold text-ink-900 dark:text-night-text truncate">
+                {v.label}
+              </h3>
+              {#if v.rationale}
+                <p class="text-[10.5px] text-ink-500 dark:text-night-mute leading-snug">
+                  {v.rationale}
+                </p>
+              {/if}
+            </div>
           </div>
           {#if applied}
             <span class="shrink-0 inline-flex items-center gap-1 px-1.5 py-0.5 rounded-full bg-brand-pink text-white text-[10px] font-semibold">
               Applied
+            </span>
+          {:else if previewing}
+            <span class="shrink-0 inline-flex items-center gap-1 px-1.5 py-0.5 rounded-full border border-brand-pink text-brand-pink dark:text-brand-pink-light text-[10px] font-semibold">
+              On page
             </span>
           {/if}
         </div>

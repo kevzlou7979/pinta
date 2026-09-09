@@ -132,6 +132,32 @@ export function naturalOrientation(model: DeviceModel): Orientation {
 }
 
 // ---------------------------------------------------------------------------
+// Custom size (responsive config — quick W×H entry in the toolbar)
+
+export const CUSTOM_SIZE_MIN = 200;
+export const CUSTOM_SIZE_MAX = 4000;
+
+/** Build an ad-hoc model from a typed Width × Height. Null when out of
+ *  range — the canvas shows an error instead of a broken frame. */
+export function customSizeModel(
+  width: number,
+  height: number,
+): DeviceModel | null {
+  if (!Number.isFinite(width) || !Number.isFinite(height)) return null;
+  const w = Math.round(width);
+  const h = Math.round(height);
+  if (
+    w < CUSTOM_SIZE_MIN ||
+    w > CUSTOM_SIZE_MAX ||
+    h < CUSTOM_SIZE_MIN ||
+    h > CUSTOM_SIZE_MAX
+  ) {
+    return null;
+  }
+  return { id: `size:${w}x${h}`, label: `${w}×${h}`, class: "Custom", width: w, height: h };
+}
+
+// ---------------------------------------------------------------------------
 // Device groups (bulk add)
 
 /** Toolbar bulk-add groups. "Desktops" spans both desktop classes. */
@@ -334,39 +360,75 @@ export function frameOuterSize(
   };
 }
 
+type Rect = { x: number; y: number; w: number; h: number };
+
 /**
- * Assign positions to frames that don't have one — row-wrap flow within
- * the viewport width, starting below any already-placed content. Runs on
- * hydrate (first run, or state persisted before drag existed). Mutates
- * the frames in place.
+ * Skyline top-left packing (masonry): the best spot for a w-wide frame
+ * given what's already placed. Candidate columns are the left margin and
+ * every placed frame's right edge; for each, the frame must sit below
+ * all placed frames it overlaps horizontally (gap included). Lowest y
+ * wins, ties go left. O(n²) — fine for the 12-frame cap.
+ */
+export function packPosition(
+  placed: Rect[],
+  w: number,
+  viewportW: number,
+): { x: number; y: number } {
+  const candidates = new Set<number>([CANVAS_GAP]);
+  for (const r of placed) candidates.add(r.x + r.w + CANVAS_GAP);
+  let best: { x: number; y: number } | null = null;
+  for (const x of candidates) {
+    if (x > CANVAS_GAP && x + w > viewportW) continue;
+    let y = CANVAS_GAP;
+    for (const r of placed) {
+      if (x < r.x + r.w + CANVAS_GAP && r.x < x + w + CANVAS_GAP) {
+        y = Math.max(y, r.y + r.h + CANVAS_GAP);
+      }
+    }
+    if (!best || y < best.y || (y === best.y && x < best.x)) best = { x, y };
+  }
+  return best ?? { x: CANVAS_GAP, y: CANVAS_GAP };
+}
+
+/**
+ * Masonry-place frames that don't have a position yet, packing them into
+ * the gaps around already-placed content. Runs on hydrate (first run /
+ * pre-drag state) and after every add. Mutates the frames in place.
  */
 export function layoutUnplacedFrames(
   frames: DeviceFrame[],
   globalZoomPct: number,
   viewportW: number,
 ): void {
-  let maxBottom = 0;
+  const placed: Rect[] = [];
   for (const f of frames) {
     if (f.x != null && f.y != null) {
-      maxBottom = Math.max(maxBottom, f.y + frameOuterSize(f, globalZoomPct).h);
+      const o = frameOuterSize(f, globalZoomPct);
+      placed.push({ x: f.x, y: f.y, w: o.w, h: o.h });
     }
   }
-  let x = CANVAS_GAP;
-  let y = maxBottom > 0 ? maxBottom + CANVAS_GAP : CANVAS_GAP;
-  let rowH = 0;
   for (const f of frames) {
     if (f.x != null && f.y != null) continue;
-    const { w, h } = frameOuterSize(f, globalZoomPct);
-    if (x > CANVAS_GAP && x + w > viewportW) {
-      x = CANVAS_GAP;
-      y += rowH + CANVAS_GAP;
-      rowH = 0;
-    }
-    f.x = x;
-    f.y = y;
-    x += w + CANVAS_GAP;
-    rowH = Math.max(rowH, h);
+    const o = frameOuterSize(f, globalZoomPct);
+    const pos = packPosition(placed, o.w, viewportW);
+    f.x = pos.x;
+    f.y = pos.y;
+    placed.push({ x: pos.x, y: pos.y, w: o.w, h: o.h });
   }
+}
+
+/** Rearrange Workspace: forget every position and re-pack the whole
+ *  canvas into masonry, keeping the frames' array order. */
+export function rearrangeFrames(
+  frames: DeviceFrame[],
+  globalZoomPct: number,
+  viewportW: number,
+): void {
+  for (const f of frames) {
+    delete f.x;
+    delete f.y;
+  }
+  layoutUnplacedFrames(frames, globalZoomPct, viewportW);
 }
 
 export function defaultDevicesState(): DevicesPageStateShape {

@@ -592,7 +592,16 @@ class ExtensionState {
      *  `applyCatalogResult` bails when this is true so a mid-edit
      *  Generate result doesn't clobber the user's in-progress text. */
     editingActive: boolean;
-  }>({ catalog: null, pending: null, pendingDetails: {}, pendingChats: {}, pendingSectionSuggest: {}, sectionSuggestions: {}, pendingSectionChats: {}, error: null, editingActive: false });
+    /** Bulk "file failed tests to GitLab" in flight (one at a time). */
+    pendingFileIssues: boolean;
+    /** Where each failed test was filed (gitlab issue or local
+     *  tasks.md fallback), keyed by testId. Persisted under
+     *  TEST_PILOT_FILED_KEY so rows stay marked across reloads. */
+    filedIssues: Record<
+      string,
+      { target: "gitlab" | "local"; url?: string; path?: string; title?: string; at: number }
+    >;
+  }>({ catalog: null, pending: null, pendingDetails: {}, pendingChats: {}, pendingSectionSuggest: {}, sectionSuggestions: {}, pendingSectionChats: {}, error: null, editingActive: false, pendingFileIssues: false, filedIssues: {} });
 
   /**
    * Phase 14 — cross-cutting chat state for the two non-Test-Pilot
@@ -988,10 +997,12 @@ class ExtensionState {
       this.clearChatTimer(id);
     }
     this.clearTestPilotTimeout();
+    this.clearFileIssuesTimeout();
     this.testPilot.catalog = null;
     this.testPilot.pending = null;
     this.testPilot.pendingDetails = {};
     this.testPilot.pendingChats = {};
+    this.testPilot.pendingFileIssues = false;
     this.testPilot.error = null;
   }
 
@@ -999,6 +1010,7 @@ class ExtensionState {
    *  enter standalone (clears state, no load). Idempotent. */
   async loadTestPilot(companion: Companion | null): Promise<void> {
     this.resetTestPilotState();
+    void this.loadTestPilotFiled(companion);
     if (!companion) return;
     const key = ExtensionState.testPilotKeyFor(companion);
     try {
@@ -1103,6 +1115,15 @@ class ExtensionState {
    * app from project context, then return the parsed catalog. Same
    * result shape as importTestDoc — just no markdown to upload.
    */
+  /** Test depth for generate/parse — the `thorough_tests` module
+   *  setting: thorough = exhaustive functionality coverage (more
+   *  tokens), smoke = quick happy-path pass (the default). */
+  private testDepth(): "smoke" | "thorough" {
+    return this.modules["test-pilot"]?.settings?.thorough_tests === true
+      ? "thorough"
+      : "smoke";
+  }
+
   async generateTestDoc(): Promise<void> {
     if (!this.client || this.connectionStatus !== "connected") {
       this.testPilot.error =
@@ -1122,7 +1143,11 @@ class ExtensionState {
       startedAt: Date.now(),
     };
     this.armTestPilotTimeout();
-    const queryComment = JSON.stringify({ op: "generate-doc", docId });
+    const queryComment = JSON.stringify({
+      op: "generate-doc",
+      docId,
+      depth: this.testDepth(),
+    });
     const settings = this.modules["test-pilot"]?.settings ?? {};
     this.send({
       type: "module.query.submit",
@@ -1170,6 +1195,7 @@ class ExtensionState {
       docId,
       filename,
       content,
+      depth: this.testDepth(),
     });
     const settings = this.modules["test-pilot"]?.settings ?? {};
     this.send({
@@ -1331,6 +1357,165 @@ class ExtensionState {
       this.testPilotTimer = null;
     }
     this.retireAgentWaitNotice();
+  }
+
+  // --- Bulk "file failed tests to GitLab" (gitlab-issues pairing) ---
+
+  /** Per-companion storage key — test ids (AUTH-01) repeat across
+   *  projects, so Filed marks must never bleed between companions. */
+  private currentFiledKey: string | null = null;
+  private fileIssuesTimer: ReturnType<typeof setTimeout> | null = null;
+
+  private async loadTestPilotFiled(companion: Companion | null): Promise<void> {
+    // Reset FIRST so a companion switch never shows the previous
+    // project's Filed marks, even briefly or in standalone.
+    this.testPilot.filedIssues = {};
+    this.currentFiledKey = companion
+      ? `${ExtensionState.testPilotKeyFor(companion)}:filed`
+      : null;
+    if (!this.currentFiledKey) return;
+    try {
+      const stored = await chrome.storage?.local?.get(this.currentFiledKey);
+      const raw = stored?.[this.currentFiledKey];
+      if (raw && typeof raw === "object") {
+        this.testPilot.filedIssues = raw as typeof this.testPilot.filedIssues;
+      }
+    } catch {
+      // storage unavailable — rows just lose their Filed marks
+    }
+  }
+
+  private saveTestPilotFiled(): void {
+    if (!this.currentFiledKey) return;
+    void chrome.storage?.local
+      ?.set({
+        [this.currentFiledKey]: $state.snapshot(this.testPilot.filedIssues),
+      })
+      .catch(() => {});
+  }
+
+  /** File every failed (and not-yet-filed) test as a tracker issue —
+   *  GitLab via `glab` when the gitlab-issues module is enabled, else
+   *  the `.pinta/tasks.md` local fallback. One bulk agent run. */
+  async fileFailedTestsToGitLab(): Promise<void> {
+    if (this.testPilot.pendingFileIssues) return;
+    const catalog = this.testPilot.catalog;
+    if (!catalog) return;
+    if (!this.client || this.connectionStatus !== "connected") {
+      this.testPilot.error =
+        "No companion connected. Start `pinta-companion .` in your project to file issues.";
+      return;
+    }
+    const failed = catalog.sections.flatMap((s) =>
+      s.tests
+        .filter((t) => t.status === "fail")
+        .map((t) => ({
+          id: t.id,
+          section: s.title,
+          test: t.test,
+          expected: t.expected,
+        })),
+    );
+    const unfiled = failed.filter((t) => !this.testPilot.filedIssues[t.id]);
+    if (unfiled.length === 0) {
+      this.testPilot.error =
+        failed.length > 0
+          ? "Every failed test already has an issue filed."
+          : "No failed tests to file — mark failures first.";
+      return;
+    }
+    const gl = this.modules["gitlab-issues"];
+    const gitlab = gl?.enabled
+      ? {
+          projectId: (gl.settings?.project_id as string) || undefined,
+          labels: (gl.settings?.labels as string) || undefined,
+        }
+      : null;
+    const queryComment = JSON.stringify({
+      op: "test-file-issues",
+      runId: crypto.randomUUID(),
+      docId: catalog.docId,
+      docTitle: catalog.title ?? catalog.filename,
+      url: this.lastUrl ?? "",
+      tests: unfiled,
+      gitlab,
+      fallbackToLocal: true,
+    });
+    this.testPilot.error = null;
+    this.testPilot.pendingFileIssues = true;
+    this.armFileIssuesTimeout(unfiled.length);
+    this.send({
+      type: "module.query.submit",
+      url: this.lastUrl ?? "",
+      moduleId: "test-pilot",
+      moduleSettings: this.modules["test-pilot"]?.settings ?? {},
+      queryComment,
+    });
+  }
+
+  private armFileIssuesTimeout(count: number): void {
+    this.clearFileIssuesTimeout();
+    const what = `file ${count} failed test${count === 1 ? "" : "s"} as issues`;
+    this.armAgentWait({
+      softMs: ExtensionState.TEST_PILOT_TIMEOUT_MS,
+      what,
+      setHandle: (t) => {
+        this.fileIssuesTimer = t;
+      },
+      stillPending: () => this.testPilot.pendingFileIssues,
+      giveUp: () => {
+        this.testPilot.pendingFileIssues = false;
+        this.testPilot.error = ExtensionState.slowWaitGiveUp(what);
+      },
+    });
+  }
+
+  private clearFileIssuesTimeout(): void {
+    if (this.fileIssuesTimer) {
+      clearTimeout(this.fileIssuesTimer);
+      this.fileIssuesTimer = null;
+    }
+    this.retireAgentWaitNotice();
+  }
+
+  private handleTestFileIssuesSync(session: Session): void {
+    if (session.status === "done") {
+      this.clearFileIssuesTimeout();
+      this.testPilot.pendingFileIssues = false;
+      let payload: { [k: string]: unknown } | null = null;
+      try {
+        payload = JSON.parse(session.appliedSummary ?? "");
+      } catch {
+        payload = null;
+      }
+      const results =
+        payload && payload.type === "test-pilot-issues-filed"
+          ? (payload.results as unknown)
+          : null;
+      if (Array.isArray(results)) {
+        for (const r of results) {
+          if (!r || typeof r !== "object" || typeof r.testId !== "string") {
+            continue;
+          }
+          this.testPilot.filedIssues[r.testId] = {
+            target: r.target === "gitlab" ? "gitlab" : "local",
+            url: typeof r.url === "string" ? r.url : undefined,
+            path: typeof r.path === "string" ? r.path : undefined,
+            title: typeof r.title === "string" ? r.title : undefined,
+            at: Date.now(),
+          };
+        }
+        this.saveTestPilotFiled();
+      } else {
+        this.testPilot.error =
+          "Agent finished but returned no filed-issue list — restart /pinta so it loads the updated skill (§7.10.4) and retry.";
+      }
+    } else if (session.status === "error") {
+      this.clearFileIssuesTimeout();
+      this.testPilot.pendingFileIssues = false;
+      this.testPilot.error =
+        session.errorMessage ?? "Filing the failed tests didn't finish.";
+    }
   }
 
   // ─── Slow-agent-aware waits (shared across all modules) ─────────────
@@ -3551,6 +3736,11 @@ class ExtensionState {
     /** Optional free-text art direction for the NEXT generate (e.g.
      *  "glassy, more compact"). Not persisted — per-run intent. */
     direction: string;
+    /** Optional pasted look-reference image (JPEG data URL, downscaled
+     *  client-side). Session-only — never persisted (storage quota);
+     *  rides the wire as the session screenshot so the agent Reads a
+     *  PNG/JPEG file, never inline base64 (token economy). */
+    refImage: string | null;
     /** Per-variant Discuss threads (op variants-discuss), keyed by
      *  variant id. Persisted separately (VARIANTS_CHATS_KEY). */
     variantChats: Record<string, ChatMessage[]>;
@@ -3577,6 +3767,7 @@ class ExtensionState {
     galleryNonce: 0,
     count: DEFAULT_VARIANT_COUNT,
     direction: "",
+    refImage: null,
     variantChats: {},
     pendingDiscuss: {},
     discussVariantId: null,
@@ -3782,6 +3973,9 @@ class ExtensionState {
           : "",
       count: this.variants.count,
       ...(direction ? { direction } : {}),
+      // Flag only — the image itself rides as the session screenshot
+      // and lands on disk (fullPageScreenshotPath), never inline here.
+      ...(this.variants.refImage ? { referenceImage: true } : {}),
     });
     this.send({
       type: "module.query.submit",
@@ -3789,6 +3983,7 @@ class ExtensionState {
       moduleId: "design-variants",
       moduleSettings: settings,
       queryComment,
+      ...(this.variants.refImage ? { screenshot: this.variants.refImage } : {}),
     });
   }
 
@@ -3893,6 +4088,16 @@ class ExtensionState {
 
   setVariantsDirection(text: string): void {
     this.variants.direction = text;
+  }
+
+  /** Attach a pasted look-reference image (JPEG data URL, already
+   *  downscaled by the tab). One per run — a new paste replaces it. */
+  setVariantRefImage(dataUrl: string): void {
+    this.variants.refImage = dataUrl;
+  }
+
+  clearVariantRefImage(): void {
+    this.variants.refImage = null;
   }
 
   setVariantsCount(n: number): void {
@@ -10026,6 +10231,11 @@ class ExtensionState {
               this.handleSectionChatSync(msg.session, sectionTitle);
               return;
             }
+            return;
+          }
+          // Bulk "file failed tests" — singleton, routed by op alone.
+          if (op === "test-file-issues") {
+            this.handleTestFileIssuesSync(msg.session);
             return;
           }
           // Phase 14.6 — section-level "Suggest Test". Routed by

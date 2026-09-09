@@ -8,6 +8,26 @@ For the architectural design behind each item, see
 
 ### Added
 
+- **Devices: responsive config + expand.** The toolbar picker gains
+  "Custom size…" — type any Width × Height (200–4000px) and add it as a
+  frame; every frame header gains an expand button that fills the
+  window (same iframe, no reload; Esc or ↙ restores).
+- **Test Pilot: Smoke vs Thorough + file failures to GitLab.** A depth
+  toggle on the Generate screen (persists as the `thorough_tests`
+  setting) makes Generate/Import produce either a quick happy-path
+  catalog or exhaustive coverage incl. edge/negative paths (SKILL
+  §7.10 `depth`). A new header action files every failed test as a
+  GitLab issue via `glab` (one per test, de-duped; `.pinta/tasks.md`
+  fallback when the module is off) — rows show a Filed link (SKILL
+  §7.10.4, op `test-file-issues`).
+- **Design Variants: clearer flow + richer results + reference image.**
+  Direction is now a textarea that accepts a PASTED screenshot of the
+  look you want (downscaled client-side, rides the wire as a session
+  screenshot file — SKILL §7.16 `referenceImage`); the Generate button
+  explains why it's disabled; results gain numbered cards, an
+  "On page" chip, and a click-to-jump compare strip. The `--variants`
+  role flag is now named in the skill description.
+
 - **Devices module (Phase 24) — multi-device canvas.** A full-tab
   simulator page showing your running app in many live, interactive
   device frames at once (iPhone / Pixel / iPad / Surface / laptop /
@@ -21,7 +41,9 @@ For the architectural design behind each item, see
   picker also adds whole groups at once — All Mobile / All Tablets /
   All Laptops / All Desktops. A toolbar **Sync** toggle mirrors
   navigation: click a link in one frame and every other frame follows
-  (the frame you navigated in never reloads).
+  (the frame you navigated in never reloads). New frames masonry-pack
+  into the nearest free spot; **Rearrange** re-packs the whole canvas
+  and **Clear all** empties it.
 
 ## 0.8.2 — 2026-08-21
 

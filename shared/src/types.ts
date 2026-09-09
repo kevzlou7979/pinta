@@ -754,6 +754,14 @@ export type ClientMessage =
       moduleId: string;
       moduleSettings: Record<string, string | boolean>;
       queryComment: string;
+      /**
+       * Optional image riding the query (PNG/JPEG data URL). The store
+       * extracts it to disk exactly like a session screenshot
+       * (`fullPageScreenshotPath`), so the agent Reads a file — inline
+       * base64 never reaches the agent. Used by Design Variants for the
+       * pasted look-reference image (query carries `referenceImage: true`).
+       */
+      screenshot?: string;
     };
 
 /**
