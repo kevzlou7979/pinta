@@ -936,6 +936,25 @@ describe("renderReportSummaryMarkdown", () => {
     expect(md).not.toContain("Fri Jun 05");
   });
 
+  it("emits no Saturday or Sunday line, even for a custom range", () => {
+    const md = renderReportSummaryMarkdown({
+      runId: "s2",
+      range: "custom",
+      anchorDate: "2026-06-08",
+      generatedAt: 0,
+      days: [
+        { date: "2026-06-05", items: [{ id: "f", title: "Friday work", category: "chore", source: "git" }] },
+        { date: "2026-06-06", items: [{ id: "s", title: "Saturday work", category: "chore", source: "git" }] },
+        { date: "2026-06-07", items: [{ id: "u", title: "Sunday work", category: "chore", source: "git" }] },
+      ],
+    });
+    expect(md).not.toContain("June 06 2026");
+    expect(md).not.toContain("June 07 2026");
+    // The weekend work itself is folded in, never dropped.
+    expect(md).toContain("Saturday Work");
+    expect(md).toContain("Sunday Work");
+  });
+
   it("collapses duplicate lines in the no-summary fallback", () => {
     const md = renderReportSummaryMarkdown({
       ...base,
@@ -1007,6 +1026,20 @@ describe("balanceReportDays (invoice balancing)", () => {
     expect(out[0]!.items).toHaveLength(6);
     expect(out[0]!.summary).toBe("Wrote prose.");
     expect(out[1]!.items.length + out[2]!.items.length).toBe(2);
+  });
+
+  it("never gives a weekend day a share", () => {
+    // 2026-06-05 Fri, 06 Sat, 07 Sun, 08 Mon.
+    const out = balanceReportDays([
+      { date: "2026-06-05", items: mk(8, "a") },
+      { date: "2026-06-06", items: [] },
+      { date: "2026-06-07", items: [] },
+      { date: "2026-06-08", items: [] },
+    ]);
+    expect(out.find((d) => d.date === "2026-06-06")!.items).toHaveLength(0);
+    expect(out.find((d) => d.date === "2026-06-07")!.items).toHaveLength(0);
+    expect(out.find((d) => d.date === "2026-06-05")!.items).toHaveLength(4);
+    expect(out.find((d) => d.date === "2026-06-08")!.items).toHaveLength(4);
   });
 
   it("no-ops when there is nothing to balance across", () => {

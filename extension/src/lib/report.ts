@@ -429,6 +429,7 @@ export function mergeCustomItems(
 export function foldWeekends(
   days: ReportDay[],
   range: ReportRange,
+  opts: { force?: boolean } = {},
 ): ReportDay[] {
   // Clone so callers' stored (true-dated) data stays untouched.
   const byDate = new Map<string, ReportDay>();
@@ -442,7 +443,9 @@ export function foldWeekends(
 
   // Daily + custom show their exact days (no fold) — a single day, or a
   // window the user picked explicitly. Weekly/sprint fold weekends.
-  if (range !== "daily" && range !== "custom") {
+  // `force` overrides that for the invoice export, which must never
+  // bill a Saturday or Sunday line whatever range produced it.
+  if (opts.force || (range !== "daily" && range !== "custom")) {
     const weekendDates = [...byDate.keys()].filter(isWeekend).sort();
     for (const wDate of weekendDates) {
       const weekend = byDate.get(wDate)!;
@@ -859,7 +862,11 @@ export function balanceReportDays(
   maxChars = INVOICE_DAY_MAX_CHARS,
   multiProject = false,
 ): ReportDay[] {
-  const eligible = days.filter((d) => !d.summary);
+  // Weekends never take a share — an invoice shouldn't show Saturday or
+  // Sunday work. (The summary export force-folds them away first; this
+  // guard keeps the function honest on its own.)
+  const isEligible = (d: ReportDay): boolean => !d.summary && !isWeekend(d.date);
+  const eligible = days.filter(isEligible);
   if (eligible.length < 2) return days;
   const pool = eligible.flatMap((d) => d.items);
   if (pool.length === 0) return days;
@@ -903,9 +910,7 @@ export function balanceReportDays(
   }
 
   let n = 0;
-  return days.map((d) =>
-    d.summary ? d : { ...d, items: assigned[n++] ?? [] },
-  );
+  return days.map((d) => (isEligible(d) ? { ...d, items: assigned[n++] ?? [] } : d));
 }
 
 /**
@@ -924,7 +929,9 @@ export function renderReportSummaryMarkdown(run: ReportRun): string {
   // Balanced for the invoice: heavy days share into light ones, and no
   // day's detail text exceeds the 1000-char PayPal line budget.
   const days = balanceReportDays(
-    foldWeekends(run.days, run.range),
+    // force: weekend work folds into the adjacent weekday for EVERY
+    // range here — a custom-range invoice must not list Sat/Sun either.
+    foldWeekends(run.days, run.range, { force: true }),
     INVOICE_DAY_MAX_CHARS,
     multiProject,
   );
