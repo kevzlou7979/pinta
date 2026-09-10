@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import {
   addDays,
   categoryLabel,
+  dedupeReportDays,
   foldWeekends,
   formatDayHeading,
   formatFileSummary,
@@ -858,6 +859,62 @@ describe("annotation-children fallback helpers", () => {
     const out = oneLineComment(long);
     expect(out.length).toBe(118); // 117 + ellipsis
     expect(out.endsWith("…")).toBe(true);
+  });
+});
+
+describe("dedupeReportDays (keyed-each crash guard)", () => {
+  const it_ = (id: string, title = id) => ({
+    id,
+    title,
+    category: "chore" as const,
+    source: "git" as const,
+  });
+
+  it("collapses duplicate dates, concatenating their items in order", () => {
+    const out = dedupeReportDays([
+      { date: FRI, items: [it_("a")], summary: "first" },
+      { date: FRI, items: [it_("b")], summary: "second" },
+    ]);
+    expect(out).toHaveLength(1);
+    expect(out[0]!.items.map((i) => i.id)).toEqual(["a", "b"]);
+    expect(out[0]!.summary).toBe("first");
+  });
+
+  it("re-keys duplicate item ids within a day", () => {
+    const out = dedupeReportDays([
+      { date: FRI, items: [it_("dup"), it_("dup"), it_("dup"), it_("ok")] },
+    ]);
+    expect(out[0]!.items.map((i) => i.id)).toEqual([
+      "dup",
+      "dup#2",
+      "dup#3",
+      "ok",
+    ]);
+  });
+
+  it("produces globally unique keys across days and items", () => {
+    const out = dedupeReportDays([
+      { date: FRI, items: [it_("x"), it_("x")] },
+      { date: FRI, items: [it_("x")] },
+    ]);
+    expect(out).toHaveLength(1);
+    expect(new Set(out[0]!.items.map((i) => i.id)).size).toBe(3);
+  });
+
+  it("merges foldedFrom and leaves clean input untouched", () => {
+    const clean = [{ date: FRI, items: [it_("a"), it_("b")] }];
+    expect(dedupeReportDays(clean)).toEqual(clean);
+    const folded = dedupeReportDays([
+      { date: FRI, items: [], foldedFrom: ["2026-09-05"] },
+      { date: FRI, items: [], foldedFrom: ["2026-09-06"] },
+    ]);
+    expect(folded[0]!.foldedFrom).toEqual(["2026-09-05", "2026-09-06"]);
+  });
+
+  it("does not mutate its input", () => {
+    const input = [{ date: FRI, items: [it_("d"), it_("d")] }];
+    dedupeReportDays(input);
+    expect(input[0]!.items.map((i) => i.id)).toEqual(["d", "d"]);
   });
 });
 

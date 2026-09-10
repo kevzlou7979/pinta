@@ -7623,7 +7623,12 @@ class ExtensionState {
         | string[]
         | undefined;
       if (Array.isArray(raw)) {
-        this.report.projects = raw.filter((p): p is string => typeof p === "string");
+        // Dedupe on hydrate: the Projects list is rendered by a keyed
+        // {#each ... (p)}, and a repeated path from an older/edited
+        // storage blob would hard-crash the tab (each_key_duplicate).
+        this.report.projects = [
+          ...new Set(raw.filter((p): p is string => typeof p === "string")),
+        ];
       }
     } catch {
       // defaults stand

@@ -1152,3 +1152,39 @@ export function parseHowToTestResult(raw: unknown): HowToTestResult | null {
   if (steps.length === 0) return null;
   return { itemId, steps };
 }
+
+/**
+ * Last line of defense before the keyed {#each} render: an agent run
+ * (or an old persisted one) can carry two days with the same date or
+ * two items sharing an id — Svelte hard-crashes on duplicate keys
+ * (each_key_duplicate), leaving the previous tab's DOM on screen.
+ * Collapse duplicate dates (items concatenated, first day's meta wins)
+ * and re-key duplicate item ids (`id#2`, `id#3`, …). Fresh arrays;
+ * inputs are not mutated. Order is preserved.
+ */
+export function dedupeReportDays(days: ReportDay[]): ReportDay[] {
+  const byDate = new Map<string, ReportDay>();
+  const order: string[] = [];
+  for (const d of days) {
+    const existing = byDate.get(d.date);
+    if (existing) {
+      existing.items = [...existing.items, ...d.items];
+      if (d.foldedFrom?.length) {
+        existing.foldedFrom = [...(existing.foldedFrom ?? []), ...d.foldedFrom];
+      }
+    } else {
+      byDate.set(d.date, { ...d, items: [...d.items] });
+      order.push(d.date);
+    }
+  }
+  return order.map((date) => {
+    const day = byDate.get(date)!;
+    const seen = new Map<string, number>();
+    day.items = day.items.map((it) => {
+      const n = seen.get(it.id) ?? 0;
+      seen.set(it.id, n + 1);
+      return n === 0 ? it : { ...it, id: `${it.id}#${n + 1}` };
+    });
+    return day;
+  });
+}

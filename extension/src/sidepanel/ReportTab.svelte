@@ -12,6 +12,7 @@
   import StepList from "./StepList.svelte";
   import {
     categoryLabel,
+    dedupeReportDays,
     foldWeekends,
     formatDayHeading,
     formatFileSummary,
@@ -59,13 +60,18 @@
   // yet, manual entries show on their own.
   const days = $derived.by(() => {
     const custom = app.report.customItems;
+    // dedupeReportDays guards the keyed {#each}: a run with duplicate
+    // dates or item ids would otherwise hard-crash the tab render
+    // (each_key_duplicate) and strand the previous tab's DOM.
     if (!run) {
       if (custom.length === 0) return [];
-      return foldWeekends(mergeCustomItems([], custom), "custom");
+      return dedupeReportDays(foldWeekends(mergeCustomItems([], custom), "custom"));
     }
-    return foldWeekends(
-      mergeCustomItems(run.days, custom, runWindow ?? undefined),
-      run.range,
+    return dedupeReportDays(
+      foldWeekends(
+        mergeCustomItems(run.days, custom, runWindow ?? undefined),
+        run.range,
+      ),
     );
   });
   const rangeLabel = $derived(

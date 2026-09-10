@@ -202,7 +202,9 @@
     >✕</button>
   </div>
 
-  <div class="rounded-[1.25rem] bg-night-alt p-2 shadow-lg self-start">
+  <!-- self-start keeps the bezel shrink-to-fit on the canvas; expanded
+       must NOT inherit it or it overrides the overlay's items-center. -->
+  <div class={`rounded-[1.25rem] bg-night-alt p-2 shadow-lg ${expanded ? "self-center" : "self-start"}`}>
     <div
       class="overflow-hidden rounded-xl bg-white"
       style="width: {Math.round(d.width * s)}px; height: {Math.round(d.height * s)}px;"
