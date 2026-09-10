@@ -36,6 +36,25 @@ const SR: (new () => SpeechRecognitionLike) | undefined =
 const port = chrome.runtime.connect({ name: "voice-offscreen" });
 
 let recognition: SpeechRecognitionLike | null = null;
+/** False once the service worker goes away (MV3 idle-terminates it).
+ *  This document is then orphaned — the SW recycles it on the next
+ *  dictation, so we just stop cleanly instead of throwing on a dead
+ *  port from a recognizer callback. */
+let connected = true;
+
+port.onDisconnect.addListener(() => {
+  connected = false;
+  stop();
+});
+
+function send(msg: unknown): void {
+  if (!connected) return;
+  try {
+    port.postMessage(msg);
+  } catch {
+    connected = false;
+  }
+}
 
 function stop(): void {
   try {
@@ -48,7 +67,7 @@ function stop(): void {
 
 function start(lang: string): void {
   if (!SR) {
-    port.postMessage({ t: "error", code: "unsupported" });
+    send({ t: "error", code: "unsupported" });
     return;
   }
   stop(); // never run two recognizers at once
@@ -70,27 +89,27 @@ function start(lang: string): void {
       else interim += r[0].transcript;
     }
     if (final.trim()) {
-      port.postMessage({ t: "result", transcript: final, isFinal: true });
+      send({ t: "result", transcript: final, isFinal: true });
     } else if (interim.trim()) {
-      port.postMessage({ t: "result", transcript: interim, isFinal: false });
+      send({ t: "result", transcript: interim, isFinal: false });
     }
   };
 
   rec.onerror = (e: unknown) => {
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    port.postMessage({ t: "error", code: (e as any)?.error ?? "unknown" });
+    send({ t: "error", code: (e as any)?.error ?? "unknown" });
   };
 
   rec.onend = () => {
     recognition = null;
-    port.postMessage({ t: "end" });
+    send({ t: "end" });
   };
 
   try {
     rec.start();
   } catch {
     recognition = null;
-    port.postMessage({ t: "error", code: "start-failed" });
+    send({ t: "error", code: "start-failed" });
   }
 }
 

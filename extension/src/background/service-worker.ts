@@ -217,13 +217,24 @@ async function ensureOffscreenReady(): Promise<chrome.runtime.Port | null> {
   if (offscreenPort) return offscreenPort;
   try {
     const has = await chrome.offscreen.hasDocument();
-    if (!has) {
-      await chrome.offscreen.createDocument({
-        url: "src/offscreen/offscreen.html",
-        reasons: [chrome.offscreen.Reason.USER_MEDIA],
-        justification: "Microphone access for Voice Command speech-to-text.",
-      });
+    // A live document with no port means the SERVICE WORKER restarted
+    // (MV3 terminates it when idle) while the offscreen doc survived.
+    // The doc only connects once, at load — so that port is gone for
+    // good and the doc is unreachable. Recycle it; without this, every
+    // dictation after the first SW restart waits 3s and fails.
+    if (has) {
+      console.log("[pinta] voice: recycling stale offscreen document");
+      try {
+        await chrome.offscreen.closeDocument();
+      } catch {
+        // already gone (raced with another caller) — fall through
+      }
     }
+    await chrome.offscreen.createDocument({
+      url: "src/offscreen/offscreen.html",
+      reasons: [chrome.offscreen.Reason.USER_MEDIA],
+      justification: "Microphone access for Voice Command speech-to-text.",
+    });
   } catch (err) {
     console.error("[pinta] offscreen create failed", err);
     return null;
@@ -233,6 +244,9 @@ async function ensureOffscreenReady(): Promise<chrome.runtime.Port | null> {
   return await new Promise((resolve) => {
     const timer = setTimeout(() => {
       offscreenWaiters = offscreenWaiters.filter((w) => w !== onReady);
+      if (!offscreenPort) {
+        console.error("[pinta] voice: offscreen document never connected");
+      }
       resolve(offscreenPort);
     }, 3000);
     const onReady = (p: chrome.runtime.Port | null) => {

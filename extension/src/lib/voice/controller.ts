@@ -32,6 +32,10 @@ function errorMessage(code: string): string {
       return "Speech recognition needs an internet connection.";
     case "unsupported":
       return "This browser doesn't support speech recognition.";
+    case "offscreen-failed":
+      return "Couldn't start the recorder. Reload the page and try again.";
+    case "start-failed":
+      return "Mic didn't start. Grant the microphone in Settings → Voice Command.";
     default:
       return "Voice input failed. Try again.";
   }
