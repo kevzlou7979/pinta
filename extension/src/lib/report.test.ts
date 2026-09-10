@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
   addDays,
+  balanceReportDays,
   categoryLabel,
   dedupeReportDays,
   foldWeekends,
@@ -22,6 +23,7 @@ import {
   parseShotResult,
   rangeWindow,
   renderReportMarkdown,
+  renderReportSummaryMarkdown,
   shotKeyForItem,
   type ReportCustomItem,
   type ReportDay,
@@ -313,6 +315,60 @@ describe("renderReportMarkdown", () => {
   it("stays flat for a single-project run (no project subheads)", () => {
     const md = renderReportMarkdown(run);
     expect(md).not.toContain("###");
+  });
+
+  it("collapses identical item lines into one ×N entry", () => {
+    const dupes: ReportRun = {
+      ...run,
+      days: [
+        {
+          date: FRI,
+          items: [
+            { id: "a", title: "Pinta audit-flow run", category: "chore", source: "git" },
+            { id: "b", title: "Pinta audit-flow run", category: "chore", source: "git" },
+            { id: "c", title: "Pinta audit-flow run", category: "chore", source: "git" },
+            { id: "d", title: "Something else", category: "chore", source: "git" },
+          ],
+        },
+      ],
+    };
+    const md = renderReportMarkdown(dupes);
+    expect(md.match(/Pinta Audit-flow Run/g)).toHaveLength(1);
+    expect(md).toContain("- Pinta Audit-flow Run ×3");
+    expect(md).toContain("- Something Else");
+    expect(md).not.toContain("Something Else ×");
+  });
+
+  it("keeps same-titled roll-ups apart when their children differ", () => {
+    const rollups: ReportRun = {
+      ...run,
+      days: [
+        {
+          date: FRI,
+          items: [
+            {
+              id: "a",
+              title: "Pinta annotations",
+              category: "chore",
+              source: "git",
+              children: [{ title: "fixed the header" }],
+            },
+            {
+              id: "b",
+              title: "Pinta annotations",
+              category: "chore",
+              source: "git",
+              children: [{ title: "fixed the footer" }],
+            },
+          ],
+        },
+      ],
+    };
+    const md = renderReportMarkdown(rollups);
+    expect(md.match(/Pinta Annotations/g)).toHaveLength(2);
+    expect(md).toContain("Fixed the Header");
+    expect(md).toContain("Fixed the Footer");
+    expect(md).not.toContain("×2");
   });
 
   it("drops commit short-shas but keeps PR/issue refs", () => {
@@ -859,6 +915,108 @@ describe("annotation-children fallback helpers", () => {
     const out = oneLineComment(long);
     expect(out.length).toBe(118); // 117 + ellipsis
     expect(out.endsWith("…")).toBe(true);
+  });
+});
+
+describe("renderReportSummaryMarkdown", () => {
+  const base = { runId: "s1", range: "weekly" as const, anchorDate: FRI, generatedAt: 0 };
+
+  it("heads each day with the full date, not the short weekday stamp", () => {
+    const md = renderReportSummaryMarkdown({
+      ...base,
+      days: [
+        {
+          date: FRI,
+          items: [{ id: "a", title: "Shipped it", category: "chore", source: "git" }],
+          summary: "Shipped the thing.",
+        },
+      ],
+    });
+    expect(md).toContain("June 05 2026");
+    expect(md).not.toContain("Fri Jun 05");
+  });
+
+  it("collapses duplicate lines in the no-summary fallback", () => {
+    const md = renderReportSummaryMarkdown({
+      ...base,
+      days: [
+        {
+          date: FRI,
+          items: [
+            { id: "a", title: "Pinta audit-flow run", category: "chore", source: "git" },
+            { id: "b", title: "Pinta audit-flow run", category: "chore", source: "git" },
+          ],
+        },
+      ],
+    });
+    expect(md).toContain("June 05 2026");
+    expect(md).toContain("- Pinta Audit-flow Run ×2");
+    expect(md.match(/Pinta Audit-flow Run/g)).toHaveLength(1);
+  });
+});
+
+describe("balanceReportDays (invoice balancing)", () => {
+  const mk = (n: number, prefix: string) =>
+    Array.from({ length: n }, (_, i) => ({
+      id: `${prefix}${i}`,
+      title: `${prefix} task number ${i}`,
+      category: "chore" as const,
+      source: "git" as const,
+    }));
+
+  it("moves work from a heavy day into a light one", () => {
+    const out = balanceReportDays([
+      { date: "2026-06-01", items: mk(10, "a") },
+      { date: "2026-06-02", items: mk(2, "b") },
+    ]);
+    const counts = out.map((d) => d.items.length);
+    expect(counts).toEqual([6, 6]);
+    expect(out.flatMap((d) => d.items)).toHaveLength(12);
+  });
+
+  it("keeps every day's rendered lines under the 1000-char budget", () => {
+    const long = Array.from({ length: 60 }, (_, i) => ({
+      id: `x${i}`,
+      title: `A fairly wordy task title that eats characters number ${i}`,
+      category: "chore" as const,
+      source: "git" as const,
+    }));
+    const out = balanceReportDays([
+      { date: "2026-06-01", items: long },
+      { date: "2026-06-02", items: [] },
+      { date: "2026-06-03", items: [] },
+    ]);
+    const md = renderReportSummaryMarkdown({
+      runId: "r",
+      range: "weekly",
+      anchorDate: "2026-06-03",
+      generatedAt: 0,
+      days: out,
+    });
+    for (const block of md.split("\n\n")) {
+      expect(block.length).toBeLessThanOrEqual(1000 + 40); // + heading line
+    }
+  });
+
+  it("leaves days the agent summarized untouched", () => {
+    const out = balanceReportDays([
+      { date: "2026-06-01", items: mk(6, "a"), summary: "Wrote prose." },
+      { date: "2026-06-02", items: mk(2, "b") },
+      { date: "2026-06-03", items: [] },
+    ]);
+    expect(out[0]!.items).toHaveLength(6);
+    expect(out[0]!.summary).toBe("Wrote prose.");
+    expect(out[1]!.items.length + out[2]!.items.length).toBe(2);
+  });
+
+  it("no-ops when there is nothing to balance across", () => {
+    const one = [{ date: "2026-06-01", items: mk(9, "a") }];
+    expect(balanceReportDays(one)).toEqual(one);
+    const empty = [
+      { date: "2026-06-01", items: [] },
+      { date: "2026-06-02", items: [] },
+    ];
+    expect(balanceReportDays(empty)).toEqual(empty);
   });
 });
 

@@ -763,21 +763,48 @@ function reportItemLine(it: ReportItem, multiProject: boolean): string {
   return `- ${tag}${ref}${title}`;
 }
 
+/**
+ * Item lines for one day, with identical entries collapsed. Repeated
+ * activity (seven "Pinta Audit-flow Run" sessions in a day) arrives as
+ * distinct items with distinct ids, but renders to the same prose line —
+ * seven copies of it is noise in an export you hand to someone. Blocks
+ * are keyed on the line PLUS its nested children, so a roll-up with
+ * different children is never merged away; a collapsed block gets a
+ * `×N` count. Order of first appearance is preserved.
+ */
+function renderItemBlocks(items: ReportItem[], multiProject: boolean): string[] {
+  const order: string[] = [];
+  const counts = new Map<string, number>();
+  const parts = new Map<string, { head: string; kids: string[] }>();
+  for (const it of items) {
+    const head = reportItemLine(it, multiProject);
+    const kids = (it.children ?? []).map(
+      (c) => `  - ${humanizeReportTitle(c.title)}`,
+    );
+    const key = [head, ...kids].join("\n");
+    if (!counts.has(key)) {
+      order.push(key);
+      parts.set(key, { head, kids });
+    }
+    counts.set(key, (counts.get(key) ?? 0) + 1);
+  }
+  return order.map((key) => {
+    const n = counts.get(key)!;
+    const { head, kids } = parts.get(key)!;
+    return [n > 1 ? `${head} ×${n}` : head, ...kids].join("\n");
+  });
+}
+
 /** Markdown for a single day — flat, plain-prose `- title` lines (a `#ref`
  *  kept only for PRs/issues), each prefixed with `[project]` when the report
  *  spans multiple projects. A roll-up item's `children` (e.g. each Pinta
  *  annotation) are indented as nested bullets — plain descriptions, no page
  *  routes. Shared by the whole-report export and the per-day export button. */
 export function renderDayMarkdown(day: ReportDay, multiProject: boolean): string {
-  const lines = [`## ${formatDayHeading(day.date)}`];
-  for (const it of day.items) {
-    lines.push(reportItemLine(it, multiProject));
-    if (it.children?.length) {
-      for (const c of it.children) {
-        lines.push(`  - ${humanizeReportTitle(c.title)}`);
-      }
-    }
-  }
+  const lines = [
+    `## ${formatDayHeading(day.date)}`,
+    ...renderItemBlocks(day.items, multiProject),
+  ];
   return lines.join("\n").trimEnd() + "\n";
 }
 
@@ -800,6 +827,87 @@ export function renderReportMarkdown(run: ReportRun): string {
   return [`# Report — ${label}`, "", ...blocks].join("\n").trimEnd() + "\n";
 }
 
+/** Hard per-day budget for the summary export — it is pasted into a
+ *  PayPal invoice line, whose description field caps out around 1000
+ *  characters. Every day block the export emits stays under this. */
+export const INVOICE_DAY_MAX_CHARS = 1000;
+
+/** Rendered length of a day's item lines, after duplicate collapsing. */
+function itemsLength(items: ReportItem[], multiProject: boolean): number {
+  return renderItemBlocks(items, multiProject).join("\n").length;
+}
+
+/**
+ * Even out the item load across days for the invoice-style export.
+ *
+ * Real activity clumps — one day carries fifteen entries and the next
+ * carries two — which reads badly on an invoice and can blow the
+ * per-line character budget. This redistributes items round-robin
+ * across the run's days so each carries a similar share, never letting
+ * a day's rendered lines exceed `maxChars`.
+ *
+ * Only days WITHOUT an agent summary take part: a day the agent wrote
+ * prose for keeps its own text and its own items. Items never leave the
+ * run, and their order is preserved within each day. Note this
+ * deliberately moves an item off its true date — it is an invoicing
+ * view, not the audit trail (the detailed export keeps true dates).
+ * If an item fits nowhere (every day already at budget), it is dropped
+ * and the count surfaces as a trailing "+N more" entry where it fits.
+ */
+export function balanceReportDays(
+  days: ReportDay[],
+  maxChars = INVOICE_DAY_MAX_CHARS,
+  multiProject = false,
+): ReportDay[] {
+  const eligible = days.filter((d) => !d.summary);
+  if (eligible.length < 2) return days;
+  const pool = eligible.flatMap((d) => d.items);
+  if (pool.length === 0) return days;
+
+  const assigned: ReportItem[][] = eligible.map(() => []);
+  const target = Math.ceil(pool.length / eligible.length);
+  let cursor = 0;
+  let dropped = 0;
+
+  /** Try to place `it` starting at `cursor`; `respectTarget` keeps the
+   *  first pass even, the retry pass only respects the char budget. */
+  const place = (it: ReportItem, respectTarget: boolean): boolean => {
+    for (let k = 0; k < eligible.length; k++) {
+      const idx = (cursor + k) % eligible.length;
+      if (respectTarget && assigned[idx]!.length >= target) continue;
+      if (itemsLength([...assigned[idx]!, it], multiProject) > maxChars) continue;
+      assigned[idx]!.push(it);
+      cursor = (idx + 1) % eligible.length;
+      return true;
+    }
+    return false;
+  };
+
+  for (const it of pool) {
+    if (!place(it, true) && !place(it, false)) dropped++;
+  }
+
+  if (dropped > 0) {
+    const marker: ReportItem = {
+      id: `overflow-${dropped}`,
+      title: `+${dropped} more item${dropped === 1 ? "" : "s"} (trimmed to fit)`,
+      category: "chore",
+      source: "git",
+    };
+    for (let i = 0; i < assigned.length; i++) {
+      if (itemsLength([...assigned[i]!, marker], multiProject) <= maxChars) {
+        assigned[i]!.push(marker);
+        break;
+      }
+    }
+  }
+
+  let n = 0;
+  return days.map((d) =>
+    d.summary ? d : { ...d, items: assigned[n++] ?? [] },
+  );
+}
+
 /**
  * Human-friendly whole-report export: ONE natural-language paragraph per day
  * (the agent's `summary`), headed `Mon DD (~N chars)`, ≤1000 chars each — the
@@ -813,7 +921,13 @@ export function renderReportSummaryMarkdown(run: ReportRun): string {
   // looked up here and appended to the weekday they fold into.
   const summaryByDate = new Map<string, string>();
   for (const d of run.days) if (d.summary) summaryByDate.set(d.date, d.summary);
-  const days = foldWeekends(run.days, run.range);
+  // Balanced for the invoice: heavy days share into light ones, and no
+  // day's detail text exceeds the 1000-char PayPal line budget.
+  const days = balanceReportDays(
+    foldWeekends(run.days, run.range),
+    INVOICE_DAY_MAX_CHARS,
+    multiProject,
+  );
   const blocks: string[] = [];
   for (const day of days) {
     if (day.items.length === 0 && !day.summary) continue;
@@ -823,14 +937,21 @@ export function renderReportSummaryMarkdown(run: ReportRun): string {
       const s = summaryByDate.get(wd);
       if (s) parts.push(s.trim());
     }
-    const head = formatShortDay(day.date);
+    // Full date ("August 26 2026") — same heading the day cards and the
+    // detailed export use, so a summary you paste somewhere still says
+    // which year it covers.
+    const head = formatDayHeading(day.date);
     if (parts.length > 0) {
-      const s = parts.join(" ").slice(0, 1000);
+      const s = parts.join(" ").slice(0, INVOICE_DAY_MAX_CHARS);
       blocks.push(`${head} (~${s.length} chars)\n${s}`);
     } else {
-      // No agent summary — fall back to the plain item lines for this day.
-      const lines = day.items.map((it) => reportItemLine(it, multiProject));
-      blocks.push(`${head}\n${lines.join("\n")}`);
+      // No agent summary — fall back to the plain item lines for this
+      // day. balanceReportDays already fit these under the budget; the
+      // slice is a belt-and-braces guard on a single oversized title.
+      const body = renderItemBlocks(day.items, multiProject)
+        .join("\n")
+        .slice(0, INVOICE_DAY_MAX_CHARS);
+      blocks.push(`${head}\n${body}`);
     }
   }
   return blocks.join("\n\n").trimEnd() + "\n";
