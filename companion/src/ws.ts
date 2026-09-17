@@ -8,11 +8,28 @@ import type {
   Session,
 } from "@pinta/shared";
 import type { SessionStore } from "./store.js";
+import {
+  ExtensionTrust,
+  extensionIdFromOrigin,
+  isLoopbackHost,
+  isWritingQueryComment,
+  parseImageDataUrl,
+} from "./security.js";
 
 export type AttachOptions = {
   server: HttpServer;
   store: SessionStore;
   log?: (msg: string) => void;
+  /** Shared with startServer so a WS pin is honored by HTTP. */
+  trust?: ExtensionTrust;
+  /**
+   * Accept WS upgrades that carry no Origin header. Nothing legitimate
+   * does (the extension always sends its chrome-extension:// origin; the
+   * agent and MCP backend use HTTP), so this is off unless
+   * `PINTA_ALLOW_NO_ORIGIN_WS=1`. Such sockets are never trusted: they
+   * can't submit writing ops and their submits never auto-apply.
+   */
+  allowNoOriginWs?: boolean;
 };
 
 // Cap incoming WebSocket frame size. Same rationale as the HTTP body
@@ -31,24 +48,44 @@ const MAX_WS_PAYLOAD = 50 * 1024 * 1024;
 // reconnect never re-pushes the whole session history.
 const RECONNECT_REPLAY_WINDOW_MS = 10 * 60 * 1000;
 
+export type WsOriginVerdict =
+  | { ok: true; trusted: boolean }
+  | { ok: false; reason: string };
+
 /**
- * Reject WebSocket upgrade requests from cross-origin browser tabs.
- * Mirrors the HTTP-side Origin check in server.ts: localhost binding
- * doesn't help when the attacker is already a tab in the same browser,
- * so we explicitly accept only:
+ * Gate a WebSocket upgrade. Localhost binding doesn't help when the
+ * attacker is already a tab or another extension in the same browser, so
+ * we accept only:
  *
- *  - chrome-extension:// (our own side panel)
- *  - no Origin header (Node CLI, agent tooling, raw curl)
+ *  - the trusted Pinta extension (Web Store id, $PINTA_EXTENSION_IDS, or
+ *    the first extension ever to connect — pinned trust-on-first-use)
+ *  - no Origin header, only when explicitly opted in (untrusted socket)
  *
- * Anything else is some webpage trying to drive our state — refuse.
- * Without this, a malicious page could open ws://127.0.0.1:7878/ and
- * fire `session.create` / `annotation.add` / `session.submit` to
- * exfiltrate annotations or coerce the agent into running a session.
+ * Anything else (web pages, other extensions, a rebound Host) is refused.
+ * Without this, a page or rogue extension could open ws://127.0.0.1:7878/
+ * and fire `session.submit` / writing module ops the agent would run
+ * with no user click. Exported for unit tests.
  */
-function isAllowedWsOrigin(req: IncomingMessage): boolean {
+export function verifyWsOrigin(
+  req: Pick<IncomingMessage, "headers">,
+  trust: ExtensionTrust,
+  allowNoOrigin: boolean,
+): WsOriginVerdict {
+  if (!isLoopbackHost(req.headers.host)) {
+    return { ok: false, reason: `non-loopback host ${req.headers.host}` };
+  }
   const origin = (req.headers.origin ?? "").toString();
-  if (!origin) return true;
-  return origin.startsWith("chrome-extension://");
+  if (!origin) {
+    return allowNoOrigin
+      ? { ok: true, trusted: false }
+      : { ok: false, reason: "no Origin header (set PINTA_ALLOW_NO_ORIGIN_WS=1 to allow)" };
+  }
+  const id = extensionIdFromOrigin(origin);
+  if (!id) return { ok: false, reason: `forbidden origin ${origin}` };
+  if (!trust.pinOrCheck(id)) {
+    return { ok: false, reason: `untrusted extension ${id}` };
+  }
+  return { ok: true, trusted: true };
 }
 
 /**
@@ -136,19 +173,24 @@ export function broadcastAll(wss: WebSocketServer, msg: ServerMessage): void {
 export function attachWebSocket(opts: AttachOptions): WebSocketServer {
   const { server, store } = opts;
   const log = opts.log ?? (() => {});
+  const trust = opts.trust ?? new ExtensionTrust(store.projectRoot, { log });
+  const allowNoOrigin =
+    opts.allowNoOriginWs ?? process.env.PINTA_ALLOW_NO_ORIGIN_WS === "1";
+  // Per-upgrade trust, read back on "connection".
+  const trustedReqs = new WeakSet<IncomingMessage>();
 
   const wss = new WebSocketServer({
     server,
     path: "/",
     maxPayload: MAX_WS_PAYLOAD,
     verifyClient: (info, cb) => {
-      if (isAllowedWsOrigin(info.req)) {
+      const verdict = verifyWsOrigin(info.req, trust, allowNoOrigin);
+      if (verdict.ok) {
+        if (verdict.trusted) trustedReqs.add(info.req);
         cb(true);
         return;
       }
-      log(
-        `ws upgrade rejected from origin ${info.req.headers.origin ?? "(none)"}`,
-      );
+      log(`ws upgrade rejected: ${verdict.reason}`);
       cb(false, 403, "forbidden origin");
     },
   });
@@ -178,8 +220,9 @@ export function attachWebSocket(opts: AttachOptions): WebSocketServer {
     }
   });
 
-  wss.on("connection", (socket) => {
-    log("ws client connected");
+  wss.on("connection", (socket, req) => {
+    const trusted = trustedReqs.has(req);
+    log(`ws client connected${trusted ? "" : " (untrusted: no writing ops)"}`);
 
     const send = (msg: ServerMessage) => {
       if (socket.readyState === WebSocket.OPEN) {
@@ -222,7 +265,7 @@ export function attachWebSocket(opts: AttachOptions): WebSocketServer {
       }
 
       try {
-        const session = await dispatch(msg, store, log);
+        const session = await dispatch(msg, store, log, { trusted });
         if (session && msg.type === "session.create") {
           broadcast({ type: "session.created", session });
         } else if (session && msg.type === "module.query.submit") {
@@ -251,10 +294,16 @@ export function attachWebSocket(opts: AttachOptions): WebSocketServer {
   return wss;
 }
 
-async function dispatch(
+export type DispatchContext = {
+  /** Socket came from the trusted Pinta extension (not a no-Origin opt-in). */
+  trusted: boolean;
+};
+
+export async function dispatch(
   msg: ClientMessage,
   store: SessionStore,
   log: (msg: string) => void,
+  ctx: DispatchContext,
 ): Promise<Session | null> {
   switch (msg.type) {
     case "session.create": {
@@ -293,10 +342,19 @@ async function dispatch(
     case "session.submit": {
       const active = store.getActive();
       if (!active) throw new Error("no active session");
+      if (
+        !ctx.trusted &&
+        active.annotations.some(
+          (a) => a.kind === "query" && isWritingQueryComment(a.comment),
+        )
+      ) {
+        throw new Error("writing ops are only accepted from the Pinta extension");
+      }
       const submitted = await store.submit(
         active.id,
         msg.screenshot,
-        msg.autoApply,
+        // An untrusted socket can never skip the plan-confirm gate.
+        ctx.trusted ? msg.autoApply : false,
         msg.modules,
       );
       const modulesNote = submitted.modules?.length
@@ -312,6 +370,15 @@ async function dispatch(
       // ephemeral session, attaches the query annotation, marks
       // submitted with the module. The agent picks it up like any
       // other submitted session and responds via mark_session_done.
+      // Writing ops (edit / commit / file issues) run with no further
+      // confirmation, so only the trusted extension may send them.
+      if (!ctx.trusted && isWritingQueryComment(msg.queryComment)) {
+        throw new Error("writing ops are only accepted from the Pinta extension");
+      }
+      // Reject a bad query image before minting a session it would orphan.
+      if (msg.screenshot && !parseImageDataUrl(msg.screenshot)) {
+        throw new Error("unsupported image (expected a PNG or JPEG data URL)");
+      }
       const session = store.createSession({
         url: msg.url,
         ephemeral: true,

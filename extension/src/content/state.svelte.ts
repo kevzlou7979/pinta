@@ -88,6 +88,24 @@ class ContentState {
   // (no reactivity needed — read inside the observer callback only).
   variantPreviewActive = false;
 
+  // Devices module — annotating inside a device frame. On a normal page the
+  // overlay is always live. Inside a Devices canvas iframe it's loaded on
+  // demand (nav-reporter.ts) and only the frame the canvas marked as the
+  // annotation target is live: inactive frames ignore panel messages and
+  // hotkeys, and hide their host.
+  readonly inFrame = window.top !== window.self;
+  /** Set by Overlay.svelte so overlay.ts can ask for a re-announce
+   *  (overlay.ready) without reaching into the component. */
+  announceFrame: () => void = () => {};
+  /** Set by Overlay.svelte so overlay.ts can arm a tool itself. Activating
+   *  a device frame has to work without the side panel: the canvas->frame
+   *  postMessage hop is the only one a sandboxed sub-frame can rely on. */
+  requestMode: (next: Mode, tool?: DrawTool) => void = () => {};
+  frameActive = $state(
+    window.top === window.self ||
+      (globalThis as { __pintaFrameAnnotate?: boolean }).__pintaFrameAnnotate === true,
+  );
+
   // Whether the Pinta side panel is currently open. The floating toolbar only
   // shows while it is (the panel holds a background port for its lifetime).
   panelOpen = $state(false);

@@ -71,9 +71,18 @@ const INLINE_SECRET_PATTERNS: { kind: string; re: RegExp }[] = [
   // contains at least one uppercase + one digit. The lookaheads keep
   // ordinary prose (all-lowercase paragraphs) from being scrubbed.
   // Catches long random tokens that don't match any branded pattern.
+  //
+  // The lookaheads are BOUNDED on purpose. Unbounded ({0,} / *) they make
+  // this quadratic: "+ / = - _" are non-word characters, so nearly every
+  // position in a long run of the charset is a , and each one rescanned
+  // the whole run looking for an uppercase or a digit. A planted
+  // "a/"-repeated text node (100 KB, no uppercase) took 18 SECONDS on the
+  // page's main thread. A bound makes each position O(256) instead of
+  // O(n) — real credentials carry an uppercase and a digit long before
+  // then, so nothing that matters stops matching.
   {
     kind: "high-entropy",
-    re: /\b(?=[A-Za-z0-9+/=_-]*[A-Z])(?=[A-Za-z0-9+/=_-]*\d)[A-Za-z0-9+/=_-]{40,}\b/g,
+    re: /\b(?=[A-Za-z0-9+/=_-]{0,256}[A-Z])(?=[A-Za-z0-9+/=_-]{0,256}\d)[A-Za-z0-9+/=_-]{40,}\b/g,
   },
 ];
 
@@ -84,13 +93,202 @@ const INLINE_SECRET_PATTERNS: { kind: string; re: RegExp }[] = [
  * here yet (Phase D's UI will need them; this phase keeps the AnnotationTarget
  * shape unchanged).
  */
+/** Belt to the bounded-lookahead braces: skip the unbranded high-entropy
+ *  sweep on input this large. Every caller is capped well below it
+ *  (outerHTML is sliced before scrubbing, nearbyText at 200 chars/level,
+ *  URLs are short), so crossing this line means a new unbounded caller
+ *  appeared — and the branded patterns, which are cheap, still run. */
+const HIGH_ENTROPY_MAX = 32 * 1024;
+
 export function scrubInlineSecrets(s: string): string {
   if (!s) return s;
   let out = s;
   for (const { kind, re } of INLINE_SECRET_PATTERNS) {
+    if (kind === "high-entropy" && s.length > HIGH_ENTROPY_MAX) continue;
     out = out.replace(re, `[REDACTED:${kind}]`);
   }
   return out;
+}
+
+/**
+ * The same sweep for a URL query / fragment VALUE, minus `high-entropy`.
+ * That pattern's charset includes `/`, `-` and `_`, so a long
+ * percent-decoded redirect target ("?redirect_uri=https://app.dev/Settings1/
+ * TeamMembers/BillingPlan") matches it and the agent gets a page URL it
+ * can't navigate to. In freeform HTML an opaque 40-char blob really is
+ * suspicious; in a URL value it is usually just a path, and the branded
+ * patterns still catch every actual credential shape.
+ */
+function scrubUrlValue(v: string): string {
+  if (!v) return v;
+  let out = v;
+  for (const { kind, re } of INLINE_SECRET_PATTERNS) {
+    if (kind === "high-entropy") continue;
+    out = out.replace(re, `[REDACTED:${kind}]`);
+  }
+  return out;
+}
+
+// ---------------------------------------------------------------------------
+// URL scrubbing. Page URLs ride to the companion / agent (annotation.url,
+// session url, module queries). OAuth callbacks, magic links and signed
+// URLs carry credentials in the query or fragment — redact them.
+
+/** Key WORDS that mark a query / fragment parameter as a credential.
+ *  Matched per word (`access_token`, `accessToken`, `X-Amz-Signature`
+ *  → access/token, x/amz/signature) so `design` or `monkey` don't hit. */
+const SENSITIVE_KEY_WORDS = new Set([
+  "token", "tokens", "code", "secret", "key", "apikey", "auth", "authorization",
+  "session", "sessionid", "sid", "password", "passwd", "pwd", "sig",
+  "signature", "access", "refresh", "jwt", "bearer", "credential",
+  "credentials", "otp", "nonce", "ticket", "saml", "samlresponse",
+]);
+export const REDACTED = "REDACTED";
+
+function keyWords(key: string): string[] {
+  return key
+    .replace(/([a-z0-9])([A-Z])/g, "$1_$2")
+    .toLowerCase()
+    .split(/[^a-z0-9]+/)
+    .filter(Boolean);
+}
+
+export function isSensitiveParamKey(key: string): boolean {
+  const words = keyWords(key);
+  const whole = words.join("");
+  return words.some((w) => SENSITIVE_KEY_WORDS.has(w)) || SENSITIVE_KEY_WORDS.has(whole);
+}
+
+/** Whether this key=value pair must be redacted. One rule for the query
+ *  string and the fragment, so both stay consistent (and idempotent — an
+ *  already-redacted value is left alone). */
+export function shouldRedactParam(key: string, value: string): boolean {
+  return value !== REDACTED && isSensitiveParamKey(key);
+}
+
+/**
+ * Redact INSIDE a fragment rather than dropping it. Hash-routed SPAs keep
+ * the route there ("#/board/42?tab=open"), and a URL stripped back to
+ * "https://app/" tells the agent nothing about which screen the annotation
+ * belongs to — and makes two different routes compare equal, which breaks
+ * pin replay. Returns the fragment without its leading "#".
+ */
+/** decodeURIComponent throws on a lone "%" — and Chrome leaves one in the
+ *  fragment verbatim ("#q=100%"). scrubUrl runs on every annotation
+ *  capture, so a throw here would take the whole path down. */
+function decodeParam(v: string): string {
+  try {
+    return decodeURIComponent(v);
+  } catch {
+    return v;
+  }
+}
+
+export function scrubFragment(frag: string): string {
+  const qi = frag.indexOf("?");
+  const route = qi === -1 ? "" : frag.slice(0, qi);
+  const rest = qi === -1 ? frag : frag.slice(qi + 1);
+  // Only treat the tail as parameters when it really looks like pairs —
+  // "#/board/42" is a route, not a query. OAuth implicit-flow fragments
+  // ("#access_token=…&token_type=bearer") have no "?" and hit this too.
+  const looksLikePairs = /^[^?#&=]+=[^&]*(?:&[^?#&=]+=[^&]*)*$/.test(rest);
+  if (!looksLikePairs) return scrubInlineSecrets(frag);
+  const out: string[] = [];
+  for (const pair of rest.split("&")) {
+    const eq = pair.indexOf("=");
+    const k = pair.slice(0, eq);
+    const v = pair.slice(eq + 1);
+    // Key-matching alone is not enough: "#u=alice&t=<JWT>" has no
+    // sensitive-looking key, so the value gets the pattern sweep too —
+    // on the DECODED form, so percent-encoding can't hide a token.
+    const dec = decodeParam(v);
+    if (shouldRedactParam(k, dec)) {
+      out.push(`${k}=${REDACTED}`);
+      continue;
+    }
+    const swept = scrubUrlValue(dec);
+    out.push(`${k}=${swept === dec ? v : encodeURIComponent(swept)}`);
+  }
+  const query = out.join("&");
+  return qi === -1 ? query : `${scrubInlineSecrets(route)}?${query}`;
+}
+
+/**
+ * Redact credential-like parts of a URL before it leaves the page:
+ *  - query values whose KEY looks sensitive become `REDACTED`;
+ *  - the same treatment inside the fragment, which is kept so hash routes
+ *    survive (see scrubFragment).
+ * Idempotent and stable (same input → same output), so scrubbed URLs
+ * still compare equal. Non-URL input is returned scrubbed of inline
+ * secrets only; empty stays empty.
+ */
+export function scrubUrl(url: string): string {
+  if (typeof url !== "string" || url === "") return "";
+  let u: URL;
+  try {
+    u = new URL(url);
+  } catch {
+    return scrubInlineSecrets(url);
+  }
+  // file:, chrome-extension:, custom schemes: we don't reason about their
+  // query shape, but an inline secret in one still must not travel.
+  if (!/^https?:$/.test(u.protocol)) return scrubInlineSecrets(url);
+  let changed = false;
+  if (u.username || u.password) {
+    u.username = "";
+    u.password = "";
+    changed = true;
+  }
+  if (u.search) {
+    const params = new URLSearchParams();
+    let redacted = false;
+    // Rebuilt in order so a scrubbed URL keeps its parameter layout.
+    for (const [k, v] of new URLSearchParams(u.search)) {
+      const hide = shouldRedactParam(k, v);
+      const safe = hide ? REDACTED : scrubUrlValue(v);
+      if (safe !== v) redacted = true;
+      params.append(k, safe);
+    }
+    if (redacted) {
+      u.search = params.toString();
+      changed = true;
+    }
+  }
+  if (u.hash) {
+    const frag = u.hash.slice(1);
+    const next = scrubFragment(frag);
+    if (next !== frag) {
+      u.hash = next ? `#${next}` : "";
+      changed = true;
+    }
+  }
+  if (!changed) return url;
+  // URL serializes an emptied fragment without the "#".
+  return u.toString();
+}
+
+/**
+ * An agent-supplied link is only rendered / stored as a link when it is
+ * https:, or http: on a loopback host. Returns the normalized URL or
+ * undefined.
+ */
+export function safeExternalUrl(value: unknown): string | undefined {
+  if (typeof value !== "string" || value.trim() === "") return undefined;
+  let u: URL;
+  try {
+    u = new URL(value.trim());
+  } catch {
+    return undefined;
+  }
+  if (u.username || u.password) return undefined;
+  if (u.protocol === "https:") return u.toString();
+  if (
+    u.protocol === "http:" &&
+    (u.hostname === "localhost" || u.hostname === "127.0.0.1" || u.hostname === "[::1]")
+  ) {
+    return u.toString();
+  }
+  return undefined;
 }
 
 /**
@@ -108,7 +306,13 @@ function sanitizeOuterHtml(el: Element): string {
   // (e.g. an Auth-header debug panel that shows `Bearer eyJ…` to the
   // user). Both layers are needed — attribute stripping can't reach
   // text nodes, and pattern stripping can't reach onclick handlers.
-  return scrubInlineSecrets(clone.outerHTML);
+  // Slice BEFORE scrubbing. The caller truncates to HTML_TRUNCATE anyway,
+  // so scrubbing megabytes of a large container is pure cost — and a token
+  // severed mid-string is not a usable credential. The headroom leaves room
+  // for the scrub's own "[REDACTED:…]" expansions to fit inside the cap.
+  const raw = clone.outerHTML;
+  const bounded = raw.length > HTML_TRUNCATE * 4 ? raw.slice(0, HTML_TRUNCATE * 4) : raw;
+  return scrubInlineSecrets(bounded);
 }
 
 function scrub(node: Element): void {

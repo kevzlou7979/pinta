@@ -14,6 +14,15 @@ import type {
   InstalledModule,
 } from "@pinta/shared";
 import { expectedSessionRole } from "@pinta/shared";
+import {
+  BadRequestError,
+  SCREENSHOT_EXTS,
+  assertSafeSessionId,
+  isSafeDocId,
+  isSafeSessionId,
+  parseImageDataUrl,
+  resolveInside,
+} from "./security.js";
 
 /**
  * Namespaced module id rule (Phase 19). Lowercase, dot-separated
@@ -98,12 +107,16 @@ export class SessionStore {
   }
 
   /** Path stored on the session — relative to projectRoot, posix-style. */
-  private screenshotPath(id: string): string {
-    return `.pinta/sessions/${id}.png`;
+  private screenshotPath(id: string, ext: "png" | "jpg"): string {
+    assertSafeSessionId(id);
+    return `.pinta/sessions/${id}.${ext}`;
   }
 
-  private absScreenshotPath(id: string): string {
-    return join(this.sessionsDir, `${id}.png`);
+  /** Absolute on-disk path for a session file; refuses unsafe ids and
+   *  anything that would resolve outside `.pinta/sessions/`. */
+  private sessionFilePath(id: string, ext: "json" | "png" | "jpg"): string {
+    assertSafeSessionId(id);
+    return resolveInside(this.sessionsDir, `${id}.${ext}`);
   }
 
   private get testDocsDir(): string {
@@ -142,9 +155,16 @@ export class SessionStore {
         content?: string;
       };
       if (typeof p.content !== "string") continue;
+      // docId becomes a file name — refuse anything that could escape
+      // test-docs/. Strip the inline content either way so it never
+      // lands in the session JSON.
+      if (!isSafeDocId(p.docId)) {
+        ann.comment = JSON.stringify({ op: p.op, docId: null, filename: p.filename });
+        console.warn("[store] doc-parse refused: invalid docId");
+        continue;
+      }
       await mkdir(this.testDocsDir, { recursive: true });
-      const ext = p.filename.toLowerCase().endsWith(".md") ? "md" : "md";
-      const filePath = join(this.testDocsDir, `${p.docId}.${ext}`);
+      const filePath = resolveInside(this.testDocsDir, `${p.docId}.md`);
       await writeFile(filePath, p.content, "utf8");
       // Sweep prior imports — only one catalog is active at a time, and
       // older docs would otherwise linger on disk indefinitely. Specs
@@ -174,8 +194,9 @@ export class SessionStore {
    * original write.
    */
   async writeTestDoc(docId: string, content: string): Promise<void> {
+    if (!isSafeDocId(docId)) throw new BadRequestError("invalid docId");
     await mkdir(this.testDocsDir, { recursive: true });
-    const filePath = join(this.testDocsDir, `${docId}.md`);
+    const filePath = resolveInside(this.testDocsDir, `${docId}.md`);
     await writeFile(filePath, content, "utf8");
   }
 
@@ -195,8 +216,12 @@ export class SessionStore {
    * UI without changing the on-disk shape.
    */
   private resultsPathFor(docId: string, authorSlug: string): string {
+    if (!isSafeDocId(docId)) throw new BadRequestError("invalid docId");
+    if (authorSlug !== "" && !/^[a-z0-9-]{1,64}$/.test(authorSlug)) {
+      throw new BadRequestError("invalid author slug");
+    }
     const suffix = authorSlug ? `.results.${authorSlug}.json` : `.results.json`;
-    return join(this.testDocsDir, `${docId}${suffix}`);
+    return resolveInside(this.testDocsDir, `${docId}${suffix}`);
   }
 
   async writeTestResults(
@@ -263,9 +288,10 @@ export class SessionStore {
     try {
       const files = await readdir(this.sessionsDir);
       for (const f of files) {
-        const isKeptJson = keepId && f === `${keepId}.json`;
-        const isKeptPng = keepId && f === `${keepId}.png`;
-        if (isKeptJson || isKeptPng) continue;
+        const kept =
+          !!keepId &&
+          [`${keepId}.json`, ...SCREENSHOT_EXTS.map((e) => `${keepId}.${e}`)].includes(f);
+        if (kept) continue;
         try {
           await unlink(join(this.sessionsDir, f));
         } catch {
@@ -424,19 +450,29 @@ export class SessionStore {
   }
 
   /**
-   * If the session carries a base64 PNG data URL, write it to disk and
-   * replace the inline data with a relative path reference. Mutates and
-   * returns the session.
+   * If the session carries a base64 PNG/JPEG data URL, write it to disk
+   * as `<id>.png` / `<id>.jpg` (matching the data URL's type) and replace
+   * the inline data with a relative path reference. Any other format is
+   * refused. Mutates and returns the session.
    */
   private async extractScreenshot(session: Session): Promise<Session> {
     const data = session.fullPageScreenshot;
     if (!data) return session;
-    const m = /^data:image\/(png|jpeg);base64,(.+)$/i.exec(data);
-    if (!m) return session;
-    const [, , base64] = m;
+    const img = parseImageDataUrl(data);
+    if (!img) {
+      throw new BadRequestError("unsupported screenshot (expected a PNG or JPEG data URL)");
+    }
     await mkdir(this.sessionsDir, { recursive: true });
-    await writeFile(this.absScreenshotPath(session.id), Buffer.from(base64!, "base64"));
-    session.fullPageScreenshotPath = this.screenshotPath(session.id);
+    await writeFile(
+      this.sessionFilePath(session.id, img.ext),
+      Buffer.from(img.base64, "base64"),
+    );
+    // A re-submit in the other format must not leave a stale sibling file.
+    for (const other of SCREENSHOT_EXTS) {
+      if (other === img.ext) continue;
+      await unlink(this.sessionFilePath(session.id, other)).catch(() => {});
+    }
+    session.fullPageScreenshotPath = this.screenshotPath(session.id, img.ext);
     delete session.fullPageScreenshot;
     return session;
   }
@@ -447,9 +483,15 @@ export class SessionStore {
       const files = await readdir(this.sessionsDir);
       for (const f of files) {
         if (!f.endsWith(".json")) continue;
-        const raw = await readFile(join(this.sessionsDir, f), "utf8");
-        const session = JSON.parse(raw) as Session;
-        this.sessions.set(session.id, session);
+        try {
+          const raw = await readFile(join(this.sessionsDir, f), "utf8");
+          const session = JSON.parse(raw) as Session;
+          // Never re-admit an id that would later build an unsafe path.
+          if (!isSafeSessionId(session?.id)) continue;
+          this.sessions.set(session.id, session);
+        } catch {
+          // skip one corrupt file rather than dropping the whole restore
+        }
       }
     } catch {
       // first run, nothing to restore
@@ -457,8 +499,8 @@ export class SessionStore {
   }
 
   private async persist(session: Session): Promise<void> {
+    const file = this.sessionFilePath(session.id, "json");
     await mkdir(this.sessionsDir, { recursive: true });
-    const file = join(this.sessionsDir, `${session.id}.json`);
     await writeFile(file, JSON.stringify(session, null, 2), "utf8");
   }
 
@@ -536,11 +578,32 @@ export class SessionStore {
     return session;
   }
 
+  /**
+   * Store a session posted whole over HTTP (`POST /v1/sessions`). The body
+   * is untrusted: the id must be path-safe, the project root is always
+   * this companion's (never the client's), auto-apply is forced off (a
+   * posted session can't skip the plan-confirm gate), and any
+   * client-supplied screenshot path is dropped — only a screenshot we
+   * extract ourselves may set it.
+   */
   async ingestSession(session: Session): Promise<Session> {
+    if (!session || typeof session !== "object") {
+      throw new BadRequestError("session body must be an object");
+    }
+    assertSafeSessionId(session.id);
+    if (!Array.isArray(session.annotations)) {
+      throw new BadRequestError("session.annotations must be an array");
+    }
+    const shot = session.fullPageScreenshot as unknown;
+    if (shot !== undefined && (typeof shot !== "string" || (shot !== "" && !parseImageDataUrl(shot)))) {
+      throw new BadRequestError("unsupported screenshot (expected a PNG or JPEG data URL)");
+    }
     const stored: Session = {
       ...session,
-      projectRoot: session.projectRoot || this.projectRoot,
+      projectRoot: this.projectRoot,
+      autoApply: false,
     };
+    delete stored.fullPageScreenshotPath;
     await this.extractScreenshot(stored);
     this.sessions.set(stored.id, stored);
     if (stored.status === "drafting") this.activeId = stored.id;
@@ -587,6 +650,11 @@ export class SessionStore {
     modules?: Session["modules"],
   ): Promise<Session> {
     const session = this.requireSession(sessionId);
+    // Validate before mutating so a bad image can't strand the session
+    // half-submitted in memory.
+    if (screenshot && !parseImageDataUrl(screenshot)) {
+      throw new BadRequestError("unsupported screenshot (expected a PNG or JPEG data URL)");
+    }
     session.status = "submitted";
     session.submittedAt = Date.now();
     if (screenshot) session.fullPageScreenshot = screenshot;

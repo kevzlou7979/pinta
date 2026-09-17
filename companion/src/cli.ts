@@ -14,6 +14,7 @@ import { attachWebSocket, broadcastAll } from "./ws.js";
 import { startWatcher, type WatchEvent } from "./watcher.js";
 import { registerEntry, unregister, type RegistryEntry } from "./registry.js";
 import { readProjectConfig } from "./project-config.js";
+import { ExtensionTrust } from "./security.js";
 
 // Bundled by esbuild — declared at build time. See build.mjs.
 declare const __PINTA_VERSION__: string;
@@ -172,15 +173,23 @@ async function main(): Promise<void> {
   // Chrome notifications while the side panel (and its WS) is closed.
   const watchEvents: WatchEvent[] = [];
 
+  // One trust instance for HTTP + WS so the first-connect pin is shared.
+  // Its messages (pinned / refused extension) always print — they tell
+  // the user how to recover, so they can't hide behind --verbose.
+  const trust = new ExtensionTrust(args.projectRoot, {
+    log: (msg) => process.stderr.write(`[pinta] ${msg}\n`),
+  });
+
   const { port, server } = await startServer({
     port: args.port,
     autoAllocatePort: !args.portExplicit,
     store,
     log,
+    trust,
     getRegistryEntry: () => registryEntry,
     getWatchEvents: () => watchEvents,
   });
-  const wss = attachWebSocket({ server, store, log });
+  const wss = attachWebSocket({ server, store, log, trust });
 
   // Opt-in task watcher (`.pinta/watch.json`). A dumb shell poll — no
   // agent, no Claude tokens — that broadcasts `watch.new` when the tracker

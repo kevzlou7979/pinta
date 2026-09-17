@@ -37,6 +37,35 @@ matching source files for you.
 
 Recent additions on top of the original V1 pipeline:
 
+**Unreleased**
+
+- **Design Variants** *(unreleased)*. Pick an element (or the whole page)
+  and get 1–5 variants that stay inside your design system, as preview
+  cards. Add an art direction or paste a reference screenshot; **Preview
+  on page**, **Refine** in chat, then **Use this** to apply to source. A
+  match check then compares the live element with the card and **Fix
+  differences** sends only the gaps back. See `spec/SPEC.md` §8 Phase 22.
+- **Code Review** *(unreleased)*. A game-style review of your uncommitted
+  diff (or a topic you name): one card per logical change, Pass / Fail /
+  Learn, a graded run, and Fix on failed cards. See `spec/SPEC.md` §8
+  Phase 23.
+- **Devices canvas** *(unreleased)*. Your running app in many live device
+  frames in one tab — device groups and custom sizes, drag / rearrange,
+  expand, and nav **Sync**. **Annotate this device** makes one frame the
+  annotation target: the side panel's tools work inside it, its width
+  scopes the edit to that breakpoint, and screenshots crop to the device
+  viewport. See `spec/SPEC.md` §8 Phase 24.
+- **Test Pilot: Smoke / Thorough + GitLab filing** *(unreleased)*. Generate
+  a quick happy-path catalog or a thorough one with edge cases; **File
+  failed tests** files each failed row as a GitLab issue via `glab` (or
+  `.pinta/tasks.md` without GitLab). See `spec/SPEC.md` §8 Phase 12.
+- **Report: invoice-ready export** *(unreleased)*. The whole-report export
+  is a summary with one paragraph per weekday under 1000 characters, full
+  dates, duplicates collapsed, and the load balanced across days. See
+  `spec/SPEC.md` §8 Phase 16.
+
+**Released**
+
 - **Task watcher — desktop notifications for new tracker items** *(v0.8.0)*.
   An opt-in, module-scoped companion poll (`.pinta/watch.json`) fires a
   Chrome notification + tab/toolbar badges when new tasks land — even with
@@ -222,7 +251,9 @@ Recent additions on top of the original V1 pipeline:
   SVG paths that follow `currentColor` in light + dark.
 - **Hotkeys** — `Alt+S` (Select) / `Alt+P` (Pen) / `Alt+X` (Exit) /
   `Esc` (Cancel) / `Cmd+Enter` (submit in popover). Avoid Ctrl+Shift+R
-  hard-reload collision.
+  hard-reload collision. Later: `Ctrl+Alt+<letter>` tool shortcuts,
+  `Ctrl+Z` / `Ctrl+Shift+Z` undo / redo, `Alt+V` voice — full list in
+  Settings → Keyboard shortcuts.
 
 See [`spec/SPEC.md` §7–9](spec/SPEC.md) for the full status of each.
 
@@ -261,16 +292,17 @@ See [`spec/SPEC.md` §7–9](spec/SPEC.md) for the full status of each.
 | Test Pilot — tester sheet export (.md + .docx with embedded steps); standalone offline import | shipped |
 | Chat module — global FAB + Annotate Just Ask + Test Pilot per-row chat (new `inquiry` mode) | shipped |
 | `pinta-companion` published to npm — `npx pinta-companion .` | shipped |
-| `vite-plugin-pinta` for instant source mapping | planned (Phase 6) |
+| Vite plugin for instant source mapping (not yet published; `data-source-file` / `data-source-line` attributes are already read) | planned (Phase 6) |
 | Drag-reorder annotations, group by file, undo last edit via git | planned (Phase 7) |
-| Drag-to-resize handles, per-side spacing splits, design-token pickers | planned (Phase 8) |
+| Drag-to-resize handles (Resize tool) and per-side spacing splits | shipped |
+| Design-token pickers | planned (Phase 8) |
 | Cropped composite screenshot (5–10× smaller, only annotation bboxes) | planned |
 
 ---
 
 ## Modules included
 
-Pinta ships with five built-in **modules** — small agent-side
+Pinta ships with built-in **modules** — small agent-side
 integrations that extend the core annotation loop. Enable in
 **Settings**, opt in per submit (or per query for interactive modules).
 The wire contract stays narrow: each module carries a stable id and a
@@ -357,9 +389,18 @@ daily, weekly, 10-day sprint, or a custom range, multi-project aware.
 One-click Markdown export, per-day or whole-range. See `spec/SPEC.md`
 §8 Phase 16.
 
+### 🎨  Design Variants · 🔍  Code Review · 📱  Devices  ·  *interactive, unreleased*
+
+**Design Variants** proposes 1–5 on-system variants for an element or
+page and applies the one you pick, then checks the page matches the card
+(Phase 22). **Code Review** deals your diff as Pass / Fail / Learn cards
+(Phase 23). **Devices** shows your app in many live device frames, with
+nav sync and annotate-in-a-device — no agent involved (Phase 24). See
+`spec/SPEC.md` §8.
+
 ### Writing your own
 
-Beyond the five built-ins, Pinta can load **importable modules** — a
+Beyond the built-ins, Pinta can load **importable modules** — a
 third party ships one as a single `.pinta-module.json` (manifest + agent
 instructions) dropped into `.pinta/modules/`, gated behind a Settings
 consent dialog and a default-deny capability check (sample at
@@ -670,40 +711,18 @@ endpoints respond as specified.
 
 V1 covers the core loop. What's next, in priority order:
 
-- **Phase 6 — `vite-plugin-pinta`.** Inject `data-source-file` /
+- **Phase 6 — Vite source-mapping plugin.** Inject `data-source-file` /
   `data-source-line` in dev so the agent doesn't have to grep. Targets >95%
-  source-mapping accuracy.
+  source-mapping accuracy. Not published yet; the extension already reads
+  those attributes when any build step adds them.
 - **Phase 7 — Polish.** Drag-to-reorder annotations, group by file in the
-  side panel, undo last edit (rolls back via git), plan-then-execute
-  toggle. (Per-project `.pinta.json` shipped alongside multi-project
-  mode and is already wired up.)
-- **Phase 13 — Test Pilot catalog editing.** Delete / add / edit /
-  rename / reorder sections + tests from the side panel, with
-  on-disk `.pinta/test-docs/{docId}.md` kept in sync via a new
-  companion endpoint. Lets you patch AI-generated catalogs in place
-  instead of regenerating.
-- **Phase 14 — Inquiry mode (chat module).** Adds a third module verb
-  alongside *act*: a shared bottom-sheet chat with three entry points
-  — a global header icon for FAQ-style asks, a "Just Ask" checkbox
-  on Annotate (Submit becomes Ask), and a FAB on the Test Pilot tab
-  for per-row context. All three share one `op: "chat"` wire and
-  one sheet UI. Replaces the current Test Pilot per-row Notes.
-- **Phase 15 — AuditFlow module.** Lighthouse-style audit surface as
-  a Pinta module. Four built-in categories (security / perf / a11y /
-  mobile) plus user-defined custom audits — paste guidance or upload
-  a `.md` and the agent generates the rules for you. Per-check
-  **Fix with agent** composes a Pinta annotation and routes through
-  the standard source-edit loop; Discuss routes to the Phase 14
-  chat; File issue routes through GitLab Issues. Card + table
-  views, deterministic scoring, cross-run continuity. The audit
-  becomes a source of work the existing modules consume.
-- **Phase 18 — Agent role routing.** `/pinta --annotate` /
-  `--test-pilot` / `--audit` / `--chat` flags let multi-terminal
-  users dedicate each Claude Code window to a workload. Agents
-  silently skip sessions outside their role so a long audit run
-  doesn't block the next annotation. Skill-only change — no wire
-  changes, no companion changes. Roles stack; no-flag = current
-  "claim everything" behavior.
+  side panel, undo last edit (rolls back via git). (Per-project
+  `.pinta.json` and the plan-then-execute / Auto-apply toggle already
+  shipped.)
+- **Phase 15 follow-ups — AuditFlow.** Generate custom checks from pasted
+  guidance, a `.md`, or a URL; snooze and a cross-run trend chart.
+- **Phase 17 — Claude Design.** An ambient design-system module so
+  annotated edits follow your component patterns.
 - **Beyond.** Conflict detection, multi-tab sessions, read-only sharing.
   See [`spec/SPEC.md` §9](spec/SPEC.md#9-open-questions) for the open
   design questions.

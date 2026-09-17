@@ -27,9 +27,75 @@
       urlDraft = devices.state.url;
       hydrated = true;
     });
-    const onMsg = (e: MessageEvent): void => devices.handleNavMessage(e);
+    // Which tab this canvas is. Every message in and out is tagged with
+    // it, so it has to be resolved before the runtime listener registers
+    // (a miss there returns without calling sendResponse, which the panel
+    // sees as a rejection) and before any frame message is forwarded (a
+    // null tabId makes the panel drop it).
+    let myTabId: number | null = null;
+    // Never rejects: a rejection here would leave the runtime listener
+    // unregistered forever and silently drop every frame message.
+    const tabIdReady = chrome.tabs
+      .getCurrent()
+      .then((t) => {
+        myTabId = t?.id ?? null;
+      })
+      .catch(() => {
+        myTabId = null;
+      });
+    const onMsg = (e: MessageEvent): void => {
+      if (devices.handleAnnotateAck(e)) return;
+      const out = devices.readFrameOut(e);
+      if (out) {
+        // Forward the frame's message to the side panel, tagged with this
+        // tab so the panel can treat it as coming from the device frame.
+        void tabIdReady.then(() => {
+          if (myTabId == null) return;
+          void chrome.runtime
+            .sendMessage({ type: "devices.frame-out", tabId: myTabId, payload: out })
+            .catch(() => {});
+        });
+        return;
+      }
+      devices.handleNavMessage(e);
+    };
     window.addEventListener("message", onMsg);
-    return () => window.removeEventListener("message", onMsg);
+    const onRuntime = (
+      msg: unknown,
+      sender: chrome.runtime.MessageSender,
+      sendResponse: (r: unknown) => void,
+    ): boolean | undefined => {
+      if (sender.id !== chrome.runtime.id) return;
+      const m = msg as { type?: string; tabId?: number; payload?: unknown } | null;
+      if (m?.tabId !== myTabId) return;
+      if (m.type === "devices.annotate-frame-rect") {
+        void devices.annotateFrameRect().then((rect) => sendResponse({ rect }));
+        return true;
+      }
+      if (m.type === "devices.relay") {
+        sendResponse({ delivered: devices.relayToAnnotateFrame(m.payload) });
+        return;
+      }
+      if (m.type === "devices.reping-annotate") {
+        // The panel didn't hear from a frame — re-activate the current
+        // target so its overlay announces itself again.
+        sendResponse({ annotating: devices.repingAnnotate() });
+        return;
+      }
+      return;
+    };
+    let listening = false;
+    let disposed = false;
+    void tabIdReady.then(() => {
+      if (disposed) return;
+      chrome.runtime.onMessage.addListener(onRuntime);
+      listening = true;
+    });
+    return () => {
+      disposed = true;
+      window.removeEventListener("message", onMsg);
+      if (listening) chrome.runtime.onMessage.removeListener(onRuntime);
+    };
   });
 
   // Keep the URL bar following sync navigations — but never while the

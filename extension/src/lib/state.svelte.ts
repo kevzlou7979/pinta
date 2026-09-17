@@ -116,19 +116,25 @@ import {
 } from "./pinta-settings.js";
 import {
   DEFAULT_VARIANT_COUNT,
-  MAX_VARIANTS,
+  isValidVariantCount,
   normalizeDirection,
   parseApplyResult,
   parseDiscussResult,
   parsePagesResult,
   parseVariantsResult,
   sanitizeVariantHtml,
+  splitPreviewBackdrop,
   validateVariantRun,
+  MAX_PAGES,
+  MAX_RENDER_DIFFS,
+  diffPathForAgent,
   type DesignVariant,
+  type RenderCheck,
   type PageEntry,
   type VariantRun,
   type VariantScope,
 } from "./design-variants.js";
+import { safeExternalUrl, scrubUrl } from "../content/capture.js";
 import {
   nextStreak,
   normalizeTopic,
@@ -514,6 +520,14 @@ class ExtensionState {
    * `autoApply` / `includeScreenshot` pattern).
    */
   tickedModules = $state<Record<string, boolean>>({});
+  /** Submit-footer choices. Remembered across submits AND panel reloads —
+   *  the side panel unmounts every time it closes, and re-ticking the same
+   *  boxes on every batch is busywork. */
+  submitOptions = $state<{
+    autoApply: boolean;
+    includeScreenshot: boolean;
+    justAsk: boolean;
+  }>({ autoApply: true, includeScreenshot: false, justAsk: false });
   /**
    * Draft for the Annotate "Add a task" composer (NoteComposer). Held in
    * the store, not the component, so an in-progress task survives an
@@ -707,6 +721,13 @@ class ExtensionState {
   get lastKnownUrl(): string | null {
     return this.lastUrl;
   }
+
+  /** `lastUrl` with credential-like query / fragment parts redacted
+   *  (scrubUrl). Use for EVERY url that leaves the extension — module
+   *  queries, agent payloads, companion session records. */
+  private get queryUrl(): string {
+    return scrubUrl(this.lastUrl ?? "");
+  }
   /** Origin currently driving the standalone-mode session (IDB key). */
   private currentOrigin: string | null = null;
 
@@ -761,6 +782,7 @@ class ExtensionState {
     // in IndexedDB and don't depend on which companion we land on.
     void this.refreshImported();
     void this.loadModules();
+    void this.loadSubmitOptions();
     void this.loadPulseSettings();
     void this.loadWatchPending();
     void this.loadAutoReload();
@@ -1135,7 +1157,7 @@ class ExtensionState {
     // maintained artifact across spec revisions. A fresh UUID is minted
     // only on the first generate (no prior catalog).
     const docId = this.testPilot.catalog?.docId ?? crypto.randomUUID();
-    const url = this.lastUrl ?? "";
+    const url = this.queryUrl;
     this.testPilot.error = null;
     this.testPilot.pending = {
       kind: "doc-generate",
@@ -1186,7 +1208,7 @@ class ExtensionState {
     // companion's `extractTestDocContent` writes the new content; with
     // a stable docId, no orphan files accumulate.
     const docId = this.testPilot.catalog?.docId ?? crypto.randomUUID();
-    const url = this.lastUrl ?? "";
+    const url = this.queryUrl;
     this.testPilot.error = null;
     this.testPilot.pending = { kind: "doc-parse", sessionId: "", filename };
     this.armTestPilotTimeout();
@@ -1238,7 +1260,7 @@ class ExtensionState {
       }
     }
     if (!section) return;
-    const url = this.lastUrl ?? "";
+    const url = this.queryUrl;
     this.testPilot.error = null;
     this.testPilot.pendingDetails[testId] = { askedAt: Date.now() };
     this.armDetailTimeout(testId);
@@ -1436,7 +1458,7 @@ class ExtensionState {
       runId: crypto.randomUUID(),
       docId: catalog.docId,
       docTitle: catalog.title ?? catalog.filename,
-      url: this.lastUrl ?? "",
+      url: this.queryUrl,
       tests: unfiled,
       gitlab,
       fallbackToLocal: true,
@@ -1446,7 +1468,7 @@ class ExtensionState {
     this.armFileIssuesTimeout(unfiled.length);
     this.send({
       type: "module.query.submit",
-      url: this.lastUrl ?? "",
+      url: this.queryUrl,
       moduleId: "test-pilot",
       moduleSettings: this.modules["test-pilot"]?.settings ?? {},
       queryComment,
@@ -1499,7 +1521,7 @@ class ExtensionState {
           }
           this.testPilot.filedIssues[r.testId] = {
             target: r.target === "gitlab" ? "gitlab" : "local",
-            url: typeof r.url === "string" ? r.url : undefined,
+            url: safeExternalUrl(r.url),
             path: typeof r.path === "string" ? r.path : undefined,
             title: typeof r.title === "string" ? r.title : undefined,
             at: Date.now(),
@@ -1741,7 +1763,7 @@ class ExtensionState {
     // Cap history so payloads stay bounded for long threads. Last
     // N messages including the just-appended user prompt.
     const history = (test.chat ?? []).slice(-ExtensionState.CHAT_HISTORY_CAP);
-    const url = this.lastUrl ?? "";
+    const url = this.queryUrl;
     const detailedResponses =
       this.modules["chat"]?.settings?.detailed_responses === true;
     const queryComment = JSON.stringify({
@@ -1789,7 +1811,7 @@ class ExtensionState {
   //
   // Routing key is the section title (not a testId): op "suggest-tests"
   // with a top-level `sectionTitle`, handled by handleSuggestSync.
-  // Agent handler: SKILL.md §7.10.4.
+  // Agent handler: SKILL.md §7.10 op suggest-tests.
   // ────────────────────────────────────────────────────────────────
 
   /** Ask the agent for additional test scenarios for one section. */
@@ -1831,7 +1853,7 @@ class ExtensionState {
     this.testPilot.error = null;
     this.send({
       type: "module.query.submit",
-      url: this.lastUrl ?? "",
+      url: this.queryUrl,
       moduleId: "test-pilot",
       moduleSettings: settings,
       queryComment,
@@ -1972,7 +1994,7 @@ class ExtensionState {
     this.armSectionChatTimeout(sectionTitle);
     this.send({
       type: "module.query.submit",
-      url: this.lastUrl ?? "",
+      url: this.queryUrl,
       moduleId: "test-pilot",
       moduleSettings: settings,
       queryComment,
@@ -2382,7 +2404,7 @@ class ExtensionState {
     const history = this.chat.global.slice(
       -ExtensionState.CHAT_HISTORY_CAP,
     );
-    const url = this.lastUrl ?? "";
+    const url = this.queryUrl;
     const detailedResponses =
       this.modules["chat"]?.settings?.detailed_responses === true;
     const queryComment = JSON.stringify({
@@ -2450,7 +2472,7 @@ class ExtensionState {
       -ExtensionState.CHAT_HISTORY_CAP,
     );
     const session = this.session;
-    const url = this.lastUrl ?? "";
+    const url = this.queryUrl;
     const detailedResponses =
       this.modules["chat"]?.settings?.detailed_responses === true;
     // Phase 14.5 — if the chat module's redact_pii setting is on
@@ -2477,7 +2499,7 @@ class ExtensionState {
           rawNearby && redactPiiEnabled
             ? rawNearby.map((t) => redactPii(t))
             : rawNearby,
-        url: a.url,
+        url: a.url ? scrubUrl(a.url) : a.url,
       };
     });
     // Phase 14.5 — flag captured page content that contains prompt-
@@ -2572,7 +2594,7 @@ class ExtensionState {
     const history = this.chat.annotateBatch[batchId].slice(
       -ExtensionState.CHAT_HISTORY_CAP,
     );
-    const url = this.lastUrl ?? "";
+    const url = this.queryUrl;
     const detailedResponses =
       this.modules["chat"]?.settings?.detailed_responses === true;
     const primary = annotation.targets?.[0] ?? annotation.target;
@@ -2592,7 +2614,7 @@ class ExtensionState {
         rawNearby && redactPiiEnabled
           ? rawNearby.map((t) => redactPii(t))
           : rawNearby,
-      url: annotation.url,
+      url: annotation.url ? scrubUrl(annotation.url) : annotation.url,
     };
     // Phase 14.5 — same injection-marker scan as the batch sender, but
     // over the single annotation in this scoped ask. See sibling method
@@ -3684,7 +3706,7 @@ class ExtensionState {
   // ─── Phase 22 — Design Variants ─────────────────────────────────────
   //
   // Interactive module: pick an element (or whole page), the agent
-  // returns 3 on-system design variants, the tab renders them as
+  // returns 1–5 on-system design variants, the tab renders them as
   // sandboxed cards + optional live in-page swap, and the chosen one is
   // applied to source via a second op. A Pages gallery iframes the LIVE
   // dev-server routes at device widths (no agent involvement to render).
@@ -3730,11 +3752,11 @@ class ExtensionState {
     device: string;
     /** Bumped by refreshGallery() — re-keys the gallery iframes. */
     galleryNonce: number;
-    /** How many variants the NEXT generate asks for (2..MAX_VARIANTS,
+    /** How many variants the NEXT generate asks for (1..MAX_VARIANTS,
      *  persisted). */
     count: number;
     /** Optional free-text art direction for the NEXT generate (e.g.
-     *  "glassy, more compact"). Not persisted — per-run intent. */
+     *  "clearer hierarchy, more compact"). Not persisted — per-run intent. */
     direction: string;
     /** Optional pasted look-reference image (JPEG data URL, downscaled
      *  client-side). Session-only — never persisted (storage quota);
@@ -3797,6 +3819,10 @@ class ExtensionState {
         Array.isArray(raw.currentRun.variants)
       ) {
         this.variants.currentRun = raw.currentRun;
+        // A check can't survive a panel reload — never show a stuck spinner.
+        if (this.variants.currentRun?.match?.status === "checking") {
+          delete this.variants.currentRun.match;
+        }
       }
       if (Array.isArray(raw.pages)) {
         this.variants.pages = raw.pages.filter(
@@ -3811,12 +3837,7 @@ class ExtensionState {
         this.variants.device = raw.device;
       }
       const count = (raw as { count?: unknown }).count;
-      if (
-        typeof count === "number" &&
-        Number.isInteger(count) &&
-        count >= 2 &&
-        count <= MAX_VARIANTS
-      ) {
+      if (isValidVariantCount(count)) {
         this.variants.count = count;
       }
     } catch {
@@ -3966,7 +3987,7 @@ class ExtensionState {
       op: "variants-generate",
       runId,
       scope,
-      url: this.lastUrl ?? "",
+      url: this.queryUrl,
       designSystemPath:
         typeof settings.designSystemPath === "string"
           ? settings.designSystemPath
@@ -3979,7 +4000,7 @@ class ExtensionState {
     });
     this.send({
       type: "module.query.submit",
-      url: this.lastUrl ?? "",
+      url: this.queryUrl,
       moduleId: "design-variants",
       moduleSettings: settings,
       queryComment,
@@ -3989,7 +4010,10 @@ class ExtensionState {
 
   /** Apply the chosen variant to source. Stateless on the agent side —
    *  everything it needs (target + variant spec) rides in the payload. */
-  async applyVariant(variantId: string): Promise<void> {
+  async applyVariant(
+    variantId: string,
+    fix?: { diffs: RenderCheck["diffs"]; missing: string[] },
+  ): Promise<void> {
     if (this.variants.pending) return;
     const run = this.variants.currentRun;
     const variant = run?.variants.find((v) => v.id === variantId);
@@ -4001,6 +4025,7 @@ class ExtensionState {
     }
     // Never leave a live preview behind while the agent rewrites source.
     this.restoreVariantPreview();
+    this.clearVerifyRetry();
     const runId = crypto.randomUUID();
     this.variants.pending = {
       runId,
@@ -4013,7 +4038,19 @@ class ExtensionState {
     this.claimNotice = null;
     this.armVariantsTimeout("apply the variant");
     const settings = this.modules["design-variants"]?.settings ?? {};
-    const { previewHtml: _omit, ...lean } = $state.snapshot(variant);
+    // Element scope: previewHtml rides along as the VISUAL CONTRACT the
+    // agent must reproduce (≤ 8 KB, element only, backdrop removed) —
+    // without it the agent can only approximate from the summary. Page
+    // scope keeps it out: that preview is a simplified skeleton and up
+    // to 20 KB, so the summary stays the spec (token economy).
+    const { previewHtml, previewBackground: _bg, ...lean } =
+      $state.snapshot(variant);
+    // Fix pass: the contract rides along only when card nodes are
+    // MISSING on the page — plain property diffs don't need the markup.
+    const contract =
+      run.scope.kind === "element" && (!fix || fix.missing.length > 0)
+        ? { previewHtml: sanitizeVariantHtml(splitPreviewBackdrop(previewHtml).elementHtml) }
+        : {};
     const queryComment = JSON.stringify({
       op: "variants-apply",
       runId,
@@ -4024,11 +4061,24 @@ class ExtensionState {
         typeof settings.designSystemPath === "string"
           ? settings.designSystemPath
           : "",
-      variant: lean,
+      variant: { ...lean, ...contract },
+      // Fix pass: the variant is already applied; only these computed
+      // differences (card vs page) need correcting.
+      ...(fix
+        ? {
+            fix: {
+              diffs: fix.diffs.slice(0, MAX_RENDER_DIFFS).map((d) => ({
+                ...d,
+                path: diffPathForAgent(d.path),
+              })),
+              missing: fix.missing.slice(0, 10).map(diffPathForAgent),
+            },
+          }
+        : {}),
     });
     this.send({
       type: "module.query.submit",
-      url: this.lastUrl ?? "",
+      url: this.queryUrl,
       moduleId: "design-variants",
       moduleSettings: settings,
       queryComment,
@@ -4054,13 +4104,13 @@ class ExtensionState {
     this.armVariantsTimeout("discover the app's pages");
     this.send({
       type: "module.query.submit",
-      url: this.lastUrl ?? "",
+      url: this.queryUrl,
       moduleId: "design-variants",
       moduleSettings: this.modules["design-variants"]?.settings ?? {},
       queryComment: JSON.stringify({
         op: "variants-discover-pages",
         runId,
-        url: this.lastUrl ?? "",
+        url: this.queryUrl,
       }),
     });
   }
@@ -4069,6 +4119,11 @@ class ExtensionState {
     const clean = path.trim();
     if (!clean.startsWith("/")) return;
     if (this.variants.pages.some((p) => p.path === clean)) return;
+    // Every page is a live iframe in the panel — same cap as discovery.
+    if (this.variants.pages.length >= MAX_PAGES) {
+      this.variants.error = `The Pages gallery holds up to ${MAX_PAGES} routes — remove one first.`;
+      return;
+    }
     this.variants.pages = [
       ...this.variants.pages,
       { path: clean, label: label?.trim() || clean },
@@ -4101,9 +4156,126 @@ class ExtensionState {
   }
 
   setVariantsCount(n: number): void {
-    if (!Number.isInteger(n) || n < 2 || n > MAX_VARIANTS) return;
+    if (!isValidVariantCount(n)) return;
     this.variants.count = n;
     void this.saveVariantsState();
+  }
+
+  private verifyTimer: ReturnType<typeof setTimeout> | null = null;
+  /** The single pending auto-retry of the match check (apply-done delay
+   *  or a not-found retry). Cleared on every new check / reset. */
+  private verifyRetryTimer: ReturnType<typeof setTimeout> | null = null;
+  private verifyAttempt = 0;
+  private verifyAuto = false;
+  private static readonly VERIFY_MAX_ATTEMPTS = 3;
+
+  private clearVerifyRetry(): void {
+    if (this.verifyRetryTimer) clearTimeout(this.verifyRetryTimer);
+    this.verifyRetryTimer = null;
+  }
+
+  private scheduleVerifyRetry(delayMs: number, attempt: number): void {
+    this.clearVerifyRetry();
+    this.verifyRetryTimer = setTimeout(() => {
+      this.verifyRetryTimer = null;
+      void this.verifyAppliedVariant({ auto: true, attempt });
+    }, delayMs);
+  }
+
+  /** Post-apply match check. Asks the page to render the applied card
+   *  off-screen and diff it against the live element. Element scope
+   *  only; read-only; zero agent tokens. `auto` = fired after an apply,
+   *  which tolerates a slow hot-reload (element not found yet, or the
+   *  old element still mounted) with a few spaced retries. */
+  async verifyAppliedVariant(opts: { auto?: boolean; attempt?: number } = {}): Promise<void> {
+    const run = this.variants.currentRun;
+    const variant = run?.variants.find((v) => v.id === run.appliedVariantId);
+    if (!run || !variant || run.scope.kind !== "element") return;
+    // A manual check (or the retry itself firing) supersedes any queued retry.
+    this.clearVerifyRetry();
+    const attempt = opts.attempt ?? 1;
+    this.verifyAttempt = attempt;
+    this.verifyAuto = !!opts.auto;
+    run.match = { status: "checking", checkedAt: Date.now() };
+    const fail = (message: string) => {
+      if (this.variants.currentRun?.match?.status !== "checking") return;
+      this.variants.currentRun.match = { status: "error", message, checkedAt: Date.now() };
+    };
+    const tabId = await ExtensionState.currentTabId();
+    if (tabId == null) {
+      fail("Open your app's tab, then check again.");
+      return;
+    }
+    if (this.verifyTimer) clearTimeout(this.verifyTimer);
+    this.verifyTimer = setTimeout(
+      () => fail("The page didn't answer — reload the app tab and check again."),
+      8000,
+    );
+    const ok = await ExtensionState.sendToTabWithInject(tabId, {
+      type: "variants.verify",
+      variantId: variant.id,
+      target: $state.snapshot(run.scope.target),
+      // The bounded whole-page walk only on a manual check or the LAST
+      // auto attempt — early attempts usually race the hot-reload.
+      allowGlobal: !opts.auto || attempt >= ExtensionState.VERIFY_MAX_ATTEMPTS,
+      previewHtml: sanitizeVariantHtml(
+        splitPreviewBackdrop(variant.previewHtml).elementHtml,
+      ),
+    });
+    if (!ok) fail("Couldn't reach the page — reload the app tab and check again.");
+  }
+
+  /** `variants.verify-result` from the content script. */
+  handleVariantVerifyResult(m: {
+    variantId?: string;
+    found?: boolean;
+    check?: RenderCheck;
+    error?: string;
+  }): void {
+    const run = this.variants.currentRun;
+    if (!run || !m.variantId || m.variantId !== run.appliedVariantId) return;
+    if (run.match?.status !== "checking") return;
+    if (this.verifyTimer) clearTimeout(this.verifyTimer);
+    // Auto check right after an apply: the dev server may still be
+    // swapping modules. Retry (spaced) only while the element isn't found —
+    // a found element with diffs is a real result, not a reload race.
+    if (
+      this.verifyAuto &&
+      this.verifyAttempt < ExtensionState.VERIFY_MAX_ATTEMPTS &&
+      m.found === false
+    ) {
+      this.scheduleVerifyRetry(2500, this.verifyAttempt + 1);
+      return;
+    }
+    if (m.found === false) {
+      run.match = { status: "not-found", checkedAt: Date.now() };
+    } else if (m.error || !m.check) {
+      run.match = {
+        status: "error",
+        message: m.error ?? "Couldn't compare the page with the card.",
+        checkedAt: Date.now(),
+      };
+    } else {
+      run.match = {
+        status: "done",
+        score: m.check.score,
+        diffs: m.check.diffs,
+        missing: m.check.missing,
+        checkedAt: Date.now(),
+      };
+    }
+    void this.saveVariantsState();
+  }
+
+  /** "Fix differences" — re-run apply with only the measured diffs. */
+  fixVariantDifferences(): void {
+    const run = this.variants.currentRun;
+    const match = run?.match;
+    if (!run?.appliedVariantId || match?.status !== "done") return;
+    void this.applyVariant(run.appliedVariantId, {
+      diffs: match.diffs ?? [],
+      missing: match.missing ?? [],
+    });
   }
 
   refreshGallery(): void {
@@ -4122,6 +4294,7 @@ class ExtensionState {
       return;
     }
     this.restoreVariantPreview();
+    this.clearVerifyRetry();
     this.variants.currentRun = null;
     this.variants.pickedTarget = null;
     this.variants.error = null;
@@ -4129,6 +4302,24 @@ class ExtensionState {
     this.variants.discussVariantId = null;
     void this.saveVariantsState();
     void this.saveVariantChats();
+  }
+
+  /** Header "Reset" — back to a blank form. Drops the run, the picked
+   *  element (and any pick in progress), direction, reference image,
+   *  Discuss threads and errors, and restores a live on-page preview.
+   *  Keeps preferences: count, device and the Pages gallery. Refuses
+   *  while a request is in flight (same rule as clearVariantsRun). */
+  resetVariants(): void {
+    if (this.variants.pending) {
+      this.variants.error =
+        "A request is still running — wait for it (or Cancel) before resetting.";
+      return;
+    }
+    if (this.variants.picking) void this.cancelVariantPick();
+    this.clearVariantsRun();
+    this.variants.direction = "";
+    this.variants.refImage = null;
+    this.variants.scopeKind = "element";
   }
 
   /** User clicked Cancel on a stuck variants op. */
@@ -4140,29 +4331,28 @@ class ExtensionState {
     this.variants.error = "Design Variants request cancelled.";
   }
 
-  /** Live-swap a variant onto the page (element scope only). The swap
-   *  HTML is sanitized HERE as well as in the content script — this side
-   *  because the payload came from the agent, that side because messages
-   *  can come from anywhere. */
+  /** Live-swap a variant onto the page. Element scope replaces the picked
+   *  element; page scope hides the body's children and renders the variant
+   *  beside them (nothing is destroyed, so restoring always works). The
+   *  swap HTML is sanitized HERE as well as in the content script — this
+   *  side because the payload came from the agent, that side because
+   *  messages can come from anywhere. */
   async previewVariantOnPage(variantId: string): Promise<void> {
     const run = this.variants.currentRun;
     const variant = run?.variants.find((v) => v.id === variantId);
-    if (!run || !variant || run.scope.kind !== "element") return;
+    if (!run || !variant) return;
+    const isElement = run.scope.kind === "element";
     const tabId = await ExtensionState.currentTabId();
     if (tabId == null) return;
-    const swap = variant.swap
-      ? {
-          cssChanges: variant.swap.cssChanges
-            ? $state.snapshot(variant.swap.cssChanges)
-            : undefined,
-          html: variant.swap.html
-            ? sanitizeVariantHtml(variant.swap.html)
-            : undefined,
-        }
-      : null;
-    if (!swap || (!swap.cssChanges && !swap.html)) {
+    // Element scope renders the card's own markup (the visual contract)
+    // minus any backdrop wrapper — the page is the ground. Page scope IS
+    // the whole surface, so its backdrop is part of what you're judging.
+    const previewHtml = sanitizeVariantHtml(
+      isElement ? splitPreviewBackdrop(variant.previewHtml).elementHtml : variant.previewHtml,
+    );
+    if (previewHtml.trim() === "") {
       this.variants.error =
-        "This variant has no in-page preview — use the card preview.";
+        "This variant has nothing to preview on the page — use the card preview.";
       return;
     }
     this.variants.previewingVariantId = variantId;
@@ -4171,8 +4361,8 @@ class ExtensionState {
       type: "variants.preview",
       variantId,
       label: variant.label,
-      target: $state.snapshot(run.scope.target),
-      swap,
+      target: run.scope.kind === "element" ? $state.snapshot(run.scope.target) : null,
+      previewHtml,
     }).then((ok) => {
       if (!ok) {
         this.variants.previewingVariantId = null;
@@ -4268,14 +4458,17 @@ class ExtensionState {
     this.variants.error = null;
     void this.saveVariantChats();
     const settings = this.modules["design-variants"]?.settings ?? {};
+    // History = the turns BEFORE this prompt (userMsg was just appended and
+    // already rides as `prompt`) — no duplicate tokens.
     const history = (this.variants.variantChats[variantId] ?? [])
+      .slice(0, -1)
       .slice(-6)
       .map((m) => ({ role: m.role, text: m.text }));
     this.variants.pendingDiscuss[variantId] = true;
     this.armVariantsOpTimer(variantId, this.variants.pendingDiscuss);
     this.send({
       type: "module.query.submit",
-      url: this.lastUrl ?? "",
+      url: this.queryUrl,
       moduleId: "design-variants",
       moduleSettings: settings,
       queryComment: JSON.stringify({
@@ -4430,7 +4623,7 @@ class ExtensionState {
             runId: parsed.runId ?? pending.runId,
             createdAt: Date.now(),
             scope,
-            url: this.lastUrl ?? "",
+            url: this.queryUrl,
             variants: validateVariantRun(parsed.variants, scope.kind),
           };
           // New deck of variants — the old run's Discuss threads must
@@ -4450,7 +4643,17 @@ class ExtensionState {
             parsed.variantId ?? pending.variantId;
           this.variants.currentRun.applySummary = parsed.summary;
           this.variants.currentRun.appliedFiles = parsed.files;
+          delete this.variants.currentRun.match;
           void this.saveVariantsState();
+          // Give the dev server time to hot-reload, then check the page
+          // against the card (element scope; zero agent tokens).
+          if (this.variants.currentRun.scope.kind === "element") {
+            this.variants.currentRun.match = {
+              status: "checking",
+              checkedAt: Date.now(),
+            };
+            this.scheduleVerifyRetry(3000, 1);
+          }
           // The source changed — a gallery refresh shows the new look.
           this.refreshGallery();
         } else {
@@ -4739,13 +4942,13 @@ class ExtensionState {
     );
     this.send({
       type: "module.query.submit",
-      url: this.lastUrl ?? "",
+      url: this.queryUrl,
       moduleId: "code-review",
       moduleSettings: this.modules["code-review"]?.settings ?? {},
       queryComment: JSON.stringify({
         op: "review-gather",
         runId,
-        url: this.lastUrl ?? "",
+        url: this.queryUrl,
         ...(cleanTopic !== "" ? { topic: cleanTopic } : {}),
       }),
     });
@@ -4867,7 +5070,7 @@ class ExtensionState {
     this.armReviewOpTimer("review-learn", cardId, this.review.pendingLearn);
     this.send({
       type: "module.query.submit",
-      url: this.lastUrl ?? "",
+      url: this.queryUrl,
       moduleId: "code-review",
       moduleSettings: this.modules["code-review"]?.settings ?? {},
       queryComment: JSON.stringify({
@@ -4904,7 +5107,7 @@ class ExtensionState {
     this.armReviewOpTimer("review-fix", cardId, this.review.pendingFix);
     this.send({
       type: "module.query.submit",
-      url: this.lastUrl ?? "",
+      url: this.queryUrl,
       moduleId: "code-review",
       moduleSettings: this.modules["code-review"]?.settings ?? {},
       queryComment: JSON.stringify({
@@ -5185,7 +5388,7 @@ class ExtensionState {
   /** Composite key for the per-card timer maps. NUL separator so a card id
    *  with spaces / colons can't collide across the boundary. */
   private static cardTimerKey(moduleId: string, cardId: string): string {
-    return `${moduleId} ${cardId}`;
+    return `${moduleId}\u0000${cardId}`;
   }
 
   /** Recompute the DERIVED `currentRun` from the raw agent run + the
@@ -5512,7 +5715,7 @@ class ExtensionState {
     this.armAuditOpTimer("audit-discuss", check.id, this.audit.pendingCheckChat);
     this.send({
       type: "module.query.submit",
-      url: this.lastUrl ?? "",
+      url: this.queryUrl,
       moduleId: "audit-flow",
       moduleSettings: this.modules["audit-flow"]?.settings ?? {},
       queryComment,
@@ -5605,7 +5808,7 @@ class ExtensionState {
     this.armAuditOpTimer("audit-file-issue", check.id, this.audit.pendingFileIssue);
     this.send({
       type: "module.query.submit",
-      url: this.lastUrl ?? "",
+      url: this.queryUrl,
       moduleId: "audit-flow",
       moduleSettings: this.modules["audit-flow"]?.settings ?? {},
       queryComment,
@@ -5625,7 +5828,7 @@ class ExtensionState {
       if (payload && payload.type === "audit-issue-filed") {
         this.audit.filedIssues[checkId] = {
           target: payload.target === "gitlab" ? "gitlab" : "local",
-          url: typeof payload.url === "string" ? payload.url : undefined,
+          url: safeExternalUrl(payload.url),
           path: typeof payload.path === "string" ? payload.path : undefined,
           title: typeof payload.title === "string" ? payload.title : undefined,
           at: Date.now(),
@@ -5679,7 +5882,7 @@ class ExtensionState {
     this.armAuditOpTimer("audit-fix", check.id, this.audit.pendingCheckFix);
     this.send({
       type: "module.query.submit",
-      url: this.lastUrl ?? "",
+      url: this.queryUrl,
       moduleId: "audit-flow",
       moduleSettings: this.modules["audit-flow"]?.settings ?? {},
       queryComment,
@@ -5756,7 +5959,7 @@ class ExtensionState {
     this.audit.error = null;
     this.claimNotice = null;
     this.armAuditTimeout();
-    const url = this.lastUrl ?? "";
+    const url = this.queryUrl;
     const queryComment = JSON.stringify({
       op: "audit",
       runId,
@@ -5815,7 +6018,7 @@ class ExtensionState {
     });
     this.send({
       type: "module.query.submit",
-      url: this.lastUrl ?? "",
+      url: this.queryUrl,
       moduleId: "audit-flow",
       moduleSettings: {},
       queryComment,
@@ -5982,7 +6185,7 @@ class ExtensionState {
     );
     this.send({
       type: "module.query.submit",
-      url: this.lastUrl ?? "",
+      url: this.queryUrl,
       moduleId,
       moduleSettings: settings,
       queryComment,
@@ -6022,7 +6225,7 @@ class ExtensionState {
     for (const item of items) {
       this.send({
         type: "module.query.submit",
-        url: this.lastUrl ?? "",
+        url: this.queryUrl,
         moduleId,
         moduleSettings: settings,
         queryComment: JSON.stringify({
@@ -6113,7 +6316,7 @@ class ExtensionState {
     });
     this.send({
       type: "module.query.submit",
-      url: this.lastUrl ?? "",
+      url: this.queryUrl,
       moduleId,
       moduleSettings: settings,
       queryComment,
@@ -6194,11 +6397,11 @@ class ExtensionState {
     ) as Record<string, string | boolean>;
     const pageUrl =
       this.lastUrl && /^https?:\/\//i.test(this.lastUrl)
-        ? this.lastUrl
+        ? scrubUrl(this.lastUrl)
         : undefined;
     this.send({
       type: "module.query.submit",
-      url: this.lastUrl ?? "",
+      url: this.queryUrl,
       moduleId,
       moduleSettings: settings,
       queryComment: JSON.stringify({
@@ -6955,7 +7158,7 @@ class ExtensionState {
     });
     this.send({
       type: "module.query.submit",
-      url: this.lastUrl ?? "",
+      url: this.queryUrl,
       moduleId: "report",
       moduleSettings: {},
       queryComment,
@@ -7118,7 +7321,7 @@ class ExtensionState {
       item.url && /^https?:\/\//i.test(item.url) ? item.url.trim() : undefined;
     const pageUrl =
       this.lastUrl && /^https?:\/\//i.test(this.lastUrl)
-        ? this.lastUrl
+        ? scrubUrl(this.lastUrl)
         : undefined;
     if (!itemUrl && !pageUrl) {
       this.report.error =
@@ -7146,7 +7349,7 @@ class ExtensionState {
     });
     this.send({
       type: "module.query.submit",
-      url: this.lastUrl ?? "",
+      url: this.queryUrl,
       moduleId: "report",
       moduleSettings: {},
       queryComment,
@@ -7275,7 +7478,7 @@ class ExtensionState {
     this.armReportHowToTimeout();
     const pageUrl =
       this.lastUrl && /^https?:\/\//i.test(this.lastUrl)
-        ? this.lastUrl
+        ? scrubUrl(this.lastUrl)
         : undefined;
     const queryComment = JSON.stringify({
       op: "report-how-to-test",
@@ -7291,7 +7494,7 @@ class ExtensionState {
     });
     this.send({
       type: "module.query.submit",
-      url: this.lastUrl ?? "",
+      url: this.queryUrl,
       moduleId: "report",
       moduleSettings: {},
       queryComment,
@@ -7426,7 +7629,7 @@ class ExtensionState {
     });
     this.send({
       type: "module.query.submit",
-      url: this.lastUrl ?? "",
+      url: this.queryUrl,
       moduleId: "report",
       moduleSettings: {},
       queryComment,
@@ -7834,7 +8037,7 @@ class ExtensionState {
     });
     this.send({
       type: "module.query.submit",
-      url: this.lastUrl ?? "",
+      url: this.queryUrl,
       moduleId: "git-commit",
       moduleSettings: {},
       queryComment,
@@ -8174,7 +8377,7 @@ class ExtensionState {
     this.audit.error = null;
     this.send({
       type: "module.query.submit",
-      url: this.lastUrl ?? "",
+      url: this.queryUrl,
       moduleId: "audit-flow",
       moduleSettings: {},
       queryComment,
@@ -8860,6 +9063,7 @@ class ExtensionState {
 
   // ─── Modules (built-in integrations like GitLab Issues) ─────────────
 
+  private static readonly SUBMIT_OPTIONS_KEY = "pinta-submit-options";
   private static readonly MODULES_KEY = "pinta-modules";
 
   /** Pull module enable/settings from chrome.storage.local. */
@@ -8877,6 +9081,58 @@ class ExtensionState {
     } catch {
       // storage missing (test env) — defaults are fine
     }
+  }
+
+  /** Restore the submit-footer choices + ticked per-submit modules. */
+  async loadSubmitOptions(): Promise<void> {
+    try {
+      const stored = await chrome.storage?.local?.get(
+        ExtensionState.SUBMIT_OPTIONS_KEY,
+      );
+      const raw = stored?.[ExtensionState.SUBMIT_OPTIONS_KEY] as
+        | {
+            autoApply?: unknown;
+            includeScreenshot?: unknown;
+            justAsk?: unknown;
+            ticked?: Record<string, unknown>;
+          }
+        | undefined;
+      if (!raw || typeof raw !== "object") return;
+      if (typeof raw.autoApply === "boolean") {
+        this.submitOptions.autoApply = raw.autoApply;
+      }
+      if (typeof raw.includeScreenshot === "boolean") {
+        this.submitOptions.includeScreenshot = raw.includeScreenshot;
+      }
+      if (typeof raw.justAsk === "boolean") {
+        this.submitOptions.justAsk = raw.justAsk;
+      }
+      if (raw.ticked && typeof raw.ticked === "object") {
+        const next: Record<string, boolean> = {};
+        for (const [id, on] of Object.entries(raw.ticked)) {
+          if (on === true) next[id] = true;
+        }
+        this.tickedModules = next;
+      }
+    } catch {
+      // storage missing (test env) — defaults are fine
+    }
+  }
+
+  /** Persist the footer choices + ticks. Call after any of them change. */
+  saveSubmitOptions(): void {
+    void (async () => {
+      try {
+        await chrome.storage?.local?.set({
+          [ExtensionState.SUBMIT_OPTIONS_KEY]: {
+            ...$state.snapshot(this.submitOptions),
+            ticked: $state.snapshot(this.tickedModules),
+          },
+        });
+      } catch {
+        // ignore — in-memory state still wins
+      }
+    })();
   }
 
   private async saveModules(): Promise<void> {
@@ -8941,6 +9197,7 @@ class ExtensionState {
       // Untick it for the current submit too — having a disabled module
       // still queued would be confusing.
       delete this.tickedModules[id];
+      this.saveSubmitOptions();
     }
     void this.saveModules();
   }
@@ -8991,6 +9248,7 @@ class ExtensionState {
   setModuleTicked(id: string, ticked: boolean): void {
     if (ticked) this.tickedModules[id] = true;
     else delete this.tickedModules[id];
+    this.saveSubmitOptions();
   }
 
   /** Compose the SessionModule[] payload for a submit, picking only
@@ -9018,11 +9276,11 @@ class ExtensionState {
     return out.length > 0 ? out : undefined;
   }
 
-  /** Reset per-session ticked modules. Called on each new session start
-   *  so the user has to re-tick (matches autoApply / includeScreenshot
-   *  behavior). */
+  /** Drop every per-submit tick (used when the user clears module state;
+   *  submits no longer reset them). */
   resetTickedModules(): void {
     this.tickedModules = {};
+    this.saveSubmitOptions();
   }
 
   // ─── Imported modules (Phase 19) ────────────────────────────────────
@@ -9221,7 +9479,7 @@ class ExtensionState {
     const now = Date.now();
     const payload: Session = {
       id: crypto.randomUUID(),
-      url: this.lastUrl ?? imported.session.url,
+      url: scrubUrl(this.lastUrl ?? imported.session.url),
       projectRoot: "",
       startedAt: now,
       submittedAt: now,
@@ -9302,7 +9560,7 @@ class ExtensionState {
     ) {
       return "would-overwrite";
     }
-    const url = this.lastUrl ?? imported.session.url;
+    const url = scrubUrl(this.lastUrl ?? imported.session.url);
     const cloned: Session = {
       id: crypto.randomUUID(),
       url,
@@ -9362,6 +9620,22 @@ class ExtensionState {
       // Routing context still resolves to the same companion. Update
       // the cached URL so future calls have an accurate baseline, but
       // don't burn the port-scan budget.
+      this.lastUrl = activeTabUrl;
+      return;
+    }
+    const selected = this.selectedCompanion;
+    if (
+      !force &&
+      selected &&
+      activeTabUrl &&
+      this.connectionStatus === "connected" &&
+      selected.urlPatterns.length === 0 &&
+      !this.companions.some(
+        (c) => c !== selected && c.urlPatterns.length > 0 && matchAny(activeTabUrl, c.urlPatterns),
+      )
+    ) {
+      // Catch-all companion still connected and nobody more specific
+      // claims this URL — same routing, skip the 21-port scan.
       this.lastUrl = activeTabUrl;
       return;
     }
@@ -9650,7 +9924,7 @@ class ExtensionState {
     // routes. Skill / GitLab module fall back to `session.url` if absent.
     const stamped: Annotation = {
       ...annotation,
-      url: annotation.url ?? this.lastUrl ?? this.session?.url,
+      url: annotation.url ?? (this.lastUrl ? scrubUrl(this.lastUrl) : this.session?.url),
     };
     if (this.appMode === "standalone") {
       await this.mutateLocal((s) => ({
@@ -9722,7 +9996,7 @@ class ExtensionState {
     this.markCreatingSession(true);
     this.send({
       type: "session.create",
-      url: this.lastUrl ?? detached?.url ?? "",
+      url: scrubUrl(this.lastUrl ?? detached?.url ?? ""),
     });
   }
 
@@ -10321,7 +10595,7 @@ class ExtensionState {
             this.markCreatingSession(true);
             this.send({
               type: "session.create",
-              url: this.lastUrl ?? incoming.url ?? "",
+              url: scrubUrl(this.lastUrl ?? incoming.url ?? ""),
             });
           }
           break;
@@ -10330,12 +10604,9 @@ class ExtensionState {
         this.session = incoming;
         this.markCreatingSession(false);
         this.lastError = null;
-        // A new session started → drop ticked module checkboxes so the
-        // user has to consciously opt in for the next submit. Mirrors
-        // how autoApply / includeScreenshot behave per-batch.
-        if (incoming.id !== previousSessionId) {
-          this.resetTickedModules();
-        }
+        // Ticked modules (and the other submit-footer choices) survive a
+        // new session on purpose: they're a working preference, and
+        // re-ticking "Create GitLab issues" on every batch is busywork.
         break;
       }
       case "session.applying":
@@ -10499,7 +10770,7 @@ class ExtensionState {
         "Nothing to check yet — apply a batch first, then run Drift Check.";
       return;
     }
-    const url = this.lastUrl ?? this.session?.url ?? "";
+    const url = scrubUrl(this.lastUrl ?? this.session?.url ?? "");
     this.drift.error = null;
     this.drift.results = {};
     this.drift.checkedAt = null;

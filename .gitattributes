@@ -1,0 +1,17 @@
+# A stray control byte must never make a source file "binary" to git —
+# that silently turns its diff into "Binary files differ" and the change
+# becomes unreviewable. Force a textual diff without touching line endings.
+*.ts      diff
+*.tsx     diff
+*.svelte  diff
+*.js      diff
+*.mjs     diff
+*.cjs     diff
+*.json    diff
+*.md      diff
+*.css     diff
+*.html    diff
+*.svg     diff
+*.yml     diff
+*.yaml    diff
+*.sh      diff

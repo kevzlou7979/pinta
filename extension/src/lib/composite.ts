@@ -11,6 +11,9 @@ const SELECT_LINE_WIDTH = 3;
 const DRAW_LINE_WIDTH = 3;
 const SELECT_PADDING = 4;
 const SELECT_LABEL_FONT = "11px ui-sans-serif, system-ui, sans-serif";
+/** Composite output quality. JPEG (not PNG): the screenshot is opaque, and
+ *  a full-page PNG encode is multi-MB and seconds of main-thread time. */
+const COMPOSITE_JPEG_QUALITY = 0.85;
 
 /**
  * Optional knobs for composite rendering.
@@ -24,12 +27,13 @@ export type CompositeOptions = {
   badgeColorOverride?: string;
 };
 
-// Composites annotations onto the screenshot. Inputs and outputs are PNG
-// data URLs. Strokes/boundingRect are in CSS page pixels (matching the
+// Composites annotations onto the screenshot. Input is any image data URL;
+// output is a JPEG data URL (encoded async — off the side panel's main
+// thread path, unlike toDataURL). Strokes/boundingRect are in CSS page pixels (matching the
 // CSS-pixel screenshot produced by captureFullPage).
 //
 // Each annotation gets a numbered badge so an agent reading the
-// composited PNG can correlate it with the side-panel list / exported
+// composited image can correlate it with the side-panel list / exported
 // MD ("annotation 3 in the doc is the badge labelled '3' on the image").
 // Numbers are 1..N in array order, matching what the side panel shows.
 export async function compositeAnnotations(
@@ -79,7 +83,7 @@ export async function compositeAnnotations(
     }
   }
 
-  return canvas.toDataURL("image/png");
+  return await canvasToJpegDataUrl(canvas);
 }
 
 /**
@@ -90,7 +94,7 @@ export async function compositeAnnotations(
  * translated into viewport-relative coords.
  *
  * Used by the standalone bundle export so each scroll position becomes
- * a separate clean PNG instead of one tall stitched image where fixed
+ * a separate clean image instead of one tall stitched image where fixed
  * elements appear duplicated. Numbering still uses the global 1..N
  * order from the session's annotation array.
  */
@@ -155,7 +159,7 @@ export async function compositeAnnotationsToViewport(
   }
 
   ctx.restore();
-  return canvas.toDataURL("image/png");
+  return await canvasToJpegDataUrl(canvas);
 }
 
 /** Returns the page-Y of an annotation's "main" point, used to decide
@@ -455,11 +459,39 @@ function paintLabel(
   ctx.restore();
 }
 
+/** Encode async (toBlob) and free the canvas backing store right after —
+ *  a full-page composite canvas can be hundreds of MB. */
+async function canvasToJpegDataUrl(canvas: HTMLCanvasElement): Promise<string> {
+  const blob = await new Promise<Blob>((resolve, reject) => {
+    canvas.toBlob(
+      (b) => (b ? resolve(b) : reject(new Error("image encode failed"))),
+      "image/jpeg",
+      COMPOSITE_JPEG_QUALITY,
+    );
+  });
+  canvas.width = canvas.height = 0;
+  return await new Promise<string>((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => resolve(reader.result as string);
+    reader.onerror = () => reject(reader.error ?? new Error("read failed"));
+    reader.readAsDataURL(blob);
+  });
+}
+
+/** Load + fully decode before drawing, so drawImage doesn't decode a huge
+ *  image synchronously. decode() can reject on very large images in some
+ *  Chrome builds even though the image loads — fall back to onload then. */
 function loadImage(src: string): Promise<HTMLImageElement> {
-  return new Promise((resolve, reject) => {
-    const img = new Image();
+  const img = new Image();
+  img.decoding = "async";
+  const loaded = new Promise<HTMLImageElement>((resolve, reject) => {
     img.onload = () => resolve(img);
     img.onerror = () => reject(new Error("failed to load image"));
-    img.src = src;
   });
+  loaded.catch(() => {});
+  img.src = src;
+  return img.decode().then(
+    () => img,
+    () => loaded,
+  );
 }

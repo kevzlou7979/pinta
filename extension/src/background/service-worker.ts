@@ -1,6 +1,6 @@
 /// <reference types="chrome" />
 
-import { captureFullPage } from "./screenshot.js";
+import { captureDeviceFrame, captureFullPage } from "./screenshot.js";
 import {
   WATCH_PORTS_KEY,
   WATCH_TOASTED_KEY,
@@ -160,6 +160,8 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
     // reloaded. Inject it on demand (when Pinta opens / the tab changes) so
     // the floating toolbar + overlay appear without a manual page reload.
     // overlay.ts self-guards on its host tag, so re-injection is idempotent.
+    // Top frame only: a Devices device frame loads the overlay itself,
+    // via the dynamic import in nav-reporter.
     const tabId = msg.tabId ?? sender.tab?.id;
     if (typeof tabId !== "number") {
       sendResponse({ ok: false, error: "no tabId" });
@@ -183,13 +185,44 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
     return true;
   }
 
-  if (msg?.type === "capture.full-page") {
-    const tabId = msg.tabId ?? sender.tab?.id;
+  if (msg?.type === "capture.device-frame") {
+    // Devices canvas tab: crop the annotating device frame out of a
+    // visible-tab capture (the full-page path scrolls the top frame, which
+    // here is the canvas itself). Extension pages only (the side panel) — a
+    // content script must never be able to trigger a visible-tab capture.
+    if (sender.tab) {
+      sendResponse({ ok: false, error: "not allowed from a tab" });
+      return false;
+    }
+    const tabId = msg.tabId;
     if (typeof tabId !== "number") {
       sendResponse({ ok: false, error: "no tabId" });
       return false;
     }
-    captureFullPage(tabId).then(
+    captureDeviceFrame(tabId).then(
+      (capture) => sendResponse({ ok: true, capture }),
+      (err: Error) => {
+        console.error("[pinta] device frame capture failed", err);
+        sendResponse({ ok: false, error: err.message });
+      },
+    );
+    return true;
+  }
+
+  if (msg?.type === "capture.full-page") {
+    // A content script may only capture the tab it runs in. Honouring its
+    // msg.tabId would let a page aim a visible-tab capture at another tab.
+    // Symmetric with capture.device-frame below; unreachable today thanks
+    // to the sender.id guard above, but the rule belongs with the handler.
+    const tabId = sender.tab ? sender.tab.id : msg.tabId;
+    if (typeof tabId !== "number") {
+      sendResponse({ ok: false, error: "no tabId" });
+      return false;
+    }
+    // Callers name what they'll use so the other half is never computed or
+    // shipped over messaging: "stitched" (submit) or "slices" (bundle).
+    const mode = msg.mode === "slices" ? "slices" : "stitched";
+    captureFullPage(tabId, mode).then(
       (capture) => sendResponse({ ok: true, capture }),
       (err: Error) => {
         console.error("[pinta] capture failed", err);

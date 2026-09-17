@@ -1,5 +1,5 @@
 // Single source of truth for Pinta's annotation tools — id, label, icon,
-// single-key shortcut, and whether it's a "draw" tool (arrow/rect/pen/pin
+// Ctrl+Alt shortcut letter, and whether it's a "draw" tool (arrow/rect/pen/pin
 // enter draw mode with that specific tool; the rest map to their own mode).
 // Shared by the side-panel TOOL grid and the on-page floating toolbar so the
 // two never drift.
@@ -25,8 +25,9 @@ export type ToolDef = {
   label: string;
   /** Inner SVG markup for a 24×24 stroke icon (fill/stroke = currentColor). */
   svg: string;
-  /** Single-key shortcut (no modifier). Shown in tooltips; handled only while
-   *  the floating toolbar is enabled and the user isn't typing in a field. */
+  /** Shortcut letter, pressed as Ctrl+Alt+<key> (Overlay.svelte, matched by
+   *  KeyboardEvent.code). Shown in tooltips; handled only while the floating
+   *  toolbar is enabled and the user isn't typing in a field. */
   key: string;
   /** True for tools that enter "draw" mode carrying this tool id. */
   draw?: boolean;

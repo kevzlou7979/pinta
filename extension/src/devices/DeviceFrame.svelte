@@ -16,6 +16,10 @@
 
   const d = $derived(dimsFor(frame));
   const expanded = $derived(devices.expandedId === frame.id);
+  const annotating = $derived(devices.annotateFrameId === frame.id);
+  /** Activated AND the frame's overlay answered — only then do the panel
+   *  tools actually work inside this frame. */
+  const annotateLive = $derived(annotating && devices.annotateReadyId === frame.id);
   // Expanded: fit the device into the viewport (never upscale — a
   // transform-scaled iframe above 1x renders blurry text).
   let winW = $state(1200);
@@ -58,16 +62,28 @@
     const el = e.currentTarget as HTMLElement;
     let lastX = e.clientX;
     let lastY = e.clientY;
+    // Accumulate pointer deltas and write state at most once per frame —
+    // pointermove can fire far faster than the canvas repaints.
+    let dx = 0;
+    let dy = 0;
+    let raf = 0;
+    const flush = (): void => {
+      raf = 0;
+      if (dx === 0 && dy === 0) return;
+      devices.moveFrame(frame.id, (frame.x ?? 0) + dx, (frame.y ?? 0) + dy);
+      dx = 0;
+      dy = 0;
+    };
     const move = (ev: PointerEvent): void => {
-      devices.moveFrame(
-        frame.id,
-        (frame.x ?? 0) + ev.clientX - lastX,
-        (frame.y ?? 0) + ev.clientY - lastY,
-      );
+      dx += ev.clientX - lastX;
+      dy += ev.clientY - lastY;
       lastX = ev.clientX;
       lastY = ev.clientY;
+      if (!raf) raf = requestAnimationFrame(flush);
     };
     const up = (ev: PointerEvent): void => {
+      if (raf) cancelAnimationFrame(raf);
+      flush();
       dragging = false;
       try {
         el.releasePointerCapture(ev.pointerId);
@@ -144,6 +160,26 @@
     </span>
     <button
       type="button"
+      class="shrink-0 h-6 px-1.5 inline-flex items-center gap-1 rounded-md text-[10.5px] font-semibold transition-colors"
+      class:bg-brand-pink={annotateLive}
+      class:text-white={annotateLive}
+      class:bg-amber-100={annotating && !annotateLive}
+      class:text-amber-800={annotating && !annotateLive}
+      class:text-ink-500={!annotating}
+      class:dark:text-night-dim={!annotating}
+      class:hover:text-brand-pink={!annotating}
+      title={annotating
+        ? "Stop annotating this device"
+        : "Annotate this device — the Pinta side panel's tools then work inside this frame"}
+      aria-label={annotating ? "Stop annotating this device" : "Annotate this device"}
+      aria-pressed={annotating}
+      onclick={() => devices.toggleAnnotate(frame.id)}
+    >
+      <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M17 3a2.828 2.828 0 1 1 4 4L7.5 20.5 2 22l1.5-5.5L17 3z"/></svg>
+      {annotateLive ? "Annotating" : annotating ? "Starting…" : "Annotate"}
+    </button>
+    <button
+      type="button"
       class="shrink-0 w-6 h-6 inline-flex items-center justify-center rounded-md text-ink-500 dark:text-night-dim hover:text-brand-pink"
       title="Rotate (portrait / landscape)"
       aria-label="Rotate device"
@@ -204,7 +240,12 @@
 
   <!-- self-start keeps the bezel shrink-to-fit on the canvas; expanded
        must NOT inherit it or it overrides the overlay's items-center. -->
-  <div class={`rounded-[1.25rem] bg-night-alt p-2 shadow-lg ${expanded ? "self-center" : "self-start"}`}>
+  <div
+    class={`rounded-[1.25rem] bg-night-alt p-2 shadow-lg transition-shadow ${expanded ? "self-center" : "self-start"}`}
+    class:ring-2={annotateLive}
+    class:ring-brand-pink={annotateLive}
+    class:ring-offset-2={annotateLive}
+  >
     <div
       class="overflow-hidden rounded-xl bg-white"
       style="width: {Math.round(d.width * s)}px; height: {Math.round(d.height * s)}px;"
@@ -218,7 +259,7 @@
             sandbox="allow-same-origin allow-scripts allow-forms allow-popups allow-modals"
             referrerpolicy="no-referrer"
             loading="lazy"
-            onload={() => devices.notifyFrameLoaded()}
+            onload={() => devices.notifyFrameLoaded(frame.id)}
             style="width: {d.width}px; height: {d.height}px; transform: scale({s}); transform-origin: top left; border: 0;"
           ></iframe>
         {/key}

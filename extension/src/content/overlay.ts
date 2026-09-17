@@ -159,4 +159,58 @@ if (!document.querySelector(HOST_TAG)) {
   content.initPanelPresence();
 
   mount(Overlay, { target: root });
+
+  // Devices frame: the canvas toggles which frame is the annotation target.
+  // Same trust rule as nav-reporter — only our extension origin, only the
+  // parent canvas.
+  if (content.inFrame) {
+    const EXT_ORIGIN = new URL(chrome.runtime.getURL("")).origin;
+    // Clicking "Annotate" on a device frame should highlight elements
+    // straight away. Waiting for the side panel to push a tool would put
+    // the whole feature behind a panel -> sandboxed-sub-frame message hop;
+    // arming Select here needs only the canvas message we just got. The
+    // resulting mode.changed lights up the panel's Select button.
+    const apply = (on: boolean): void => {
+      content.frameActive = on;
+      host.style.display = on ? "" : "none";
+      if (on) content.requestMode("select");
+      // Tell the canvas the overlay really is live in this frame. Without
+      // it the canvas can't tell "activated" from "no Pinta in this frame"
+      // (frames that were already open when the extension loaded have no
+      // content script until they reload).
+      try {
+        window.parent.postMessage({ type: "pinta-annotate-ack", on }, EXT_ORIGIN);
+      } catch {
+        // parent gone — ignore
+      }
+    };
+    apply(content.frameActive);
+    window.addEventListener("message", (e: MessageEvent) => {
+      if (e.origin !== EXT_ORIGIN || e.source !== window.parent) return;
+      const d = e.data as { type?: unknown; on?: unknown } | null;
+      if (!d || d.type !== "pinta-annotate") return;
+      const on = d.on === true;
+      if (on !== content.frameActive) {
+        apply(on);
+        return;
+      }
+      // Already in that state: still answer. The canvas pings every 2s and
+      // on demand precisely because the side panel may have missed the
+      // first announcement (it unmounts whenever it closes), and it can't
+      // address this frame until it hears from it.
+      if (on) {
+        try {
+          window.parent.postMessage({ type: "pinta-annotate-ack", on: true }, EXT_ORIGIN);
+        } catch {
+          // parent gone — ignore
+        }
+        content.announceFrame();
+        // Deliberately NOT re-arming a tool here. apply() already arms
+        // Select the moment a frame is activated, so any idle state at this
+        // point is one the user chose (Esc, or un-picking the tool) — and
+        // the canvas re-pings every couple of seconds, so re-arming would
+        // undo their Esc a moment after they pressed it.
+      }
+    });
+  }
 }

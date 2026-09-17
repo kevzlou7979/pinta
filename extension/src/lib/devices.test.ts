@@ -17,6 +17,10 @@ import {
   naturalOrientation,
   newFrame,
   normalizeTargetUrl,
+  NAV_REPOINT_GRACE_MS,
+  NavSyncTracker,
+  storableTargetUrl,
+  urlOrigin,
   packPosition,
   parseCustomDevices,
   parseStoredDevicesState,
@@ -414,5 +418,67 @@ describe("parseStoredDevicesState", () => {
     });
     expect(s.frames).toHaveLength(1);
     expect(s.frames[0]!.orientation).toBe("landscape");
+  });
+});
+
+describe("nav sync", () => {
+  const target = "http://localhost:5173/";
+
+  it("urlOrigin / storableTargetUrl keep only http(s) origin (+ path)", () => {
+    expect(urlOrigin("http://localhost:5173/a?b#c")).toBe("http://localhost:5173");
+    expect(urlOrigin("javascript:alert(1)")).toBeNull();
+    expect(storableTargetUrl("http://localhost:5173/course/1?token=abc#x")).toBe("http://localhost:5173/course/1");
+    expect(storableTargetUrl("data:text/html,x")).toBe("");
+  });
+
+  it("first report is a position fix; a later same-origin change propagates", () => {
+    const t = new NavSyncTracker();
+    expect(t.report("a", "http://localhost:5173/", target, 0).verdict).toBe("record");
+    expect(t.report("a", "http://localhost:5173/", target, 10).verdict).toBe("record");
+    expect(t.report("a", "http://localhost:5173/b", target, 20)).toEqual({
+      verdict: "propagate",
+      url: "http://localhost:5173/b",
+    });
+  });
+
+  it("never propagates cross-origin or non-http reports (forged by the framed page)", () => {
+    const t = new NavSyncTracker();
+    t.report("a", "http://localhost:5173/", target, 0);
+    expect(t.report("a", "https://evil.test/phish", target, 10).verdict).toBe("record");
+    expect(t.report("a", "javascript:alert(1)", target, 20).verdict).toBe("ignore");
+  });
+
+  it("re-pointed frames: reports inside the grace window stay local", () => {
+    const t = new NavSyncTracker();
+    t.report("b", "http://localhost:5173/", target, 0);
+    t.markRepointed("b", 100, "http://localhost:5173/a");
+    // Redirect after the sync re-point — must not bounce back.
+    expect(t.report("b", "http://localhost:5173/login", target, 300).verdict).toBe("record");
+    expect(t.report("b", "http://localhost:5173/next", target, 100 + NAV_REPOINT_GRACE_MS + 1).verdict).toBe(
+      "propagate",
+    );
+  });
+
+  it("a Pinta-initiated load clears the baseline; a user-initiated load keeps it", () => {
+    const t = new NavSyncTracker();
+    t.report("a", "http://localhost:5173/", target, 0);
+    t.markRepointed("a", 0); // Refresh all
+    t.loaded("a", 50);
+    expect(t.urlOf("a")).toBeUndefined();
+    expect(t.report("a", "http://localhost:5173/redirected", target, 60).verdict).toBe("record");
+    // Later: user clicks a link in a multi-page app → full load, not expected.
+    const later = 60 + NAV_REPOINT_GRACE_MS + 1;
+    t.loaded("a", later);
+    expect(t.report("a", "http://localhost:5173/page2", target, later + 10).verdict).toBe("propagate");
+  });
+
+  it("forget / clear drop state", () => {
+    const t = new NavSyncTracker();
+    t.report("a", "http://localhost:5173/", target, 0);
+    t.forget("a");
+    expect(t.urlOf("a")).toBeUndefined();
+    t.report("b", "http://localhost:5173/", target, 0);
+    t.clear();
+    expect(t.urlOf("b")).toBeUndefined();
   });
 });

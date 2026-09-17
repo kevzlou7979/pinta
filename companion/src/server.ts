@@ -15,6 +15,13 @@ import {
   type RegistryEntry,
 } from "./registry.js";
 import { addUrlPattern, readProjectConfig } from "./project-config.js";
+import {
+  BadRequestError,
+  ExtensionTrust,
+  extensionIdFromOrigin,
+  isLoopbackHost,
+  isSafeSessionId,
+} from "./security.js";
 
 export type ServerOptions = {
   host?: string;
@@ -40,6 +47,13 @@ export type ServerOptions = {
    * is closed. Read-only; absent when the watcher is off.
    */
   getWatchEvents?: () => WatchEvent[];
+  /**
+   * Which chrome-extension:// origins count as Pinta (Web Store id,
+   * $PINTA_EXTENSION_IDS, trust-on-first-use pin). Share the instance
+   * with attachWebSocket so a WS pin is seen by HTTP immediately.
+   * Defaults to a fresh one for the store's project root.
+   */
+  trust?: ExtensionTrust;
 };
 
 const POLL_TIMEOUT_MS = 25_000;
@@ -77,12 +91,20 @@ export async function startServer(opts: ServerOptions): Promise<StartedServer> {
   const autoAllocate = opts.autoAllocatePort ?? false;
   const rangeEnd = opts.portRangeEnd ?? DEFAULT_PORT_RANGE_END;
 
+  const trust = opts.trust ?? new ExtensionTrust(store.projectRoot, { log });
+
   const server = createServer(async (req, res) => {
     try {
-      await handle(req, res, store, log, opts);
+      await handle(req, res, store, log, opts, trust);
     } catch (err) {
       log(`error: ${(err as Error).message}`);
-      sendJson(res, 500, { error: (err as Error).message });
+      if (res.headersSent) {
+        res.end();
+        return;
+      }
+      sendJson(res, err instanceof BadRequestError ? 400 : 500, {
+        error: (err as Error).message,
+      });
     }
   });
 
@@ -141,71 +163,89 @@ async function handle(
   store: SessionStore,
   log: (msg: string) => void,
   opts: ServerOptions,
+  trust: ExtensionTrust,
 ): Promise<void> {
   const url = new URL(req.url ?? "/", "http://localhost");
   const method = (req.method ?? "GET").toUpperCase();
   const path = url.pathname;
 
-  // CORS for local dev. Reads (GET) are open — any tool on the user's
-  // machine should be able to probe /v1/health. Writes (POST/PUT/DELETE)
-  // are gated: only the extension itself, the agent's localhost CLI
-  // (no-Origin), or an explicitly-permitted origin may mutate state.
-  // Without this, a malicious page in the user's *own* browser could
-  // CSRF the companion (DELETE /v1/sessions, POST /v1/url-patterns)
-  // because the server binds to 127.0.0.1 — which doesn't help when the
-  // attacker is already a tab in the same browser.
-  const reqOrigin = req.headers.origin ?? "";
-  const isExtensionOrigin = reqOrigin.startsWith("chrome-extension://");
-  const isReadMethod = method === "GET" || method === "HEAD";
-  const writeAllowed = !reqOrigin || isExtensionOrigin;
+  // Origin gate. The companion binds 127.0.0.1 and has no auth, which
+  // doesn't help when the attacker is a tab (or another extension) in
+  // the user's own browser. Callers fall into three groups:
+  //
+  //  - no Origin: the agent's curl, the CLI, the MCP stdio backend →
+  //    full access (a local process can already touch the project).
+  //  - chrome-extension://<id>: full access when the id is trusted (Web
+  //    Store id, $PINTA_EXTENSION_IDS, or the TOFU pin written on the
+  //    first WS connect). Before anything is pinned, an extension may
+  //    read/write except module install/uninstall. A pinned mismatch is
+  //    refused everywhere except /v1/health.
+  //  - any other Origin (web pages, file://, "null"): 403 on every route
+  //    except a minimal /v1/health that leaks nothing. No ACAO header is
+  //    ever sent for them, so a page can't read companion data.
+  //
+  // The Host check blocks DNS rebinding: a rebound page's same-origin
+  // GETs carry no Origin header, but their Host is the attacker's name.
+  const isHealth = method === "GET" && path === "/v1/health";
+  if (!isLoopbackHost(req.headers.host)) {
+    log(`rejected ${method} ${path} — non-loopback Host ${req.headers.host ?? "(none)"}`);
+    return sendJson(res, 403, { error: "forbidden host" });
+  }
 
-  // ACAO mirroring: echo the request's Origin when it's a Chrome
-  // extension (so the browser allows credentialed fetches), else "*"
-  // for the read-only case. Methods/headers are constant.
-  res.setHeader(
-    "Access-Control-Allow-Origin",
-    isExtensionOrigin ? reqOrigin : "*",
-  );
+  const reqOrigin = (req.headers.origin ?? "").toString();
+  const extensionId = extensionIdFromOrigin(reqOrigin);
+  const isExtensionOrigin = extensionId !== null;
+  const isForeignOrigin = reqOrigin !== "" && !isExtensionOrigin;
+  const isReadMethod = method === "GET" || method === "HEAD";
+  const trustVerdict = isExtensionOrigin ? trust.check(extensionId) : null;
+
   res.setHeader("Vary", "Origin");
-  res.setHeader(
-    "Access-Control-Allow-Methods",
-    "GET, POST, DELETE, OPTIONS",
-  );
-  res.setHeader("Access-Control-Allow-Headers", "Content-Type");
+  if (isExtensionOrigin) {
+    res.setHeader("Access-Control-Allow-Origin", reqOrigin);
+    res.setHeader(
+      "Access-Control-Allow-Methods",
+      "GET, POST, PUT, DELETE, OPTIONS",
+    );
+    res.setHeader("Access-Control-Allow-Headers", "Content-Type");
+  }
+
+  if (isForeignOrigin) {
+    if (isHealth) return sendJson(res, 200, { ok: true });
+    log(`rejected ${method} ${path} from origin ${reqOrigin}`);
+    return sendJson(res, 403, { error: "forbidden origin" });
+  }
+
   if (method === "OPTIONS") {
     res.statusCode = 204;
     res.end();
     return;
   }
 
-  // Reject cross-origin writes from non-extension pages. Same-origin or
-  // no-Origin (Node CLI, curl, native fetch without Origin header) pass
-  // through; only browser-tab attacks are blocked.
-  if (!isReadMethod && !writeAllowed) {
-    log(`rejected ${method} ${path} from origin ${reqOrigin}`);
-    return sendJson(res, 403, { error: "forbidden cross-origin write" });
+  if (trustVerdict === "untrusted" && !isHealth) {
+    trust.logRefused(extensionId);
+    return sendJson(res, 403, {
+      error:
+        "untrusted extension — this project is pinned to another Pinta build " +
+        "(delete .pinta/trusted-extension.json or set PINTA_EXTENSION_IDS)",
+    });
   }
 
   // Module install/uninstall is the highest-leverage mutation — it can
   // grant a third-party `agent.md` file-write / run-tool / network
   // capabilities the /pinta agent will honor. Only the extension's
-  // consent dialog performs it, so require the chrome-extension:// origin
-  // explicitly here (the general gate above also lets *no-Origin* local
-  // callers write, which would let any local process silently install a
+  // consent dialog performs it, so require a *trusted* extension origin
+  // (not merely any chrome-extension://, and never no-Origin — that would
+  // let any local process or other extension silently install a
   // capability-bearing module and bypass the consent UI). The agent's CLI
   // never installs modules, so this doesn't narrow any legitimate path.
-  if (
-    !isReadMethod &&
-    !isExtensionOrigin &&
-    path.startsWith("/v1/modules")
-  ) {
-    log(`rejected ${method} ${path} — module mutation requires extension origin`);
+  if (!isReadMethod && path.startsWith("/v1/modules") && trustVerdict !== "trusted") {
+    log(`rejected ${method} ${path} — module mutation requires the trusted Pinta extension`);
     return sendJson(res, 403, {
       error: "module install/uninstall must originate from the Pinta extension",
     });
   }
 
-  if (method === "GET" && path === "/v1/health") {
+  if (isHealth) {
     const entry = opts.getRegistryEntry?.() ?? null;
     return sendJson(res, 200, {
       ok: true,
@@ -520,9 +560,27 @@ async function handle(
 
   if (method === "POST" && path === "/v1/sessions") {
     const body = await readJson<Session>(req);
-    const session = await store.ingestSession(body);
+    if (!body || typeof body !== "object" || !isSafeSessionId(body.id)) {
+      return sendJson(res, 400, { error: "invalid session id (expected [A-Za-z0-9_-]{1,64})" });
+    }
+    let session: Session;
+    try {
+      session = await store.ingestSession(body);
+    } catch (err) {
+      if (err instanceof BadRequestError) {
+        return sendJson(res, 400, { error: err.message });
+      }
+      throw err;
+    }
     log(`ingested session ${session.id} (${session.annotations.length} annotations)`);
     return sendJson(res, 201, session);
+  }
+
+  // Every /v1/sessions/:id[/...] route: refuse ids that aren't path-safe
+  // before they reach the store (which persists by id).
+  const sessionIdMatch = path.match(/^\/v1\/sessions\/([^/]+)(?:\/|$)/);
+  if (sessionIdMatch && !isSafeSessionId(sessionIdMatch[1])) {
+    return sendJson(res, 400, { error: "invalid session id" });
   }
 
   const sessionMatch = path.match(/^\/v1\/sessions\/([^/]+)$/);

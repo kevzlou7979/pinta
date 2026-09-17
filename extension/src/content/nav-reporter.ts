@@ -6,14 +6,50 @@
 // on every navigation (polling catches SPA route changes the isolated
 // world can't observe via history patching), addressed ONLY to the
 // extension origin so reports can never leak to an arbitrary embedder.
+//
+// It is also the gateway for annotating inside a device frame: when the
+// canvas marks THIS frame as the annotation target ("pinta-annotate"),
+// the annotate overlay is imported on demand. Frames the canvas never
+// targets — and every iframe on every other site — never load it.
 
 const EXT_ORIGIN = new URL(chrome.runtime.getURL("")).origin;
 
 let started = false;
+let overlayRequested = false;
+
+/** URL of the built overlay module. Resolved from the manifest's web-
+ *  accessible resources (the chunk name is content-hashed) and imported
+ *  directly — a bundler dynamic import would inject <link rel=modulepreload>
+ *  tags into the host page, which strict page CSPs block. */
+function overlayModuleUrl(): string | null {
+  for (const entry of chrome.runtime.getManifest().web_accessible_resources ?? []) {
+    const resources = typeof entry === "string" ? [entry] : (entry.resources ?? []);
+    const hit = resources.find((r) => /(^|\/)overlay\.ts[^/]*\.js$/.test(r));
+    if (hit) return chrome.runtime.getURL(hit);
+  }
+  return null;
+}
 
 window.addEventListener("message", (e: MessageEvent) => {
-  if (e.origin !== EXT_ORIGIN) return;
-  const data = e.data as { type?: unknown } | null;
+  if (e.origin !== EXT_ORIGIN || e.source !== window.parent) return;
+  const data = e.data as { type?: unknown; on?: unknown } | null;
+  if (data?.type === "pinta-annotate") {
+    // First activation loads the overlay; later on/off toggles are handled
+    // by the overlay's own listener (overlay.ts).
+    if (window.top === window.self || data.on !== true || overlayRequested) return;
+    const url = overlayModuleUrl();
+    if (!url) {
+      console.error("[pinta] annotate overlay module not found in the manifest");
+      return;
+    }
+    overlayRequested = true;
+    (globalThis as { __pintaFrameAnnotate?: boolean }).__pintaFrameAnnotate = true;
+    import(/* @vite-ignore */ url).catch((err: unknown) => {
+      overlayRequested = false;
+      console.error("[pinta] couldn't load the annotate overlay in this frame", err);
+    });
+    return;
+  }
   if (!data || data.type !== "pinta-nav-start") return;
   // Only meaningful inside a frame whose parent is the canvas page.
   if (window.top === window.self || started) return;

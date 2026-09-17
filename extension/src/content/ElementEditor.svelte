@@ -1,9 +1,27 @@
+<script module lang="ts">
+  import type { EditorUnit } from "../lib/css-units.js";
+
+  // A unit the user picks sticks for the rest of the browsing session, so
+  // they don't re-pick em on every element. Module-scoped on purpose: the
+  // editor remounts per selection, a page reload starts at the defaults.
+  const sessionUnits = new Map<string, EditorUnit>();
+</script>
+
 <script lang="ts">
   import { onMount } from "svelte";
   import type { AnnotationImage } from "@pinta/shared";
   import { content } from "./state.svelte.js";
   import MicButton from "../lib/voice/MicButton.svelte";
   import { downscaleImage } from "../lib/downscale-image.js";
+  import {
+    EDITOR_UNITS,
+    baseFor,
+    convertShorthand,
+    defaultUnitFor,
+    ensureUnits,
+    toUnitlessLineHeight,
+    type UnitBases,
+  } from "../lib/css-units.js";
 
   type LiveStyles = {
     fontFamily: string;
@@ -19,6 +37,11 @@
     borderRadius: string;
     boxShadow: string;
     display: string;
+    /** px bases the unit picker converts against — see lib/css-units.ts. */
+    ownFontSize: number;
+    parentFontSize: number;
+    rootFontSize: number;
+    parentWidth: number;
   };
 
   type Props = {
@@ -163,25 +186,70 @@
     Math.max(8, Math.min(window.innerWidth - POPUP_W - 8, anchor.left)),
   );
 
+  // ── Units ──────────────────────────────────────────────────────────
+  // Computed styles arrive in px; emitting px bakes fixed pixels into the
+  // user's source. Every length field therefore starts in its property's
+  // relative default (em for type, rem for boxes) and the picker
+  // re-converts the value in place rather than reinterpreting the number.
+  const UNIT_PROPS = [
+    "font-size",
+    "width",
+    "height",
+    "padding",
+    "margin",
+    "border-radius",
+    "gap",
+  ] as const;
+  type UnitProp = (typeof UNIT_PROPS)[number];
+
+  let units = $state<Record<UnitProp, EditorUnit>>(
+    Object.fromEntries(
+      UNIT_PROPS.map((p) => [p, sessionUnits.get(p) ?? defaultUnitFor(p)]),
+    ) as Record<UnitProp, EditorUnit>,
+  );
+
+  // Inline because content styles live in styles.css (shadow DOM) and this
+  // is editor-local: a flex row that lets the picker sit beside the input
+  // without widening the 360px popup's two-column grid.
+  const UNIT_ROW = "display:flex;gap:4px;align-items:center;";
+  const UNIT_INPUT = "flex:1 1 0;min-width:0;box-sizing:border-box;";
+  const UNIT_SELECT =
+    "flex:0 0 auto;width:auto;padding:5px 2px;font-size:10px;cursor:pointer;";
+
+  let bases = $derived<UnitBases>({
+    ownFontSize: liveStyles.ownFontSize || 16,
+    parentFontSize: liveStyles.parentFontSize || 16,
+    rootFontSize: liveStyles.rootFontSize || 16,
+    parentWidth: liveStyles.parentWidth || undefined,
+  });
+
+  function toUnit(raw: string, prop: UnitProp): string {
+    return convertShorthand(simplifyShorthand(raw), prop, units[prop], bases);
+  }
+
   // Per-field locals — bound to inputs. Track separately from cssChanges
   // so we can compute the diff against `liveStyles` on every keystroke.
-  let fontSize = $state(simplifyLength(liveStyles.fontSize));
+  let fontSize = $state(toUnit(simplifyLength(liveStyles.fontSize), "font-size"));
   let fontWeight = $state(liveStyles.fontWeight);
   let color = $state(toHex(liveStyles.color));
-  let lineHeight = $state(simplifyLength(liveStyles.lineHeight));
-  let width = $state(simplifyLength(liveStyles.width));
-  let height = $state(simplifyLength(liveStyles.height));
-  let padding = $state(simplifyShorthand(liveStyles.padding));
-  let margin = $state(simplifyShorthand(liveStyles.margin));
+  // A ratio, not a length — it keeps scaling with whatever font size the
+  // element ends up with, so there's no unit picker here.
+  let lineHeight = $state(
+    toUnitlessLineHeight(simplifyLength(liveStyles.lineHeight), liveStyles.ownFontSize),
+  );
+  let width = $state(toUnit(simplifyLength(liveStyles.width), "width"));
+  let height = $state(toUnit(simplifyLength(liveStyles.height), "height"));
+  let padding = $state(toUnit(liveStyles.padding, "padding"));
+  let margin = $state(toUnit(liveStyles.margin, "margin"));
   let backgroundColor = $state(toHex(liveStyles.backgroundColor));
-  let borderRadius = $state(simplifyLength(liveStyles.borderRadius));
+  let borderRadius = $state(toUnit(simplifyLength(liveStyles.borderRadius), "border-radius"));
   let boxShadow = $state(liveStyles.boxShadow === "none" ? "" : liveStyles.boxShadow);
 
   // Grid tab — derived initial value from current display + columns.
   // gridPreset is one of "", "1", "2", ..., "6", "auto".
   type GridPreset = "" | "1" | "2" | "3" | "4" | "5" | "6" | "auto";
   let gridPreset = $state<GridPreset>(detectGridPreset(liveStyles));
-  let gridGap = $state(simplifyLength(detectGap(liveStyles)));
+  let gridGap = $state(toUnit(simplifyLength(detectGap(liveStyles)), "gap"));
 
   function detectGridPreset(s: LiveStyles): GridPreset {
     if (s.display !== "grid") return "";
@@ -253,6 +321,38 @@
     if (marginOpen) margin = joinSides(marSides);
   });
 
+  // Switching a unit re-expresses the current value AND its baseline, so a
+  // pure conversion never registers as an edit — only a real change does.
+  function setUnit(prop: UnitProp, next: EditorUnit): void {
+    if (units[prop] === next) return;
+    units[prop] = next;
+    sessionUnits.set(prop, next);
+    const re = (v: string) => convertShorthand(v, prop, next, bases);
+    if (prop === "font-size") {
+      fontSize = re(fontSize);
+      initial.fontSize = re(initial.fontSize);
+    } else if (prop === "width") {
+      width = re(width);
+      initial.width = re(initial.width);
+    } else if (prop === "height") {
+      height = re(height);
+      initial.height = re(initial.height);
+    } else if (prop === "padding") {
+      padding = re(padding);
+      initial.padding = re(initial.padding);
+      if (paddingOpen) padSides = splitSides(padding);
+    } else if (prop === "margin") {
+      margin = re(margin);
+      initial.margin = re(initial.margin);
+      if (marginOpen) marSides = splitSides(margin);
+    } else if (prop === "border-radius") {
+      borderRadius = re(borderRadius);
+      initial.borderRadius = re(initial.borderRadius);
+    } else if (prop === "gap") {
+      gridGap = re(gridGap);
+    }
+  }
+
   // Initial snapshot for diffing.
   const initial = {
     fontSize,
@@ -276,28 +376,32 @@
   // Recompute the structured cssChanges whenever any picker changes.
   $effect(() => {
     const next: Record<string, string> = {};
+    // Lengths go out through ensureUnits so a typed "24" picks up the unit
+    // the user is looking at — we never submit a bare number.
     if (fontSize.trim() && fontSize !== initial.fontSize)
-      next["font-size"] = fontSize.trim();
+      next["font-size"] = ensureUnits(fontSize, units["font-size"]);
     if (fontWeight.trim() && fontWeight !== initial.fontWeight)
       next["font-weight"] = fontWeight.trim();
     if (color.trim() && color.toLowerCase() !== initial.color.toLowerCase())
       next["color"] = color.trim();
+    // line-height stays a unitless ratio.
     if (lineHeight.trim() && lineHeight !== initial.lineHeight)
       next["line-height"] = lineHeight.trim();
-    if (width.trim() && width !== initial.width) next["width"] = width.trim();
+    if (width.trim() && width !== initial.width)
+      next["width"] = ensureUnits(width, units.width);
     if (height.trim() && height !== initial.height)
-      next["height"] = height.trim();
+      next["height"] = ensureUnits(height, units.height);
     if (padding.trim() && padding !== initial.padding)
-      next["padding"] = padding.trim();
+      next["padding"] = ensureUnits(padding, units.padding);
     if (margin.trim() && margin !== initial.margin)
-      next["margin"] = margin.trim();
+      next["margin"] = ensureUnits(margin, units.margin);
     if (
       backgroundColor.trim() &&
       backgroundColor.toLowerCase() !== initial.backgroundColor.toLowerCase()
     )
       next["background-color"] = backgroundColor.trim();
     if (borderRadius.trim() && borderRadius !== initial.borderRadius)
-      next["border-radius"] = borderRadius.trim();
+      next["border-radius"] = ensureUnits(borderRadius, units["border-radius"]);
     if (boxShadow.trim() && boxShadow !== initial.boxShadow)
       next["box-shadow"] = boxShadow.trim();
 
@@ -308,7 +412,7 @@
         gridPreset === "auto"
           ? "repeat(auto-fit, minmax(240px, 1fr))"
           : `repeat(${gridPreset}, minmax(0, 1fr))`;
-      if (gridGap.trim()) next["gap"] = gridGap.trim();
+      if (gridGap.trim()) next["gap"] = ensureUnits(gridGap, units.gap);
     }
 
     cssChanges = next;
@@ -433,6 +537,20 @@
   }
 </script>
 
+{#snippet unitPicker(prop: UnitProp)}
+  <select
+    style={UNIT_SELECT}
+    title="Unit — em / rem keep this scaling with the page's font size"
+    aria-label="Unit for {prop}"
+    value={units[prop]}
+    onchange={(e) => setUnit(prop, e.currentTarget.value as EditorUnit)}
+  >
+    {#each EDITOR_UNITS as u (u)}
+      <option value={u} disabled={u === "%" && baseFor(prop, "%", bases) === 0}>{u}</option>
+    {/each}
+  </select>
+{/snippet}
+
 {#snippet sideBox(s: Sides, set: (side: SideKey, value: string) => void)}
   <div class="sides">
     {#each SIDE_KEYS as [k, lbl] (k)}
@@ -551,7 +669,12 @@
     </p>
   {:else if activeTab === "font"}
     <div class="grid">
-      <label>Size <input type="text" bind:value={fontSize} onkeydown={onKey} /></label>
+      <label>Size
+        <span style={UNIT_ROW}>
+          <input type="text" style={UNIT_INPUT} bind:value={fontSize} onkeydown={onKey} />
+          {@render unitPicker("font-size")}
+        </span>
+      </label>
       <label>Weight
         <select bind:value={fontWeight}>
           <option value="300">300</option>
@@ -563,27 +686,48 @@
         </select>
       </label>
       <label>Color <input type="color" bind:value={color} /></label>
-      <label>Line height <input type="text" bind:value={lineHeight} onkeydown={onKey} /></label>
+      <label>Line height
+        <input
+          type="text"
+          bind:value={lineHeight}
+          onkeydown={onKey}
+          title="Unitless ratio — scales with the final font size"
+          placeholder="e.g. 1.5"
+        />
+      </label>
     </div>
   {:else if activeTab === "sizing"}
     <div class="grid">
-      <label>Width <input type="text" bind:value={width} onkeydown={onKey} placeholder="e.g. 50%, 320px, auto" /></label>
-      <label>Height <input type="text" bind:value={height} onkeydown={onKey} placeholder="e.g. 100vh, 240px" /></label>
+      <label>Width
+        <span style={UNIT_ROW}>
+          <input type="text" style={UNIT_INPUT} bind:value={width} onkeydown={onKey} placeholder="e.g. auto" />
+          {@render unitPicker("width")}
+        </span>
+      </label>
+      <label>Height
+        <span style={UNIT_ROW}>
+          <input type="text" style={UNIT_INPUT} bind:value={height} onkeydown={onKey} placeholder="e.g. auto" />
+          {@render unitPicker("height")}
+        </span>
+      </label>
     </div>
   {:else if activeTab === "spacing"}
     <div class="grid">
       <div class="field">
         <span class="field-row">
           Padding
-          <button
-            type="button"
-            class="expander"
-            class:expander--open={paddingOpen}
-            title={paddingOpen ? "Use a single shorthand value" : "Edit top / right / bottom / left"}
-            aria-label="Toggle per-side padding"
-            aria-expanded={paddingOpen}
-            onclick={togglePadding}
-          >&#9662;</button>
+          <span style="display:flex;align-items:center;gap:2px;">
+            {@render unitPicker("padding")}
+            <button
+              type="button"
+              class="expander"
+              class:expander--open={paddingOpen}
+              title={paddingOpen ? "Use a single shorthand value" : "Edit top / right / bottom / left"}
+              aria-label="Toggle per-side padding"
+              aria-expanded={paddingOpen}
+              onclick={togglePadding}
+            >&#9662;</button>
+          </span>
         </span>
         {#if paddingOpen}
           {@render sideBox(padSides, setPadSide)}
@@ -594,15 +738,18 @@
       <div class="field">
         <span class="field-row">
           Margin
-          <button
-            type="button"
-            class="expander"
-            class:expander--open={marginOpen}
-            title={marginOpen ? "Use a single shorthand value" : "Edit top / right / bottom / left"}
-            aria-label="Toggle per-side margin"
-            aria-expanded={marginOpen}
-            onclick={toggleMargin}
-          >&#9662;</button>
+          <span style="display:flex;align-items:center;gap:2px;">
+            {@render unitPicker("margin")}
+            <button
+              type="button"
+              class="expander"
+              class:expander--open={marginOpen}
+              title={marginOpen ? "Use a single shorthand value" : "Edit top / right / bottom / left"}
+              aria-label="Toggle per-side margin"
+              aria-expanded={marginOpen}
+              onclick={toggleMargin}
+            >&#9662;</button>
+          </span>
         </span>
         {#if marginOpen}
           {@render sideBox(marSides, setMarSide)}
@@ -610,7 +757,12 @@
           <input type="text" bind:value={margin} onkeydown={onKey} placeholder="e.g. 0 auto" />
         {/if}
       </div>
-      <label>Border radius <input type="text" bind:value={borderRadius} onkeydown={onKey} placeholder="e.g. 8px, 50%" /></label>
+      <label>Border radius
+        <span style={UNIT_ROW}>
+          <input type="text" style={UNIT_INPUT} bind:value={borderRadius} onkeydown={onKey} placeholder="e.g. 0.5" />
+          {@render unitPicker("border-radius")}
+        </span>
+      </label>
       <label>Background <input type="color" bind:value={backgroundColor} /></label>
     </div>
     <label class="full">Box shadow
@@ -637,12 +789,16 @@
     </div>
     {#if gridPreset}
       <label style="margin-top: 10px;">Gap
-        <input
-          type="text"
-          bind:value={gridGap}
-          onkeydown={onKey}
-          placeholder="e.g. 1rem, 16px, 0.5rem 1rem"
-        />
+        <span style={UNIT_ROW}>
+          <input
+            type="text"
+            style={UNIT_INPUT}
+            bind:value={gridGap}
+            onkeydown={onKey}
+            placeholder="e.g. 1, or 0.5 1"
+          />
+          {@render unitPicker("gap")}
+        </span>
       </label>
     {/if}
   {:else if activeTab === "css"}

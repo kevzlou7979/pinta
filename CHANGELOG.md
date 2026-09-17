@@ -8,6 +8,18 @@ For the architectural design behind each item, see
 
 ### Added
 
+- **AuditFlow: localization bugs in the Accessibility category.** Eight
+  i18n checks join the built-in Accessibility audit (SKILL §7.11):
+  hardcoded UI strings that bypass `t()`, missing translation keys
+  (base locale → `fail`, other locales → `warn`), sentence
+  concatenation, hand-rolled plurals, dates / numbers / currency
+  formatted by hand instead of `Intl`, truncation under text expansion
+  (`nowrap`, fixed px widths on labels), RTL readiness (physical vs
+  logical CSS props, `dir` on `<html>`), and locale-blind sort / case.
+  The agent detects the i18n layer first; projects without one get a
+  single `info` note plus only the locale-independent checks, so an
+  English-only app isn't flooded.
+
 - **Devices: responsive config + expand.** The toolbar picker gains
   "Custom size…" — type any Width × Height (200–4000px) and add it as a
   frame; every frame header gains an expand button that fills the
@@ -27,6 +39,44 @@ For the architectural design behind each item, see
   explains why it's disabled; results gain numbered cards, an
   "On page" chip, and a click-to-jump compare strip. The `--variants`
   role flag is now named in the skill description.
+- **Design Variants: simpler tab, single variants, Reset.** The three
+  numbered step cards collapse into one compose card (scope → direction →
+  count) with one Generate button; the device picker appears only with
+  results; the Pages gallery folds into a collapsed section; card actions
+  trim to Preview on page / Refine / Use this plus a full-screen icon.
+  Runs can now ask for **1** variant (1–5). A header **Reset** clears the
+  picked element, direction, reference image, results and Refine chats and
+  sets the scope back to Element (keeps count, device and pages; confirms
+  before discarding unapplied variants).
+- **Design Variants: Preview on page and Apply now match the card.** The
+  card markup (`previewHtml`) is the single visual contract. Preview on
+  page renders that exact markup in a closed shadow root that takes the
+  element's layout slot, so the app's CSS build (missing Tailwind classes,
+  preflight resets) can no longer distort it; agent page-ground wrappers
+  are unwrapped automatically. Apply sends `previewHtml` for element
+  variants and the skill requires an exact match (identical tokens or
+  exact values, never "close"), replacing the old ~90% rule. Cards can
+  carry an optional `previewBackground` ground color.
+- **Design Variants: automatic match check after Apply.** Once the dev
+  server hot-reloads, the page renders the applied card off-screen and
+  diffs computed styles against the live element (zero agent tokens).
+  The applied card shows "Page matches this card", or a score with a
+  Card / Page list of every differing property; **Fix differences**
+  sends only those diffs back to the agent (`fix` on `variants-apply`,
+  SKILL §7.16). The check re-finds the element after its classes change,
+  retries while the element is still reloading, and ignores environment
+  noise (inherited base line-height, CSS-reset svg display, derived
+  offsets).
+- **Design Variants: results redesign.** Element cards render through the
+  same shadow context as the on-page preview and size to the element (no
+  more tiny previews in empty dark frames); click a preview for actual
+  size. Once results exist the form collapses to a one-line brief with
+  Edit / Regenerate, the thumbnail strip is gone, rationales clamp to two
+  lines, and the applied card holds its summary, files and match result
+  (Card vs Page chips, Fix differences, re-check). Direction chips are
+  product intents ("clearer hierarchy") instead of effects ("glassy"), and
+  the skill gains a craft bar against generic AI styling (no decoration the
+  product doesn't already use, idea-named labels, ≤ 18-word rationales).
 
 - **Devices module (Phase 24) — multi-device canvas.** A full-tab
   simulator page showing your running app in many live, interactive
@@ -44,6 +94,89 @@ For the architectural design behind each item, see
   (the frame you navigated in never reloads). New frames masonry-pack
   into the nearest free spot; **Rearrange** re-packs the whole canvas
   and **Clear all** empties it.
+- **Devices: annotate inside a device.** Click **Annotate** on a device
+  frame's header and the side panel's tools (select, draw, move, text,
+  paint…) work inside that frame. One device at a time; its viewport width
+  tags each annotation, so the agent edits that breakpoint. Submit and
+  export capture the device's own viewport, cropped from the canvas. The
+  overlay loads into the chosen frame only on demand; no other iframe on
+  any site ever loads it.
+
+### Changed
+
+- **Side panel loads faster.** Module tabs and the zip library load on
+  demand, so the side panel's initial script drops from ~186 KB to ~58 KB
+  gzipped.
+- **Screenshots are lighter.** Full-page capture returns only what the
+  caller needs (the stitched image for submit, slices for export), is
+  capped at 16,384 px / 60M px² and 18 s (a partial shot is flagged
+  `capped`), and composites and exported images are JPEG. Device-frame
+  shots are never upscaled (long edge ≤ 1568 px).
+- **Leaner agent runs.** The skill's read budgets shrink (Design Variants
+  ~30 files / 150 KB; AuditFlow grep-first, per-category caps), locale
+  checks read keys only, the Fix differences payload is capped per string,
+  and Refine no longer repeats your message in its history. SKILL.md ends
+  10 lines shorter despite the new safety rules.
+- **Skill: Test Pilot "Suggest tests" now has a real handler**, plus one
+  table of built-in modules showing which ops can write.
+- **Accessibility audits don't penalise English-only apps.** Without an
+  i18n layer, the locale-independent checks report as one unscored info row.
+
+### Fixed
+
+- **Annotating a device frame no longer depends on tab messaging.** The
+  side panel hands tool/annotation messages to the Devices canvas, which
+  posts them straight into the annotating frame (the same hop activation
+  uses), and the frame mirrors its own messages back the same way. The
+  frame also re-announces itself on every activation ping, and the panel
+  shows whether it is connected to a device frame.
+- **Devices nav sync and device annotation load reliably.** Content scripts
+  that crxjs emits as classic scripts no longer bundle Vite's preload helper
+  (`import.meta` parse error that disabled nav sync and frame annotation).
+- **Devices nav sync** no longer reload-storms after Refresh all or
+  redirects, follows only same-origin navigations, and stores the target URL
+  without its query string; frame drags repaint at most once per frame.
+- **Design Variants match check** is bounded on large pages, works for
+  icon-only elements, and keeps a single retry timer; the Pages gallery caps
+  manual routes at 12.
+- **Chat inputs:** Alt+Enter and Ctrl/Cmd+Enter insert a new line (browsers
+  don't do it natively in a textarea).
+- **Submit options stick.** Auto-apply, Include full-page screenshot, Just Ask
+  and per-submit module ticks (e.g. Create GitLab issues) are remembered across
+  submits and panel reloads instead of resetting after every batch.
+- **Side panel** removes its tab listeners on close and skips the companion
+  port scan when a connected catch-all companion still applies.
+- Keyboard shortcuts in Settings and the docs now list the Ctrl+Alt tool keys,
+  Alt+V and undo / redo.
+
+### Security
+
+- **Companion rejects unsafe session ids** and keeps every session file
+  inside `.pinta/sessions`; posted sessions can no longer set
+  `projectRoot`, `autoApply` or a screenshot path.
+- **Web pages can no longer read companion data.** Non-extension origins get
+  403 on every route except a minimal `/v1/health`, and DNS-rebound hosts are
+  refused.
+- **Only the trusted Pinta extension** (the Web Store id, `PINTA_EXTENSION_IDS`,
+  or the first extension that connects, pinned in
+  `.pinta/trusted-extension.json`) may open the WebSocket, install modules or
+  send code-editing ops. Switching between an unpacked and a Web Store build
+  needs that file deleted or the env var set.
+- **Design Variants markup goes through a strict allowlist sanitizer**, and
+  extension pages get a tighter Content Security Policy: agent HTML can no
+  longer load remote resources, hide instructions in comments or attributes,
+  or paint over the panel or page. Full screen opens a packaged page that
+  renders the variant in a sandboxed iframe.
+- **Credential-like URL parameters and fragments are redacted** before URLs
+  leave the extension; agent-returned issue links must be https.
+- **Skill safety rules:** git and glab calls pass untrusted text through
+  files (`git commit -F`, no shell interpolation) and validate ids; every
+  code-editing op runs a preflight (protected paths, no scripts / remote code
+  / new dependencies, visual CSS only for variants); the untrusted-input
+  table covers every module, screenshots and browser pages.
+- Device-frame capture only runs from extension pages and only captures the
+  active Devices tab.
+- Dependencies: fast-uri 3.1.7 and browserslist 4.28.9 (high advisories).
 
 ## 0.8.2 — 2026-08-21
 

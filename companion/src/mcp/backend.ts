@@ -1,5 +1,6 @@
 import { readFile } from "node:fs/promises";
 import { join, isAbsolute } from "node:path";
+import { imageMediaTypeForPath } from "../security.js";
 import type {
   AnnotationStatus,
   Session,
@@ -100,13 +101,22 @@ export class HttpBackend implements Backend {
     const session = await this.getSession(id);
     if (!session?.fullPageScreenshotPath) return null;
 
+    // The companion writes <id>.png or <id>.jpg; derive the media type
+    // from the stored path and refuse anything that isn't one of those
+    // (so a tampered path can't turn this into a generic file read).
+    const mediaType = imageMediaTypeForPath(session.fullPageScreenshotPath);
+    if (!mediaType) {
+      throw new Error(
+        `unsupported screenshot path: ${session.fullPageScreenshotPath}`,
+      );
+    }
     const abs = isAbsolute(session.fullPageScreenshotPath)
       ? session.fullPageScreenshotPath
       : join(session.projectRoot, session.fullPageScreenshotPath);
 
     try {
       const bytes = await readFile(abs);
-      return { base64: bytes.toString("base64"), mediaType: "image/png" };
+      return { base64: bytes.toString("base64"), mediaType };
     } catch (err) {
       throw new Error(
         `could not read screenshot at ${abs}: ${(err as Error).message}`,

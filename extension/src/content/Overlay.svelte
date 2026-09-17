@@ -1,7 +1,7 @@
 <script lang="ts">
-  import { onMount } from "svelte";
+  import { onMount, untrack } from "svelte";
   import type { Annotation, AnnotationImage, AnnotationTarget } from "@pinta/shared";
-  import { captureTarget } from "./capture.js";
+  import { captureTarget, scrubUrl } from "./capture.js";
   import { content, type Mode, type Draft } from "./state.svelte.js";
   import { targetAnchor, type DrawTool } from "./tools/draw.js";
   import {
@@ -29,7 +29,18 @@
   import { voice } from "../lib/voice/controller.js";
   import FloatingToolbar from "./FloatingToolbar.svelte";
   import { toolMode, toolForKey, type Tool } from "../lib/tools.js";
-  import { sanitizeVariantHtml } from "../lib/design-variants.js";
+  import {
+    buildShadowPreviewHost,
+    diffRenderedTrees,
+    locateAppliedElement,
+    makeDefaultStyleOf,
+    sanitizeVariantFragment,
+  } from "../lib/design-variants.js";
+
+  /** This page's URL with credential-like query values / fragments
+   *  redacted — every URL the overlay stamps or announces goes through it,
+   *  so annotation URLs and the panel's page URL stay comparable. */
+  const pageUrl = (): string => scrubUrl(location.href);
 
   let hovered: Element | null = $state(null);
   let selected: Element | null = $state(null);
@@ -45,7 +56,7 @@
   // the current page only — without this, the rect cache would let
   // badges from one SPA route bleed onto every other route.
   let currentUrl = $state<string>(
-    typeof location !== "undefined" ? location.href : "",
+    typeof location !== "undefined" ? pageUrl() : "",
   );
   // Pulsating edge-glow shown while the agent is picking up and
   // applying the session. Toggled by `processing.start` / `processing.end`
@@ -110,8 +121,7 @@
   // toggles its mode (re-picking the active one exits to idle).
   function pickTool(t: Tool) {
     if (t === "image") {
-      chrome.runtime
-        .sendMessage({ type: "toolbar.pick-image" })
+      sendToPanel({ type: "toolbar.pick-image" })
         .catch(() => {});
       return;
     }
@@ -120,8 +130,7 @@
       // tool active while it's on. Flip it + tell the side panel to open/close
       // its batching session.
       content.freeTransform = !content.freeTransform;
-      chrome.runtime
-        .sendMessage({ type: "transform.state", on: content.freeTransform })
+      sendToPanel({ type: "transform.state", on: content.freeTransform })
         .catch(() => {});
       return;
     }
@@ -146,16 +155,95 @@
     const mode = content.mode;
     const tool = mode === "draw" ? content.tool : undefined;
     try {
-      chrome.runtime.sendMessage({ type: "mode.changed", mode, tool });
+      sendToPanel({ type: "mode.changed", mode, tool });
     } catch {
       // Extension reloaded / context invalidated — nothing to do here;
       // the page will re-mount its overlay on the next reload.
     }
   });
 
+  /** Messages out of a device frame also go to the canvas, which forwards
+   *  them to the side panel. chrome.runtime messaging from a sandboxed
+   *  sub-frame of an extension-page tab is the one hop we can't verify, so
+   *  the canvas (plain window.postMessage, same hop activation uses) is the
+   *  belt to its braces. Duplicates are harmless: the panel keys on ids. */
+  function sendToPanel(msg: unknown): Promise<unknown> {
+    mirrorToCanvas(msg);
+    try {
+      return (chrome.runtime.sendMessage(msg) as Promise<unknown>) ?? Promise.resolve();
+    } catch {
+      return Promise.resolve();
+    }
+  }
+
+  function mirrorToCanvas(msg: unknown): void {
+    if (!content.inFrame) return;
+    try {
+      window.parent.postMessage(
+        { type: "pinta-frame-out", payload: msg },
+        new URL(chrome.runtime.getURL("")).origin,
+      );
+    } catch {
+      // parent gone — ignore
+    }
+  }
+
+  /** Tell the side panel this page (or active device frame) is live so it
+   *  adopts the URL and replays pins. Inactive device frames stay quiet. */
+  function announceReady(): void {
+    if (!content.frameActive) return;
+    try {
+      // previewActive lets the panel tell a fresh document (preview gone
+      // with the old DOM) from an SPA calling replaceState while a preview
+      // is still up — both reach it as overlay.ready.
+      void sendToPanel({
+        type: "overlay.ready",
+        url: pageUrl(),
+        previewActive: content.variantPreviewActive,
+      })?.catch(() => {});
+    } catch {
+      // No extension context available — ignore.
+    }
+  }
+
+  // Let overlay.ts re-announce on demand (canvas activation pings).
+  content.announceFrame = announceReady;
+  // ...and arm a tool on activation (see content.requestMode).
+  content.requestMode = (next, tool) =>
+    setMode(next as Mode, tool as DrawTool | undefined);
+
+  // Devices frame: becoming the annotation target re-announces this frame;
+  // losing it drops any active tool so nothing lingers mid-gesture. Acts on
+  // actual frameActive TRANSITIONS only — the first run just records the
+  // value (onMount's pingUrl already announced a frame mounted active, and
+  // a frame mounted inactive has nothing to drop).
+  let prevFrameActive: boolean | null = null;
+  $effect(() => {
+    if (!content.inFrame) return;
+    const active = content.frameActive;
+    const prev = prevFrameActive;
+    prevFrameActive = active;
+    if (prev === null || prev === active) return;
+    if (active) announceReady();
+    else {
+      untrack(() => setMode("idle"));
+      try {
+        void sendToPanel({ type: "frame.inactive" })?.catch(() => {});
+      } catch {
+        // Extension context invalidated — nothing to tell.
+      }
+    }
+  });
+
   // Listen for mode toggles + annotated-pin lifecycle from the side panel.
   onMount(() => {
-    const handler = (msg: unknown) => {
+    const handler = (
+      msg: unknown,
+      _sender: chrome.runtime.MessageSender,
+      sendResponse: (response: unknown) => void,
+    ) => {
+      // Inactive device frame: the panel's broadcast is for another frame.
+      if (!content.frameActive) return;
       const m = msg as {
         type?: string;
         mode?: Mode;
@@ -172,8 +260,20 @@
         variantId?: string;
         label?: string;
         target?: AnnotationTarget;
-        swap?: { cssChanges?: Record<string, string>; html?: string };
+        /** Design Variants on-page preview / verify markup (the card contract). */
+        previewHtml?: string;
       };
+      if (m?.type === "frame.viewport") {
+        // Devices capture: the annotating frame's scroll + viewport, so the
+        // panel can composite annotations onto the cropped frame shot.
+        sendResponse({
+          scrollY: window.scrollY,
+          width: window.innerWidth,
+          height: window.innerHeight,
+          url: pageUrl(),
+        });
+        return;
+      }
       if (m?.type === "panel.state") {
         content.panelOpen = !!m.open;
         return;
@@ -182,6 +282,9 @@
         // Side panel flipped Free Transform (its Done/Cancel or its tool
         // button). Mirror + echo the state so both surfaces stay in sync.
         content.freeTransform = !!m.on;
+        // Raw send + explicit mirror: inside a device frame the runtime
+        // hop alone may not reach the panel (see sendToPanel).
+        mirrorToCanvas({ type: "transform.state", on: content.freeTransform });
         chrome.runtime
           .sendMessage({ type: "transform.state", on: content.freeTransform })
           .catch(() => {});
@@ -281,13 +384,32 @@
         setMode("variant-pick");
       } else if (m?.type === "variants.pick-cancel") {
         if (content.mode === "variant-pick") setMode("idle");
-      } else if (m?.type === "variants.preview" && m.target && m.swap) {
+      } else if (
+        m?.type === "variants.preview" &&
+        typeof m.variantId === "string" &&
+        typeof m.previewHtml === "string"
+      ) {
+        // No target = page scope: the whole document is the subject.
         previewVariant(
           m as {
             variantId: string;
             label?: string;
+            target: AnnotationTarget | null;
+            previewHtml: string;
+          },
+        );
+      } else if (
+        m?.type === "variants.verify" &&
+        m.target &&
+        typeof m.previewHtml === "string" &&
+        typeof m.variantId === "string"
+      ) {
+        verifyAppliedVariant(
+          m as {
+            variantId: string;
             target: AnnotationTarget;
-            swap: { cssChanges?: Record<string, string>; html?: string };
+            previewHtml: string;
+            allowGlobal?: boolean;
           },
         );
       } else if (m?.type === "variants.restore") {
@@ -298,19 +420,22 @@
       }
     };
     chrome.runtime.onMessage.addListener(handler);
+    // The canvas relays the panel's messages into this frame (see
+    // mirrorToCanvas for why). Same trust rule as activation: our
+    // extension's origin, from the parent window only.
+    const extOrigin = new URL(chrome.runtime.getURL("")).origin;
+    const onRelay = (e: MessageEvent): void => {
+      if (e.origin !== extOrigin || e.source !== window.parent) return;
+      const d = e.data as { type?: unknown; payload?: unknown } | null;
+      if (!d || d.type !== "pinta-relay" || !d.payload) return;
+      handler(d.payload, { id: chrome.runtime.id }, () => {});
+    };
+    if (content.inFrame) window.addEventListener("message", onRelay);
     // Tell the side panel we're alive so it can replay any annotations
     // from the current draft that were created on this URL — pins get
     // re-painted on reload / SPA nav. Best-effort: if no side panel is
     // open the message just dispatches into the void.
-    const pingUrl = () => {
-      try {
-        void chrome.runtime
-          .sendMessage({ type: "overlay.ready", url: location.href })
-          ?.catch(() => {});
-      } catch {
-        // No extension context available — ignore.
-      }
-    };
+    const pingUrl = () => announceReady();
     pingUrl();
     // SPA route change: the content script stays alive, but the DOM
     // typically re-renders so previously-painted pin badges point at
@@ -319,7 +444,7 @@
     // badges follow the element through subsequent re-renders. The ping
     // is just to update the side panel's view of the current URL.
     const onRouteChange = () => {
-      currentUrl = location.href;
+      currentUrl = pageUrl();
       queueMicrotask(pingUrl);
     };
     // Watch DOM mutations and re-resolve detached annotated elements
@@ -338,16 +463,10 @@
         // preview is dead: clear it (and tell the panel) instead of
         // suppressing re-resolution indefinitely.
         if (content.variantPreviewActive) {
-          // Self-heal BOTH modes: a framework re-render that removed the
-          // swap node (swap mode) or the styled element itself (css
-          // mode) means the preview is dead — clear it instead of
-          // suppressing annotation re-resolution indefinitely.
-          const dead =
-            variantPreview?.mode === "swap"
-              ? !variantPreview.replacement?.isConnected
-              : variantPreview
-                ? !variantPreview.original.isConnected
-                : true;
+          // Self-heal: a framework re-render that removed the swap host
+          // means the preview is dead — clear it instead of suppressing
+          // annotation re-resolution indefinitely.
+          const dead = !variantPreview?.replacement.isConnected;
           if (dead) restoreVariantPreviewLocal(true);
           return;
         }
@@ -381,6 +500,7 @@
     };
     return () => {
       chrome.runtime.onMessage.removeListener(handler);
+      window.removeEventListener("message", onRelay);
       removeEventListener("hashchange", onRouteChange);
       removeEventListener("popstate", onRouteChange);
       history.pushState = origPushState;
@@ -399,6 +519,7 @@
   //   Esc   → cancel in-progress / pending / mode (handled per-mode)
   onMount(() => {
     function onKey(e: KeyboardEvent) {
+      if (!content.frameActive) return;
       if (!e.altKey || e.ctrlKey || e.metaKey || e.shiftKey) return;
       const key = e.key.toLowerCase();
       // Alt+V — dictate into the focused field (Voice Command). Handled
@@ -432,6 +553,7 @@
   // keyboard-layout independent (Ctrl+Alt can remap letters on some layouts).
   onMount(() => {
     function onKey(e: KeyboardEvent) {
+      if (!content.frameActive) return;
       if (!content.floatingToolbarEnabled) return;
       if (!e.ctrlKey || !e.altKey || e.metaKey || e.shiftKey) return;
       const ae = document.activeElement as HTMLElement | null;
@@ -450,7 +572,11 @@
 
   // Scroll/resize → repaint highlight rects.
   onMount(() => {
-    const bump = () => (tick += 1);
+    const bump = () => {
+      // Inactive device frame: its host is hidden — nothing to repaint.
+      if (!content.frameActive) return;
+      tick += 1;
+    };
     window.addEventListener("scroll", bump, true);
     window.addEventListener("resize", bump);
     return () => {
@@ -669,16 +795,14 @@
       const target = captureTarget(el);
       hovered = null;
       setMode("idle");
-      chrome.runtime
-        .sendMessage({ type: "variants.picked", target })
+      sendToPanel({ type: "variants.picked", target })
         .catch(() => {});
     }
     function onKey(e: KeyboardEvent) {
       if (e.key !== "Escape") return;
       hovered = null;
       setMode("idle");
-      chrome.runtime
-        .sendMessage({ type: "variants.pick-cancelled" })
+      sendToPanel({ type: "variants.pick-cancelled" })
         .catch(() => {});
     }
     document.addEventListener("mousemove", onMove, true);
@@ -691,91 +815,218 @@
     };
   });
 
-  /** The single active live preview. `original` keeps the detached node
-   *  for swap-mode so restore can put it back; css-mode restores the
-   *  snapshot cssText. Transient by design — a framework re-render that
-   *  clobbers the swap simply loses the preview (isConnected guards). */
+  /** The single active live preview: the element swapped for a shadow
+   *  preview host. `original` keeps the detached node so restore can put
+   *  it back. Transient by design — a framework re-render that clobbers the
+   *  swap simply loses the preview (isConnected guards). */
   let variantPreview: {
     variantId: string;
     label: string;
-    mode: "css" | "swap";
-    original: HTMLElement;
+    original: HTMLElement | null;
     originalCssText: string;
-    replacement: HTMLElement | null;
+    replacement: HTMLElement;
+    /** Page scope only: the stylesheet hiding the real page, and the
+     *  scroll position we took the user away from. Element scope leaves
+     *  this null. */
+    page: {
+      style: HTMLStyleElement;
+      hidden: { el: HTMLElement; value: string; priority: string }[];
+      scrollX: number;
+      scrollY: number;
+    } | null;
   } | null = $state(null);
+
+  /**
+   * Page-scope preview. There is no single element to swap, so instead of
+   * tearing the document down (which would destroy the app's framework
+   * state and rarely survives a restore) we HIDE the body's children and
+   * render the variant beside them. Every original node stays in the DOM
+   * untouched, so restoring is just putting the display values back.
+   */
+  function previewPageVariant(m: {
+    variantId: string;
+    label?: string;
+    previewHtml: string;
+  }): void {
+    const body = document.body;
+    if (!body) return;
+    // Same closed-shadow context as the card and the element preview —
+    // that sameness IS the fidelity guarantee.
+    const built = buildShadowPreviewHost(body, m.previewHtml, m.variantId);
+    if (!built) {
+      sendToPanel({ type: "variants.preview-failed", variantId: m.variantId })
+        .catch(() => {});
+      return;
+    }
+    // Hiding the real page takes BOTH halves, and each covers what the
+    // other can't:
+    //   - a stylesheet catches children a framework appends mid-preview,
+    //     which a one-time sweep would miss entirely — but it can still
+    //     lose to a more specific page rule (`#app.d-flex{…!important}`);
+    //   - an inline !important declaration is the strongest author
+    //     declaration there is, so it beats any page rule regardless of
+    //     specificity — but only on the children that exist right now.
+    built.host.setAttribute("data-pinta-page-preview", "");
+    const style = document.createElement("style");
+    style.textContent =
+      `body > *:not([data-pinta-page-preview]):not(${HOST_TAG}){display:none !important}`;
+    (document.head ?? document.documentElement).appendChild(style);
+    const hidden: { el: HTMLElement; value: string; priority: string }[] = [];
+    for (const child of Array.from(body.children)) {
+      // Never hide our own overlay (it lives on documentElement, but a
+      // host page could have moved it) or the preview host itself.
+      if (child === built.host || child.tagName.toLowerCase() === HOST_TAG) continue;
+      if (!(child instanceof HTMLElement)) continue;
+      hidden.push({
+        el: child,
+        value: child.style.getPropertyValue("display"),
+        priority: child.style.getPropertyPriority("display"),
+      });
+      child.style.setProperty("display", "none", "important");
+    }
+    // The variant is a full page: give it the viewport to lay out in.
+    built.host.style.setProperty("min-height", "100vh");
+    built.host.style.setProperty("width", "100%");
+    built.host.style.setProperty("margin", "0");
+    body.appendChild(built.host);
+    const scrollX = window.scrollX;
+    const scrollY = window.scrollY;
+    window.scrollTo(0, 0);
+    content.variantPreviewActive = true;
+    variantPreview = {
+      variantId: m.variantId,
+      label: m.label ?? m.variantId,
+      original: null,
+      originalCssText: "",
+      replacement: built.host,
+      page: { style, hidden, scrollX, scrollY },
+    };
+    tick += 1;
+  }
 
   function previewVariant(m: {
     variantId: string;
     label?: string;
-    target: AnnotationTarget;
-    swap: { cssChanges?: Record<string, string>; html?: string };
+    target: AnnotationTarget | null;
+    previewHtml: string;
   }): void {
     // Switching between variants = replace the active preview.
     restoreVariantPreviewLocal(false);
+    if (!m.target) {
+      previewPageVariant(m);
+      return;
+    }
     const el = content.findElementForEntry({
       selector: m.target.selector,
       outerHTML: m.target.outerHTML,
       nearbyText: m.target.nearbyText,
     }) as HTMLElement | null;
     if (!el || !el.isConnected) {
-      chrome.runtime
-        .sendMessage({ type: "variants.preview-failed", variantId: m.variantId })
+      sendToPanel({ type: "variants.preview-failed", variantId: m.variantId })
+        .catch(() => {});
+      return;
+    }
+    // Faithful preview: render the card's OWN markup (previewHtml — the
+    // variant's visual contract) instead of agent real-class markup the
+    // app's CSS build may not contain. The host takes the element's
+    // layout slot; its closed shadow root gives the markup the card's
+    // rendering context (page CSS can't reach in, variant <style> can't
+    // leak out). The helper sanitizes AGAIN in this isolated world — the
+    // message could come from anywhere and the page has no sandbox.
+    const built = buildShadowPreviewHost(el, m.previewHtml, m.variantId);
+    if (!built) {
+      // Sanitizer stripped everything renderable — tell the panel so its
+      // "previewing" toggle un-lights (mirrors the not-found path).
+      sendToPanel({ type: "variants.preview-failed", variantId: m.variantId })
         .catch(() => {});
       return;
     }
     content.variantPreviewActive = true;
     const originalCssText = el.style.cssText ?? "";
-    const previewFailed = () => {
-      content.variantPreviewActive = false;
-      chrome.runtime
-        .sendMessage({ type: "variants.preview-failed", variantId: m.variantId })
-        .catch(() => {});
+    const host = built.host;
+    el.replaceWith(host);
+    variantPreview = {
+      variantId: m.variantId,
+      label: m.label ?? m.variantId,
+      original: el,
+      originalCssText,
+      replacement: host,
+      page: null,
     };
-    if (m.swap.html) {
-      // Structural swap. Sanitize AGAIN in the isolated world — the
-      // message could come from anywhere; the sanitizer is load-bearing
-      // here (the page has no sandbox). <template> parsing never
-      // executes scripts, and the sanitizer already removed them.
-      const tpl = document.createElement("template");
-      tpl.innerHTML = sanitizeVariantHtml(m.swap.html);
-      // First ELEMENT child that isn't a <style> — a leading <style>
-      // would otherwise become the replacement node and the element
-      // would simply vanish from the page.
-      const node = (Array.from(tpl.content.children).find(
-        (c) => c.tagName.toUpperCase() !== "STYLE",
-      ) ?? null) as HTMLElement | null;
-      if (!node) {
-        // Sanitizer stripped everything renderable — tell the panel so
-        // its "previewing" toggle un-lights (mirrors the not-found path).
-        previewFailed();
-        return;
-      }
-      node.setAttribute("data-pinta-variant", m.variantId);
-      el.replaceWith(node);
-      variantPreview = {
-        variantId: m.variantId,
-        label: m.label ?? m.variantId,
-        mode: "swap",
-        original: el,
-        originalCssText,
-        replacement: node,
-      };
-    } else if (m.swap.cssChanges) {
-      applyPreview(el, originalCssText, m.swap.cssChanges);
-      variantPreview = {
-        variantId: m.variantId,
-        label: m.label ?? m.variantId,
-        mode: "css",
-        original: el,
-        originalCssText,
-        replacement: null,
-      };
-    } else {
-      // No usable swap payload at all — same failure surface as above.
-      previewFailed();
+    tick += 1;
+  }
+
+  /** Post-apply match check: render the card markup off-screen in the
+   *  same shadow context as the on-page preview, locate the re-rendered
+   *  element (its classes changed, so the old selector may not match),
+   *  and diff computed styles. Read-only; the result goes back to the
+   *  panel as `variants.verify-result`. */
+  function verifyAppliedVariant(m: {
+    variantId: string;
+    target: AnnotationTarget;
+    previewHtml: string;
+    allowGlobal?: boolean;
+  }): void {
+    const reply = (payload: Record<string, unknown>) =>
+      sendToPanel({ type: "variants.verify-result", variantId: m.variantId, ...payload })
+        .catch(() => {});
+    // A live preview would be measured instead of the real element.
+    if (variantPreview) restoreVariantPreviewLocal(true);
+    // Text only, but still through the sanitizer (inert document, no sink).
+    const expectedText = sanitizeVariantFragment(m.previewHtml).textContent ?? "";
+    const actual = locateAppliedElement(document, m.target.selector, expectedText, {
+      allowGlobal: m.allowGlobal !== false,
+      rect: m.target.boundingRect,
+    });
+    if (!actual) {
+      reply({ found: false });
       return;
     }
-    tick += 1;
+    const built = buildShadowPreviewHost(actual, m.previewHtml, m.variantId);
+    const expected = built
+      ? Array.from(built.content.children).find(
+          (c) => c.tagName.toUpperCase() !== "STYLE",
+        )
+      : null;
+    if (!built || !expected) {
+      reply({ found: true, error: "Nothing to compare — the card markup is empty." });
+      return;
+    }
+    const width = actual.getBoundingClientRect().width;
+    Object.assign(built.host.style, {
+      position: "fixed",
+      left: "-100000px",
+      top: "0px",
+      width: `${Math.max(1, Math.round(width))}px`,
+      visibility: "hidden",
+      pointerEvents: "none",
+    });
+    document.body.append(built.host);
+    // One frame so layout-dependent values (svg boxes) are resolved — raced
+    // with a timeout because a hidden tab never fires rAF, which would
+    // strand the off-screen host and never reply. getComputedStyle forces
+    // layout either way. Runs exactly once.
+    let done = false;
+    const run = () => {
+      if (done) return;
+      done = true;
+      clearTimeout(fallback);
+      try {
+        const check = diffRenderedTrees(
+          expected,
+          actual,
+          (el) => getComputedStyle(el),
+          makeDefaultStyleOf(built.content),
+        );
+        reply({ found: true, check });
+      } catch (err) {
+        reply({ found: true, error: (err as Error).message });
+      } finally {
+        built.host.remove();
+      }
+    };
+    const fallback = setTimeout(run, 50);
+    requestAnimationFrame(run);
   }
 
   /** Undo the live preview. `notifyPanel` distinguishes a user-initiated
@@ -784,22 +1035,27 @@
   function restoreVariantPreviewLocal(notifyPanel: boolean): void {
     const p = variantPreview;
     variantPreview = null;
-    if (p) {
-      if (p.mode === "swap") {
-        // If a framework re-render already replaced our node, the swap is
-        // gone with it — restoring would throw, so guard on isConnected.
-        if (p.replacement?.isConnected) {
-          p.replacement.replaceWith(p.original);
-          p.original.style.cssText = p.originalCssText;
-        }
-      } else if (p.original.isConnected) {
-        p.original.style.cssText = p.originalCssText;
+    if (p?.page) {
+      // Page scope: nothing was ever detached, so this always succeeds.
+      // Put each child's own display declaration back exactly as it was,
+      // priority included — restoring "flex" without its !important would
+      // change the page we were only supposed to be covering up.
+      p.replacement.remove();
+      p.page.style.remove();
+      for (const { el, value, priority } of p.page.hidden) {
+        if (value) el.style.setProperty("display", value, priority);
+        else el.style.removeProperty("display");
       }
+      window.scrollTo(p.page.scrollX, p.page.scrollY);
+    } else if (p?.replacement.isConnected && p.original) {
+      // If a framework re-render already replaced our node, the swap is
+      // gone with it — restoring would throw, so guard on isConnected.
+      p.replacement.replaceWith(p.original);
+      p.original.style.cssText = p.originalCssText;
     }
     content.variantPreviewActive = false;
     if (notifyPanel && p) {
-      chrome.runtime
-        .sendMessage({ type: "variants.preview-restored", variantId: p.variantId })
+      sendToPanel({ type: "variants.preview-restored", variantId: p.variantId })
         .catch(() => {});
     }
     tick += 1;
@@ -984,9 +1240,9 @@
       target,
       targets: target ? [target] : undefined,
       viewport: snapshotViewport(),
-      url: location.href,
+      url: pageUrl(),
     };
-    chrome.runtime.sendMessage({ type: "annotation.draw-committed", annotation });
+    sendToPanel({ type: "annotation.draw-committed", annotation });
     content.recordCommitted(annotation);
     content.cancelPendingImage();
     imageComment = "";
@@ -1207,9 +1463,9 @@
       target: p.sourceTarget,
       move,
       viewport: snapshotViewport(),
-      url: location.href,
+      url: pageUrl(),
     };
-    chrome.runtime.sendMessage({ type: "annotation.draw-committed", annotation });
+    sendToPanel({ type: "annotation.draw-committed", annotation });
     // Snapshot so Remove / new-session restores the translate preview for
     // the primary AND every extra that rode along.
     content.recordAnnotated(
@@ -1220,7 +1476,7 @@
       p.sourceTarget.selector,
       p.sourceTarget.outerHTML,
       p.sourceTarget.nearbyText,
-      location.href,
+      pageUrl(),
       false,
       p.extras.map((ex) => ({
         element: ex.el,
@@ -1498,9 +1754,9 @@
       targets: [target],
       target,
       viewport: snapshotViewport(),
-      url: location.href,
+      url: pageUrl(),
     };
-    chrome.runtime.sendMessage({ type: "annotation.draw-committed", annotation });
+    sendToPanel({ type: "annotation.draw-committed", annotation });
     content.recordAnnotated(
       annId,
       el,
@@ -1509,7 +1765,7 @@
       target.selector,
       target.outerHTML,
       target.nearbyText,
-      location.href,
+      pageUrl(),
     );
     content.attachPreviewChanges(annId, diffAppliedProps(p.baseCssText, el.style.cssText));
   }
@@ -1579,9 +1835,9 @@
         text,
       },
       viewport: snapshotViewport(),
-      url: location.href,
+      url: pageUrl(),
     };
-    chrome.runtime.sendMessage({ type: "annotation.draw-committed", annotation });
+    sendToPanel({ type: "annotation.draw-committed", annotation });
     // `inserted: true` → rollback removes the node instead of restoring.
     content.recordAnnotated(
       annId,
@@ -1591,7 +1847,7 @@
       undefined,
       undefined,
       undefined,
-      location.href,
+      pageUrl(),
       true,
     );
   }
@@ -1725,9 +1981,9 @@
       targets: [target],
       target,
       viewport: snapshotViewport(),
-      url: location.href,
+      url: pageUrl(),
     };
-    chrome.runtime.sendMessage({ type: "annotation.draw-committed", annotation });
+    sendToPanel({ type: "annotation.draw-committed", annotation });
     // Record for rollback. `deleted: true` suppresses the on-page pin
     // badge (there's nothing to point at — the element is gone). Removing
     // the card fires `annotated.remove`, which restores originalCssText.
@@ -1739,7 +1995,7 @@
       target.selector,
       target.outerHTML,
       target.nearbyText,
-      location.href,
+      pageUrl(),
       false,
       undefined,
       true,
@@ -2006,9 +2262,9 @@
       targets: [target],
       target,
       viewport: snapshotViewport(),
-      url: location.href,
+      url: pageUrl(),
     };
-    chrome.runtime.sendMessage({ type: "annotation.draw-committed", annotation });
+    sendToPanel({ type: "annotation.draw-committed", annotation });
     // Keep the preview applied; snapshot for rollback on Remove / clear.
     content.recordAnnotated(
       annId,
@@ -2018,7 +2274,7 @@
       target.selector,
       target.outerHTML,
       target.nearbyText,
-      location.href,
+      pageUrl(),
     );
     content.attachPreviewChanges(annId, diffAppliedProps(p.baseCssText, el.style.cssText));
     resizePending = null;
@@ -2174,9 +2430,9 @@
       targets: [p.target],
       target: p.target,
       viewport: snapshotViewport(),
-      url: location.href,
+      url: pageUrl(),
     };
-    chrome.runtime.sendMessage({ type: "annotation.draw-committed", annotation });
+    sendToPanel({ type: "annotation.draw-committed", annotation });
     content.recordAnnotated(
       annId,
       el,
@@ -2185,7 +2441,7 @@
       p.target.selector,
       p.target.outerHTML,
       p.target.nearbyText,
-      location.href,
+      pageUrl(),
     );
     content.attachPreviewChanges(annId, diff);
     transformPending = null;
@@ -2454,9 +2710,9 @@
       targets: [target],
       target,
       viewport: snapshotViewport(),
-      url: location.href,
+      url: pageUrl(),
     };
-    chrome.runtime.sendMessage({ type: "annotation.draw-committed", annotation });
+    sendToPanel({ type: "annotation.draw-committed", annotation });
     content.recordAnnotated(
       annId,
       el,
@@ -2465,7 +2721,7 @@
       target.selector,
       target.outerHTML,
       target.nearbyText,
-      location.href,
+      pageUrl(),
     );
     content.attachPreviewChanges(annId, diffAppliedProps(p.baseCssText, el.style.cssText));
     paintPending = null;
@@ -2697,9 +2953,9 @@
       targets: [target],
       target,
       viewport: snapshotViewport(),
-      url: location.href,
+      url: pageUrl(),
     };
-    chrome.runtime.sendMessage({ type: "annotation.draw-committed", annotation });
+    sendToPanel({ type: "annotation.draw-committed", annotation });
     content.recordAnnotated(
       annId,
       el,
@@ -2708,7 +2964,7 @@
       target.selector,
       target.outerHTML,
       target.nearbyText,
-      location.href,
+      pageUrl(),
     );
     // Scale leaves a transform preview on the element — record it so a
     // rebuild after removing a sibling reinstates (or drops) it correctly.
@@ -2831,9 +3087,26 @@
       borderRadius: "",
       boxShadow: "",
       display: "",
+      ownFontSize: 16,
+      parentFontSize: 16,
+      rootFontSize: 16,
+      parentWidth: 0,
     };
     if (!el) return empty;
     const cs = window.getComputedStyle(el);
+    // Bases the editor converts px into (see lib/css-units.ts). Two extra
+    // getComputedStyle calls per selection — no tree walk, so it stays
+    // cheap enough to run on every pick. The parent falls back to the root
+    // for <html> itself.
+    const root = document.documentElement;
+    const parent = el.parentElement;
+    const pcs = parent ? window.getComputedStyle(parent) : null;
+    const rcs = el === root ? cs : window.getComputedStyle(root);
+    const px = (v: string | undefined, fallback: number) => {
+      const n = parseFloat(v ?? "");
+      return Number.isFinite(n) && n > 0 ? n : fallback;
+    };
+    const rootFontSize = px(rcs.fontSize, 16);
     return {
       fontFamily: cs.fontFamily,
       fontSize: cs.fontSize,
@@ -2848,6 +3121,12 @@
       borderRadius: cs.borderRadius,
       boxShadow: cs.boxShadow,
       display: cs.display,
+      ownFontSize: px(cs.fontSize, rootFontSize),
+      parentFontSize: pcs ? px(pcs.fontSize, rootFontSize) : rootFontSize,
+      rootFontSize,
+      // Content-box width of the parent — the base for `%`. 0 when the
+      // parent isn't laid out (computed width comes back "auto").
+      parentWidth: pcs ? px(pcs.width, 0) : 0,
     };
   }
 
@@ -3011,7 +3290,7 @@
     const html = el as HTMLElement;
     const orig = html.style?.cssText ?? "";
     const origHtml = html.innerHTML;
-    const url = ann.url ?? location.href;
+    const url = ann.url ?? pageUrl();
     if (ann.kind === "delete") {
       html.style.setProperty("display", "none", "important");
       content.recordAnnotated(
@@ -3073,7 +3352,7 @@
       primary.selector,
       primary.outerHTML,
       primary.nearbyText,
-      ann.url ?? location.href,
+      ann.url ?? pageUrl(),
     );
   }
 
@@ -3115,14 +3394,14 @@
         targets[0]?.selector,
         targets[0]?.outerHTML,
         targets[0]?.nearbyText,
-        location.href,
+        pageUrl(),
       );
       content.attachPreviewChanges(
         annId,
         diffAppliedProps(previewBaseCss ?? "", (selected as HTMLElement).style.cssText),
       );
     }
-    chrome.runtime.sendMessage({
+    sendToPanel({
       type: "annotation.target-selected",
       annotationId: annId,
       targets,
@@ -3135,7 +3414,7 @@
         : undefined,
       images: hasImages ? selectImages : undefined,
       viewport: snapshotViewport(),
-      url: location.href,
+      url: pageUrl(),
     });
     // Keep the inline preview applied — the user wants a cumulative
     // visual of all queued edits. The annotation's snapshot is in
@@ -3181,9 +3460,9 @@
       // the screenshot — e.g. an agent reading just the .md file.
       target: resolveDrawingTarget(draft) ?? undefined,
       images: draftImages.length ? draftImages : undefined,
-      url: location.href,
+      url: pageUrl(),
     };
-    chrome.runtime.sendMessage({
+    sendToPanel({
       type: "annotation.draw-committed",
       annotation,
     });
@@ -3422,8 +3701,7 @@
     if (key === importedLocatedKey) return;
     importedLocatedKey = key;
     try {
-      void chrome.runtime
-        .sendMessage({ type: "imported.located", matched, total })
+      void sendToPanel({ type: "imported.located", matched, total })
         ?.catch(() => {});
     } catch {
       // Extension context gone — ignore.
@@ -3442,15 +3720,14 @@
 <!-- Floating on-page toolbar (Settings-gated). Same tools as the side panel;
   clicking one drives the overlay directly. Hidden while viewing an imported
   read-only session so the two overlays never fight. -->
-{#if content.floatingToolbarEnabled && content.panelOpen && !imported}
+{#if content.floatingToolbarEnabled && content.panelOpen && !imported && !content.inFrame}
   <FloatingToolbar
     mode={content.mode}
     tool={content.tool}
     transformOn={content.freeTransform}
     onpick={pickTool}
     onaction={(id) =>
-      chrome.runtime
-        .sendMessage({
+      sendToPanel({
           type:
             id === "add-task" ? "toolbar.add-task" : "toolbar.add-selector",
         })
@@ -3626,6 +3903,9 @@
         // Only restore the preview once the panel acknowledged; with the
         // side panel closed there is no listener, the promise rejects,
         // and we keep the preview + pill so nothing silently vanishes.
+        // The raw call is kept for exactly those reject semantics, so the
+        // device-frame mirror has to be spelled out alongside it.
+        mirrorToCanvas({ type: "variants.preview-apply", variantId: id });
         chrome.runtime
           .sendMessage({ type: "variants.preview-apply", variantId: id })
           .then(() => restoreVariantPreviewLocal(true))
@@ -3638,7 +3918,7 @@
             }
           });
       }}
-    >Use this variant</button>
+    >Use this</button>
   </div>
 {/if}
 

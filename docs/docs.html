@@ -416,6 +416,10 @@
         <li><a href="#test-pilot">Test Pilot</a></li>
         <li><a href="#chat">Chat</a></li>
         <li><a href="#auditflow">AuditFlow</a></li>
+        <li><a href="#design-variants">Design Variants</a></li>
+        <li><a href="#code-review">Code Review</a></li>
+        <li><a href="#devices">Devices</a></li>
+        <li><a href="#report">Report</a></li>
       </ul>
       <h4>Multi-agent</h4>
       <ul>
@@ -583,7 +587,7 @@ changed, and hit Submit. I'll wait."</code></pre>
       </p>
       <ul>
         <li><strong>Select</strong> — pick a DOM element. The agent gets the selector, outer HTML, computed styles, and surrounding text.</li>
-        <li><strong>Draw</strong> — arrow, rectangle, circle, freehand, pin. No DOM target — the agent reads the composited screenshot.</li>
+        <li><strong>Draw</strong> — arrow, rectangle, circle, freehand, pin. The agent reads the composited screenshot, plus the element under the drawing's anchor when it's on-screen.</li>
         <li><strong>Image</strong> — drop a reference image at a specific spot. The agent sees both the screenshot and your reference.</li>
       </ul>
       <h4>Inline editor</h4>
@@ -601,7 +605,14 @@ changed, and hit Submit. I'll wait."</code></pre>
         <li><code>Alt+S</code> — toggle Select mode</li>
         <li><code>Alt+P</code> — toggle Draw mode (Pen)</li>
         <li><code>Alt+X</code> — exit to idle</li>
+        <li><code>Alt+V</code> — dictate into the focused field (Voice Command enabled; works inside fields too)</li>
         <li><code>Esc</code> — cancel an in-progress annotation or exit the active mode</li>
+        <li><code>Ctrl+Alt+&lt;letter&gt;</code> — pick a tool while the floating toolbar is on: <code>V</code> Select, <code>A</code> Arrow, <code>R</code> Rect, <code>P</code> Pen, <code>N</code> Pin, <code>I</code> Image, <code>M</code> Move, <code>T</code> Text, <code>D</code> Delete, <code>S</code> Resize, <code>B</code> Paint, <code>C</code> Scale, <code>F</code> Free transform</li>
+      </ul>
+      <p><strong>Side panel</strong> (not while typing in a field):</p>
+      <ul>
+        <li><code>Ctrl/Cmd+Z</code> — undo the last annotation</li>
+        <li><code>Ctrl/Cmd+Shift+Z</code> (or <code>Ctrl/Cmd+Y</code>) — redo</li>
       </ul>
       <p><strong>Inline element editor + comment popover</strong>:</p>
       <ul>
@@ -611,7 +622,7 @@ changed, and hit Submit. I'll wait."</code></pre>
       <p><strong>Chat input</strong> (Test Pilot per-row, global, Just Ask):</p>
       <ul>
         <li><code>Enter</code> — send message</li>
-        <li><code>Alt+Enter</code> (or <code>Shift+Enter</code>) — new line</li>
+        <li><code>Shift+Enter</code> (or <code>Alt+Enter</code>) — new line</li>
       </ul>
       <p>Settings → Keyboard shortcuts lists the same set inside the side panel for quick reference.</p>
 
@@ -669,6 +680,23 @@ changed, and hit Submit. I'll wait."</code></pre>
         the same spec restores your marks. Catalog structure is the source
         of truth.
       </p>
+      <h4>Smoke vs Thorough</h4>
+      <p>
+        The <strong>Smoke test / Thorough</strong> toggle in the tab (or
+        Settings → Test Pilot → <strong>Thorough test generation</strong>)
+        sets how much catalog import / generate produces. Smoke (default) is
+        a quick happy-path pass; Thorough covers every feature with edge
+        cases and negative paths — more tokens, slower.
+      </p>
+      <h4>File failed tests + Suggest Test</h4>
+      <p>
+        <strong>File failed tests</strong> in the header files every failed,
+        not-yet-filed row in one run: a GitLab issue per test via
+        <code>glab</code> (no duplicates), or entries in
+        <code>.pinta/tasks.md</code> when GitLab isn't set up.
+        <strong>Suggest Test</strong> on a section header asks the agent for
+        missing scenarios; tick the ones you want and they join the section.
+      </p>
 
       <h2 id="chat">Chat <span class="chip shipped">module</span></h2>
       <p>
@@ -696,7 +724,7 @@ changed, and hit Submit. I'll wait."</code></pre>
         payloads, env vars, ARIA names). Affects all three chat surfaces.
       </p>
 
-      <h2 id="auditflow">AuditFlow <span class="chip shipped">module</span> <span class="chip planned">15a + 15b</span></h2>
+      <h2 id="auditflow">AuditFlow <span class="chip shipped">module</span></h2>
       <p>
         Lighthouse-style audit surface in its own side-panel tab. Pick
         categories, run audit, get back per-category scores with actionable
@@ -706,17 +734,23 @@ changed, and hit Submit. I'll wait."</code></pre>
       <ul>
         <li><strong>Security</strong> — XSS, CSRF, <code>eval</code> / <code>{@html}</code> misuse, secret leakage in source, CSRF guards on destructive endpoints, <code>npm audit</code> for dependency CVEs.</li>
         <li><strong>Performance</strong> — bundle entry count, production deps count, heavy known offenders (lodash full, moment), sync fetches in render, missing lazy routes, build target sanity, missing <code>loading="lazy"</code>.</li>
-        <li><strong>Accessibility</strong> — alt text, labeled inputs, ARIA misuse, heading hierarchy, click handlers on non-interactive elements, focus-visible, missing <code>lang</code>.</li>
+        <li><strong>Accessibility</strong> — alt text, labeled inputs, ARIA misuse, heading hierarchy, click handlers on non-interactive elements, focus-visible, missing <code>lang</code>, plus localization bugs: hardcoded UI strings, missing translation keys, sentence concatenation, hand-rolled plurals, dates / numbers / currency formatted by hand, truncation under text expansion, RTL readiness, locale-blind sorting.</li>
         <li><strong>Mobile</strong> — viewport meta, fixed-px containers, touch-target sizing, hover-only interactions, horizontal-overflow risks, mouse-only drag listeners.</li>
         <li><strong>Cross-Browser</strong> <span class="chip planned">soon</span> — caniuse-resolved support matrix per finding.</li>
       </ul>
+      <p>
+        All categories are static analysis of your source by the agent — no
+        browser or Lighthouse run. Add your own categories and checks, or
+        ask for more with <strong>Suggest checks</strong>.
+      </p>
       <h4>Fix with agent</h4>
       <p>
-        Every finding has a <strong>Fix with agent</strong> button that
-        composes a Pinta annotation pre-filled with the check details and
-        switches you to the Annotate tab for review. The audit becomes a
-        <em>source of work</em>; the existing Annotate loop is the
-        <em>sink</em>.
+        Every finding has a <strong>Fix with agent</strong> action that
+        fixes the source in place, with a per-row loader; a category's ⋮
+        menu adds <strong>Fix All</strong>. <strong>Discuss</strong> opens a
+        chat about the finding and <strong>File issue</strong> files it to
+        GitLab (or <code>.pinta/tasks.md</code>). Mark findings resolved or
+        won't-fix — the marks survive re-runs.
       </p>
       <h4>Scoring</h4>
       <p>
@@ -726,12 +760,71 @@ changed, and hit Submit. I'll wait."</code></pre>
         70+ Good, 50+ Needs work, else Poor.
       </p>
 
+      <h2 id="design-variants">Design Variants <span class="chip shipped">module</span> <span class="chip planned">unreleased</span></h2>
+      <p>
+        Ask for design options without leaving your app. Pick an element (or
+        the whole page) and the agent returns 1–5 variants that stay inside
+        your design system, as preview cards. Enable it in Settings, then
+        open the <strong>Design Variants</strong> tab.
+      </p>
+      <ul>
+        <li><strong>Brief</strong> — optional art direction (up to 280 characters) and a pasted screenshot of the look you want. The agent translates it into your project's tokens.</li>
+        <li><strong>Preview on page</strong> — swaps the real element for the variant in place; <strong>Restore</strong> or <code>Esc</code> puts it back.</li>
+        <li><strong>Refine</strong> — chat about one variant ("add a subtle background to the heading"); the card updates, source doesn't.</li>
+        <li><strong>Use this</strong> — the agent edits source to match the card exactly. Then a <strong>match check</strong> compares the live element with the card (no agent tokens): it says "matches" or lists the differing properties, and <strong>Fix differences</strong> sends only those back.</li>
+        <li><strong>Reset</strong> clears the pick, direction, image and results. The optional <strong>Pages gallery</strong> shows your routes live at a device width.</li>
+      </ul>
+      <p>
+        Settings: optional design-system path and device presets. Agent HTML
+        is sanitized before it reaches the panel or your page.
+      </p>
+
+      <h2 id="code-review">Code Review <span class="chip shipped">module</span> <span class="chip planned">unreleased</span></h2>
+      <p>
+        A game-style review of your own change. The agent reads your
+        uncommitted diff (or the last commit when the tree is clean) and
+        deals one card per logical change. Enable it in Settings, then open
+        the <strong>Code Review</strong> tab.
+      </p>
+      <ul>
+        <li><strong>Topic mode</strong> — type a focus (e.g. "MFA authentication") to review the relevant code instead of the diff.</li>
+        <li><strong>Pass</strong> / <strong>Fail</strong> / <strong>Learn</strong> each card (keys <code>P</code> / <code>F</code> / <code>L</code>, arrows to move). Fail takes an optional one-line note.</li>
+        <li><strong>Learn</strong> opens a chat that explains how the code works; read-only.</li>
+        <li>The end card grades the run (S–D) and lists failed cards, each with <strong>Fix</strong> — the only action that edits code.</li>
+      </ul>
+
+      <h2 id="devices">Devices <span class="chip shipped">module</span> <span class="chip planned">unreleased</span></h2>
+      <p>
+        See your running app on many devices at once. Enable it in Settings,
+        open the <strong>Devices</strong> tab, and launch the canvas — a
+        full browser tab of live, clickable device frames. No agent involved.
+      </p>
+      <ul>
+        <li>Add phones, tablets, laptops and desktops (or a whole group), or a <strong>Custom size</strong>. Rotate, zoom, expand one frame, drag frames anywhere; <strong>Rearrange</strong> tidies the canvas.</li>
+        <li><strong>Sync</strong> — navigate in one frame and the others follow.</li>
+        <li><strong>Annotate this device</strong> — the frame header's Annotate button makes that frame the target, so the side panel's tools work inside it. One device at a time; its width tags each annotation, so the agent edits that breakpoint. Screenshots capture the device's viewport.</li>
+        <li>Frames respond to real media queries. Apps that forbid framing (<code>X-Frame-Options</code> / <code>frame-ancestors</code>) won't render, and cookie logins may not carry into frames.</li>
+      </ul>
+
+      <h2 id="report">Report <span class="chip shipped">module</span></h2>
+      <p>
+        See what you shipped. Enable it in Settings, open the
+        <strong>Report</strong> tab and pick a range; the agent gathers git,
+        GitHub / GitLab and Pinta activity (read-only) into day cards.
+      </p>
+      <ul>
+        <li>Ranges: a day, a week, a 10-day sprint, or a custom window. Weekend work folds into a nearby weekday.</li>
+        <li><strong>Projects</strong> — combine other repos into one report.</li>
+        <li>Per entry: a proof <strong>screenshot</strong> and <strong>How to test</strong> steps.</li>
+        <li><strong>Export</strong> — a day as detailed markdown, or the whole report as an invoice-ready summary: one short paragraph per weekday, full dates, no duplicates.</li>
+      </ul>
+
       <hr />
 
       <!-- ============================================================
            MULTI-AGENT
            ============================================================ -->
-      <h2 id="role-flags">Role flags (Phase 18a) <span class="chip shipped">multi-terminal</span></h2>
+      <h2 id="role-flags">Role flags (Phase 18) <span class="chip shipped">multi-terminal</span></h2>
       <p>
         Run multiple <code>/pinta</code> Claude Code terminals against the
         same project and dedicate each to a workload. Each terminal declares
@@ -743,10 +836,12 @@ changed, and hit Submit. I'll wait."</code></pre>
           <tr><th>Flag</th><th>Claims sessions where…</th></tr>
         </thead>
         <tbody>
-          <tr><td><code>--annotate</code></td><td><code>modules[]</code> does NOT contain <code>test-pilot</code>, <code>audit-flow</code>, or <code>chat</code></td></tr>
+          <tr><td><code>--annotate</code></td><td><code>modules[]</code> contains none of <code>test-pilot</code>, <code>audit-flow</code>, <code>chat</code>, <code>design-variants</code>, <code>code-review</code></td></tr>
           <tr><td><code>--test-pilot</code></td><td><code>modules[].id</code> contains <code>test-pilot</code></td></tr>
           <tr><td><code>--audit</code></td><td><code>modules[].id</code> contains <code>audit-flow</code></td></tr>
           <tr><td><code>--chat</code></td><td><code>modules[].id</code> contains <code>chat</code></td></tr>
+          <tr><td><code>--variants</code></td><td><code>modules[].id</code> contains <code>design-variants</code></td></tr>
+          <tr><td><code>--review</code></td><td><code>modules[].id</code> contains <code>code-review</code></td></tr>
           <tr><td><em>(no flag)</em></td><td>Claim everything — default, current behavior</td></tr>
         </tbody>
       </table>
@@ -758,6 +853,10 @@ changed, and hit Submit. I'll wait."</code></pre>
 Terminal 2: /pinta --test-pilot   # UAT runs + per-row chat
 Terminal 3: /pinta --audit        # audit runs, low traffic
 Terminal 4: /pinta --chat         # Just-Ask + global chat</code></pre>
+      <p>
+        The companion enforces roles: a terminal that tries to claim a
+        session outside its role gets a 403.
+      </p>
       <div class="callout warn">
         <strong>Coverage matters.</strong> At least one terminal in the
         project must accept each kind in use. If you start all 4
@@ -800,9 +899,11 @@ Terminal 4: /pinta --chat         # Just-Ask + global chat</code></pre>
       </p>
       <ul>
         <li><strong>GitLab Issues</strong> — optional <code>project_id</code> override + default labels.</li>
-        <li><strong>Test Pilot</strong> — Detailed help steps (default off).</li>
+        <li><strong>Test Pilot</strong> — Detailed help steps + Thorough test generation (both default off).</li>
         <li><strong>Chat</strong> — Detailed responses (default off) + Redact PII (default on — strips emails / phones / IDs from page content sent to the agent).</li>
-        <li><strong>AuditFlow</strong> — no settings in 15a/b; browser-target picker arrives with Cross-Browser.</li>
+        <li><strong>AuditFlow</strong>, <strong>Code Review</strong>, <strong>Report</strong> — no settings.</li>
+        <li><strong>Design Variants</strong> — optional design-system path + device presets.</li>
+        <li><strong>Devices</strong> — optional custom devices (JSON).</li>
       </ul>
       <h4>Visual feedback</h4>
       <p>
@@ -932,10 +1033,10 @@ glab auth login --scopes api,write_repository</code></pre>
         page for what's planned. Quick highlights:
       </p>
       <ul>
-        <li>Phase 15c — user-defined custom audits (paste docs → agent generates rules)</li>
-        <li>Phase 16 — Test Pilot sign-off (tester exports MD with Pass/Fail; dev imports + reviews)</li>
+        <li>Phase 6 — a Vite plugin for instant source mapping (Pinta already reads <code>data-source-file</code> / <code>data-source-line</code> if your build adds them)</li>
         <li>Phase 17 — Claude Design (ambient design-system module)</li>
-        <li>Phase 18b — companion-enforced role routing (currently trust-model)</li>
+        <li>AuditFlow — generate custom checks from pasted docs or a URL</li>
+        <li>Design Variants, Code Review and Devices — shipping in the next release</li>
       </ul>
     </main>
   </div>

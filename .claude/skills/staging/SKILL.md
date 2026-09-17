@@ -438,6 +438,12 @@ grep -nE "^  permissions:|host_permissions:|matches:" extension/manifest.config.
 
 # 5 — privacy disclosure still present.
 test -f docs/privacy.html && echo "  privacy.html present" || echo "  MISSING privacy.html — 🟠"
+
+# 6 — built content scripts must parse as CLASSIC scripts (crxjs may emit them
+#     without a module loader). Any import.meta there is a parse error that
+#     silently disables the script (happened to nav-reporter.ts). Needs a fresh
+#     build: npm run build --workspace @pinta/extension. Expect 0 on every line.
+node -e "const fs=require('fs');const m=require('./extension/dist/manifest.json');for(const c of m.content_scripts)for(const f of c.js){const n=(fs.readFileSync('extension/dist/'+f,'utf8').match(/import.meta/g)||[]).length;console.log('  '+f+' import.meta='+n+(n?' — 🔴 parse error':''))}"
 ```
 
 ### 4.7.5 Severity

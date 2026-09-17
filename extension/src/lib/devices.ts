@@ -5,6 +5,8 @@
 //
 // No chrome.* APIs and no runes in here — everything is unit-testable.
 
+import { normalizeTargetUrl } from "./devices-frame.js";
+
 export type DeviceClass =
   | "Mobile"
   | "Tablet"
@@ -289,21 +291,7 @@ export function effectiveScale(
 // ---------------------------------------------------------------------------
 // Target URL
 
-/**
- * Normalize user input into a frameable URL. Only http(s) comes out:
- * a missing scheme gets `http://`; anything else (javascript:, data:,
- * chrome:, chrome-extension:, file:, …) yields "" — frames only ever
- * load web pages.
- */
-export function normalizeTargetUrl(input: string): string {
-  const raw = input.trim();
-  if (raw === "") return "";
-  if (/^https?:\/\//i.test(raw)) return raw;
-  // A colon followed by pure digits is a port (localhost:5173), not a
-  // scheme — everything else with a scheme prefix is rejected.
-  if (/^[a-z][a-z0-9+.-]*:(?!\d+([/?#]|$))/i.test(raw)) return "";
-  return `http://${raw}`;
-}
+export { normalizeTargetUrl };
 
 // ---------------------------------------------------------------------------
 // Frames + persisted state
@@ -504,3 +492,123 @@ export function parseStoredDevicesState(raw: unknown): DevicesPageStateShape {
     sync: o.sync === true,
   };
 }
+
+// ---------------------------------------------------------------------------
+// Navigation sync (pure). Frames report their URL through nav-reporter.ts;
+// the canvas decides whether a report is a navigation worth spreading.
+// Reports are forgeable by the framed page itself (its main world shares
+// the frame's window), so only same-origin URLs ever spread.
+
+/** Quiet period before a propagated URL spreads — redirect chains in the
+ *  originating frame settle and only the final URL reloads the others. */
+export const NAV_SETTLE_MS = 400;
+/** A frame Pinta just re-pointed (sync, refresh, target change) has its
+ *  reports recorded but never spread for this long (its redirects stay
+ *  local instead of bouncing back across the canvas). */
+export const NAV_REPOINT_GRACE_MS = 2500;
+
+/** http(s) origin of `url`, or null. */
+export function urlOrigin(url: string): string | null {
+  try {
+    const u = new URL(url);
+    return u.protocol === "http:" || u.protocol === "https:" ? u.origin : null;
+  } catch {
+    return null;
+  }
+}
+
+/** What the canvas may persist for a target URL: origin + path. Query
+ *  strings and fragments can carry tokens (magic links, OAuth callbacks). */
+export function storableTargetUrl(url: string): string {
+  try {
+    const u = new URL(url);
+    if (u.protocol !== "http:" && u.protocol !== "https:") return "";
+    return `${u.origin}${u.pathname}`;
+  } catch {
+    return "";
+  }
+}
+
+export type NavReportVerdict = "ignore" | "record" | "propagate";
+
+/**
+ * Per-frame nav-sync bookkeeping. `report` classifies a frame's URL report:
+ *  - ignore:    not an http(s) URL;
+ *  - record:    first report of a document, unchanged URL, a cross-origin
+ *               URL, or a frame inside its re-point grace window;
+ *  - propagate: a real same-origin navigation the other frames should follow.
+ */
+export class NavSyncTracker {
+  private frameUrl = new Map<string, string>();
+  private quietUntil = new Map<string, number>();
+  private expectLoad = new Set<string>();
+
+  constructor(private readonly graceMs = NAV_REPOINT_GRACE_MS) {}
+
+  /** Last URL the frame reported (or was pointed at). */
+  urlOf(id: string): string | undefined {
+    return this.frameUrl.get(id);
+  }
+
+  /** Pinta is (re)loading frame `id`. Its next load resets the report
+   *  baseline and its reports don't spread during the grace window.
+   *  `url` = where it's being pointed, when known. */
+  markRepointed(id: string, now: number, url?: string): void {
+    this.quietUntil.set(id, now + this.graceMs);
+    this.expectLoad.add(id);
+    if (url !== undefined) this.frameUrl.set(id, url);
+  }
+
+  /** The frame's iframe fired `load`. A Pinta-initiated load clears the
+   *  baseline (the new document's first report is a position fix) and
+   *  re-arms the grace window (client-side redirects stay local). A
+   *  user-initiated load — a link click in a multi-page app — keeps the
+   *  baseline, so that navigation still spreads. */
+  loaded(id: string, now: number): void {
+    if (!this.expectLoad.delete(id)) return;
+    this.frameUrl.delete(id);
+    this.quietUntil.set(id, now + this.graceMs);
+  }
+
+  report(
+    id: string,
+    rawUrl: string,
+    targetUrl: string,
+    now: number,
+  ): { verdict: NavReportVerdict; url: string } {
+    const url = normalizeTargetUrl(rawUrl);
+    if (url === "" || urlOrigin(url) === null) return { verdict: "ignore", url: "" };
+    const prev = this.frameUrl.get(id);
+    this.frameUrl.set(id, url);
+    if (prev === undefined || prev === url) return { verdict: "record", url };
+    const origin = urlOrigin(targetUrl);
+    if (!origin || urlOrigin(url) !== origin) return { verdict: "record", url };
+    if (now < (this.quietUntil.get(id) ?? 0)) return { verdict: "record", url };
+    return { verdict: "propagate", url };
+  }
+
+  forget(id: string): void {
+    this.frameUrl.delete(id);
+    this.quietUntil.delete(id);
+    this.expectLoad.delete(id);
+  }
+
+  clear(): void {
+    this.frameUrl.clear();
+    this.quietUntil.clear();
+    this.expectLoad.clear();
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Annotating inside device frames — moved to ./devices-frame.ts (tiny, no
+// imports, safe for the service worker). Re-exported for compatibility.
+
+export {
+  DEVICES_PAGE_PATH,
+  devicesCanvasTargetUrl,
+  frameCaptureGeometry,
+  isDevicesCanvasUrl,
+  type FrameCaptureGeometry,
+  type FrameRectReport,
+} from "./devices-frame.js";

@@ -23,12 +23,13 @@
     pintaFilename,
     PintaFileError,
   } from "../lib/pinta-file.js";
-  import { zipSync, strToU8 } from "fflate";
   import { theme, toggleTheme } from "../lib/theme.svelte.js";
   // Tool defs (id / label / icon / shortcut) are shared with the on-page
   // floating toolbar via lib/tools.ts so the two never drift.
   import { TOOLS, startsNewGroup, type Tool } from "../lib/tools.js";
   import { matchAny, suggestPattern } from "../lib/url-patterns.js";
+  import { devicesCanvasTargetUrl, isDevicesCanvasUrl } from "../lib/devices-frame.js";
+  import { scrubUrl } from "../content/capture.js";
   import type { Companion } from "../lib/companions.js";
   import AnnotationCard from "./AnnotationCard.svelte";
   import ConfirmModal from "./ConfirmModal.svelte";
@@ -36,26 +37,38 @@
   import NoteComposer from "./NoteComposer.svelte";
   import SessionHistory from "./SessionHistory.svelte";
   import SettingsPanel from "./SettingsPanel.svelte";
-  import TestPilotTab from "./TestPilotTab.svelte";
-  import AuditFlowTab from "./AuditFlowTab.svelte";
-  import ReportTab from "./ReportTab.svelte";
-  import DesignVariantsTab from "./DesignVariantsTab.svelte";
-  import CodeReviewTab from "./CodeReviewTab.svelte";
-  import DevicesTab from "./DevicesTab.svelte";
-  import ModuleBoardTab from "./ModuleBoardTab.svelte";
+  // Module tabs (TestPilot / AuditFlow / Report / Variants / CodeReview /
+  // Devices / ModuleBoard) are lazy-loaded via lazyTab() below — each is its
+  // own chunk fetched on first open, not parsed with every panel start.
   import ChatSheet from "./ChatSheet.svelte";
   import MicButton from "../lib/voice/MicButton.svelte";
   import { voice } from "../lib/voice/controller.js";
+  import type { RenderCheck } from "../lib/design-variants.js";
+
+  /** Memoized dynamic import for a module tab, so re-opening a tab reuses
+   *  the same (already-settled) promise instead of starting a new import. */
+  const tabModules = new Map<string, Promise<unknown>>();
+  function lazyTab<T>(key: string, load: () => Promise<T>): Promise<T> {
+    let p = tabModules.get(key);
+    if (!p) {
+      p = load().catch((err: unknown) => {
+        tabModules.delete(key); // allow a retry on the next open
+        throw err;
+      });
+      tabModules.set(key, p);
+    }
+    return p as Promise<T>;
+  }
 
   // Phase 14 chat surfaces owned by App.svelte (Test Pilot tier owns
   // its own sheet inside TestPilotTab.svelte):
   // - globalChatOpen — global "Ask Pinta" FAB → ChatSheet with context.kind = "global"
-  // - annotateJustAsk — Annotate submit footer checkbox; when ticked,
+  // - submitOptions.justAsk — Annotate submit footer checkbox; when ticked,
   //   Submit re-labels to "Ask agent" and opens the chat with
   //   context.kind = "annotate-batch" instead of submitting source edits.
   // - annotateChatOpen — sheet open-state for the Annotate surface.
   let globalChatOpen = $state(false);
-  let annotateJustAsk = $state(false);
+
   let annotateChatOpen = $state(false);
 
   /**
@@ -224,6 +237,84 @@
 
   let pageUrl = $state<string>("");
   let activeTabId = $state<number | null>(null);
+  /** Active tab is the Devices canvas — annotation happens inside ONE
+   *  device frame (the canvas marks it), and "the page" is that frame. */
+  let onDevicesCanvas = $state(false);
+  /** A device frame's overlay is live on the canvas tab. */
+  let devicesFrameLive = $state(false);
+  /** Chrome frameId of that live device frame (sender.frameId). */
+  let devicesFrameId: number | null = null;
+
+  /** On a Devices canvas, make sure a device frame's overlay has
+   *  announced itself before we send it anything: ask the canvas to
+   *  re-activate its target and give the overlay a moment to answer.
+   *  Returns false when no device is set to annotate. */
+  async function ensureDeviceFrameLive(): Promise<boolean> {
+    if (!onDevicesCanvas || devicesFrameLive) return true;
+    if (activeTabId == null) return false;
+    const reply = (await chrome.runtime
+      .sendMessage({ type: "devices.reping-annotate", tabId: activeTabId })
+      .catch(() => null)) as { annotating?: boolean } | null;
+    // No device picked at all — that's the one case worth blocking on.
+    if (!reply?.annotating) return false;
+    for (let i = 0; i < 12 && !devicesFrameLive; i++) {
+      await new Promise((r) => setTimeout(r, 100));
+    }
+    // A device IS annotating. Even if its overlay hasn't announced itself
+    // to this panel yet, send the tool: sendToPage falls back to the
+    // tab-wide broadcast, which only the active frame acts on.
+    return true;
+  }
+
+  /** Send a message to the page the user is annotating. On a Devices
+   *  canvas that is ONE device frame, so address it by frameId: a
+   *  tab-wide broadcast would also hit the canvas page and every other
+   *  device frame, and relies on each of them staying silent. Everywhere
+   *  else this is the normal tab-wide send. */
+  async function sendToPage(msg: unknown): Promise<unknown> {
+    if (activeTabId == null) throw new Error("no active tab");
+    if (onDevicesCanvas) {
+      // Ask the canvas to hand it to the annotating frame. That hop is
+      // plain window.postMessage — the same one activation uses — so it
+      // doesn't depend on tab messaging reaching a sandboxed sub-frame.
+      const relayed = (await chrome.runtime
+        .sendMessage({ type: "devices.relay", tabId: activeTabId, payload: msg })
+        .catch(() => null)) as { delivered?: boolean } | null;
+      if (relayed?.delivered) return undefined;
+      if (devicesFrameId != null) {
+        return chrome.tabs.sendMessage(activeTabId, msg, { frameId: devicesFrameId });
+      }
+    }
+    return chrome.tabs.sendMessage(activeTabId, msg);
+  }
+  const extRoot = (() => {
+    try {
+      return chrome.runtime.getURL("");
+    } catch {
+      return "";
+    }
+  })();
+
+  /** Adopt the active tab. On the Devices canvas the page URL is the app
+   *  the canvas shows (its ?url=), unless the annotating frame already
+   *  reported a more specific one for this same tab. */
+  function adoptTab(tab: chrome.tabs.Tab | undefined): void {
+    const url = tab?.url ?? "";
+    const id = tab?.id ?? null;
+    const canvas = isDevicesCanvasUrl(url, extRoot);
+    const sameCanvas = canvas && onDevicesCanvas && id === activeTabId;
+    if (!sameCanvas) {
+      devicesFrameLive = false;
+      devicesFrameId = null;
+    }
+    if (canvas) {
+      if (!(sameCanvas && /^https?:/i.test(pageUrl))) pageUrl = devicesCanvasTargetUrl(url);
+    } else {
+      pageUrl = url;
+    }
+    onDevicesCanvas = canvas;
+    activeTabId = id;
+  }
   let activeTool = $state<Tool | null>(null);
   // When the on-page floating toolbar is enabled, the side-panel TOOL grid
   // hides (the palette replaces it). Mirrored from chrome.storage.
@@ -240,12 +331,11 @@
   let capturing = $state(false);
   // Screenshots add ~1.5–2k vision tokens per submit. Off by default; the
   // agent works fine with selector + outerHTML + nearbyText alone for most
-  // text/style edits.
-  let includeScreenshot = $state(false);
+  // text/style edits. Lives in the store so the choice survives a submit
+  // and a panel reload (see app.submitOptions).
   let copiedAt = $state<number | null>(null);
-  // Default ON — most users want the agent to apply edits without a
-  // confirmation round-trip. Untick per-submit to just file/draft instead.
-  let autoApplyEnabled = $state(true);
+  /** Submit-footer choices — persisted; see ExtensionState.submitOptions. */
+  const submitOptions = $derived(app.submitOptions);
   let hmrDetected = $state<boolean | null>(null);
   let reloadingAt = $state<number | null>(null);
   // A batch finished without HMR but we did NOT auto-reload (auto-reload is
@@ -291,9 +381,9 @@
   // reads as "no options set").
   const footerActiveSummary = $derived.by(() => {
     const parts: string[] = [];
-    if (autoApplyEnabled) parts.push("Auto-apply");
-    if (includeScreenshot) parts.push("Screenshot");
-    if (annotateJustAsk) parts.push("Just Ask");
+    if (submitOptions.autoApply) parts.push("Auto-apply");
+    if (submitOptions.includeScreenshot) parts.push("Screenshot");
+    if (submitOptions.justAsk) parts.push("Just Ask");
     for (const m of app.allModuleSpecs()) {
       if (m.mode !== "per-submit") continue;
       if (app.moduleReady(m.id) && app.tickedModules[m.id]) {
@@ -330,6 +420,12 @@
     tool?: Tool;
     /** Phase 22 — Design Variants preview round-trips. */
     variantId?: string;
+    /** `transform.state` — Free Transform toggled on the page. */
+    on?: boolean;
+    /** `variants.verify-result` — post-apply render check. */
+    found?: boolean;
+    check?: RenderCheck;
+    error?: string;
   };
 
   /** Selector-resolution count for the currently-viewed imported session,
@@ -345,17 +441,23 @@
    * content script isn't listening.
    */
   function replayAnnotationsToTab(tabId: number, url: string): void {
+    // sendToPage always addresses the ACTIVE tab (on the Devices canvas,
+    // the annotating frame inside it). A background tab's content script
+    // mounting must not repaint the active page using that other tab's
+    // URL filter, so drop anything that isn't the tab we're viewing.
+    if (tabId !== activeTabId) return;
     const sessionUrl = app.session?.url ?? "";
     const all = app.session?.annotations ?? [];
     for (const ann of all) {
       if (ann.kind !== "select") continue;
       const annUrl = ann.url ?? sessionUrl;
       if (annUrl !== url) continue;
-      chrome.tabs
-        .sendMessage(tabId, { type: "annotated.replay", annotation: ann })
-        .catch(() => {
-          // Content script not (yet) listening — skip.
-        });
+      // Must go through sendToPage: on the Devices canvas a tab-wide
+      // send doesn't reliably reach the sandboxed device frame, so pins
+      // would never repaint there.
+      void sendToPage({ type: "annotated.replay", annotation: ann }).catch(() => {
+        // Content script not (yet) listening — skip.
+      });
     }
   }
 
@@ -566,7 +668,34 @@
     sender: chrome.runtime.MessageSender,
   ) => {
     if (sender?.id !== chrome.runtime.id) return;
+    // A device frame's message, forwarded by the Devices canvas page.
+    // Re-enter with a sender that looks like the frame itself so every
+    // handler below (which keys on sender.tab.id) works unchanged.
+    const relay = msg as { type?: string; tabId?: number; payload?: unknown };
+    if (relay?.type === "devices.frame-out" && relay.payload) {
+      runtimeMessageHandler(relay.payload, {
+        id: chrome.runtime.id,
+        tab: { id: relay.tabId } as chrome.tabs.Tab,
+        // No frameId: the canvas relayed this, so we don't know which
+        // Chrome frame it came from. Synthesizing one (-1, or a stale id)
+        // would poison devicesFrameId and leave frame.inactive unable to
+        // match — the panel would then claim a device is still annotating
+        // after the user turned it off. The direct chrome.runtime copy of
+        // the same message carries the real id.
+      });
+      return;
+    }
     const m = msg as IncomingMsg;
+    if (m?.type === "frame.inactive" && sender.tab?.id === activeTabId) {
+      // Only the frame we adopted going inert matters — a late message from
+      // the PREVIOUS target must not hide the frame that just took over.
+      if (sender.frameId === devicesFrameId) {
+        devicesFrameLive = false;
+        devicesFrameId = null;
+        activeTool = null;
+      }
+      return;
+    }
     if (m?.type === "overlay.ready" && sender.tab?.id != null) {
       // Content script just mounted (page reload / SPA nav). Push back
       // any select-mode annotations from the current draft that were
@@ -578,6 +707,27 @@
       // the filter mis-classifies annotations as "on another page".
       if (url && sender.tab.id === activeTabId) {
         pageUrl = url;
+        if (onDevicesCanvas) {
+          devicesFrameLive = true;
+          // Only a real frame id — a relayed copy has none (see above),
+          // and must not overwrite the id the direct copy gave us.
+          if (typeof sender.frameId === "number" && sender.frameId >= 0) {
+            devicesFrameId = sender.frameId;
+          }
+        }
+      }
+      // A fresh document took any live variant preview with it, so the
+      // card must stop claiming "Previewing". The page tells us whether a
+      // preview is still standing: overlay.ready also fires when an SPA
+      // calls history.replaceState (filters, scroll, analytics), which must
+      // NOT cancel a preview the user is still looking at.
+      if (
+        !(m as { previewActive?: boolean }).previewActive &&
+        sender.tab.id === activeTabId &&
+        app.variants.previewingVariantId
+      ) {
+        app.variants.previewingVariantId = null;
+        app.variants.previewingTabId = null;
       }
       // A real document load resets our shared-DOM attributes — re-arm the
       // reload guard so Vite full-reloads stay held on this tab.
@@ -659,6 +809,10 @@
       }
       return;
     }
+    if (m?.type === "variants.verify-result" && sender.tab?.id === activeTabId) {
+      app.handleVariantVerifyResult(m);
+      return;
+    }
     if (m?.type === "variants.preview-failed" && sender.tab?.id === activeTabId) {
       app.variants.previewingVariantId = null;
       app.variants.error =
@@ -690,7 +844,12 @@
       composerOpen = "selector";
       return;
     }
-    if (m?.type === "annotation.target-selected") {
+    // Both annotation handlers are tab-guarded like every other handler
+    // here. Without it a content script on ANY tab — including a page
+    // rendered inside a Devices frame — could put an annotation, with a
+    // comment and CSS changes of its choosing, into the batch the agent is
+    // about to act on.
+    if (m?.type === "annotation.target-selected" && sender.tab?.id === activeTabId) {
       // Prefer plural targets[]; fall back to legacy single target.
       // Skip the message if neither is present (no point making an
       // annotation with nothing for the agent to act on).
@@ -725,13 +884,17 @@
         // Stamp from the content script's location.href — authoritative
         // for SPAs where chrome.tabs.onUpdated misses hash/pushState changes
         // and the side panel's lastUrl can be stale.
-        url: m.url,
+        url: m.url ? scrubUrl(m.url) : undefined,
       };
       app.addAnnotation(annotation);
       pushUndo(annotation);
       if (freeTransform) transformIds = [...transformIds, annotation.id];
       activeTool = null;
-    } else if (m?.type === "annotation.draw-committed" && m.annotation) {
+    } else if (
+      m?.type === "annotation.draw-committed" &&
+      m.annotation &&
+      sender.tab?.id === activeTabId
+    ) {
       app.addAnnotation(m.annotation);
       pushUndo(m.annotation);
       if (freeTransform) transformIds = [...transformIds, m.annotation.id];
@@ -753,8 +916,7 @@
   // content broadcasts transform.state back so this panel reacts uniformly).
   function toggleTransformOnPage(on: boolean): void {
     if (activeTabId == null) return;
-    chrome.tabs
-      .sendMessage(activeTabId, { type: "transform.set", on })
+    sendToPage({ type: "transform.set", on })
       .catch(() => {});
   }
 
@@ -839,8 +1001,7 @@
     // op that wasn't tracked due to a toggle-broadcast race). Safe because
     // there's nothing else to keep.
     if (ids.length >= total && activeTabId != null) {
-      chrome.tabs
-        .sendMessage(activeTabId, { type: "annotated.clear" })
+      sendToPage({ type: "annotated.clear" })
         .catch(() => {});
     }
   }
@@ -850,10 +1011,50 @@
   // toolbar are missing until a reload. Ask the background to inject on demand
   // (idempotent) whenever Pinta opens or the active tab changes.
   function ensureContentScript(): void {
+    // Devices canvas: the top frame is our own page; device frames load the
+    // overlay on demand when the canvas marks one for annotating.
+    if (onDevicesCanvas) return;
     if (activeTabId == null || !/^https?:/i.test(pageUrl)) return;
     chrome.runtime
       .sendMessage({ type: "ensure-content-script", tabId: activeTabId })
       .catch(() => {});
+  }
+
+  /** Devices canvas screenshot: the annotating device frame cropped from
+   *  the canvas, plus that frame's scroll offset for compositing. */
+  async function captureDeviceFrameSlice(): Promise<{
+    dataUrl: string;
+    offsetY: number;
+    width: number;
+    height: number;
+  }> {
+    if (activeTabId == null) throw new Error("no active tab");
+    // Address the live device frame directly when known — every other frame
+    // on the canvas would otherwise receive (and ignore) the broadcast.
+    const vpMsg = { type: "frame.viewport" };
+    const vp = (await sendToPage(vpMsg).catch(() => null)) as
+      | { scrollY?: number }
+      | null
+      | undefined;
+    const resp = (await chrome.runtime.sendMessage({
+      type: "capture.device-frame",
+      tabId: activeTabId,
+    })) as {
+      ok: boolean;
+      /** width/height = device CSS px (the composite viewport); the image
+       *  itself may be smaller (imageWidth/imageHeight) — never upscaled. */
+      capture?: { dataUrl: string; width: number; height: number };
+      error?: string;
+    };
+    if (!resp?.ok || !resp.capture) {
+      throw new Error(resp?.error ?? "device frame capture failed");
+    }
+    return {
+      dataUrl: resp.capture.dataUrl,
+      offsetY: typeof vp?.scrollY === "number" ? vp.scrollY : 0,
+      width: resp.capture.width,
+      height: resp.capture.height,
+    };
   }
 
   // ── Undo / Redo ─────────────────────────────────────────────────────
@@ -874,8 +1075,7 @@
   async function readdAnnotation(ann: Annotation): Promise<void> {
     await app.addAnnotation(ann);
     if (activeTabId != null) {
-      chrome.tabs
-        .sendMessage(activeTabId, { type: "annotated.reapply", annotation: ann })
+      sendToPage({ type: "annotated.reapply", annotation: ann })
         .catch(() => {});
     }
   }
@@ -981,8 +1181,7 @@
         active: true,
         currentWindow: true,
       });
-      pageUrl = tab?.url ?? "";
-      activeTabId = tab?.id ?? null;
+      adoptTab(tab);
       ensureContentScript();
     } catch {
       // not running in extension context (e.g. dev preview)
@@ -992,27 +1191,34 @@
     await app.start(pageUrl || null);
 
     // When the active tab changes (user navigates), re-evaluate routing.
-    const onTabActivated = async () => {
-      try {
-        const [tab] = await chrome.tabs.query({
-          active: true,
-          currentWindow: true,
-        });
-        pageUrl = tab?.url ?? "";
-        activeTabId = tab?.id ?? null;
-        ensureContentScript();
-        await app.rescan(pageUrl || null);
-      } catch {
-        // ignore — likely transient
-      }
-    };
+    // (onDestroy may have run during the awaits above — don't attach then.)
+    if (destroyed) return;
     chrome.tabs?.onActivated?.addListener(onTabActivated);
-    chrome.tabs?.onUpdated?.addListener((tabId, info) => {
-      if (info.url && tabId === activeTabId) onTabActivated();
-    });
+    chrome.tabs?.onUpdated?.addListener(onTabUpdated);
   });
 
+  let destroyed = false;
+  async function onTabActivated(): Promise<void> {
+    try {
+      const [tab] = await chrome.tabs.query({
+        active: true,
+        currentWindow: true,
+      });
+      adoptTab(tab);
+      ensureContentScript();
+      await app.rescan(pageUrl || null);
+    } catch {
+      // ignore — likely transient
+    }
+  }
+  function onTabUpdated(tabId: number, info: chrome.tabs.TabChangeInfo): void {
+    if (info.url && tabId === activeTabId) void onTabActivated();
+  }
+
   onDestroy(() => {
+    destroyed = true;
+    chrome.tabs?.onActivated?.removeListener(onTabActivated);
+    chrome.tabs?.onUpdated?.removeListener(onTabUpdated);
     chrome.runtime.onMessage.removeListener(runtimeMessageHandler);
     window.removeEventListener("keydown", voiceHotkey);
     window.removeEventListener("keydown", undoRedoHotkey);
@@ -1280,11 +1486,12 @@
     app.moduleReady("gitlab-issues") && !!app.tickedModules["gitlab-issues"],
   );
   const fileOnlyMode = $derived(
-    gitlabIssuesTickedAndReady && !autoApplyEnabled,
+    gitlabIssuesTickedAndReady && !submitOptions.autoApply,
   );
   $effect(() => {
-    if (screenshotLocked && !includeScreenshot) {
-      includeScreenshot = true;
+    if (screenshotLocked && !submitOptions.includeScreenshot) {
+      submitOptions.includeScreenshot = true;
+      app.saveSubmitOptions();
     }
   });
 
@@ -1369,6 +1576,20 @@
     }
   }
 
+  /** What clicking tool `id` should select. Normally a lit tool toggles
+   *  back to idle — except Select on the Devices canvas, where the frame
+   *  arms Select for you the moment you hit Annotate. The button is then
+   *  already lit and the user's FIRST click would silently turn annotation
+   *  off, which reads as "I selected it but nothing highlights". There,
+   *  on/off belongs to the frame's own Annotate toggle, so re-clicking
+   *  Select re-arms it (and heals a frame knocked to idle by Esc). */
+  function toolClickTarget(id: Tool): Tool | null {
+    if (id === "transform") return "transform";
+    if (activeTool !== id) return id;
+    if (onDevicesCanvas && id === "select") return id;
+    return null;
+  }
+
   async function setActive(tool: Tool | null) {
     if (activeTabId == null) return;
     if (tool === "transform") {
@@ -1405,7 +1626,12 @@
           ? next
           : "draw";
     try {
-      await chrome.tabs.sendMessage(activeTabId, {
+      if (mode !== "idle" && !(await ensureDeviceFrameLive())) {
+        app.lastError =
+          "Pick a device to annotate first — click Annotate on a device frame's header.";
+        return;
+      }
+      await sendToPage({
         type: "mode.set",
         mode,
         tool: mode === "draw" ? next : undefined,
@@ -1448,7 +1674,7 @@
     }
     try {
       const dataUrl = await fileToDataUrl(file);
-      await chrome.tabs.sendMessage(activeTabId, {
+      await sendToPage({
         type: "image.place",
         dataUrl,
         mediaType: file.type || "image/png",
@@ -1527,8 +1753,7 @@
     app.removeAnnotation(id);
     // Drop the matching pin badge in the content overlay too.
     if (activeTabId != null) {
-      chrome.tabs
-        .sendMessage(activeTabId, { type: "annotated.remove", annotationId: id })
+      sendToPage({ type: "annotated.remove", annotationId: id })
         .catch(() => {});
     }
   }
@@ -1550,8 +1775,7 @@
     if (!app.session) return;
     // Wipe pin badges in the content overlay before the session resets.
     if (activeTabId != null) {
-      chrome.tabs
-        .sendMessage(activeTabId, { type: "annotated.clear" })
+      sendToPage({ type: "annotated.clear" })
         .catch(() => {});
     }
     await app.cancelAndRestart(pageUrl || app.session.url);
@@ -1599,6 +1823,9 @@
   // visible to the main-world guard.
   function pushReloadHold(tabId: number | null, hold: boolean) {
     if (tabId == null) return;
+    // The Devices canvas is our own extension page — scripting into it is
+    // rejected every time, and there is no Vite client there to hold.
+    if (onDevicesCanvas && tabId === activeTabId) return;
     chrome.scripting
       .executeScript({
         target: { tabId },
@@ -1675,8 +1902,7 @@
     lastOverlaySessionId = id;
     if (previous === null) return;
     if (activeTabId == null) return;
-    chrome.tabs
-      .sendMessage(activeTabId, { type: "annotated.clear" })
+    sendToPage({ type: "annotated.clear" })
       .catch(() => {});
   });
 
@@ -1695,8 +1921,7 @@
     const key = processing ? `on:${color}` : "off";
     if (lastProcessingPing === key) return;
     lastProcessingPing = key;
-    chrome.tabs
-      .sendMessage(activeTabId, {
+    sendToPage({
         type: processing ? "processing.start" : "processing.end",
         color: processing ? color : undefined,
       })
@@ -1717,8 +1942,7 @@
       // Reset the located indicator so a stale count from a previous
       // viewer doesn't briefly show while the new one is resolving.
       importedLocated = null;
-      chrome.tabs
-        .sendMessage(activeTabId, {
+      sendToPage({
           type: "imported.show",
           imported: {
             title: viewing.manifest.title,
@@ -1736,8 +1960,7 @@
         });
     } else {
       importedLocated = null;
-      chrome.tabs
-        .sendMessage(activeTabId, { type: "imported.hide" })
+      sendToPage({ type: "imported.hide" })
         .catch(() => {});
     }
   });
@@ -1808,8 +2031,8 @@
   }
 
   /**
-   * Bundle export: capture full-page screenshot, composite annotations
-   * (with numbered badges) onto it, zip the .md and .png together so
+   * Bundle export: capture per-viewport slices, composite annotations
+   * (with numbered badges) onto each, zip the .md and .jpg images so
    * an agent can read both with a single drop into Claude / Cursor / etc.
    * Standalone-mode equivalent of the connected-mode Submit flow.
    */
@@ -1822,7 +2045,7 @@
       // Lift the toolbar/highlight off the page before capture so the
       // screenshot is clean. Same trick the connected-mode submit uses.
       try {
-        await chrome.tabs.sendMessage(activeTabId, {
+        await sendToPage({
           type: "mode.set",
           mode: "idle",
         });
@@ -1831,19 +2054,37 @@
       }
       activeTool = null;
 
-      const resp = (await chrome.runtime.sendMessage({
-        type: "capture.full-page",
-        tabId: activeTabId,
-      })) as {
+      type BundleCapture = {
         ok: boolean;
         capture?: {
-          dataUrl: string;
+          dataUrl?: string;
           slices?: Array<{ dataUrl: string; offsetY: number }>;
           viewportWidth?: number;
           viewportHeight?: number;
         };
         error?: string;
       };
+      let resp: BundleCapture;
+      if (onDevicesCanvas) {
+        // One slice: the annotating device's viewport.
+        const shot = await captureDeviceFrameSlice();
+        resp = {
+          ok: true,
+          capture: {
+            dataUrl: shot.dataUrl,
+            slices: [{ dataUrl: shot.dataUrl, offsetY: shot.offsetY }],
+            viewportWidth: shot.width,
+            viewportHeight: shot.height,
+          },
+        };
+      } else {
+        // Slices only — the background skips the stitch entirely.
+        resp = (await chrome.runtime.sendMessage({
+          type: "capture.full-page",
+          tabId: activeTabId,
+          mode: "slices",
+        })) as BundleCapture;
+      }
       if (!resp?.ok || !resp.capture) {
         throw new Error(resp?.error ?? "capture failed");
       }
@@ -1855,7 +2096,7 @@
       const vw = resp.capture.viewportWidth ?? window.innerWidth;
       const vh = resp.capture.viewportHeight ?? window.innerHeight;
 
-      // One composited PNG per scroll section so fixed/sticky elements
+      // One composited JPEG per scroll section so fixed/sticky elements
       // appear once each (in their own viewport) instead of stacking
       // vertically as they would in a stitched full-page image.
       const screenshotEntries: Record<string, Uint8Array> = {};
@@ -1870,27 +2111,30 @@
           );
           const name =
             slices.length === 1
-              ? `${base}.png`
-              : `${base}-section${String(i + 1).padStart(2, "0")}.png`;
+              ? `${base}.jpg`
+              : `${base}-section${String(i + 1).padStart(2, "0")}.jpg`;
           screenshotEntries[name] = dataUrlToBytes(composited);
           screenshotNames.push(name);
         }
-      } else {
+      } else if (resp.capture.dataUrl) {
         // Background didn't return slices (older bundle?). Fall back to
         // the stitched image.
         const composited = await compositeAnnotations(
           resp.capture.dataUrl,
           annotations,
         );
-        const name = `${base}.png`;
+        const name = `${base}.jpg`;
         screenshotEntries[name] = dataUrlToBytes(composited);
         screenshotNames.push(name);
+      } else {
+        throw new Error("capture returned no image");
       }
 
       const text = formatSession({ url, annotations }, format, {
         screenshotFilenames: screenshotNames,
       });
 
+      const { zipSync, strToU8 } = await import("fflate");
       const zipped = zipSync({
         [docName]: strToU8(text),
         ...screenshotEntries,
@@ -1920,7 +2164,7 @@
       // Take element selection / drawing modes off the page so the screenshot
       // doesn't include the active toolbar/highlight.
       try {
-        await chrome.tabs.sendMessage(activeTabId, {
+        await sendToPage({
           type: "mode.set",
           mode: "idle",
         });
@@ -1929,28 +2173,40 @@
       }
       activeTool = null;
 
-      if (!includeScreenshot) {
+      if (!submitOptions.includeScreenshot) {
         // Text-only mode — let the agent work from selector + outerHTML
         // + nearbyText alone. Cheaper and faster.
-        app.submit("", autoApplyEnabled);
+        app.submit("", submitOptions.autoApply);
         afterSubmit();
         return;
       }
 
-      const resp = (await chrome.runtime.sendMessage({
-        type: "capture.full-page",
-        tabId: activeTabId,
-      })) as { ok: boolean; capture?: { dataUrl: string }; error?: string };
+      let composited: string;
+      if (onDevicesCanvas) {
+        const shot = await captureDeviceFrameSlice();
+        composited = await compositeAnnotationsToViewport(shot.dataUrl, annotations, {
+          offsetY: shot.offsetY,
+          width: shot.width,
+          height: shot.height,
+        });
+      } else {
+        // Stitched only — no raw slices ride back over messaging.
+        const resp = (await chrome.runtime.sendMessage({
+          type: "capture.full-page",
+          tabId: activeTabId,
+          mode: "stitched",
+        })) as { ok: boolean; capture?: { dataUrl?: string }; error?: string };
 
-      if (!resp?.ok || !resp.capture) {
-        throw new Error(resp?.error ?? "capture failed");
+        if (!resp?.ok || !resp.capture?.dataUrl) {
+          throw new Error(resp?.error ?? "capture failed");
+        }
+
+        composited = await compositeAnnotations(
+          resp.capture.dataUrl,
+          annotations,
+        );
       }
-
-      const composited = await compositeAnnotations(
-        resp.capture.dataUrl,
-        annotations,
-      );
-      app.submit(composited, autoApplyEnabled);
+      app.submit(composited, submitOptions.autoApply);
       afterSubmit();
     } catch (err) {
       app.lastError = `screenshot failed: ${(err as Error).message}`;
@@ -1965,8 +2221,7 @@
   // them on-screen would mix with pins the user adds to the new draft.
   function afterSubmit() {
     if (activeTabId != null) {
-      chrome.tabs
-        .sendMessage(activeTabId, { type: "annotated.clear" })
+      sendToPage({ type: "annotated.clear" })
         .catch(() => {});
     }
   }
@@ -2659,26 +2914,28 @@
     {#if app.viewingSettings}
       <SettingsPanel />
     {:else if !app.viewingImportedId && !showAssociatePrompt && activeTab === "test-pilot" && app.moduleReady("test-pilot")}
-      <TestPilotTab />
+      {#await lazyTab("test-pilot", () => import("./TestPilotTab.svelte")) then m}<m.default />{/await}
     {:else if !app.viewingImportedId && !showAssociatePrompt && activeTab === "audit-flow" && app.moduleReady("audit-flow")}
-      <AuditFlowTab />
+      {#await lazyTab("audit-flow", () => import("./AuditFlowTab.svelte")) then m}<m.default />{/await}
     {:else if !app.viewingImportedId && !showAssociatePrompt && activeTab === "report" && app.moduleReady("report")}
-      <ReportTab />
+      {#await lazyTab("report", () => import("./ReportTab.svelte")) then m}<m.default />{/await}
     {:else if !app.viewingImportedId && !showAssociatePrompt && activeTab === "design-variants" && app.moduleReady("design-variants")}
-      <DesignVariantsTab />
+      {#await lazyTab("design-variants", () => import("./DesignVariantsTab.svelte")) then m}<m.default />{/await}
     {:else if !app.viewingImportedId && !showAssociatePrompt && activeTab === "code-review" && app.moduleReady("code-review")}
-      <CodeReviewTab />
+      {#await lazyTab("code-review", () => import("./CodeReviewTab.svelte")) then m}<m.default />{/await}
     {:else if !app.viewingImportedId && !showAssociatePrompt && activeTab === "devices" && app.moduleReady("devices")}
-      <DevicesTab />
+      {#await lazyTab("devices", () => import("./DevicesTab.svelte")) then m}<m.default />{/await}
     {:else if !app.viewingImportedId && !showAssociatePrompt && app.interactiveTabSpecs().some((s) => s.id === activeTab)}
       <!-- Phase 19 — generic renderer for an imported interactive tab. -->
-      <ModuleBoardTab
-        spec={app.interactiveTabSpecs().find((s) => s.id === activeTab)!}
-        onOpenTestPilot={() => {
-          activeTab = "test-pilot";
-          void chrome.storage?.local?.set({ "pinta-active-tab": "test-pilot" });
-        }}
-      />
+      {#await lazyTab("module-board", () => import("./ModuleBoardTab.svelte")) then m}
+        <m.default
+          spec={app.interactiveTabSpecs().find((s) => s.id === activeTab)!}
+          onOpenTestPilot={() => {
+            activeTab = "test-pilot";
+            void chrome.storage?.local?.set({ "pinta-active-tab": "test-pilot" });
+          }}
+        />
+      {/await}
     {:else if app.viewingImportedId}
       {@const imp = app.importedSessions.find((s) => s.id === app.viewingImportedId)}
       {#if imp}
@@ -2880,7 +3137,7 @@
         onchange={onImageFilePicked}
         aria-hidden="true"
       />
-      {#if !floatingToolbarEnabled}
+      {#if !floatingToolbarEnabled || onDevicesCanvas}
         <!-- Docked tool row (OFF-state look): a horizontal icon strip in the
              TOOL header area, grouped (draw | transform) with a divider. -->
         <div class="flex flex-wrap items-center gap-1">
@@ -2896,7 +3153,7 @@
               class:text-white={on}
               class:border-brand-pink={on}
               disabled={activeTabId == null || sessionPending || allDone}
-              onclick={() => setActive(t.id === "transform" ? "transform" : activeTool === t.id ? null : t.id)}
+              onclick={() => setActive(toolClickTarget(t.id))}
               aria-pressed={on}
               title={t.id === "transform" ? `${t.label} — toggle, then Done` : `${t.label} — Ctrl+Alt+${t.key}`}
               aria-label={t.label}
@@ -2993,6 +3250,26 @@
         </button>
       </div>
     {/snippet}
+
+    {#if onDevicesCanvas && devicesFrameLive}
+      <!-- Connected: the annotating device frame reached this panel, so
+           tool clicks are addressed straight to it. -->
+      <p class="flex items-center gap-1.5 px-1 text-[11px] text-emerald-700 dark:text-emerald-400">
+        <span class="w-1.5 h-1.5 rounded-full bg-emerald-500" aria-hidden="true"></span>
+        Device frame connected — the tools work inside it.
+      </p>
+    {:else if onDevicesCanvas}
+      <!-- Devices canvas: tools act inside ONE device frame the user picks. -->
+      <div class="flex items-start gap-2 rounded-md border border-brand-pink/40 bg-brand-pink/5 dark:bg-brand-pink/10 px-3 py-2">
+        <svg class="shrink-0 mt-0.5 text-brand-pink" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M17 3a2.828 2.828 0 1 1 4 4L7.5 20.5 2 22l1.5-5.5L17 3z"/></svg>
+        <p class="text-[11.5px] text-ink-700 dark:text-night-dim leading-snug">
+          Pick a device to annotate: click <strong class="font-semibold">Annotate</strong> on a device frame's header. Its viewport width tags each annotation, so the agent edits that breakpoint.
+          <span class="block mt-1 text-ink-500 dark:text-night-mute">
+            Already shows <strong class="font-semibold">Annotating</strong> on a frame? Then that frame can't reach this panel — reload the device frame (↻ in its header).
+          </span>
+        </p>
+      </div>
+    {/if}
 
     {#if !floatingToolbarEnabled}
       <details class="rounded-md border border-ink-200 bg-white dark:border-night-line dark:bg-night-card">
@@ -3383,7 +3660,8 @@
             <input
               type="checkbox"
               class="mt-0.5 accent-brand-pink"
-              bind:checked={autoApplyEnabled}
+              bind:checked={submitOptions.autoApply}
+              onchange={() => app.saveSubmitOptions()}
             />
             <span class="flex-1 leading-snug">
               Auto-apply (no agent confirmation)
@@ -3404,7 +3682,7 @@
               if (app.appMode !== "connected") return;
               importedSendBusy = true;
               const newId = await app.sendImportedToAgent(impFooter.id, {
-                autoApply: autoApplyEnabled,
+                autoApply: submitOptions.autoApply,
               });
               importedSendBusy = false;
               if (newId) {
@@ -3579,7 +3857,8 @@
         <input
           type="checkbox"
           class="mt-0.5 accent-brand-pink"
-          bind:checked={autoApplyEnabled}
+          bind:checked={submitOptions.autoApply}
+          onchange={() => app.saveSubmitOptions()}
         />
         <span class="flex-1 leading-snug inline-flex items-center gap-1.5">
           Auto-apply (no agent confirmation)
@@ -3594,7 +3873,8 @@
         <input
           type="checkbox"
           class="mt-0.5 accent-brand-pink"
-          bind:checked={includeScreenshot}
+          bind:checked={submitOptions.includeScreenshot}
+          onchange={() => app.saveSubmitOptions()}
           disabled={screenshotLocked}
         />
         <span class="flex-1 leading-snug inline-flex items-center gap-1.5">
@@ -3621,13 +3901,14 @@
           <input
             type="checkbox"
             class="mt-0.5 accent-brand-pink"
-            bind:checked={annotateJustAsk}
+            bind:checked={submitOptions.justAsk}
+            onchange={() => app.saveSubmitOptions()}
           />
           <span class="flex-1 leading-snug">
             <span class="inline-flex items-center gap-1.5 flex-wrap">
               💬 Just Ask
               {@render infoTip("Don't touch source files — discuss this batch with the agent first. Submit re-labels to \"Ask agent\" and opens the chat. Untick to go back to the normal source-edit flow.")}
-              {#if annotateJustAsk}
+              {#if submitOptions.justAsk}
                 <span class="inline-flex items-center text-[10px] uppercase tracking-wide font-semibold text-brand-pink dark:text-brand-pink-light bg-brand-pink/10 dark:bg-brand-pink-light/10 border border-brand-pink/40 dark:border-brand-pink-light/40 rounded-full px-1.5 py-0.5">
                   Chat only
                 </span>
@@ -3771,11 +4052,11 @@
           type="button"
           class="flex-1 rounded-md bg-brand-pink text-white text-sm font-medium py-2 hover:bg-brand-magenta dark:hover:bg-brand-pink-light disabled:opacity-50"
           disabled={!canSubmit || capturing}
-          onclick={annotateJustAsk ? askAgentWithBatch : submit}
+          onclick={submitOptions.justAsk ? askAgentWithBatch : submit}
         >
           {#if capturing}
             Capturing screenshot…
-          {:else if annotateJustAsk}
+          {:else if submitOptions.justAsk}
             💬 Ask agent
           {:else if fileOnlyMode}
             File issues

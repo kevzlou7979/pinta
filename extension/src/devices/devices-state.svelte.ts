@@ -5,6 +5,7 @@
 // chrome.storage.local keys: its own state blob, and the shared module
 // settings (read-only, for the customDevices catalog additions).
 
+import { RELAYABLE_FRAME_MESSAGES } from "../lib/devices-frame.js";
 import {
   CUSTOM_SIZE_MAX,
   CUSTOM_SIZE_MIN,
@@ -14,8 +15,12 @@ import {
   layoutUnplacedFrames,
   mergeCatalog,
   modelsForGroup,
+  NAV_SETTLE_MS,
+  NavSyncTracker,
   newFrame,
   normalizeTargetUrl,
+  storableTargetUrl,
+  urlOrigin,
   rearrangeFrames,
   parseCustomDevices,
   parseStoredDevicesState,
@@ -24,6 +29,7 @@ import {
   type DeviceGroup,
   type DeviceModel,
   type DevicesPageStateShape,
+  type FrameRectReport,
 } from "../lib/devices.js";
 
 const DEVICES_KEY = "pinta-devices";
@@ -57,14 +63,28 @@ class DevicesPageState {
   /** Per-frame iframe src. Sync updates individual entries so the frame
    *  that originated a navigation is never reloaded. */
   frameSrc = $state<Record<string, string>>({});
+  /** Frame hosting the annotate overlay (null = none). One at a time, so
+   *  the side panel's tab-wide broadcasts reach exactly one live overlay.
+   *  Session-only — never persisted. */
+  annotateFrameId = $state<string | null>(null);
+  /** Frame whose overlay acknowledged activation (null = none live yet).
+   *  Until this matches annotateFrameId the header shows "Starting…". */
+  annotateReadyId = $state<string | null>(null);
+  /** One retry per activation: reload the frame (a frame that was open
+   *  before the extension loaded has no content script until it does). */
+  private annotateTimer: ReturnType<typeof setTimeout> | null = null;
+  private annotateRetried = false;
 
   /** DOM iframes by frame id — identity lookup for postMessage sources.
    *  Not reactive on purpose; only read inside event handlers. */
   private iframeEls = new Map<string, HTMLIFrameElement>();
-  /** Last URL each frame reported — undefined until its first report,
-   *  which is recorded but never propagated (prevents a storm when the
+  /** Per-frame nav-sync bookkeeping (last reported URL, re-point grace,
+   *  expected loads) — pure logic in lib/devices.ts. A frame's first
+   *  report is recorded but never propagated (prevents a storm when the
    *  reporter lands in frames that are already open). */
-  private frameUrl = new Map<string, string>();
+  private nav = new NavSyncTracker();
+  /** Debounced propagation: only the SETTLED URL of a redirect chain spreads. */
+  private navTimer: ReturnType<typeof setTimeout> | null = null;
   private pingTimer: ReturnType<typeof setInterval> | null = null;
   private saveTimer: ReturnType<typeof setTimeout> | null = null;
 
@@ -96,7 +116,7 @@ class DevicesPageState {
     this.resetFrameSrcs();
     this.save();
     void this.loadOpenTabs();
-    if (this.state.sync) this.startPinging();
+    this.syncPinging();
   }
 
   /** Point every frame at the shared target URL. */
@@ -115,8 +135,11 @@ class DevicesPageState {
     if (this.saveTimer) clearTimeout(this.saveTimer);
     this.saveTimer = setTimeout(() => {
       this.saveTimer = null;
+      // Never persist query strings / fragments (tokens in magic links,
+      // OAuth callbacks, or URLs forged by a framed page): origin + path.
+      const snap = $state.snapshot(this.state);
       void chrome.storage.local
-        .set({ [DEVICES_KEY]: $state.snapshot(this.state) })
+        .set({ [DEVICES_KEY]: { ...snap, url: storableTargetUrl(snap.url) } })
         .catch(() => {});
     }, 300);
   }
@@ -180,9 +203,11 @@ class DevicesPageState {
 
   /** Clear the whole canvas. */
   clearFrames(): void {
+    this.setAnnotateFrame(null);
     this.state.frames = [];
     this.frameSrc = {};
-    this.frameUrl.clear();
+    this.nav.clear();
+    this.cancelNavPropagation();
     this.frontId = null;
     this.expandedId = null;
     this.save();
@@ -239,10 +264,11 @@ class DevicesPageState {
   }
 
   removeFrame(id: string): void {
+    if (this.annotateFrameId === id) this.setAnnotateFrame(null);
     this.state.frames = this.state.frames.filter((f) => f.id !== id);
     delete this.frameSrc[id];
     this.iframeEls.delete(id);
-    this.frameUrl.delete(id);
+    this.nav.forget(id);
     if (this.expandedId === id) this.expandedId = null;
     this.save();
   }
@@ -290,11 +316,20 @@ class DevicesPageState {
 
   refreshFrame(id: string): void {
     const frame = this.state.frames.find((f) => f.id === id);
-    if (frame) frame.nonce++;
+    if (!frame) return;
+    this.nav.markRepointed(id, Date.now());
+    frame.nonce++;
   }
 
   refreshAll(): void {
-    for (const f of this.state.frames) f.nonce++;
+    // Reloads (and their redirects) are Pinta-initiated: they must never
+    // come back as navigations and ripple across the canvas.
+    this.cancelNavPropagation();
+    const now = Date.now();
+    for (const f of this.state.frames) {
+      this.nav.markRepointed(f.id, now);
+      f.nonce++;
+    }
   }
 
   setUrl(raw: string): void {
@@ -307,7 +342,7 @@ class DevicesPageState {
     if (u !== this.state.url) {
       this.state.url = u;
       this.resetFrameSrcs();
-      this.refreshAll();
+      this.refreshAll(); // marks every frame re-pointed (nav grace)
       this.save();
     }
   }
@@ -318,8 +353,172 @@ class DevicesPageState {
   toggleSync(): void {
     this.state.sync = !this.state.sync;
     this.save();
-    if (this.state.sync) this.startPinging();
-    else this.stopPinging();
+    this.syncPinging();
+  }
+
+  /** Make `id` the frame you annotate in (null = stop). The previous
+   *  target is told to go inert right away; the ping loop re-activates the
+   *  target after reloads / navigations (a fresh document starts inert). */
+  setAnnotateFrame(id: string | null): void {
+    const prev = this.annotateFrameId;
+    this.clearAnnotateTimer();
+    this.annotateRetried = false;
+    this.annotateFrameId = id;
+    this.annotateReadyId = null;
+    if (prev && prev !== id) this.postAnnotate(prev, false);
+    if (id) {
+      this.frontId = id;
+      this.postAnnotate(id, true);
+      this.armAnnotateWatchdog(id);
+    }
+    this.syncPinging();
+  }
+
+  /** The frame's overlay answered — annotation is really live there. */
+  handleAnnotateAck(event: MessageEvent): boolean {
+    const data = event.data as { type?: unknown; on?: unknown } | null;
+    if (!data || data.type !== "pinta-annotate-ack") return false;
+    for (const [id, el] of this.iframeEls) {
+      if (el.contentWindow !== event.source) continue;
+      if (data.on === true && this.annotateFrameId === id) {
+        this.clearAnnotateTimer();
+        this.annotateReadyId = id;
+      } else if (this.annotateReadyId === id) {
+        this.annotateReadyId = null;
+      }
+      return true;
+    }
+    return false;
+  }
+
+  /** No ack means no Pinta in that frame yet. Reload it once (content
+   *  scripts land on the fresh document), then give up with a message
+   *  rather than leaving the header claiming it's annotating. */
+  private armAnnotateWatchdog(id: string): void {
+    this.clearAnnotateTimer();
+    this.annotateTimer = setTimeout(() => {
+      this.annotateTimer = null;
+      if (this.annotateFrameId !== id || this.annotateReadyId === id) return;
+      if (!this.annotateRetried) {
+        this.annotateRetried = true;
+        this.refreshFrame(id);
+        this.armAnnotateWatchdog(id);
+        return;
+      }
+      this.error =
+        "Couldn't start annotating in that device. Reload this page (F5) and try again — frames opened before Pinta was reloaded don't have it yet.";
+      this.annotateFrameId = null;
+      this.syncPinging();
+    }, 2500);
+  }
+
+  private clearAnnotateTimer(): void {
+    if (this.annotateTimer) clearTimeout(this.annotateTimer);
+    this.annotateTimer = null;
+  }
+
+  toggleAnnotate(id: string): void {
+    this.setAnnotateFrame(this.annotateFrameId === id ? null : id);
+  }
+
+  /** Forward a side-panel message into the annotating frame. Returns
+   *  false when no frame is annotating. */
+  relayToAnnotateFrame(payload: unknown): boolean {
+    const id = this.annotateFrameId;
+    const el = id ? this.iframeEls.get(id) : null;
+    const origin = id ? this.expectedOrigin(id) : null;
+    if (!el || !origin) return false;
+    try {
+      el.contentWindow?.postMessage({ type: "pinta-relay", payload }, origin);
+      return true;
+    } catch {
+      return false;
+    }
+  }
+
+  /**
+   * A frame mirrored one of its own messages — hand it back so the canvas
+   * can forward it to the side panel.
+   *
+   * This hop is a page -> extension privilege boundary and has to be read
+   * that way. A framed page cannot reach `chrome.runtime` at all, but its
+   * MAIN world shares the `contentWindow` identity AND the origin of the
+   * overlay's isolated world, so NEITHER an `event.source` match nor an
+   * `event.origin` check can tell the two apart. The only real defence is
+   * to keep this path away from anything with side effects: it carries
+   * UI-state messages, and everything that reaches the agent or spends the
+   * user's tokens must arrive over the direct `chrome.runtime.sendMessage`
+   * the overlay also makes — that one carries a real `sender.frameId` no
+   * page can forge. The checks below are still worth their lines: they stop
+   * an inactive frame, or one that wandered to another origin, from
+   * speaking at all.
+   */
+  readFrameOut(event: MessageEvent): unknown | null {
+    const data = event.data as { type?: unknown; payload?: unknown } | null;
+    if (!data || data.type !== "pinta-frame-out" || !data.payload) return null;
+    const id = this.annotateReadyId;
+    if (!id) return null;
+    const el = this.iframeEls.get(id);
+    if (!el || el.contentWindow !== event.source) return null;
+    const origin = this.expectedOrigin(id);
+    if (!origin || event.origin !== origin) return null;
+    const type = (data.payload as { type?: unknown }).type;
+    if (typeof type !== "string" || !RELAYABLE_FRAME_MESSAGES.has(type)) return null;
+    return data.payload;
+  }
+
+  /** Re-send activation to the current target (the side panel asks when
+   *  it hasn't heard from a frame). Returns whether one is set. */
+  repingAnnotate(): boolean {
+    const id = this.annotateFrameId;
+    if (!id) return false;
+    this.postAnnotate(id, true);
+    return true;
+  }
+
+  private postAnnotate(id: string, on: boolean): void {
+    const origin = this.expectedOrigin(id);
+    if (!origin) return;
+    try {
+      this.iframeEls
+        .get(id)
+        ?.contentWindow?.postMessage({ type: "pinta-annotate", on }, origin);
+    } catch {
+      // frame detached — ignore
+    }
+  }
+
+  /** The origin frame `id` is expected to show (its configured src).
+   *  Pings are addressed to it instead of "*": a frame that wandered to
+   *  another origin simply doesn't get activated. */
+  private expectedOrigin(id: string): string | null {
+    return urlOrigin(this.srcFor(id));
+  }
+
+  /**
+   * Where the annotating frame sits right now, for the device-frame
+   * screenshot (service worker crops the visible-tab capture with it).
+   * Scrolls the frame into view first so as much as possible is visible.
+   */
+  async annotateFrameRect(): Promise<FrameRectReport | null> {
+    const id = this.annotateFrameId;
+    const el = id ? this.iframeEls.get(id) : null;
+    if (!el) return null;
+    el.scrollIntoView({ block: "nearest", inline: "nearest" });
+    // rAF never fires in a hidden tab — don't hang the screenshot on it.
+    await Promise.race([
+      new Promise((r) => requestAnimationFrame(() => requestAnimationFrame(r))),
+      new Promise((r) => setTimeout(r, 150)),
+    ]);
+    const b = el.getBoundingClientRect();
+    return {
+      rect: { x: b.x, y: b.y, width: b.width, height: b.height },
+      cssWidth: el.offsetWidth,
+      cssHeight: el.offsetHeight,
+      viewportWidth: window.innerWidth,
+      viewportHeight: window.innerHeight,
+      devicePixelRatio: window.devicePixelRatio || 1,
+    };
   }
 
   registerIframe(id: string, el: HTMLIFrameElement | null): void {
@@ -329,15 +528,25 @@ class DevicesPageState {
 
   /** An iframe finished a (re)load — its fresh document's reporter is
    *  inert again; re-ping so it starts (the interval also covers this,
-   *  this just makes it immediate). */
-  notifyFrameLoaded(): void {
-    if (this.state.sync) this.pingFrames();
+   *  this just makes it immediate). With the frame id, a Pinta-initiated
+   *  reload also resets that frame's nav baseline (NavSyncTracker.loaded)
+   *  so its first report — often a redirect — isn't read as navigation. */
+  notifyFrameLoaded(id?: string): void {
+    if (id && this.annotateReadyId === id) this.annotateReadyId = null;
+    if (id) this.nav.loaded(id, Date.now());
+    if (this.state.sync || this.annotateFrameId) this.pingFrames();
   }
 
   /** Activate the nav reporters. The ping is harmless and idempotent
    *  (a started reporter ignores repeats), so a short interval covers
    *  every timing race: content script not yet injected at load-event
    *  time, frames added later, reloads. */
+  /** Ping while anything needs it: nav sync, or an annotating frame. */
+  private syncPinging(): void {
+    if (this.state.sync || this.annotateFrameId) this.startPinging();
+    else this.stopPinging();
+  }
+
   private startPinging(): void {
     if (this.pingTimer) return;
     this.pingFrames();
@@ -350,9 +559,16 @@ class DevicesPageState {
   }
 
   private pingFrames(): void {
-    for (const el of this.iframeEls.values()) {
+    for (const [id, el] of this.iframeEls) {
+      const origin = this.expectedOrigin(id);
+      if (!origin) continue;
       try {
-        el.contentWindow?.postMessage({ type: "pinta-nav-start" }, "*");
+        if (this.state.sync) {
+          el.contentWindow?.postMessage({ type: "pinta-nav-start" }, origin);
+        }
+        if (this.annotateFrameId === id) {
+          el.contentWindow?.postMessage({ type: "pinta-annotate", on: true }, origin);
+        }
       } catch {
         // frame detached mid-iteration — ignore
       }
@@ -360,9 +576,11 @@ class DevicesPageState {
   }
 
   /**
-   * A frame posted its URL. Untrusted input: the shape is validated,
-   * only http(s) URLs are accepted, and the sender must be one of OUR
-   * iframes (identity-checked against the registered elements).
+   * A frame posted its URL. Untrusted input — the framed page's main world
+   * can post the same message: the shape is validated, the sender must be
+   * one of OUR iframes (identity-checked against the registered elements),
+   * and only same-origin http(s) navigations outside a re-point grace
+   * window spread (NavSyncTracker), debounced so redirects settle first.
    */
   handleNavMessage(event: MessageEvent): void {
     const data = event.data as { type?: unknown; url?: unknown } | null;
@@ -377,30 +595,50 @@ class DevicesPageState {
       }
     }
     if (!originId) return;
-    const url = normalizeTargetUrl(data.url);
-    if (url === "") return;
-    const prev = this.frameUrl.get(originId);
-    this.frameUrl.set(originId, url);
-    // First report from a document = position fix, not a navigation.
-    if (!this.state.sync || prev === undefined || prev === url) return;
+    const { verdict, url } = this.nav.report(originId, data.url, this.state.url, Date.now());
+    if (verdict !== "propagate" || !this.state.sync) return;
+    // Latest wins: a redirect chain in the originator replaces the pending
+    // URL, so only where it settles reloads the other frames.
+    this.cancelNavPropagation();
+    const from = originId;
+    this.navTimer = setTimeout(() => {
+      this.navTimer = null;
+      this.propagateNav(from, url);
+    }, NAV_SETTLE_MS);
+  }
+
+  private cancelNavPropagation(): void {
+    if (this.navTimer) clearTimeout(this.navTimer);
+    this.navTimer = null;
+  }
+
+  private propagateNav(originId: string, url: string): void {
+    // The originator moved on (e.g. to another origin) — nothing settled.
+    if (!this.state.sync || this.nav.urlOf(originId) !== url) return;
+    if (normalizeTargetUrl(url) === "") return;
     if (url !== this.state.url) {
       this.state.url = url;
       this.save();
     }
+    const now = Date.now();
     for (const f of this.state.frames) {
       if (f.id === originId) continue; // never reload the originator
-      const actual = this.frameUrl.get(f.id);
-      if (this.frameSrc[f.id] === url && actual !== url) {
+      const actual = this.nav.urlOf(f.id);
+      if (this.frameSrc[f.id] === url) {
+        if (actual === url) continue; // already there — no reload
         // The stored src already claims this URL but the frame drifted
         // (it navigated internally since, as an originator whose src we
         // deliberately never rewrite) — a reactive write would be a
         // no-op, so poke the element directly: assigning src always
         // re-navigates, even to the same string.
         const el = this.iframeEls.get(f.id);
-        if (el) el.src = url;
+        if (!el) continue;
+        this.nav.markRepointed(f.id, now, url);
+        el.src = url;
+        continue;
       }
+      this.nav.markRepointed(f.id, now, url);
       this.frameSrc[f.id] = url;
-      this.frameUrl.set(f.id, url);
     }
   }
 }

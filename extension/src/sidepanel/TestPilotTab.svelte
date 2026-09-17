@@ -16,6 +16,7 @@
   import MicButton from "../lib/voice/MicButton.svelte";
   import { parseStep } from "../lib/step-md.js";
   import { highlight } from "../lib/prism-setup.js";
+  import { safeExternalUrl } from "../content/capture.js";
   import ChatSheet from "./ChatSheet.svelte";
 
   let fileInput = $state<HTMLInputElement | null>(null);
@@ -2321,9 +2322,12 @@
                            tracker issue (GitLab link) or a tasks.md entry. -->
                       {#if app.testPilot.filedIssues[test.id]}
                         {@const filed = app.testPilot.filedIssues[test.id]!}
-                        {#if filed.target === "gitlab" && filed.url}
+                        {@const filedHref = safeExternalUrl(filed.url)}
+                        <!-- Agent-supplied link: https / loopback http only (persisted
+                             entries from older builds are re-checked here). -->
+                        {#if filed.target === "gitlab" && filedHref}
                           <a
-                            href={filed.url}
+                            href={filedHref}
                             target="_blank"
                             rel="noreferrer"
                             class="shrink-0 w-8 h-9 inline-flex items-center justify-center rounded-full text-emerald-600 dark:text-emerald-400 hover:bg-ink-50 dark:hover:bg-night-alt"

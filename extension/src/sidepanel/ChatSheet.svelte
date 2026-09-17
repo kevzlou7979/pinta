@@ -286,7 +286,19 @@
     // is bypassed (isComposing) so picking a candidate doesn't fire
     // a send mid-word.
     if (e.key !== "Enter" || e.isComposing) return;
-    if (e.altKey || e.shiftKey || e.metaKey || e.ctrlKey) return;
+    // Shift+Enter: the textarea's native newline.
+    if (e.shiftKey) return;
+    if (e.altKey || e.metaKey || e.ctrlKey) {
+      // Browsers insert NOTHING for Alt/Ctrl/Cmd+Enter in a textarea, so
+      // insert the newline at the caret ourselves.
+      e.preventDefault();
+      const ta = e.currentTarget as HTMLTextAreaElement;
+      const start = ta.selectionStart ?? draft.length;
+      const end = ta.selectionEnd ?? start;
+      draft = draft.slice(0, start) + "\n" + draft.slice(end);
+      requestAnimationFrame(() => ta.setSelectionRange(start + 1, start + 1));
+      return;
+    }
     e.preventDefault();
     handleSend();
   }

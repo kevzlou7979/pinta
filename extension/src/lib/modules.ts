@@ -261,14 +261,14 @@ const VOICE_COMMAND: ModuleSpec = {
 };
 
 /**
- * Design Variants (Phase 22) — "3 UI options" without leaving Pinta.
+ * Design Variants (Phase 22) — UI options without leaving Pinta.
  *
  * The user picks an element on their running app (or "whole page") and the
- * agent returns 3 design variants that stay inside the project's design
- * system. The tab renders them as sandboxed preview cards (switchable
- * across device widths), offers a live in-page swap preview for
- * element-scope variants, and applies the chosen one to source via a
- * second op. A Pages gallery renders the LIVE dev-server routes side by
+ * agent returns 1–5 design variants that stay inside the project's design
+ * system. Each card's markup is the visual contract: the tab renders it,
+ * "Preview on page" shows that exact card in the element's place, and the
+ * chosen one is applied to source via a second op, then checked against
+ * the page (match check + Fix differences). A Pages gallery renders the LIVE dev-server routes side by
  * side at device widths — a mockup sheet backed by the real app.
  *
  * Both settings are optional, so the module is ready the moment it's
@@ -280,7 +280,7 @@ const DESIGN_VARIANTS: ModuleSpec = {
   id: "design-variants",
   name: "Design Variants",
   description:
-    "Pick an element (or a whole page) and get 3 design variants that stay inside your design system — previewed as cards at any device width, live-swappable on the page, and applied to source with one click. Includes a Pages gallery: your app's key routes side by side at Mobile / Tablet / Laptop / Desktop widths.",
+    "Pick an element (or a whole page) and get 1–5 design variants that stay inside your design system. Preview the exact card on your page, apply it to source with one click, and Pinta checks the page matches the card. Includes a Pages gallery: your app's key routes side by side at Mobile / Tablet / Laptop / Desktop widths.",
   mode: "interactive",
   sessionCheckboxLabel: "",
   sessionCheckboxHint: "",

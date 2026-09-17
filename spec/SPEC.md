@@ -26,7 +26,7 @@ Pinta closes this loop: annotate the running page in the browser → an AI agent
 **Non-goals (v1)**
 - Cross-user collaboration on annotations. Single-user, single-session.
 - Editing production sites. The target is local dev or staging where the user owns the source.
-- Replacing design tools. Pinta is for *fixing* UI, not designing it from scratch.
+- Replacing design tools. Pinta is for *fixing* UI, not designing it from scratch. (Design Variants' whole-page mode, Phase 22, still starts from a route that already runs — it proposes on-system alternatives to existing UI, not blank-canvas design.)
 - Mobile browser support. Desktop Chrome only at v1.
 
 ---
@@ -98,8 +98,10 @@ type Annotation = {
   id: string;                         // uuid
   createdAt: number;
 
-  // The mark. Drawing kinds (arrow/rect/circle/freehand/pin) carry only
-  // strokes; "select" is an element pick (styling / content / resize /
+  // The mark. Drawing kinds (arrow/rect/circle/freehand/pin) carry
+  // strokes plus a best-effort `target` — the element under the drawing's
+  // anchor (arrow head, shape centroid, pin point) when it's on-screen;
+  // "select" is an element pick (styling / content / resize /
   // paint / scale edits all ride select + cssChanges/contentChange).
   // "note" is a free-form task with no DOM target; "image" is a
   // pasted/dropped reference image placed in page-space; "query" carries a
@@ -118,8 +120,8 @@ type Annotation = {
   url?: string;
 
   // What it points at. Multi-select (Ctrl/Cmd+click) populates the
-  // `targets` array; single-target legacy paths still set `target`.
-  // Readers should prefer `targets` and fall back to `[target]`.
+  // `targets` array; single-target paths (incl. drawings) still set
+  // `target`. Readers should prefer `targets` and fall back to `[target]`.
   targets?: AnnotationTarget[];
   /** @deprecated since v0.3 — use `targets`. Kept for one release. */
   target?: AnnotationTarget;
@@ -147,6 +149,27 @@ type Annotation = {
   // Lifecycle, set by the agent. Unset = not yet picked up.
   status?: 'applying' | 'done' | 'error';
   errorMessage?: string;
+
+  // kind "move" — where the dragged element (targets[0]) should go.
+  // "reorder" = markup move into `container`, `position` relative to
+  // `reference`; "free" = apply the pixel `offset` via positioning CSS
+  // (`destinationRect` uses the same space as `boundingRect`).
+  move?: {
+    drop: 'reorder' | 'free';
+    container?: AnnotationTarget;
+    reference?: AnnotationTarget;
+    position?: 'before' | 'after' | 'inside';
+    offset?: { dx: number; dy: number };
+    destinationRect?: { x: number; y: number; width: number; height: number };
+  };
+
+  // kind "text-insert" — a new paragraph; targets[0] is the container,
+  // placed `position` relative to `reference` ("inside" = append).
+  textInsert?: {
+    reference?: AnnotationTarget;
+    position: 'before' | 'after' | 'inside';
+    text: string;
+  };
 };
 
 type AnnotationTarget = {
@@ -260,25 +283,39 @@ The intended user experience, narrated:
 
 ### 6.1 Chrome Extension (Svelte)
 
-**Stack**: Svelte 5 + TypeScript + Vite + `@crxjs/vite-plugin` + Tailwind + shadcn-svelte.
+**Stack**: Svelte 5 + TypeScript + Vite + `@crxjs/vite-plugin` + Tailwind (no component library).
 
 **Surfaces**
-- **Side panel** (Chrome's `chrome.sidePanel` API): main UI. Annotation list, comment editor, submit button, session controls.
-- **Content script overlay**: full-viewport canvas + element selector, injected into the host page. Mounted in a Shadow DOM root to isolate styles.
-- **Background service worker**: handles `chrome.tabs.captureVisibleTab`, brokers messages between content script and side panel.
-- **Popup** (minimal): on/off toggle and "open side panel" button.
+- **Side panel** (Chrome's `chrome.sidePanel` API): main UI. Annotation list, comment editor, submit button, session controls, module tabs.
+- **Content script overlay**: full-viewport canvas + element selector, injected into the host page. Mounted in a Shadow DOM root to isolate styles. Also renders the optional floating toolbar (Phase 20).
+- **Background service worker**: handles `chrome.tabs.captureVisibleTab` (full-page stitch, Devices frame crop), brokers messages between content script and side panel, relays Voice Command, polls `/v1/watch/events` for notifications.
+- **Offscreen document** (`src/offscreen/`): the one mic + Web Speech host for Voice Command (Phase 21), spawned on demand by the service worker.
+- **Devices page** (`src/devices/`): full-tab multi-device canvas (Phase 24), launched from the side panel's Devices tab.
+- **Nav reporter** (`src/content/nav-reporter.ts`): all-frames content script, inert until the Devices canvas activates it (nav sync, annotate in a device).
+- **Reload guard** (`src/content/reload-guard.ts`): MAIN-world, top-frame-only `document_start` script that holds Vite `full-reload` frames while Pinta holds reloads.
+- **Popup** (minimal): theme toggle and "open side panel" button.
 
-**Modes** (keyboard-switchable)
-- `D` — Draw: pick a tool, draw on the canvas. On stroke completion, comment input appears inline near the stroke.
-- `S` — Select: hover highlights elements, click locks selection. Comment input appears.
-- `R` — Review: see all annotations as a list. Click to scroll to. Edit/delete.
+**Modes.** The overlay's `Mode` is `idle`, `select`, `draw` (carrying the pen tool), one mode per tool (`image` / `move` / `text` / `delete` / `resize` / `paint` / `scale` / `transform`), plus the one-shot `variant-pick` (Phase 22). Picked from the side-panel tool grid, the floating toolbar, or hotkeys.
+
+**Hotkeys.** Page hotkeys ignore focused inputs / textareas / contenteditable (except `Alt+V`); in a Devices canvas only the annotating frame listens.
+
+| Where | Keys | Action |
+|---|---|---|
+| Page | `Alt+S` / `Alt+P` / `Alt+X` | Toggle Select / toggle Draw (pen) / exit to idle |
+| Page, side panel | `Alt+V` | Dictate into the focused field (Voice Command enabled) |
+| Page | `Esc` | Cancel the in-progress / pending annotation or leave the mode (handled per mode) |
+| Page, floating toolbar on | `Ctrl+Alt+<letter>` | Pick a tool: `V` Select, `A` Arrow, `R` Rect, `P` Pen, `N` Pin, `I` Image, `M` Move, `T` Text, `D` Delete, `S` Resize, `B` Paint, `C` Scale, `F` Free transform (`TOOLS` in `lib/tools.ts`, matched by `KeyboardEvent.code`) |
+| Side panel, not in a field | `Ctrl/Cmd+Z` · `Ctrl/Cmd+Shift+Z` or `Ctrl/Cmd+Y` | Undo / redo the last annotation add |
+| Comment popover, inline editor, note composer | `Ctrl/Cmd+Enter` | Submit / save |
+| Chat input (`ChatSheet`) | `Enter` · `Shift+Enter` or `Alt+Enter` | Send · new line |
+| Code Review deck | `P` / `F` / `L` · `←` / `→` | Pass / Fail / Learn · previous / next card |
 
 **State**
 
 ```ts
 type ExtensionState = {
   session: Session;                   // current session
-  mode: 'draw' | 'select' | 'review' | 'idle';
+  mode: Mode;                         // see Modes above
   activeTool: Tool;                   // when in draw mode
   activeStroke: Point[] | null;       // in-progress drawing
   hoveredElement: Element | null;     // in select mode
@@ -306,15 +343,23 @@ type ExtensionState = {
 
 **HTTP API (versioned)**
 
-Reads (GET) are open. Writes (POST / DELETE) reject requests carrying
+Reads (GET) are open. Writes (POST / PUT / DELETE) reject requests carrying
 a browser `Origin` other than `chrome-extension://*` so a tab in the
 user's own browser can't CSRF the companion — see `companion/src/server.ts`.
+`/v1/modules` writes are stricter: they require the `chrome-extension://`
+origin (no-Origin local callers get 403 too), so only the extension's
+consent dialog can install a capability-bearing module.
 
 ```
 GET    /v1/health                                          → { ok, projectRoot, port, urlPatterns, registryId, version, pid }
 GET    /v1/registry                                        → snapshot of every running companion
 GET    /v1/url-patterns                                    → on-disk patterns from .pinta.json
 POST   /v1/url-patterns                                    → { pattern } → updated patterns[]
+GET    /v1/watch/events[?since=<ms>]                       → { events[] } task-watcher nudges (polled by the service worker)
+GET    /v1/report-shot?key=<stem>                          → image/png from .pinta/report-shots/ (Report proof shots)
+GET    /v1/modules                                         → installed modules + granted capabilities (Phase 19)
+POST   /v1/modules                                         → { package, grantedCapabilities } → 201 installed | 400
+DELETE /v1/modules/:id                                     → uninstall (removes .pinta/modules/<id>/)
 GET    /v1/sessions                                        → slim history list (no annotation bodies)
 GET    /v1/sessions/active                                 → current session or null
 GET    /v1/sessions/poll                                   → long-poll for next submitted session (25s)
@@ -322,7 +367,7 @@ GET    /v1/sessions/stream                                 → SSE push (event: 
 POST   /v1/sessions                                        → ingest a fully-formed session (test path)
 GET    /v1/sessions/:id                                    → full session
 POST   /v1/sessions/:id/status                             → { status, summary?, errorMessage? }
-POST   /v1/sessions/:id/claim                              → { claimerId } → 200 winner | 409 already-claimed
+POST   /v1/sessions/:id/claim                              → { claimerId, role? } → 200 winner | 409 already-claimed | 403 { expectedRole } role mismatch
 POST   /v1/sessions/:id/annotations/:annId/status          → { status, errorMessage? }
 DELETE /v1/sessions                                        → wipe history (preserves any active drafting session)
 DELETE /v1/test-docs                                       → wipe .pinta/test-docs/ (Test Pilot, Phase 12)
@@ -334,6 +379,9 @@ GET    /v1/test-docs/:docId/results[/:authorSlug]          → read sidecar cont
 `:authorSlug` is the lowercased + kebab-cased catalog author name
 (`[a-z0-9-]{1,64}`). When omitted, the companion picks the most
 recent sidecar so a single-tester project still round-trips cleanly.
+
+Claim `role` (Phase 18b) is one of `annotate` / `test-pilot` / `audit` /
+`chat` / `variants` / `review`; omitted = generalist, first claim wins.
 
 **WebSocket protocol** (extension ↔ companion)
 
@@ -370,11 +418,17 @@ type ClientMessage =
       moduleId: string;
       moduleSettings: Record<string, string | boolean>;
       queryComment: string;
+      // Optional PNG/JPEG data URL riding the query (Design Variants
+      // reference image). Extracted to disk like a submit screenshot;
+      // the agent reads `fullPageScreenshotPath`.
+      screenshot?: string;
     };
 
 type ServerMessage =
   | { type: 'session.created'; session: Session }
   | { type: 'session.synced'; session: Session }
+  // Legacy / unused: declared and handled by the extension but never sent
+  // by the companion — progress arrives as session.synced.
   | { type: 'session.applying' }
   | { type: 'session.done'; summary: string }
   // Phase 12 — companion's targeted ack for a module.query.submit.
@@ -382,8 +436,32 @@ type ServerMessage =
   // interactive-module slot. The companion also broadcasts a normal
   // session.synced for the same session.
   | { type: 'module.query.created'; moduleId: string; session: Session }
+  // Task watcher (`.pinta/watch.json`) saw new tracker items. Heads-up
+  // only — the extension notifies + badges the owning module's tab and
+  // drops it unless that module is enabled; never invokes the agent.
+  | {
+      type: 'watch.new';
+      moduleId?: string;
+      label: string;
+      title: string;
+      items: { id: string; title: string }[];
+    }
   | { type: 'error'; message: string };
 ```
+
+**Extension-internal messages** (never reach the companion; selected —
+older ones live in their phases, e.g. `imported.show` in Phase 11)
+
+| Channel | Message | Direction · purpose |
+|---|---|---|
+| tabs | `variants.preview { variantId, label, target, previewHtml }` | panel → page: render the card markup in the element's slot (Phase 22) |
+| tabs, runtime | `variants.verify { variantId, target, previewHtml }` → `variants.verify-result { variantId, found, check?, error? }` | panel → page → panel: post-apply computed-style match check |
+| tabs | `frame.viewport` → `{ scrollY, width, height, url }` | panel → annotating device frame: composite geometry (Phase 24) |
+| runtime | `frame.inactive` | device frame → panel: frame is no longer the annotation target |
+| runtime | `capture.device-frame { tabId }` → `{ ok, capture }` | panel → service worker: visible-tab capture cropped to the frame |
+| runtime | `devices.annotate-frame-rect { tabId }` → `{ rect }` | service worker → Devices canvas (own tab only): the frame's on-screen box |
+| postMessage | `{ type: "pinta-annotate", on }` | canvas → frame: make / unmake it the annotation target |
+| postMessage | `{ type: "pinta-nav-start" }` · `{ type: "pinta-nav", url }` | canvas → frame: start nav reporting · frame → canvas (extension origin only) |
 
 **MCP tools exposed**
 
@@ -396,7 +474,8 @@ mark_session_error(id, error)                  → void
 mark_annotation_applying(sessionId, annId)     → void   // Phase 9
 mark_annotation_done(sessionId, annId)         → void   // Phase 9
 mark_annotation_error(sessionId, annId, error) → void   // Phase 9
-get_screenshot(annotation_id)                  → base64 PNG (cropped)
+get_screenshot(id)                             → full-page composited PNG for the session (image content);
+                                                 prefer `fullPageScreenshotPath` with filesystem access
 ```
 
 **Process model**: long-running. Started once per project, runs until killed. Multiple agents can connect simultaneously (only one applies, others observe).
@@ -623,9 +702,11 @@ Most of Phase 7 has shipped. What's left is genuinely small / nice-to-have.
   / Draw) / `Alt+X` (Exit) / `Esc` (Cancel) / `Cmd+Enter` (submit in
   inline-editor popup). Originally Ctrl+Shift+S/D/R; moved to Alt to
   avoid Ctrl+Shift+R hard-reload collision and away from chord finger-
-  twisting.
-- ~~Session history view.~~ **Shipped.** Collapsible "History (N)"
-  panel at the bottom of the side panel; status badges (drafting /
+  twisting. Full current list (tool shortcuts, undo / redo, voice) in
+  §6.1.
+- ~~Session history view.~~ **Shipped.** "History" popover opened from
+  the side-panel header's ⋮ menu (originally a collapsible panel at the
+  bottom of the side panel); status badges (drafting /
   submitted / applying / done / error), relative timestamps, applied
   summaries / error messages, screenshot path. Backed by a slim
   `GET /v1/sessions` endpoint (no annotation bodies).
@@ -781,8 +862,11 @@ animation timeline, design-token picker integrations.
     snapshot; Cancel-session rolls all of them back. Re-editing an
     already-annotated element reuses the true-original snapshot as the
     baseline so rollback math stays correct.
-  - *Per-side spacing splits with a linked toggle* — planned.
-  - *Drag-to-resize handles* — planned.
+  - *Per-side spacing splits* — **shipped**. Spacing tab padding /
+    margin each toggle between one shorthand input and top / right /
+    bottom / left fields.
+  - *Drag-to-resize handles* — **shipped** as the Resize tool (8
+    handles, Phase 21).
   - *Design-token picker integrations* — planned.
   - *Inline edit affordance icon on hover* — planned.
 
@@ -1158,12 +1242,27 @@ Three module surface kinds:
     them with light markdown (inline code, fenced code blocks via
     Prism, `> Note:` callouts) and per-block copy-to-clipboard.
 
-  The module exposes one setting — `detailed_steps: boolean` — that
-  toggles between tester-friendly short steps (default, fewer tokens)
-  and deeper technical steps (verbose, with curl/payload examples).
-  Flipping the toggle invalidates every cached `test.detail` in the
-  current catalog so the next row-open re-fetches at the new
-  verbosity.
+  The module exposes two settings. `detailed_steps: boolean` toggles
+  between tester-friendly short steps (default, fewer tokens) and
+  deeper technical steps (verbose, with curl/payload examples).
+  Flipping it invalidates every cached `test.detail` in the current
+  catalog so the next row-open re-fetches at the new verbosity.
+  `thorough_tests: boolean` (also a **Smoke test / Thorough** toggle in
+  the tab) sets `depth: "smoke" | "thorough"` on `doc-parse` /
+  `generate-doc`: Smoke (default) is a quick happy-path catalog;
+  Thorough covers every user-facing feature with edge cases and
+  negative paths (more tokens, still one bounded pass).
+
+  Later ops on the same envelope:
+
+  - `op: "test-file-issues"` — header **File failed tests**: one bulk
+    run files every failed, not-yet-filed row as a GitLab issue via
+    `glab` (de-dupe marker per test id), falling back to
+    `.pinta/tasks.md` when GitLab isn't configured. Returns
+    `test-pilot-issues-filed` with a URL / path per test (SKILL §7.10.4).
+  - `op: "suggest-tests"` — section **Suggest Test**: the agent proposes
+    new scenarios for one section's theme (`sectionTitle`, `existing`
+    rows, `count`); ticked rows land as `USER-N` tests.
 
   Results persist to `chrome.storage.local` under
   `pinta-test-pilot:current`. Catalog rows can be marked Pass / Fail
@@ -1370,7 +1469,7 @@ three-tier module is the diff outlined in `chat-module-spec.md`.
 threads, chat history search, "agent proposes Pass/Fail" from reply
 analysis, page-level FAB on the user's app (side-panel only).
 
-### Phase 15 — AuditFlow module — 15a + 15b shipped; 15c-e Planned
+### Phase 15 — AuditFlow module — Shipped (15a–15e; 15c / 15d reduced scope)
 
 A Lighthouse-style audit surface as a Pinta module. Module id:
 `audit-flow`, mode: `interactive` (own side-panel tab). What makes
@@ -1379,14 +1478,16 @@ is one click from being **actionable** because the annotation → agent
 edit pipeline is already there. The audit becomes the *source* of
 work; existing modules become *sinks*.
 
-**Four built-in categories** ship by default:
+**Five built-in categories** ship by default. All are LLM static analysis
+of source (SKILL §7.11) — no browser, axe-core or Lighthouse run:
 
 | Category | What it checks |
 |---|---|
-| Security | XSS, CSRF, secret leakage, `eval` / `{@html}` misuse, dep advisories |
-| Performance | Bundle size, runtime hotspots, lazy-load opportunities, network waterfall |
-| Accessibility | axe-core via headless Chrome + LLM semantic checks (ARIA, contrast, focus) |
-| Mobile | Viewport diffs @ 375/768/1280, modal overlap, touch-target sizing |
+| Security | XSS, CSRF, secret leakage, `eval` / `{@html}` misuse, `npm audit` advisories |
+| Performance | Bundle entries / deps, heavy known libraries, sync fetches in render, missing lazy routes / `loading="lazy"` |
+| Accessibility | Alt text, labeled inputs, ARIA misuse, heading order, contrast heuristics, focus-visible, `lang` + localization bugs (hardcoded strings, missing keys, concatenation, plurals, `Intl` formatting, text expansion, RTL) |
+| Mobile | Viewport meta, fixed-px containers, touch-target sizing, hover-only interactions, overflow risks |
+| Cross-Browser | Modern CSS / JS / runtime APIs vs the browserslist target, missing `@supports` / polyfills / prefixes |
 
 **Framework-specific audits are user-defined.** Sidesteps the "which
 version of Svelte do we hard-code for" problem. User pastes guidance,
@@ -1444,17 +1545,28 @@ ignored 2, 12 new findings introduced." Trend chart in 15d.
 **Wire protocol** extends `module.query.submit` with `op: "audit"` —
 no new ClientMessage variant. Agent returns `{type: "audit-flow-run",
 runId, overall, categories: [{id, name, score, checks}]}` via
-`mark_session_done`. New companion endpoint `POST /v1/audit/run-tool`
-shells out to `axe-core` / `lighthouse` / `npx @sveltejs/mcp` etc.
-when a category opts in.
+`mark_session_done`. Later ops on the same envelope: `audit-suggest`,
+`audit-discuss`, `audit-file-issue`, `audit-fix` (in-place fix, the
+only audit op that edits source). The planned `POST /v1/audit/run-tool`
+shell-out endpoint (axe-core / lighthouse / `npx @sveltejs/mcp`) was
+**not built**.
 
 **Phasing** (~3.5 weeks total; 15a alone ~4 days ships standalone):
-- **15a** — Security only + card view + Fix-with-agent → Annotate
-- **15b** — Add Perf / A11y / Mobile + table view + bulk Fix
-- **15c** — Custom audits (paste / upload / URL → rules → save)
-- **15d** — Cross-run fingerprint persistence + Won't fix / snooze
-- **15e** — File-as-issue (GitLab module composition) + Discuss
-  handoff (after Phase 14 chat lands)
+- **15a** — Security only + card view + Fix-with-agent → Annotate — *shipped*
+- **15b** — Add Perf / A11y / Mobile (+ Cross-Browser) + table view +
+  bulk Fix — *shipped*; Fix now applies in place (`audit-fix`,
+  per-row loader, category **Fix All**)
+- **15c** — Custom audits — *shipped as user-authored custom
+  categories + checks* (add / edit / rename / delete, AI **Suggest
+  checks** via `audit-suggest`, catalog markdown export / import). The
+  paste / upload / URL → generated-rules flow and the Svelte 5 seed are
+  not built.
+- **15d** — Per-check dispositions (`open` / `fixing` / `resolved` /
+  `wont-fix`, progress bars) persisted over re-runs — *shipped*; snooze
+  and the trend chart are not built.
+- **15e** — **Discuss** (shared ChatSheet, `audit-discuss`) + **File
+  issue** (GitLab via `glab` or `.pinta/tasks.md`, `audit-file-issue`)
+  — *shipped*
 
 **Full design** (locked decisions, per-category thresholds, sample
 payloads, file-touch estimate, custom-audit safety rules): see parked
@@ -1467,11 +1579,49 @@ preview (opt-in setting); concurrent audit runs (single in-flight);
 
 ---
 
+### Phase 16 — Report module — Shipped (0.6.0)
+
+> Numbering: the Test Pilot sign-off round-trip once parked under this
+> number shipped as **Phase 13b** (tester sheet). Phase 16 is Report, as
+> in the code, SKILL.md §7.13 and the public roadmap.
+
+"What did we ship" over a date window. Built-in interactive module
+(`report`, no settings — enable it in Settings to show the tab). The
+agent gathers git + GitHub / GitLab (`gh` / `glab`) + Pinta activity
+**read-only** and returns items bucketed by day; the extension renders
+Read-Mode day cards (`sidepanel/ReportTab.svelte`, helpers in
+`lib/report.ts`) and exports clean markdown. Ops on
+`module.query.submit` (SKILL §7.13):
+
+- `report-generate` — daily / weekly / 10-day sprint around an anchor
+  date, or a custom single day / window. Weekend work folds into the
+  lighter adjacent weekday (`foldWeekends`). **16b** — extra repo paths
+  combine into one report; each item carries an inline `[project]` tag.
+- `report-day-expand` (**16e**) — fetch more for one day.
+- `report-screenshot` (**16f**) — a per-entry proof shot the agent
+  writes to `.pinta/report-shots/<key>.png`; the tab loads it via
+  `GET /v1/report-shot?key=`.
+- `report-how-to-test` (**16g**) — 3–6 plain steps, inline (StepList).
+- **16c** `git-commit` (SKILL §7.14) — Commit / Commit & push for
+  finished Annotate batches, from the Submitted tray.
+
+**16d** header: one icon group — Filter (range) / Projects dialog /
+Regenerate / Export. **Exports**: per-day `.md` keeps true dates and
+full detail. The whole-report export is an invoice-ready summary: one
+prose paragraph per day under 1000 chars (`INVOICE_DAY_MAX_CHARS`),
+full-date headings, identical lines collapsed to `… xN`, item load
+balanced across days (`balanceReportDays` — may move an item off its
+true date), and no Saturday / Sunday entries.
+
+**Non-goals (v1)**: per-task audit gap-check, saving exports to disk,
+per-item Discuss.
+
+---
+
 ### Phase 18 — Agent role routing (multi-terminal specialization) — 18a + 18b shipped
 
-> Phases 16 (Test Pilot sign-off) and 17 (Claude Design) are spec-locked
-> in parked memory + the public roadmap timeline; their full sections in
-> this doc are still pending writeup.
+> Phase 17 (Claude Design) is exploring — tracked in parked memory and
+> the public roadmap timeline; its full section here is still pending.
 
 Today's claim model is "all `/pinta` terminals in a project hear
 every session, fastest claim wins" (SKILL.md §3.5). That's right for
@@ -1488,8 +1638,14 @@ its role get silently skipped to other terminals.
 /pinta --test-pilot  → modules[].id contains "test-pilot"
 /pinta --audit       → modules[].id contains "audit-flow"
 /pinta --chat        → modules[].id contains "chat"
+/pinta --variants    → modules[].id contains "design-variants"
+/pinta --review      → modules[].id contains "code-review"
 /pinta               → role = any (default; current behavior)
 ```
+
+`--annotate` claims only sessions carrying none of the specialized ids
+(GitLab Issues rides a normal source-edit session, so it counts as
+annotate work).
 
 Flags stack: `/pinta --test-pilot --audit` claims both. At least one
 terminal must accept each kind in use, else those sessions time out
@@ -1508,8 +1664,9 @@ responsive while a separate audit agent does the heavy read.
   + §3.5.0 guard. Trust model: relies on each agent honoring its
   role.
 - **18b — shipped.** Companion-enforced role on the claim endpoint.
-  `POST /v1/sessions/:id/claim` accepts `role`; mismatches get 403
-  with `expectedRole`. Closes the trust-model gap surfaced by an
+  `POST /v1/sessions/:id/claim` accepts `role` (`annotate` /
+  `test-pilot` / `audit` / `chat` / `variants` / `review`); mismatches
+  get 403 with `expectedRole`. Closes the trust-model gap surfaced by an
   off-script agent rationalizing a cross-role "rescue" — see
   `companion/src/store.ts` `tryClaim` and the `Phase 18b` test block
   in `companion/src/store.test.ts`. Generalists (no flag) omit
@@ -1634,7 +1791,19 @@ capability granularity (per-path file scope, multi-host network).
 
 ---
 
-### Phase 20 — Floating toolkit (Device toolkit) — Planned
+### Phase 20 — Floating toolkit — Floating toolbar shipped (0.8.0); Device toolkit removed
+
+**Status.** The floating toolbar shipped in 0.8.0: a draggable on-page
+tool palette (`content/FloatingToolbar.svelte`, Settings → Interface
+gate, off by default) with a Pinta-logo grip, `Ctrl+Alt+<letter>` tool
+shortcuts, hover tooltips, annotate / transform grouping, Add-task +
+CSS-selector entries, a right-edge default that survives resizes, and
+**Free Transform** (batch move / resize / edit / delete of one element
+into one annotation). When off, the side panel shows a docked tool row.
+The **Device toolkit** below was built, then **removed** the same day —
+DevTools device mode does it better, and an extension can't center or
+bezel the page without `chrome.debugger`. The multi-device idea lives on
+as Phase 24. The original plan follows for the record.
 
 A **floating, draggable toolkit** overlaid on the user's page — Photoshop's
 floating tool palettes are the mental model — rendered by the content-script
@@ -1690,7 +1859,7 @@ single-viewport cousin of that concept (which renders Mobile/Tablet/
 Laptop side-by-side in one pannable canvas). The Device toolkit toggles
 *one* viewport in place; the canvas shows *all at once*. They can coexist.
 *Update:* the canvas half shipped as **Phase 24 — Devices module**; the
-single-viewport toolkit remains unbuilt.
+single-viewport toolkit was built and removed (see Status above).
 
 ### Phase 21 — Annotation toolset + Drift Check + board actions — Shipped (0.7.0)
 
@@ -1725,50 +1894,80 @@ the `module.query.submit` op envelope) — the only new `AnnotationKind`s are
 Replaces the "paste a screenshot into claude.ai and ask for 3 options"
 loop. A built-in interactive module (`design-variants`): the user picks
 an element on their running app (one-shot `variant-pick` content mode)
-or chooses "whole page", and the agent returns **3 design variants that
-stay inside the project's design system** (§7.16 in SKILL.md — ops
-`variants-generate` / `variants-apply` / `variants-discover-pages`, all
-on the existing `module.query.submit` envelope; **zero companion
-changes**).
+or chooses "whole page", and the agent returns **1–5 design variants
+(default 3) that stay inside the project's design system** (§7.16 in
+SKILL.md — ops `variants-generate` / `variants-apply` /
+`variants-discuss` / `variants-discover-pages`, all on the existing
+`module.query.submit` envelope). Companion changes are small: the
+optional `screenshot` on `module.query.submit` (reference image, §6.2)
+and the `variants` claim role (Phase 18b).
 
-- **Variant cards** (`sidepanel/DesignVariantsTab.svelte`): each variant's
-  self-contained `previewHtml` renders in an iframe with the EMPTY
-  `sandbox` attribute (no scripts / no origin), additionally passed
-  through the inbound sanitizer. A device chip row (Mobile / Tablet /
-  Laptop / Desktop; overridable via the `devicePresets` module setting)
-  renders any card at that viewport width, scale-clipped.
-- **Live in-page preview** (element scope): "Preview on page" swaps the
-  real element — style-only variants via `applyPreview` (inline-style
-  layering), structural variants via a sanitized `<template>` parse +
-  `replaceWith`, with snapshot restore, an on-page pill (Restore / Use
-  this variant), Esc-to-restore, and a MutationObserver suspend flag.
-  Transient by design: a framework re-render clobbers it harmlessly
-  (`isConnected` guards); host-page CSP may block inline styles.
-- **Generate options**: the user picks how many variants (2-5, default
-  3) and can type an optional free-text **art direction** (≤280 chars,
-  `normalizeDirection`) that rides on `variants-generate` as
-  `direction` — the agent must honor it while staying on-system
-  (SKILL §7.16). Starting a new generate clears the previous run
-  (cards + any live preview) so stale variants never sit under the
-  spinner.
+- **Compose**: scope (element pick or whole page), optional free-text
+  **art direction** (≤280 chars, `normalizeDirection`, plus intent
+  chips), an optional pasted **reference image** (downscaled JPEG on
+  `module.query.submit.screenshot`, query flag `referenceImage: true`;
+  the agent Reads it from `fullPageScreenshotPath` and maps its look onto
+  project tokens), and a count picker (1–5). A new generate clears the
+  previous run first. Once results exist the form collapses to a
+  one-line brief with **Edit** / **Regenerate**. Header **Reset** clears
+  the pick, direction, reference image, results and Refine threads
+  (keeps count, device and Pages; refused while a request runs).
+- **`previewHtml` is the visual contract**: the root element IS the
+  variant (no page wrapper), inline resolved values only (no `var()`),
+  the target's real content, no scripts / handlers / external URLs,
+  ≤8 KB per element and ≤20 KB per page variant. Optional
+  `previewBackground` paints the card ground; a backdrop wrapper the
+  agent adds anyway is unwrapped (`splitPreviewBackdrop`). The card, the
+  on-page preview and `variants-apply` all use this one markup.
+- **Cards** (`sidepanel/DesignVariantsTab.svelte`): element cards render
+  through a closed shadow root in the panel (`mountShadowCard`) — the same
+  rendering context as the on-page preview, so card and page agree — laid
+  out at the element's real width, scaled to fit (click for actual size).
+  Page-scope cards use a sandboxed `srcdoc` iframe at device width with
+  zoom; the device picker (overridable via the `devicePresets` setting)
+  appears only where it resizes something. Full screen opens a packaged
+  extension page (`src/variant-preview/`) that renders the variant in a
+  sandboxed iframe at real size. Card actions: **Preview on page**,
+  **Refine**, **Use this**.
+- **Preview on page** (element scope): `variants.preview` renders
+  `previewHtml` in a closed shadow host that takes the element's layout
+  slot (`buildShadowPreviewHost` — page CSS can't reach in, variant
+  `<style>` can't leak out), with snapshot restore, an on-page pill
+  (Restore / Use this variant), Esc-to-restore, and a MutationObserver
+  suspend flag. Transient by design: a framework re-render clobbers it
+  harmlessly (`isConnected` guards).
+- **Refine** (Discuss): shared `ChatSheet` per variant over
+  `variants-discuss` (read-only). The agent may return `updatedVariant`
+  fields that replace the card's markup / summary; source changes only
+  on Use this.
 - **Apply**: stateless `variants-apply` resends the target + chosen
-  variant spec; the agent edits source (dev server hot-reloads) with an
-  optional **bounded** (≤2 extra passes) visual fidelity check when a
-  browser MCP is available. Result badges the card and lists the files.
-- **Pages gallery**: the app's key routes (seeded by
-  `variants-discover-pages` or typed manually) render side by side as
-  LIVE dev-server iframes at the selected device width — a mockup sheet
-  backed by the real app, doubling as the post-apply review. Requires
-  the dev app not to send `X-Frame-Options` / `frame-ancestors` denials.
-- **Security — new trust edge**: agent-generated HTML entering the
-  user's page. `sanitizeVariantHtml` (`lib/design-variants.ts`,
-  unit-tested) drops `script/iframe/object/embed/link/meta/base/form`,
-  strips `on*` handlers, `javascript:`/`data:` URLs, and `url(`-bearing
-  style attributes; it runs on BOTH the panel side (before messaging)
-  and in the content script's isolated world (before DOM insertion).
-- **Non-goals (v1)**: full-page in-page preview (cards only), per-variant
-  Discuss (stubbed "coming soon" — will reuse ChatSheet), variant
-  history across runs.
+  variant (element scope includes `previewHtml`, which the agent must
+  reproduce exactly — identical tokens or exact values). The dev server
+  hot-reloads; an optional **bounded** (≤2 extra passes) fidelity check
+  runs when a browser MCP is available. The applied card lists the files.
+- **Match check** (element scope, zero agent tokens): after apply the
+  panel sends `variants.verify`; the page renders the card markup
+  off-screen in the same shadow context, re-finds the element
+  (`locateAppliedElement` — its classes changed), diffs computed styles
+  (`diffRenderedTrees`, ≤24 diffs, environment noise ignored) and replies
+  `variants.verify-result`. Runs automatically with spaced retries while
+  HMR settles, and on demand (**Check again**). The card shows "matches"
+  or a score with a Card vs Page table; **Fix differences** re-runs
+  `variants-apply` with `fix: { diffs, missing }` so the agent corrects
+  only those.
+- **Pages gallery** (collapsed): the app's key routes (seeded by
+  `variants-discover-pages` or typed manually, ≤12, hideable) render as
+  LIVE dev-server iframes at the selected device width. Requires the dev
+  app not to send `X-Frame-Options` / `frame-ancestors` denials.
+- **Security — new trust edge**: agent-generated HTML entering the panel
+  and the user's page. `sanitizeVariantHtml` (`lib/design-variants.ts`,
+  unit-tested) is an allowlist sanitizer — only known-safe elements and
+  attributes survive (no scripts, `on*` handlers, `javascript:` /
+  `data:` URLs, or `url(`-bearing styles) — and runs on BOTH the panel
+  side and again in the content script's isolated world before DOM
+  insertion.
+- **Non-goals (v1)**: full-page in-page preview (page scope is cards
+  only), match check for page scope, variant history across runs.
 
 ### Phase 23 — Code Review module — Built (unreleased)
 
@@ -1776,8 +1975,8 @@ Gamified review of the user's own change set. Built-in interactive
 module (`code-review`, no settings): the agent gathers the uncommitted
 working-tree diff — falling back to `git show HEAD` when clean — and
 returns a deck of review cards (§7.17: ops `review-gather` /
-`review-learn` / `review-fix`, all on `module.query.submit`; **zero
-companion changes**). **Topic mode**: an optional focus prompt (≤120
+`review-learn` / `review-fix`, all on `module.query.submit`; the only
+companion change is the `review` claim role, Phase 18b). **Topic mode**: an optional focus prompt (≤120
 chars, e.g. "MFA authentication") makes the gather skip git and deal
 the RELEVANT CODE SECTIONS for that topic instead (2-3 greps, ≤40 files
 skimmed, `source:"topic"`, excerpts rendered as context lines).
@@ -1876,11 +2075,36 @@ companion op, no agent, nothing on the wire, no SKILL.md changes.**
   never propagated (no storm when sync turns on over frames already
   open). Scroll-sync remains out of scope (cross-origin
   `contentWindow`).
-  Mobile / Tablet / Laptop / Small Desktop / Large Desktop (iPhone
-  SE/16 Pro/Pro Max, Pixel 8, Galaxy S24, iPads, Surface Pro, laptops,
-  Full HD, QHD, 4K); symmetric rotate (`dimsFor`); class-default zooms;
-  `customDevices` JSON setting parsed tolerantly (`parseCustomDevices`,
-  mirrors `parseDevicePresets`) and merged by label.
+- **Catalog** (`lib/devices.ts`): Mobile / Tablet / Laptop / Small
+  Desktop / Large Desktop (iPhone SE/16 Pro/Pro Max, Pixel 8, Galaxy
+  S24, iPads, Surface Pro, laptops, Full HD, QHD, 4K); symmetric rotate
+  (`dimsFor`); class-default zooms; `customDevices` JSON setting parsed
+  tolerantly (`parseCustomDevices`, mirrors `parseDevicePresets`) and
+  merged by label.
+- **Annotate in a device**: a frame header **Annotate** toggle makes ONE
+  frame the annotation target (`devices.annotateFrameId`, session-only).
+  The canvas posts `{type:"pinta-annotate", on}`; `nav-reporter.ts`
+  (extension origin + parent-window checks) imports the annotate overlay
+  into that frame on first activation — resolved from the manifest's
+  web-accessible resources and imported directly, so no preload tags reach
+  the host page — and `overlay.ts` handles later on/off. Only the target's
+  overlay is live (`content.frameActive`): other frames ignore the side
+  panel's tab-wide broadcasts and hotkeys and hide their host, so no
+  per-frame message routing is needed. The target re-pings every 2s and on
+  load (fresh documents start inert). The side panel treats the canvas tab
+  as that frame: `adoptTab` routes companions by the canvas `?url=`,
+  `overlay.ready` from the frame sets the page URL, `frame.inactive`
+  (matched by `sender.frameId`) clears it, and a hint asks the user to
+  pick a device until one is live. Annotations carry the frame's
+  `location.href` and viewport width, so the existing mobile / tablet chip
+  and breakpoint scoping apply unchanged. Screenshots: the full-page path
+  can't work on the canvas (its top frame is our page), so
+  `capture.device-frame` asks the canvas for the frame's on-screen box
+  (`devices.annotate-frame-rect`, own-tab only), captures the visible tab
+  and crops it back to device CSS px (`frameCaptureGeometry`, clipped
+  regions left blank); the panel composites with
+  `compositeAnnotationsToViewport` at the frame's `scrollY`
+  (`frame.viewport`). Viewport-only by design — not a full-page stitch.
 - **State**: the page's own small runes store
   (`devices-state.svelte.ts`) — deliberately does NOT import
   `state.svelte.ts` (which boots the whole side-panel singleton).
@@ -1894,8 +2118,11 @@ companion op, no agent, nothing on the wire, no SKILL.md changes.**
   X-Frame-Options / CSP `frame-ancestors` apps refuse to render;
   cookie/SameSite logins may not persist inside frames (third-party
   storage partitioning). Token/localStorage auth on localhost dev apps
-  generally works.
-- **Non-goals (v1)**: screenshots, scroll-sync (impossible — the
+  generally works. The Vite full-reload hold (`reload-guard.ts`, a
+  top-frame-only MAIN-world script) does not run inside device frames,
+  so an HMR full reload still reloads a frame mid-annotation.
+- **Non-goals (v1)**: full-page stitched screenshots of a device (the
+  annotating frame's viewport capture ships), scroll-sync (impossible — the
   `chrome-extension://` top page can't reach cross-origin iframe
   `contentWindow`), UA/DPR emulation.
 
@@ -1907,13 +2134,13 @@ These are real design decisions that need answering before phase 5, but can be d
 
 1. **Conflict detection.** If annotation #1 says "make icon blue" and #3 says "remove the section containing it," #1 is wasted. Should the companion detect conflicts, or push that to the agent?
 
-2. **Multi-tab sessions.** What if the user wants to annotate flows that span pages? Single session covering multiple URLs, or one session per URL?
+2. **Multi-tab sessions.** What if the user wants to annotate flows that span pages? Single session covering multiple URLs, or one session per URL? *Answered (v0.3.0)* — one session spans routes; each annotation carries its own `url`, the side panel filters by page, and the agent keys per-page work off `annotation.url`.
 
 3. **Authentication.** When pages require auth, the screenshot flow works (Chrome sees what's on screen) but the user's session cookies become part of the workflow. Anything special needed?
 
 4. **Iframes / portals.** Element selection across iframe boundaries is awkward. v1 might just not support it.
 
-5. **Persisted annotations.** Should sessions be re-openable for follow-up, or are they single-shot? Probably the latter for v1.
+5. **Persisted annotations.** Should sessions be re-openable for follow-up, or are they single-shot? *Answered* — sessions persist to `.pinta/sessions/` and list in History; `.pinta` share files re-open them (Phase 11), and Drift Check's **Resubmit** re-sends what didn't land (Phase 21).
 
 6. **Read-only mode.** Useful to share annotations with a teammate without auto-applying? *Partially answered by Phase 11* — `.pinta` share files round-trip a session between machines and open in a read-only viewer; the recipient can act on it (Send to agent / Copy / Fork) but can't edit the imported annotations themselves.
 
@@ -1946,7 +2173,8 @@ The tool is working when:
 |---|---|---|
 | Extension framework | Svelte 5 + TypeScript | User's stack; small bundles for content scripts |
 | Extension build | Vite + @crxjs/vite-plugin | Designed for MV3 + HMR for content scripts |
-| Extension styling | Tailwind + shadcn-svelte | User's stack; consistent with their projects |
+| Extension styling | Tailwind (no component library) + `@fontsource/poppins` | User's stack; self-hosted font, no CDN |
+| Extension libraries | `prismjs` (code highlighting), `fflate` (zip / .docx) | Small, dependency-free |
 | Style isolation | Shadow DOM | Standard pattern for content script UIs |
 | Drawing | Raw Canvas 2D | Simpler than Fabric.js; <100 LOC for v1 |
 | Companion runtime | Node 20+ | Ubiquitous; matches frontend tooling |

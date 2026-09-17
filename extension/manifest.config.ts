@@ -52,6 +52,22 @@ export default defineManifest({
     "alarms",
   ],
   host_permissions: ["<all_urls>"],
+  // Extension-page CSP — TIGHTENS the MV3 default (script-src/object-src
+  // unchanged). Agent-generated variant markup renders as live DOM in the
+  // side panel (shadow-root cards), so remote image / media / font loads
+  // are blocked at the platform level as well as by the sanitizer.
+  // Allowed image sources: bundled assets, data:/blob: (pasted images,
+  // screenshots) and the local companion (report / module-card shots on
+  // http://127.0.0.1:<port>). connect-src and frame-src are deliberately
+  // NOT set: the companion WS/HTTP and the Devices / Pages-gallery iframes
+  // of arbitrary http(s) dev servers must keep working.
+  content_security_policy: {
+    extension_pages:
+      "script-src 'self'; object-src 'self'; " +
+      "img-src 'self' data: blob: http://127.0.0.1:* http://localhost:*; " +
+      "media-src 'self' data: blob:; font-src 'self' data:; " +
+      "style-src 'self' 'unsafe-inline'",
+  },
   content_scripts: [
     {
       matches: ["<all_urls>"],

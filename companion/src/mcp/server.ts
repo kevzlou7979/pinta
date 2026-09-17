@@ -160,7 +160,7 @@ export function createMcpServer(backend: Backend): McpServer {
     {
       description:
         "Fetch the full-page composited screenshot for a session as base64 " +
-        "PNG. Annotations are baked into the image. The session payload " +
+        "PNG or JPEG. Annotations are baked into the image. The session payload " +
         "also contains a path on disk (`fullPageScreenshotPath`) which is " +
         "preferable when the agent has filesystem access.",
       inputSchema: { id: z.string() },
