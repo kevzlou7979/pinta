@@ -13,8 +13,9 @@
 
   import { app } from "../lib/state.svelte.js";
   import { confirmDialog } from "../lib/confirm.svelte.js";
-  import { originOf } from "../lib/local-store.js";
-  import ChatSheet from "./ChatSheet.svelte";
+  import { urlOrigin } from "../lib/devices.js";
+  import { downscaleImage } from "../lib/downscale-image.js";
+  import { loadChatSheet } from "../lib/lazy-ui.js";
   import {
     buildSrcdoc,
     elementRenderWidth,
@@ -46,8 +47,11 @@
 
   // Origin for the Pages gallery frames — the app the user is annotating.
   // Derived from the run's URL when present, else the panel's page URL.
+  // http(s) only — a chrome-extension:// (or other) origin would frame an
+  // extension page with allow-scripts + allow-same-origin. Anything else
+  // falls through to the "Open your app's tab" hint.
   const galleryOrigin = $derived(
-    originOf(run?.url || app.lastKnownUrl || "") ?? "",
+    urlOrigin(run?.url || app.lastKnownUrl || "") ?? "",
   );
 
   // Card layout: variant cards render the iframe at the device's real
@@ -287,30 +291,13 @@
         : null,
   );
 
-  /** Downscale a pasted image to ≤900px before it rides the wire — the
-   *  agent reads it from disk, but keep the payload lean. */
-  async function downscaleImage(file: Blob): Promise<string> {
-    const url = URL.createObjectURL(file);
-    try {
-      const img = new Image();
-      await new Promise<void>((res, rej) => {
-        img.onload = () => res();
-        img.onerror = () => rej(new Error("bad image"));
-        img.src = url;
-      });
-      const MAX = 900;
-      const scale = Math.min(1, MAX / Math.max(img.width, img.height));
-      const canvas = document.createElement("canvas");
-      canvas.width = Math.max(1, Math.round(img.width * scale));
-      canvas.height = Math.max(1, Math.round(img.height * scale));
-      canvas.getContext("2d")!.drawImage(img, 0, 0, canvas.width, canvas.height);
-      // PNG, not JPEG: the companion stores every session screenshot as
-      // `.pinta/sessions/{id}.png` — bytes must match the extension the
-      // agent Reads. (composite.ts is PNG for the same reason.)
-      return canvas.toDataURL("image/png");
-    } finally {
-      URL.revokeObjectURL(url);
-    }
+  /** Downscale a pasted reference image to a ≤900px long edge via the
+   *  shared helper (JPEG, kept only when smaller) so the payload stays
+   *  lean. The wire only carries PNG/JPEG data URLs, so a GIF/WebP is
+   *  re-encoded (the helper throws if it can't). */
+  async function downscaleRefImage(file: Blob): Promise<string> {
+    const { dataUrl } = await downscaleImage(file, { maxEdge: 900, pngOrJpeg: true });
+    return dataUrl;
   }
 
   function onDirectionPaste(e: ClipboardEvent): void {
@@ -321,7 +308,7 @@
     e.preventDefault();
     const file = item.getAsFile();
     if (!file) return;
-    void downscaleImage(file)
+    void downscaleRefImage(file)
       .then((dataUrl) => app.setVariantRefImage(dataUrl))
       .catch(() => {
         app.variants.error = "Couldn't read the pasted image.";
@@ -1070,7 +1057,8 @@
 {#if app.variants.discussVariantId}
   {@const dv = run?.variants.find((x) => x.id === app.variants.discussVariantId)}
   {#if dv}
-    <ChatSheet
+    {#await loadChatSheet() then ChatSheetMod}
+    <ChatSheetMod.default
       open={!!app.variants.discussVariantId}
       contextHeader="Refining variant"
       contextLabel={dv.label}
@@ -1088,5 +1076,11 @@
       onSend={(text) => void app.sendVariantDiscuss(dv.id, text)}
       onClose={() => app.openVariantDiscuss(null)}
     />
+    {:catch}
+      <div role="alert" class="absolute inset-x-3 bottom-3 z-30 flex items-start gap-2 text-xs text-red-600 border border-red-200 bg-red-50 dark:text-red-300 dark:border-red-900/40 dark:bg-red-950/90 rounded-md p-2">
+        <p class="flex-1">Couldn't load the chat. Try again.</p>
+        <button type="button" class="shrink-0 leading-none px-1" aria-label="Dismiss" title="Dismiss" onclick={() => app.openVariantDiscuss(null)}>✕</button>
+      </div>
+    {/await}
   {/if}
 {/if}

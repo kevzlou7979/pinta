@@ -29,13 +29,9 @@
   import { voice } from "../lib/voice/controller.js";
   import FloatingToolbar from "./FloatingToolbar.svelte";
   import { toolMode, toolForKey, type Tool } from "../lib/tools.js";
-  import {
-    buildShadowPreviewHost,
-    diffRenderedTrees,
-    locateAppliedElement,
-    makeDefaultStyleOf,
-    sanitizeVariantFragment,
-  } from "../lib/design-variants.js";
+  // Type-only: the Design Variants helpers are loaded on first use (see
+  // withVariantsLib) so they stay out of the content script every page gets.
+  import type * as VariantsLib from "./variants-lib.js";
 
   /** This page's URL with credential-like query values / fragments
    *  redacted — every URL the overlay stamps or announces goes through it,
@@ -162,29 +158,15 @@
     }
   });
 
-  /** Messages out of a device frame also go to the canvas, which forwards
-   *  them to the side panel. chrome.runtime messaging from a sandboxed
-   *  sub-frame of an extension-page tab is the one hop we can't verify, so
-   *  the canvas (plain window.postMessage, same hop activation uses) is the
-   *  belt to its braces. Duplicates are harmless: the panel keys on ids. */
+  /** Messages to the side panel. Inside a device frame too this is a direct
+   *  chrome.runtime send (it carries the real sender.frameId) — never a
+   *  window.postMessage via the canvas, which the framed page could read
+   *  and forge (see lib/devices-frame.ts). */
   function sendToPanel(msg: unknown): Promise<unknown> {
-    mirrorToCanvas(msg);
     try {
       return (chrome.runtime.sendMessage(msg) as Promise<unknown>) ?? Promise.resolve();
     } catch {
       return Promise.resolve();
-    }
-  }
-
-  function mirrorToCanvas(msg: unknown): void {
-    if (!content.inFrame) return;
-    try {
-      window.parent.postMessage(
-        { type: "pinta-frame-out", payload: msg },
-        new URL(chrome.runtime.getURL("")).origin,
-      );
-    } catch {
-      // parent gone — ignore
     }
   }
 
@@ -282,9 +264,6 @@
         // Side panel flipped Free Transform (its Done/Cancel or its tool
         // button). Mirror + echo the state so both surfaces stay in sync.
         content.freeTransform = !!m.on;
-        // Raw send + explicit mirror: inside a device frame the runtime
-        // hop alone may not reach the panel (see sendToPanel).
-        mirrorToCanvas({ type: "transform.state", on: content.freeTransform });
         chrome.runtime
           .sendMessage({ type: "transform.state", on: content.freeTransform })
           .catch(() => {});
@@ -390,13 +369,17 @@
         typeof m.previewHtml === "string"
       ) {
         // No target = page scope: the whole document is the subject.
-        previewVariant(
-          m as {
-            variantId: string;
-            label?: string;
-            target: AnnotationTarget | null;
-            previewHtml: string;
-          },
+        const pm = m as {
+          variantId: string;
+          label?: string;
+          target: AnnotationTarget | null;
+          previewHtml: string;
+        };
+        withVariantsLib(
+          (lib) => previewVariant(lib, pm),
+          () =>
+            sendToPanel({ type: "variants.preview-failed", variantId: pm.variantId })
+              .catch(() => {}),
         );
       } else if (
         m?.type === "variants.verify" &&
@@ -404,33 +387,33 @@
         typeof m.previewHtml === "string" &&
         typeof m.variantId === "string"
       ) {
-        verifyAppliedVariant(
-          m as {
-            variantId: string;
-            target: AnnotationTarget;
-            previewHtml: string;
-            allowGlobal?: boolean;
-          },
+        const vm = m as {
+          variantId: string;
+          target: AnnotationTarget;
+          previewHtml: string;
+          allowGlobal?: boolean;
+        };
+        withVariantsLib(
+          (lib) => verifyAppliedVariant(lib, vm),
+          () =>
+            sendToPanel({
+              type: "variants.verify-result",
+              variantId: vm.variantId,
+              found: true,
+              error: "Couldn't load the match check.",
+            }).catch(() => {}),
         );
       } else if (m?.type === "variants.restore") {
         // Panel-initiated restore — no echo back (the panel already
         // cleared its own previewing state; a late echo would clobber a
-        // NEWER preview selection it made since).
-        restoreVariantPreviewLocal(false);
+        // NEWER preview selection it made since). Queued behind any
+        // preview / verify still waiting for the helpers, so order holds.
+        variantsQueue = variantsQueue.then(() => restoreVariantPreviewLocal(false));
       }
     };
+    // In a device frame the side panel reaches this listener with a
+    // frame-targeted chrome.tabs.sendMessage — no window.postMessage relay.
     chrome.runtime.onMessage.addListener(handler);
-    // The canvas relays the panel's messages into this frame (see
-    // mirrorToCanvas for why). Same trust rule as activation: our
-    // extension's origin, from the parent window only.
-    const extOrigin = new URL(chrome.runtime.getURL("")).origin;
-    const onRelay = (e: MessageEvent): void => {
-      if (e.origin !== extOrigin || e.source !== window.parent) return;
-      const d = e.data as { type?: unknown; payload?: unknown } | null;
-      if (!d || d.type !== "pinta-relay" || !d.payload) return;
-      handler(d.payload, { id: chrome.runtime.id }, () => {});
-    };
-    if (content.inFrame) window.addEventListener("message", onRelay);
     // Tell the side panel we're alive so it can replay any annotations
     // from the current draft that were created on this URL — pins get
     // re-painted on reload / SPA nav. Best-effort: if no side panel is
@@ -500,7 +483,6 @@
     };
     return () => {
       chrome.runtime.onMessage.removeListener(handler);
-      window.removeEventListener("message", onRelay);
       removeEventListener("hashchange", onRouteChange);
       removeEventListener("popstate", onRouteChange);
       history.pushState = origPushState;
@@ -843,7 +825,29 @@
    * render the variant beside them. Every original node stays in the DOM
    * untouched, so restoring is just putting the display values back.
    */
-  function previewPageVariant(m: {
+  /** Design Variants helpers, imported on first use and cached. */
+  let variantsLibPromise: Promise<typeof VariantsLib> | null = null;
+  function loadVariantsLib(): Promise<typeof VariantsLib> {
+    variantsLibPromise ??= import("./variants-lib.js").catch((err: unknown) => {
+      variantsLibPromise = null; // let a later request retry
+      throw err;
+    });
+    return variantsLibPromise;
+  }
+  /** Variant ops run strictly in arrival order even though the first one
+   *  waits for the import (preview A, preview B, restore must not reorder). */
+  let variantsQueue: Promise<void> = Promise.resolve();
+  function withVariantsLib(run: (lib: typeof VariantsLib) => void, onLoadFailed: () => void): void {
+    variantsQueue = variantsQueue
+      .then(() => loadVariantsLib())
+      .then(run, (err: unknown) => {
+        console.error("[pinta] couldn't load Design Variants helpers", err);
+        onLoadFailed();
+      })
+      .catch((err: unknown) => console.error("[pinta] variant op failed", err));
+  }
+
+  function previewPageVariant(lib: typeof VariantsLib, m: {
     variantId: string;
     label?: string;
     previewHtml: string;
@@ -852,7 +856,7 @@
     if (!body) return;
     // Same closed-shadow context as the card and the element preview —
     // that sameness IS the fidelity guarantee.
-    const built = buildShadowPreviewHost(body, m.previewHtml, m.variantId);
+    const built = lib.buildShadowPreviewHost(body, m.previewHtml, m.variantId);
     if (!built) {
       sendToPanel({ type: "variants.preview-failed", variantId: m.variantId })
         .catch(() => {});
@@ -904,7 +908,7 @@
     tick += 1;
   }
 
-  function previewVariant(m: {
+  function previewVariant(lib: typeof VariantsLib, m: {
     variantId: string;
     label?: string;
     target: AnnotationTarget | null;
@@ -913,7 +917,7 @@
     // Switching between variants = replace the active preview.
     restoreVariantPreviewLocal(false);
     if (!m.target) {
-      previewPageVariant(m);
+      previewPageVariant(lib, m);
       return;
     }
     const el = content.findElementForEntry({
@@ -933,7 +937,7 @@
     // rendering context (page CSS can't reach in, variant <style> can't
     // leak out). The helper sanitizes AGAIN in this isolated world — the
     // message could come from anywhere and the page has no sandbox.
-    const built = buildShadowPreviewHost(el, m.previewHtml, m.variantId);
+    const built = lib.buildShadowPreviewHost(el, m.previewHtml, m.variantId);
     if (!built) {
       // Sanitizer stripped everything renderable — tell the panel so its
       // "previewing" toggle un-lights (mirrors the not-found path).
@@ -961,7 +965,7 @@
    *  element (its classes changed, so the old selector may not match),
    *  and diff computed styles. Read-only; the result goes back to the
    *  panel as `variants.verify-result`. */
-  function verifyAppliedVariant(m: {
+  function verifyAppliedVariant(lib: typeof VariantsLib, m: {
     variantId: string;
     target: AnnotationTarget;
     previewHtml: string;
@@ -973,8 +977,8 @@
     // A live preview would be measured instead of the real element.
     if (variantPreview) restoreVariantPreviewLocal(true);
     // Text only, but still through the sanitizer (inert document, no sink).
-    const expectedText = sanitizeVariantFragment(m.previewHtml).textContent ?? "";
-    const actual = locateAppliedElement(document, m.target.selector, expectedText, {
+    const expectedText = lib.sanitizeVariantFragment(m.previewHtml).textContent ?? "";
+    const actual = lib.locateAppliedElement(document, m.target.selector, expectedText, {
       allowGlobal: m.allowGlobal !== false,
       rect: m.target.boundingRect,
     });
@@ -982,7 +986,7 @@
       reply({ found: false });
       return;
     }
-    const built = buildShadowPreviewHost(actual, m.previewHtml, m.variantId);
+    const built = lib.buildShadowPreviewHost(actual, m.previewHtml, m.variantId);
     const expected = built
       ? Array.from(built.content.children).find(
           (c) => c.tagName.toUpperCase() !== "STYLE",
@@ -1012,11 +1016,11 @@
       done = true;
       clearTimeout(fallback);
       try {
-        const check = diffRenderedTrees(
+        const check = lib.diffRenderedTrees(
           expected,
           actual,
           (el) => getComputedStyle(el),
-          makeDefaultStyleOf(built.content),
+          lib.makeDefaultStyleOf(built.content),
         );
         reply({ found: true, check });
       } catch (err) {
@@ -3903,9 +3907,7 @@
         // Only restore the preview once the panel acknowledged; with the
         // side panel closed there is no listener, the promise rejects,
         // and we keep the preview + pill so nothing silently vanishes.
-        // The raw call is kept for exactly those reject semantics, so the
-        // device-frame mirror has to be spelled out alongside it.
-        mirrorToCanvas({ type: "variants.preview-apply", variantId: id });
+        // The raw call is kept for exactly those reject semantics.
         chrome.runtime
           .sendMessage({ type: "variants.preview-apply", variantId: id })
           .then(() => restoreVariantPreviewLocal(true))

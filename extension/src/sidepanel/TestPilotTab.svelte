@@ -15,9 +15,24 @@
   import { confirmDialog } from "../lib/confirm.svelte.js";
   import MicButton from "../lib/voice/MicButton.svelte";
   import { parseStep } from "../lib/step-md.js";
-  import { highlight } from "../lib/prism-setup.js";
+  import { escapeHtml, loadChatSheet, loadPrism } from "../lib/lazy-ui.js";
   import { safeExternalUrl } from "../content/capture.js";
-  import ChatSheet from "./ChatSheet.svelte";
+
+  // Prism (and ChatSheet, which bundles it) load on demand — code blocks
+  // render as escaped plain text until the highlighter arrives.
+  let highlighter = $state<((code: string, lang: string) => string) | null>(null);
+  let highlighterRequested = false;
+  function highlight(code: string, lang: string): string {
+    if (highlighter) return highlighter(code, lang);
+    if (!highlighterRequested) {
+      highlighterRequested = true;
+      loadPrism().then(
+        (m) => (highlighter = m.highlight),
+        () => {}, // keep plain text; a later render doesn't retry
+      );
+    }
+    return escapeHtml(code);
+  }
 
   let fileInput = $state<HTMLInputElement | null>(null);
   let viewing = $state<{ testId: string } | null>(null);
@@ -33,6 +48,9 @@
   // surfaced as a small menu off the Export button. Closes on outside
   // click via the existing onDocClick handler below.
   let exportMenuOpen = $state(false);
+  /** Anchor the Export popover's left edge to the button when a
+   *  right-anchored w-72 (288px) popover would spill off the panel's left. */
+  let exportMenuAlignLeft = $state(false);
   // The currently "selected" test row in the catalog. Set when the user
   // clicks a row body or opens its detail view; used to (a) tint the row
   // as a bookmark cursor and (b) scroll-restore back to it when the user
@@ -881,9 +899,14 @@
     exportMenuOpen = false;
   }
 
-  function downloadResultsDocx() {
+  async function downloadResultsDocx() {
     const ts = new Date().toISOString().slice(0, 10);
-    downloadDocx(app.exportResultsDocx(), `${exportStem()}-results-${ts}.docx`);
+    try {
+      downloadDocx(await app.exportResultsDocx(), `${exportStem()}-results-${ts}.docx`);
+    } catch (err) {
+      app.testPilot.error = `Word export failed: ${(err as Error).message}`;
+      exportMenuOpen = false;
+    }
   }
 
   function downloadTesterSheetMd() {
@@ -896,9 +919,14 @@
     exportMenuOpen = false;
   }
 
-  function downloadTesterSheetDocx() {
+  async function downloadTesterSheetDocx() {
     const ts = new Date().toISOString().slice(0, 10);
-    downloadDocx(app.exportTesterSheetDocx(), `${exportStem()}-tester-${ts}.docx`);
+    try {
+      downloadDocx(await app.exportTesterSheetDocx(), `${exportStem()}-tester-${ts}.docx`);
+    } catch (err) {
+      app.testPilot.error = `Word export failed: ${(err as Error).message}`;
+      exportMenuOpen = false;
+    }
   }
 
   function clearCatalog() {
@@ -1615,7 +1643,10 @@
           <button
             type="button"
             class="inline-flex items-center justify-center gap-0.5 w-9 h-8 rounded-r-md text-ink-700 dark:text-night-dim hover:text-brand-pink dark:hover:text-brand-pink-light hover:bg-ink-50 dark:hover:bg-night-alt"
-            onclick={() => (exportMenuOpen = !exportMenuOpen)}
+            onclick={(e) => {
+              exportMenuAlignLeft = e.currentTarget.getBoundingClientRect().right < 288 + 8;
+              exportMenuOpen = !exportMenuOpen;
+            }}
             title="Export this catalog — Results or Tester sheet, as Markdown or Word (.docx)"
             aria-haspopup="menu"
             aria-expanded={exportMenuOpen}
@@ -1642,7 +1673,7 @@
               </button>
             {/snippet}
             <div
-              class="absolute right-0 top-full mt-1 z-40 w-72 rounded-md border border-ink-200 dark:border-night-line bg-white dark:bg-night-card shadow-lg overflow-hidden"
+              class="absolute {exportMenuAlignLeft ? 'left-0' : 'right-0'} top-full mt-1 z-40 w-72 max-w-[calc(100vw-1rem)] rounded-md border border-ink-200 dark:border-night-line bg-white dark:bg-night-card shadow-lg overflow-hidden"
               role="menu"
             >
               <div class="px-3 pt-2 pb-1 text-[10px] font-bold uppercase tracking-wider text-ink-400 dark:text-night-mute">Export</div>
@@ -2559,7 +2590,8 @@
   {@const chatSection = findChatSectionTitle()}
   {@const author = app.testPilot.catalog?.author?.trim()}
   {@const firstName = author ? author.split(/\s+/)[0] : ""}
-  <ChatSheet
+  {#await loadChatSheet() then ChatSheetMod}
+  <ChatSheetMod.default
     open={chatOpen && !!chatTest}
     contextHeader="Talking about"
     contextLabel={chatTest?.id ?? ""}
@@ -2617,6 +2649,12 @@
       if (chatTestId) void app.sendChatMessage(chatTestId, prompt, images);
     }}
   />
+  {:catch}
+    <div role="alert" class="absolute inset-x-3 bottom-3 z-30 flex items-start gap-2 text-xs text-red-600 border border-red-200 bg-red-50 dark:text-red-300 dark:border-red-900/40 dark:bg-red-950/90 rounded-md p-2">
+      <p class="flex-1">Couldn't load the chat. Try again.</p>
+      <button type="button" class="shrink-0 leading-none px-1" aria-label="Dismiss" title="Dismiss" onclick={() => { chatOpen = false; chatTestId = null; }}>✕</button>
+    </div>
+  {/await}
 {/if}
 
 <!-- Section-scoped chat removed — section help is now the icon-only

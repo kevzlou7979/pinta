@@ -12,6 +12,8 @@
 // Everything chrome.* lives inside functions — the pure helpers at the top
 // are unit-tested in a plain node environment.
 
+import { companionFetch } from "./companion-http.js";
+
 export interface WatchNudgeItem {
   id: string;
   title: string;
@@ -181,7 +183,7 @@ export async function fetchWatchEvents(
   const ctrl = new AbortController();
   const timer = setTimeout(() => ctrl.abort(), timeoutMs);
   try {
-    const res = await fetch(`http://127.0.0.1:${port}/v1/watch/events`, {
+    const res = await companionFetch(`http://127.0.0.1:${port}/v1/watch/events`, {
       signal: ctrl.signal,
     });
     if (!res.ok) return [];

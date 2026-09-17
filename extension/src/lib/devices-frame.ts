@@ -5,43 +5,80 @@
 // device catalog and layout code. NO imports — keep this file tiny.
 
 // ---------------------------------------------------------------------------
-// Canvas relay allowlist
+// Device-frame messaging gates
 
 /**
- * What a device frame is allowed to say to the side panel through the
- * Devices canvas relay: panel UI state, nothing more.
- *
- * The relay is a page -> extension privilege boundary. A framed page can't
- * reach `chrome.runtime`, but its MAIN world shares both the
- * `contentWindow` identity and the origin of the overlay's isolated world,
- * so neither an `event.source` match nor an `event.origin` check can tell
- * the two apart. Keeping the relay away from side effects is the actual
- * defence — everything that reaches the agent or spends the user's tokens
- * must arrive over the direct `chrome.runtime.sendMessage` the overlay
- * also makes, which carries a real `sender.frameId` no page can forge.
+ * There is NO window.postMessage relay between the side panel and a device
+ * frame. A framed page's MAIN world receives every message posted to its
+ * window and can post to its parent as that same window, so anything carried
+ * that way (annotation outerHTML / comments, variant markup) leaks to the
+ * page, and anything read back can be forged. Instead:
+ *   panel -> frame:           chrome.tabs.sendMessage(tabId, msg, { frameId })
+ *   frame -> panel / canvas:  chrome.runtime.sendMessage from the overlay
+ * Both reach a sandboxed http(s) iframe inside the extension canvas tab
+ * (verified in Chromium: the frame's runtime messages arrive with its real
+ * sender.frameId, and a frame-targeted tabs.sendMessage is delivered).
+ * The only window messages left are control pings with no page data:
+ * pinta-annotate {on, token}, pinta-nav-start / pinta-nav-stop, pinta-nav.
  */
-export const RELAYABLE_FRAME_MESSAGES: ReadonlySet<string> = new Set([
-  "overlay.ready",
-  "mode.changed",
-  "frame.inactive",
-  "transform.state",
-  "imported.located",
-  "variants.pick-cancelled",
-  "variants.preview-failed",
-  "variants.preview-restored",
-]);
 
-/** Messages that must NEVER be accepted from the relay — each one either
- *  reaches the agent or spends the user's tokens. Kept explicit so the
- *  rule is testable rather than implied by an absence. */
-export const NEVER_RELAYABLE_FRAME_MESSAGES: readonly string[] = [
-  "annotation.target-selected",
-  "annotation.draw-committed",
-  "variants.picked",
-  "variants.verify-result",
-  "variants.preview-apply",
-  "toolbar.pick-image",
-];
+/** Overlay -> canvas: "annotation is live (or not) in this frame". Sent
+ *  over chrome.runtime so a page can't forge it; `token` echoes the canvas
+ *  frame id from the activation ping so the canvas knows which frame. */
+export const ANNOTATE_ACK_MESSAGE = "devices.annotate-ack";
+
+/** Minimal shape of chrome.runtime.MessageSender the gates need. */
+export type FrameSenderLike =
+  | { id?: string; frameId?: number; url?: string; tab?: { id?: number } | null }
+  | null
+  | undefined;
+
+/**
+ * True only for a runtime message sent DIRECTLY by this extension's content
+ * script in a sub-frame (frameId > 0) of tab `tabId`. A copy forwarded by an
+ * extension page has no frameId; a page script can't send one at all.
+ */
+export function isDirectSubframeSender(
+  sender: FrameSenderLike,
+  extId: string,
+  tabId: number | null | undefined,
+): boolean {
+  return (
+    !!sender &&
+    !!extId &&
+    sender.id === extId &&
+    typeof tabId === "number" &&
+    sender.tab?.id === tabId &&
+    typeof sender.frameId === "number" &&
+    Number.isInteger(sender.frameId) &&
+    sender.frameId > 0
+  );
+}
+
+/**
+ * The page URL a device frame's `overlay.ready` may adopt: http(s) only, on
+ * the same origin as the browser-reported `sender.url` of that frame.
+ * Returns "" when the claim is unusable.
+ */
+export function deviceFrameReadyUrl(url: unknown, senderUrl: string | undefined): string {
+  if (typeof url !== "string" || !/^https?:\/\//i.test(url) || !senderUrl) return "";
+  try {
+    const claimed = new URL(url);
+    const actual = new URL(senderUrl);
+    if (!/^https?:$/.test(actual.protocol)) return "";
+    return claimed.origin === actual.origin ? url : "";
+  } catch {
+    return "";
+  }
+}
+
+/** Parse an annotate ack; null when `msg` isn't a well-formed one. */
+export function parseAnnotateAck(msg: unknown): { token: string; on: boolean } | null {
+  const m = msg as { type?: unknown; token?: unknown; on?: unknown } | null;
+  if (!m || m.type !== ANNOTATE_ACK_MESSAGE) return null;
+  if (typeof m.token !== "string" || m.token === "" || typeof m.on !== "boolean") return null;
+  return { token: m.token, on: m.on };
+}
 
 // ---------------------------------------------------------------------------
 // Target URL

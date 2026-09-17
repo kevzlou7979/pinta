@@ -210,7 +210,7 @@ type Session = {
   annotations: Annotation[];
 
   // Set transiently when the extension submits with a screenshot; the
-  // companion strips it after persisting the PNG to disk and exposes
+  // companion strips it after persisting the PNG/JPEG to disk and exposes
   // `fullPageScreenshotPath` (path relative to projectRoot) instead.
   fullPageScreenshot?: string;
   fullPageScreenshotPath?: string;
@@ -233,6 +233,12 @@ type Session = {
   // (>5 min without a status-update heartbeat) auto-release.
   claimedBy?: string;
   claimedAt?: number;
+
+  // Server-only provenance marker. Stamped "ws-query" on sessions the
+  // companion mints for `module.query.submit` from a trusted extension
+  // socket; clients can never set it (POST /v1/sessions deletes it). The
+  // skill runs a writing op only when it is present.
+  origin?: 'ws-query';
 
   // Phase 12 — built-in modules the user opted into for this submit.
   // Each entry pairs a stable module id with user-supplied settings the
@@ -291,9 +297,12 @@ The intended user experience, narrated:
 - **Background service worker**: handles `chrome.tabs.captureVisibleTab` (full-page stitch, Devices frame crop), brokers messages between content script and side panel, relays Voice Command, polls `/v1/watch/events` for notifications.
 - **Offscreen document** (`src/offscreen/`): the one mic + Web Speech host for Voice Command (Phase 21), spawned on demand by the service worker.
 - **Devices page** (`src/devices/`): full-tab multi-device canvas (Phase 24), launched from the side panel's Devices tab.
+- **Variant preview page** (`src/variant-preview/`): full-screen Design Variants preview (Phase 22), opened from the side panel with a one-time storage key; the variant renders in an empty-sandbox `srcdoc` iframe.
 - **Nav reporter** (`src/content/nav-reporter.ts`): all-frames content script, inert until the Devices canvas activates it (nav sync, annotate in a device).
 - **Reload guard** (`src/content/reload-guard.ts`): MAIN-world, top-frame-only `document_start` script that holds Vite `full-reload` frames while Pinta holds reloads.
 - **Popup** (minimal): theme toggle and "open side panel" button.
+
+**Extension-page CSP** (`manifest.config.ts` `content_security_policy.extension_pages`) tightens the MV3 default so agent-generated variant markup can't load remote resources: `script-src 'self'; object-src 'self'; img-src 'self' data: blob: http://127.0.0.1:* http://localhost:*; media-src 'self' data: blob:; font-src 'self' data:; style-src 'self' 'unsafe-inline'`. `connect-src` / `frame-src` are deliberately unset (companion WS/HTTP, Devices and gallery iframes of arbitrary http(s) dev servers).
 
 **Modes.** The overlay's `Mode` is `idle`, `select`, `draw` (carrying the pen tool), one mode per tool (`image` / `move` / `text` / `delete` / `resize` / `paint` / `scale` / `transform`), plus the one-shot `variant-pick` (Phase 22). Picked from the side-panel tool grid, the floating toolbar, or hotkeys.
 
@@ -343,15 +352,81 @@ type ExtensionState = {
 
 **HTTP API (versioned)**
 
-Reads (GET) are open. Writes (POST / PUT / DELETE) reject requests carrying
-a browser `Origin` other than `chrome-extension://*` so a tab in the
-user's own browser can't CSRF the companion — see `companion/src/server.ts`.
-`/v1/modules` writes are stricter: they require the `chrome-extension://`
-origin (no-Origin local callers get 403 too), so only the extension's
-consent dialog can install a capability-bearing module.
+**Trust model** (`companion/src/server.ts`, `ws.ts`, `security.ts`). The
+companion binds `127.0.0.1`; the gates below separate *browser contexts*
+(web pages, other extensions) from Pinta. A local process can spoof any
+`Origin`/`Host`/`Sec-Fetch-*` header and can already touch the project, so
+it is not a boundary against local code.
+
+- **Host.** A non-loopback `Host` header (anything but `127.0.0.1`,
+  `localhost`, `[::1]`, any port; a missing Host is allowed) gets
+  `403 { error: "forbidden host" }` on every route — blocks DNS rebinding.
+- **No `Origin`, no `Sec-Fetch-Site`** (the agent's curl, the CLI, the MCP
+  backend — Node's fetch sends only `sec-fetch-mode`): full HTTP access
+  except `/v1/modules` writes and `POST /v1/auth/token` (403). No token needed.
+- **No `Origin` but `Sec-Fetch-Site` present** — a browser context of
+  unknown identity. Chromium omits `Origin` on `GET`/`HEAD` from extension
+  pages (it sends only `Sec-Fetch-Site: none`), and a web page's `<img>` /
+  no-cors request looks the same, so these must present the bearer token as
+  `Authorization: Bearer <token>` or `?token=<token>` (for `<img src>` /
+  `EventSource` URLs). Missing or unknown token → `401 { error:
+  "auth-required" }`; a token whose extension is no longer trusted → the
+  `untrusted-extension` 403 below. Exempt: `GET /v1/health` (full body, for
+  discovery) and `OPTIONS`.
+- **Bearer token.** `POST /v1/auth/token` (POSTs carry `Origin`) returns
+  `{ token }` only to a trusted extension `Origin`: one random 256-bit
+  base64url token per extension id, minted in memory per companion process
+  (never logged or persisted; a restart invalidates it) and compared in
+  constant time. An untrusted extension gets the `untrusted-extension` 403;
+  no/foreign `Origin` gets `403`. The extension caches the token per base
+  URL (memory + `chrome.storage.session`), refreshes it once on `401`, and
+  treats the token endpoint's `untrusted-extension` 403 as its "run
+  `pinta-companion trust`" signal (`extension/src/lib/companion-http.ts`).
+- **Foreign `Origin`** (web pages, `file://`, `null` — anything not
+  `chrome-extension://<id>`): `403 { error: "forbidden origin" }` on every
+  route and method (incl. `OPTIONS`), except `GET /v1/health`, which
+  returns only `{ ok: true }`. No `Access-Control-Allow-Origin` is ever sent.
+- **Trusted extension ids** = the Chrome Web Store id ∪
+  `$PINTA_EXTENSION_IDS` (comma-separated) ∪ the per-user store
+  `~/.pinta/trusted-extensions.json` (`{ ids: [{ id, addedAt }] }`, global
+  across projects). The store is edited only out of band:
+  `npx pinta-companion trust <id>`, `untrust <id>`, `trust --list` (id
+  must match `^[a-p]{32}$`); the companion re-reads it when it changes.
+  Nothing is pinned automatically — a side-panel confirm would not be
+  enough, since a rogue extension can send any message itself.
+- **Trusted extension** `Origin`: full access with no token, ACAO echoed,
+  `Access-Control-Allow-Headers: Content-Type, Authorization` (incl.
+  `/v1/modules` install/uninstall, which requires a trusted id).
+- **Untrusted extension** `Origin`: every non-`OPTIONS` request that carries
+  it (all POST/PUT/DELETE, `POST /v1/auth/token`, the WS upgrade) gets
+  `403 { error: "untrusted-extension", extensionId, fix: "npx pinta-companion
+  trust <id>" }` (ACAO echoed so the side panel can read it). Its
+  Origin-less GETs fall under the browser-context token gate instead, and it
+  can never obtain a token.
+- **Trust store writes** (`trust` / `untrust`) are atomic (temp file +
+  rename) and refuse — exit code 1, store untouched — when the existing
+  store doesn't parse; readers treat a corrupt store as trusting nothing.
+- **Migration.** On startup, an old per-project pin
+  `<project>/.pinta/trusted-extension.json` is migrated only when git runs,
+  the project is inside a work tree, and git reports the file untracked: it
+  is renamed `*.migrated` first and only then merged into the per-user store
+  (a failed rename adds nothing). A git-tracked pin, or one git can't vouch
+  for (no git, not a work tree — e.g. a zip download), is ignored and the
+  trust command is logged.
+- **`POST /v1/sessions`** (ingest) is untrusted input: `400` on an unsafe
+  id (`^[A-Za-z0-9_-]{1,64}$`), non-array `annotations`, a non-PNG/JPEG
+  screenshot, or any `kind: "query"` annotation (module queries only
+  arrive via `module.query.submit`). It forces `projectRoot` to the
+  companion's and `autoApply: false`, and strips `modules`, `origin`,
+  `ephemeral`, `claimedBy` / `claimedAt` and `fullPageScreenshotPath`.
+
+`GET /v1/health` has two shapes: the full object below for no-Origin callers
+(browser contexts included) and trusted-extension callers, and `{ ok: true }`
+for foreign origins.
 
 ```
 GET    /v1/health                                          → { ok, projectRoot, port, urlPatterns, registryId, version, pid }
+POST   /v1/auth/token                                      → { token } (trusted extension Origin only; see Trust model)
 GET    /v1/registry                                        → snapshot of every running companion
 GET    /v1/url-patterns                                    → on-disk patterns from .pinta.json
 POST   /v1/url-patterns                                    → { pattern } → updated patterns[]
@@ -384,6 +459,18 @@ Claim `role` (Phase 18b) is one of `annotate` / `test-pilot` / `audit` /
 `chat` / `variants` / `review`; omitted = generalist, first claim wins.
 
 **WebSocket protocol** (extension ↔ companion)
+
+Upgrade gate (`verifyWsOrigin`): loopback `Host` required, and the
+`Origin` must be a trusted extension id (see Trust model) — web pages,
+other extensions and no-`Origin` clients get `403`. No-`Origin` upgrades
+are accepted only with `PINTA_ALLOW_NO_ORIGIN_WS=1`, and such sockets are
+**untrusted**: `session.submit` / `module.query.submit` carrying a writing
+op (`WRITING_QUERY_OPS`: `audit-fix`, `audit-file-issue`, `variants-apply`,
+`review-fix`, `git-commit`, `test-file-issues`, `generate-doc`,
+`report-screenshot`) is refused with an `error` message, and their
+`session.submit` never auto-applies. Only a trusted socket's
+`module.query.submit` session gets the server-only `origin: "ws-query"`
+marker.
 
 ```ts
 type ClientMessage =
@@ -474,7 +561,7 @@ mark_session_error(id, error)                  → void
 mark_annotation_applying(sessionId, annId)     → void   // Phase 9
 mark_annotation_done(sessionId, annId)         → void   // Phase 9
 mark_annotation_error(sessionId, annId, error) → void   // Phase 9
-get_screenshot(id)                             → full-page composited PNG for the session (image content);
+get_screenshot(id)                             → full-page composited PNG or JPEG for the session (image content);
                                                  prefer `fullPageScreenshotPath` with filesystem access
 ```
 
@@ -972,8 +1059,8 @@ contract.
   streaming.
 
 - **Screenshot extraction to disk.** When a session is submitted with
-  an inline base64 PNG, the companion writes it to
-  `.pinta/sessions/{id}.png` and replaces the field with
+  an inline base64 PNG or JPEG, the companion writes it to
+  `.pinta/sessions/{id}.png` (or `.jpg`) and replaces the field with
   `fullPageScreenshotPath`. Keeps API responses + persisted JSON slim
   and lets the agent `Read` the image directly. Skill notes the same
   pattern will apply to `AnnotationImage` payloads in a future
@@ -2016,8 +2103,9 @@ skimmed, `source:"topic"`, excerpts rendered as context lines).
 
 The Multi-Device Canvas idea from Phase 20, shipped as a module: a
 Mobile-View-style simulator that renders the user's running app in many
-live, interactive device frames at once. **Purely client-side — no
-companion op, no agent, nothing on the wire, no SKILL.md changes.**
+live, interactive device frames at once. **The canvas and nav sync are
+purely client-side** (no companion op, no agent); annotating inside a
+device frame joins the normal annotation batch sent to the agent.
 
 - **Surface**: a full-tab extension page (`extension/src/devices/`,
   Vite entry `src/devices/index.html`). The side-panel **Devices tab**

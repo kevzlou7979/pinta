@@ -28,7 +28,12 @@
   // floating toolbar via lib/tools.ts so the two never drift.
   import { TOOLS, startsNewGroup, type Tool } from "../lib/tools.js";
   import { matchAny, suggestPattern } from "../lib/url-patterns.js";
-  import { devicesCanvasTargetUrl, isDevicesCanvasUrl } from "../lib/devices-frame.js";
+  import {
+    devicesCanvasTargetUrl,
+    deviceFrameReadyUrl,
+    isDevicesCanvasUrl,
+    isDirectSubframeSender,
+  } from "../lib/devices-frame.js";
   import { scrubUrl } from "../content/capture.js";
   import type { Companion } from "../lib/companions.js";
   import AnnotationCard from "./AnnotationCard.svelte";
@@ -40,7 +45,8 @@
   // Module tabs (TestPilot / AuditFlow / Report / Variants / CodeReview /
   // Devices / ModuleBoard) are lazy-loaded via lazyTab() below — each is its
   // own chunk fetched on first open, not parsed with every panel start.
-  import ChatSheet from "./ChatSheet.svelte";
+  // ChatSheet (and the Prism highlighter it pulls in) is lazy too — see
+  // `chatSheetWanted` below.
   import MicButton from "../lib/voice/MicButton.svelte";
   import { voice } from "../lib/voice/controller.js";
   import type { RenderCheck } from "../lib/design-variants.js";
@@ -70,6 +76,29 @@
   let globalChatOpen = $state(false);
 
   let annotateChatOpen = $state(false);
+  // ChatSheet is only fetched once a chat sheet is first opened, then kept
+  // mounted (sticky) so its open/close transitions keep working.
+  let chatSheetWanted = $state(false);
+  $effect(() => {
+    if (globalChatOpen || annotateChatOpen) chatSheetWanted = true;
+  });
+
+  // "Companion doesn't trust this extension" notice — copy-command state.
+  let untrustedCopied = $state(false);
+  const untrustedTrustCommand = $derived(
+    app.untrustedCompanion
+      ? `npx pinta-companion trust ${chrome.runtime?.id || app.untrustedCompanion.extensionId || "<extension-id>"}`
+      : "",
+  );
+  async function copyUntrustedCommand() {
+    try {
+      await navigator.clipboard.writeText(untrustedTrustCommand);
+      untrustedCopied = true;
+      setTimeout(() => (untrustedCopied = false), 1500);
+    } catch (err) {
+      app.lastError = `clipboard write failed: ${(err as Error).message}`;
+    }
+  }
 
   /**
    * "Just Ask" click handler. Auto-composes a prompt from the
@@ -273,17 +302,13 @@
    *  else this is the normal tab-wide send. */
   async function sendToPage(msg: unknown): Promise<unknown> {
     if (activeTabId == null) throw new Error("no active tab");
-    if (onDevicesCanvas) {
-      // Ask the canvas to hand it to the annotating frame. That hop is
-      // plain window.postMessage — the same one activation uses — so it
-      // doesn't depend on tab messaging reaching a sandboxed sub-frame.
-      const relayed = (await chrome.runtime
-        .sendMessage({ type: "devices.relay", tabId: activeTabId, payload: msg })
-        .catch(() => null)) as { delivered?: boolean } | null;
-      if (relayed?.delivered) return undefined;
-      if (devicesFrameId != null) {
-        return chrome.tabs.sendMessage(activeTabId, msg, { frameId: devicesFrameId });
-      }
+    // Never relayed through the canvas page with window.postMessage: the
+    // framed page's own scripts would read every payload (outerHTML,
+    // comments, variant markup). A frame-targeted tabs.sendMessage does
+    // reach a sandboxed device frame; devicesFrameId is learned only from
+    // a direct runtime overlay.ready (see lib/devices-frame.ts).
+    if (onDevicesCanvas && devicesFrameId != null) {
+      return chrome.tabs.sendMessage(activeTabId, msg, { frameId: devicesFrameId });
     }
     return chrome.tabs.sendMessage(activeTabId, msg);
   }
@@ -668,23 +693,6 @@
     sender: chrome.runtime.MessageSender,
   ) => {
     if (sender?.id !== chrome.runtime.id) return;
-    // A device frame's message, forwarded by the Devices canvas page.
-    // Re-enter with a sender that looks like the frame itself so every
-    // handler below (which keys on sender.tab.id) works unchanged.
-    const relay = msg as { type?: string; tabId?: number; payload?: unknown };
-    if (relay?.type === "devices.frame-out" && relay.payload) {
-      runtimeMessageHandler(relay.payload, {
-        id: chrome.runtime.id,
-        tab: { id: relay.tabId } as chrome.tabs.Tab,
-        // No frameId: the canvas relayed this, so we don't know which
-        // Chrome frame it came from. Synthesizing one (-1, or a stale id)
-        // would poison devicesFrameId and leave frame.inactive unable to
-        // match — the panel would then claim a device is still annotating
-        // after the user turned it off. The direct chrome.runtime copy of
-        // the same message carries the real id.
-      });
-      return;
-    }
     const m = msg as IncomingMsg;
     if (m?.type === "frame.inactive" && sender.tab?.id === activeTabId) {
       // Only the frame we adopted going inert matters — a late message from
@@ -706,14 +714,20 @@
       // doesn't fire info.url for hash-only changes, so without this
       // the filter mis-classifies annotations as "on another page".
       if (url && sender.tab.id === activeTabId) {
-        pageUrl = url;
         if (onDevicesCanvas) {
+          // Only a direct runtime send from a device sub-frame counts (a
+          // relayed copy has no frameId), and only an http(s) URL on that
+          // frame's browser-reported origin — otherwise ignore it entirely
+          // (no pageUrl, no frame adoption, no pin replay).
+          const frameUrl = isDirectSubframeSender(sender, chrome.runtime.id, activeTabId)
+            ? deviceFrameReadyUrl(url, sender.url)
+            : "";
+          if (!frameUrl || sender.frameId == null) return;
+          pageUrl = frameUrl;
           devicesFrameLive = true;
-          // Only a real frame id — a relayed copy has none (see above),
-          // and must not overwrite the id the direct copy gave us.
-          if (typeof sender.frameId === "number" && sender.frameId >= 0) {
-            devicesFrameId = sender.frameId;
-          }
+          devicesFrameId = sender.frameId;
+        } else {
+          pageUrl = url;
         }
       }
       // A fresh document took any live variant preview with it, so the
@@ -2122,6 +2136,7 @@
         const composited = await compositeAnnotations(
           resp.capture.dataUrl,
           annotations,
+          { maxLongEdge: Infinity },
         );
         const name = `${base}.jpg`;
         screenshotEntries[name] = dataUrlToBytes(composited);
@@ -2195,15 +2210,21 @@
           type: "capture.full-page",
           tabId: activeTabId,
           mode: "stitched",
-        })) as { ok: boolean; capture?: { dataUrl?: string }; error?: string };
+        })) as {
+          ok: boolean;
+          capture?: { dataUrl?: string; viewportHeight?: number };
+          error?: string;
+        };
 
         if (!resp?.ok || !resp.capture?.dataUrl) {
           throw new Error(resp?.error ?? "capture failed");
         }
 
+        // Agent-bound: crop to the annotated band, then cap the size.
         composited = await compositeAnnotations(
           resp.capture.dataUrl,
           annotations,
+          { cropToAnnotations: { viewportHeight: resp.capture.viewportHeight ?? 0 } },
         );
       }
       app.submit(composited, submitOptions.autoApply);
@@ -2333,6 +2354,19 @@
               >
                 or pick project ({app.companions.length})
                 <svg width="9" height="9" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="6 9 12 15 18 9"/></svg>
+              </button>
+            {:else}
+              <!-- No usable companion: a way back after the untrusted notice
+                   was dismissed (or a companion was started later). A forced
+                   rescan re-shows the notice if it still applies. -->
+              <button
+                type="button"
+                class="text-[11px] text-ink-500 dark:text-night-mute hover:text-brand-pink dark:hover:text-brand-pink-light disabled:opacity-50"
+                onclick={() => app.rescan(pageUrl || null, true)}
+                disabled={app.scanning}
+                title="Look for a running companion again"
+              >
+                Rescan
               </button>
             {/if}
           </div>
@@ -2524,6 +2558,49 @@
          isn't a failure, so it's an amber warning, not a red error —
          dismissible like every banner. Shown across tabs since the waiting
          session belongs to whichever surface the user just submitted. -->
+    {#if app.untrustedCompanion}
+      <!-- A companion answered the scan but refused this extension id
+           (HTTP 403 untrusted-extension). Amber = needs user action. -->
+      <div
+        class="flex items-start gap-2 text-xs text-amber-800 border border-amber-300 bg-amber-50 dark:text-amber-200 dark:border-amber-700/40 dark:bg-amber-950/40 rounded-md p-2"
+        role="status"
+      >
+        <svg class="shrink-0 mt-0.5" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 9v4"/><path d="M12 17h.01"/><path d="M10.29 3.86 1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"/></svg>
+        <div class="flex-1 min-w-0 space-y-1.5">
+          <p class="break-words">
+            This companion (port {app.untrustedCompanion.port}) doesn't trust this browser extension yet, so Pinta can't connect. In a terminal run the command below — then click Retry.
+          </p>
+          <div class="flex items-center gap-1.5">
+            <code class="flex-1 min-w-0 block bg-white/70 dark:bg-black/30 border border-amber-200 dark:border-amber-800/50 px-2 py-1 rounded font-mono text-[11px] text-amber-900 dark:text-amber-100 break-all">{untrustedTrustCommand}</code>
+            <button
+              type="button"
+              class="shrink-0 rounded border border-amber-300 dark:border-amber-700/60 px-2 py-1 text-[11px] font-medium hover:bg-amber-100 dark:hover:bg-amber-900/40"
+              onclick={copyUntrustedCommand}
+              title="Copy command"
+            >
+              {untrustedCopied ? "Copied" : "Copy"}
+            </button>
+          </div>
+          <button
+            type="button"
+            class="rounded-md bg-brand-pink text-white px-2.5 py-1 text-[11px] font-medium hover:bg-brand-magenta dark:hover:bg-brand-pink-light disabled:opacity-50"
+            onclick={() => app.rescan(pageUrl || null, true)}
+            disabled={app.scanning}
+          >
+            {app.scanning ? "Retrying…" : "Retry"}
+          </button>
+        </div>
+        <button
+          type="button"
+          class="shrink-0 text-amber-600 hover:text-amber-800 dark:text-amber-400 dark:hover:text-amber-200 leading-none px-1"
+          onclick={() => app.dismissUntrustedCompanion()}
+          aria-label="Dismiss"
+          title="Dismiss"
+        >
+          ✕
+        </button>
+      </div>
+    {/if}
     {#if app.claimNotice}
       <div
         class="flex items-start gap-2 text-xs text-amber-800 border border-amber-300 bg-amber-50 dark:text-amber-200 dark:border-amber-700/40 dark:bg-amber-950/40 rounded-md p-2"
@@ -3642,6 +3719,24 @@
       </div>
     {/if}
 
+    {#if app.importNotice}
+      <div
+        class="flex items-start gap-2 text-xs text-amber-800 border border-amber-200 bg-amber-50 dark:text-amber-200 dark:border-amber-900/40 dark:bg-amber-950/40 rounded-md p-2"
+        role="status"
+      >
+        <p class="flex-1 min-w-0 break-words">{app.importNotice}</p>
+        <button
+          type="button"
+          class="shrink-0 text-amber-600 hover:text-amber-800 dark:text-amber-300 dark:hover:text-amber-100 leading-none px-1"
+          onclick={() => (app.importNotice = null)}
+          aria-label="Dismiss notice"
+          title="Dismiss"
+        >
+          ✕
+        </button>
+      </div>
+    {/if}
+
   </main>
 
   <footer
@@ -4130,13 +4225,21 @@
     {/if}
   </footer>
 
+    {#snippet chatLoadError(close: () => void)}
+      <div role="alert" class="absolute inset-x-3 bottom-3 z-30 flex items-start gap-2 text-xs text-red-600 border border-red-200 bg-red-50 dark:text-red-300 dark:border-red-900/40 dark:bg-red-950/90 rounded-md p-2">
+        <p class="flex-1">Couldn't load the chat. Reopen the side panel to retry.</p>
+        <button type="button" class="shrink-0 leading-none px-1" aria-label="Dismiss" title="Dismiss" onclick={close}>✕</button>
+      </div>
+    {/snippet}
+
     <!-- Phase 14 — Global chat sheet. Single thread, no surface
          context; agent answers FAQ-style asks about Pinta itself.
          Mounted inside the panel-body wrapper (not <main>) so the
          absolute-positioned overlay clips to body bounds and leaves
          the App header visible above. -->
-    {#if app.moduleReady("chat")}
-      <ChatSheet
+    {#if app.moduleReady("chat") && chatSheetWanted}
+      {#await lazyTab("chat-sheet", () => import("./ChatSheet.svelte")) then ChatSheetMod}
+      <ChatSheetMod.default
         open={globalChatOpen}
         contextHeader="Quick ask"
         contextLabel="Pinta"
@@ -4160,16 +4263,20 @@
         onClose={() => (globalChatOpen = false)}
         onSend={(prompt, images) => void app.sendGlobalChatMessage(prompt, images)}
       />
+      {:catch}
+        {#if globalChatOpen}{@render chatLoadError(() => (globalChatOpen = false))}{/if}
+      {/await}
     {/if}
 
     <!-- Phase 14 — Annotate "Just Ask" chat sheet. Per-draft-session
          thread keyed by the current session id. Surface context
          carries the annotation list + screenshot path so the agent
          can reason about the batch without editing source files. -->
-    {#if app.moduleReady("chat") && app.session?.id}
+    {#if app.moduleReady("chat") && app.session?.id && chatSheetWanted}
       {@const batchId = app.session.id}
       {@const annCount = app.session.annotations.length}
-      <ChatSheet
+      {#await lazyTab("chat-sheet", () => import("./ChatSheet.svelte")) then ChatSheetMod}
+      <ChatSheetMod.default
         open={annotateChatOpen}
         contextHeader="Talking about"
         contextLabel="{annCount} annotation{annCount === 1 ? '' : 's'}"
@@ -4194,6 +4301,9 @@
         onClose={() => (annotateChatOpen = false)}
         onSend={(prompt, images) => void app.sendAnnotateChatMessage(batchId, prompt, images)}
       />
+      {:catch}
+        {#if annotateChatOpen}{@render chatLoadError(() => (annotateChatOpen = false))}{/if}
+      {/await}
     {/if}
 
     <!-- Global "Ask Pinta" FAB — floats bottom-right of the panel body so

@@ -25,7 +25,105 @@ const COMPOSITE_JPEG_QUALITY = 0.85;
  */
 export type CompositeOptions = {
   badgeColorOverride?: string;
+  /** compositeAnnotations only: cap on the output's longer side, in px.
+   *  Defaults to AGENT_IMAGE_MAX_EDGE (the stitched full page goes to the
+   *  agent). Pass Infinity (or 0) to keep the full stitched size. */
+  maxLongEdge?: number;
+  /** compositeAnnotations only (agent path): crop the stitched page to the
+   *  band around the annotations (see agentCropBand) before the size cap,
+   *  so a tall page stays legible. `viewportHeight` (CSS px) sets how much
+   *  context is kept above/below. */
+  cropToAnnotations?: { viewportHeight: number };
 };
+
+/** Longest side, in px, of a composite bound for the agent. The model
+ *  API downscales anything larger to this edge anyway (and rejects sides
+ *  over ~8000 px), so a 16,384 px stitched page only costs bytes and
+ *  encode time. */
+export const AGENT_IMAGE_MAX_EDGE = 1568;
+
+/**
+ * Output size for a composite of a `width` x `height` image whose longer
+ * side must not exceed `maxLongEdge` (never upscales; aspect ratio kept,
+ * each side at least 1 px). `scale` maps source (CSS page px) coordinates
+ * to output px. A non-finite or non-positive cap means "no cap".
+ */
+export function compositeOutputSize(
+  width: number,
+  height: number,
+  maxLongEdge: number = AGENT_IMAGE_MAX_EDGE,
+): { width: number; height: number; scale: number } {
+  const w = Math.max(1, Math.round(width));
+  const h = Math.max(1, Math.round(height));
+  const long = Math.max(w, h);
+  if (!(maxLongEdge > 0) || !Number.isFinite(maxLongEdge) || long <= maxLongEdge) {
+    return { width: w, height: h, scale: 1 };
+  }
+  const scale = maxLongEdge / long;
+  return {
+    width: Math.max(1, Math.round(w * scale)),
+    height: Math.max(1, Math.round(h * scale)),
+    scale,
+  };
+}
+
+export type Box = { x: number; y: number; width: number; height: number };
+
+/** Every page-space rect an annotation paints (CSS page px). Empty for
+ *  `note` and for annotations without geometry. */
+export function annotationBoxes(a: Annotation): Box[] {
+  if (a.kind === "note") return [];
+  const out: Box[] = [];
+  const push = (r: Box | null | undefined) => {
+    if (r && Number.isFinite(r.y) && Number.isFinite(r.height)) out.push(r);
+  };
+  if (a.kind === "select") push(a.target?.boundingRect);
+  else if (a.kind === "move") {
+    push(a.target?.boundingRect);
+    push(a.move?.drop === "reorder" ? a.move.container?.boundingRect : a.move?.destinationRect);
+  } else if (a.kind === "text-insert") {
+    push(a.textInsert?.reference?.boundingRect ?? a.target?.boundingRect);
+  } else if (a.kind === "delete") {
+    for (const t of a.targets ?? (a.target ? [a.target] : [])) push(t.boundingRect);
+  } else if (a.kind === "image") {
+    push(a.images?.[0]?.placement);
+  } else if (a.strokes?.length) {
+    const xs = a.strokes.map((p) => p.x);
+    const ys = a.strokes.map((p) => p.y);
+    const x = Math.min(...xs);
+    const y = Math.min(...ys);
+    push({ x, y, width: Math.max(...xs) - x, height: Math.max(...ys) - y });
+  }
+  return out;
+}
+
+/** Share of the page height above which cropping isn't worth it. */
+export const AGENT_CROP_MAX_FRACTION = 0.8;
+/** Minimum context kept above/below the annotations, in CSS px. */
+const AGENT_CROP_MIN_PAD = 600;
+
+/**
+ * Vertical band of a `pageHeight`-tall stitched page to send the agent:
+ * the union of `boxes` plus at least one viewport height of context above
+ * and below (full page width is always kept). Returns null — "send the
+ * whole page" — when there are no boxes or the band would still cover
+ * more than AGENT_CROP_MAX_FRACTION of the page.
+ */
+export function agentCropBand(
+  pageHeight: number,
+  boxes: Box[],
+  viewportHeight: number,
+): { y: number; height: number } | null {
+  const h = Math.max(1, Math.round(pageHeight));
+  if (boxes.length === 0) return null;
+  const minY = Math.min(...boxes.map((b) => b.y));
+  const maxY = Math.max(...boxes.map((b) => b.y + Math.max(0, b.height)));
+  const pad = Math.max(AGENT_CROP_MIN_PAD, Number.isFinite(viewportHeight) ? viewportHeight : 0);
+  const top = Math.max(0, Math.floor(minY - pad));
+  const bottom = Math.min(h, Math.ceil(maxY + pad));
+  if (bottom <= top || bottom - top > h * AGENT_CROP_MAX_FRACTION) return null;
+  return { y: top, height: bottom - top };
+}
 
 // Composites annotations onto the screenshot. Input is any image data URL;
 // output is a JPEG data URL (encoded async — off the side panel's main
@@ -42,13 +140,28 @@ export async function compositeAnnotations(
   opts: CompositeOptions = {},
 ): Promise<string> {
   const img = await loadImage(screenshotDataUrl);
+  const band = opts.cropToAnnotations
+    ? agentCropBand(
+        img.naturalHeight,
+        annotations.flatMap(annotationBoxes),
+        opts.cropToAnnotations.viewportHeight,
+      )
+    : null;
+  const srcY = band?.y ?? 0;
+  const srcH = band?.height ?? img.naturalHeight;
+  const out = compositeOutputSize(img.naturalWidth, srcH, opts.maxLongEdge);
   const canvas = document.createElement("canvas");
-  canvas.width = img.naturalWidth;
-  canvas.height = img.naturalHeight;
+  canvas.width = out.width;
+  canvas.height = out.height;
   const ctx = canvas.getContext("2d");
   if (!ctx) throw new Error("no 2d context");
 
-  ctx.drawImage(img, 0, 0);
+  ctx.drawImage(img, 0, srcY, img.naturalWidth, srcH, 0, 0, out.width, out.height);
+  // Paint in source coordinates: every mark (position, stroke, badge)
+  // shrinks with the screenshot, exactly as a downscale of the full-size
+  // composite would render it. The crop offset shifts marks up with it.
+  if (out.scale !== 1) ctx.scale(out.scale, out.scale);
+  if (srcY) ctx.translate(0, -srcY);
 
   // Sequential rather than forEach — image-kind annotations need an
   // async bitmap load before they can be drawn, and the existing

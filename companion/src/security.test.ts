@@ -4,15 +4,24 @@ import { request } from "node:http";
 import type { AddressInfo } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { fileURLToPath } from "node:url";
 import { WebSocket } from "ws";
 import type { Session } from "@pinta/shared";
 import { SessionStore } from "./store.js";
 import { startServer, type StartedServer } from "./server.js";
 import { attachWebSocket } from "./ws.js";
 import { HttpBackend } from "./mcp/backend.js";
+import { runTrustCommand } from "./trust-cli.js";
 import {
   ExtensionTrust,
   WEB_STORE_EXTENSION_ID,
+  WRITING_QUERY_OPS,
+  TrustStoreCorruptError,
+  addTrustedId,
+  gitTrackState,
+  migrateLegacyPin,
+  readTrustStore,
+  removeTrustedId,
   extensionIdFromOrigin,
   imageMediaTypeForPath,
   isLoopbackHost,
@@ -47,11 +56,11 @@ function http(
   port: number,
   method: string,
   path: string,
-  opts: { origin?: string; host?: string; body?: unknown } = {},
+  opts: { origin?: string; host?: string; body?: unknown; headers?: Record<string, string> } = {},
 ): Promise<Res> {
   return new Promise((resolve, reject) => {
     const payload = opts.body === undefined ? undefined : JSON.stringify(opts.body);
-    const headers: Record<string, string> = {};
+    const headers: Record<string, string> = { ...opts.headers };
     if (opts.origin) headers.Origin = opts.origin;
     if (opts.host) headers.Host = opts.host;
     if (payload) {
@@ -151,48 +160,299 @@ describe("security primitives", () => {
   });
 });
 
-describe("ExtensionTrust (I4 — trust-on-first-use)", () => {
+describe("ExtensionTrust (AI2 — out-of-band trust, no silent pin)", () => {
   let dir: string;
+  let userStorePath: string;
   beforeEach(async () => {
     dir = await mkdtemp(join(tmpdir(), "pinta-trust-"));
+    userStorePath = join(dir, "home", ".pinta", "trusted-extensions.json");
   });
   afterEach(async () => {
     await rm(dir, { recursive: true, force: true });
   });
 
-  it("always trusts the Web Store id and env-listed ids; an explicit list disables TOFU", () => {
-    const trust = new ExtensionTrust(dir, { allowIds: [OTHER_EXT] });
+  it("trusts the Web Store id, env-listed ids and user-store ids — nothing else", () => {
+    const trust = new ExtensionTrust(dir, { allowIds: [OTHER_EXT], userStorePath });
     expect(trust.check(WEB_STORE_EXTENSION_ID)).toBe("trusted");
     expect(trust.check(OTHER_EXT)).toBe("trusted");
     expect(trust.check(THIRD_EXT)).toBe("untrusted");
-    expect(trust.pinOrCheck(THIRD_EXT)).toBe(false);
-    expect(new ExtensionTrust(dir, { allowIds: [] }).check(THIRD_EXT)).toBe("unpinned");
+    expect(trust.verify(THIRD_EXT)).toBe(false);
+    expect(trust.check(null)).toBe("untrusted");
   });
 
-  it("the Web Store build takes the TOFU slot so a rogue extension can't claim it later", () => {
-    const trust = new ExtensionTrust(dir, { allowIds: [] });
-    expect(trust.pinOrCheck(WEB_STORE_EXTENSION_ID)).toBe(true);
-    expect(trust.check(OTHER_EXT)).toBe("untrusted");
-    expect(trust.pinOrCheck(OTHER_EXT)).toBe(false);
-  });
-
-  it("pins the first extension, refuses a different one, and re-opens when the pin file is deleted", async () => {
+  it("never pins: the first unknown extension to connect is refused and nothing is written", async () => {
     const logs: string[] = [];
-    const trust = new ExtensionTrust(dir, { allowIds: [], log: (m) => logs.push(m) });
-    expect(trust.pinOrCheck(OTHER_EXT)).toBe(true);
-    expect(logs.some((l) => l.includes(`trusted extension ${OTHER_EXT}`))).toBe(true);
-    const pin = JSON.parse(await readFile(join(dir, ".pinta", "trusted-extension.json"), "utf8"));
-    expect(pin.id).toBe(OTHER_EXT);
+    const trust = new ExtensionTrust(dir, { allowIds: [], userStorePath, log: (m) => logs.push(m) });
+    expect(trust.verify(OTHER_EXT)).toBe(false);
+    expect(trust.verify(OTHER_EXT)).toBe(false);
+    expect(trust.verify(WEB_STORE_EXTENSION_ID)).toBe(true);
+    expect(trust.check(OTHER_EXT)).toBe("untrusted");
+    await expect(stat(userStorePath)).rejects.toThrow();
+    await expect(stat(join(dir, ".pinta"))).rejects.toThrow();
+    // One log line per refused id, naming the CLI fix.
+    expect(logs.filter((l) => l.includes(`npx pinta-companion trust ${OTHER_EXT}`))).toHaveLength(1);
+  });
 
-    expect(trust.pinOrCheck(THIRD_EXT)).toBe(false);
+  it("trust/untrust in the user store take effect without a restart", () => {
+    const trust = new ExtensionTrust(dir, { allowIds: [], userStorePath });
+    expect(trust.check(OTHER_EXT)).toBe("untrusted");
+    expect(addTrustedId(userStorePath, OTHER_EXT)).toBe(true);
+    expect(trust.check(OTHER_EXT)).toBe("trusted");
     expect(trust.check(THIRD_EXT)).toBe("untrusted");
-    expect(logs.some((l) => l.includes("trusted-extension.json") && l.includes("PINTA_EXTENSION_IDS"))).toBe(true);
+    expect(removeTrustedId(userStorePath, OTHER_EXT)).toBe(true);
+    expect(trust.check(OTHER_EXT)).toBe("untrusted");
+  });
 
-    // A fresh instance (companion restart) honors the pin on disk.
-    expect(new ExtensionTrust(dir, { allowIds: [] }).check(THIRD_EXT)).toBe("untrusted");
+  it("trust store read/write: idempotent add, remove, malformed file and ids ignored", async () => {
+    expect(readTrustStore(userStorePath)).toEqual({ ids: [] });
+    expect(addTrustedId(userStorePath, ` ${OTHER_EXT.toUpperCase()} `)).toBe(true);
+    expect(addTrustedId(userStorePath, OTHER_EXT)).toBe(false);
+    expect(addTrustedId(userStorePath, THIRD_EXT)).toBe(true);
+    const file = readTrustStore(userStorePath);
+    expect(file.ids.map((e) => e.id)).toEqual([OTHER_EXT, THIRD_EXT]);
+    expect(file.ids[0]!.addedAt).toMatch(/^\d{4}-\d{2}-\d{2}T/);
+    expect(removeTrustedId(userStorePath, OTHER_EXT)).toBe(true);
+    expect(removeTrustedId(userStorePath, OTHER_EXT)).toBe(false);
+    expect(readTrustStore(userStorePath).ids.map((e) => e.id)).toEqual([THIRD_EXT]);
+    expect(() => addTrustedId(userStorePath, "not-an-id")).toThrow(/invalid extension id/);
+    expect(() => removeTrustedId(userStorePath, "../../etc")).toThrow(/invalid extension id/);
 
-    await unlink(join(dir, ".pinta", "trusted-extension.json"));
-    expect(trust.check(THIRD_EXT)).toBe("unpinned");
+    await writeFile(userStorePath, JSON.stringify({ ids: [{ id: "bad" }, { id: OTHER_EXT, addedAt: 5 }, null] }));
+    expect(readTrustStore(userStorePath)).toEqual({ ids: [{ id: OTHER_EXT, addedAt: "" }] });
+    await writeFile(userStorePath, "{not json");
+    expect(readTrustStore(userStorePath)).toEqual({ ids: [] });
+  });
+
+  it("refuses to overwrite a corrupt store (F72) and writes atomically", async () => {
+    await mkdir(join(dir, "home", ".pinta"), { recursive: true });
+    for (const bad of ["{not json", JSON.stringify({ other: 1 }), "[]"]) {
+      await writeFile(userStorePath, bad);
+      expect(() => addTrustedId(userStorePath, OTHER_EXT), bad).toThrow(TrustStoreCorruptError);
+      expect(() => removeTrustedId(userStorePath, OTHER_EXT), bad).toThrow(/refusing to overwrite/);
+      expect(await readFile(userStorePath, "utf8"), bad).toBe(bad);
+    }
+    await unlink(userStorePath);
+    expect(addTrustedId(userStorePath, OTHER_EXT)).toBe(true);
+    expect(addTrustedId(userStorePath, THIRD_EXT)).toBe(true);
+    // No temp files left beside the store.
+    expect((await readdir(join(dir, "home", ".pinta"))).sort()).toEqual(["trusted-extensions.json"]);
+    expect(readTrustStore(userStorePath).ids.map((e) => e.id)).toEqual([OTHER_EXT, THIRD_EXT]);
+  });
+});
+
+describe("legacy per-project pin migration", () => {
+  let dir: string;
+  let userStorePath: string;
+  const legacy = () => join(dir, ".pinta", "trusted-extension.json");
+  beforeEach(async () => {
+    dir = await mkdtemp(join(tmpdir(), "pinta-migrate-"));
+    userStorePath = join(dir, "home", "trusted-extensions.json");
+    await mkdir(join(dir, ".pinta"), { recursive: true });
+  });
+  afterEach(async () => {
+    await rm(dir, { recursive: true, force: true });
+  });
+
+  it("does nothing when there is no legacy pin", async () => {
+    expect(migrateLegacyPin(dir, userStorePath, () => {}, () => "untracked")).toBe("none");
+    await expect(stat(userStorePath)).rejects.toThrow();
+  });
+
+  it("merges an untracked pin into the user store once and renames the file", async () => {
+    await writeFile(legacy(), JSON.stringify({ id: OTHER_EXT, pinnedAt: "x" }));
+    const logs: string[] = [];
+    expect(migrateLegacyPin(dir, userStorePath, (m) => logs.push(m), () => "untracked")).toBe("migrated");
+    expect(readTrustStore(userStorePath).ids.map((e) => e.id)).toEqual([OTHER_EXT]);
+    expect(logs.some((l) => l.includes(`migrated trusted extension ${OTHER_EXT}`))).toBe(true);
+    await expect(stat(legacy())).rejects.toThrow();
+    expect((await stat(`${legacy()}.migrated`)).isFile()).toBe(true);
+    // A later untrust sticks: the next startup finds nothing to migrate.
+    removeTrustedId(userStorePath, OTHER_EXT);
+    expect(migrateLegacyPin(dir, userStorePath, () => {}, () => "untracked")).toBe("none");
+    expect(readTrustStore(userStorePath).ids).toEqual([]);
+  });
+
+  it("F70: a pin git can't vouch for (not a work tree / no git) is ignored and the trust command logged", async () => {
+    await writeFile(legacy(), JSON.stringify({ id: OTHER_EXT }));
+    const logs: string[] = [];
+    expect(gitTrackState(dir, ".pinta/trusted-extension.json")).toBe("unknown");
+    expect(migrateLegacyPin(dir, userStorePath, (m) => logs.push(m))).toBe("ignored-no-git");
+    expect(migrateLegacyPin(dir, userStorePath, () => {}, () => "unknown")).toBe("ignored-no-git");
+    expect(readTrustStore(userStorePath).ids).toEqual([]);
+    expect((await stat(legacy())).isFile()).toBe(true);
+    expect(logs.some((l) => l.includes("npx pinta-companion trust <extension-id>"))).toBe(true);
+  });
+
+  it("F70: uses the real git check — an untracked pin in a work tree migrates, a committed one doesn't", async () => {
+    const { execFileSync } = await import("node:child_process");
+    const git = (...args: string[]) =>
+      execFileSync("git", ["-c", "user.email=t@t", "-c", "user.name=t", ...args], { cwd: dir, stdio: "ignore" });
+    git("init", "-q");
+    await writeFile(legacy(), JSON.stringify({ id: OTHER_EXT }));
+    expect(gitTrackState(dir, ".pinta/trusted-extension.json")).toBe("untracked");
+    git("add", ".pinta/trusted-extension.json");
+    git("commit", "-q", "-m", "pin");
+    expect(gitTrackState(dir, ".pinta/trusted-extension.json")).toBe("tracked");
+    expect(migrateLegacyPin(dir, userStorePath, () => {})).toBe("ignored-tracked");
+    git("rm", "-q", "--cached", ".pinta/trusted-extension.json");
+    expect(migrateLegacyPin(dir, userStorePath, () => {})).toBe("migrated");
+    expect(readTrustStore(userStorePath).ids.map((e) => e.id)).toEqual([OTHER_EXT]);
+  });
+
+  it("F71: nothing is trusted when the pin can't be renamed", async () => {
+    await writeFile(legacy(), JSON.stringify({ id: OTHER_EXT }));
+    // A non-empty directory at the *.migrated path makes the rename fail on every OS.
+    await mkdir(join(`${legacy()}.migrated`, "block"), { recursive: true });
+    const logs: string[] = [];
+    expect(migrateLegacyPin(dir, userStorePath, (m) => logs.push(m), () => "untracked")).toBe("rename-failed");
+    expect(readTrustStore(userStorePath).ids).toEqual([]);
+    expect((await stat(legacy())).isFile()).toBe(true);
+    expect(logs.some((l) => l.includes(`npx pinta-companion trust ${OTHER_EXT}`))).toBe(true);
+  });
+
+  it("F71/F72: a corrupt user store leaves the pin in place and the store untouched", async () => {
+    await writeFile(legacy(), JSON.stringify({ id: OTHER_EXT }));
+    await mkdir(join(dir, "home"), { recursive: true });
+    await writeFile(userStorePath, "{oops");
+    expect(migrateLegacyPin(dir, userStorePath, () => {}, () => "untracked")).toBe("invalid");
+    expect(await readFile(userStorePath, "utf8")).toBe("{oops");
+    expect((await stat(legacy())).isFile()).toBe(true);
+  });
+
+  it("ignores a git-tracked pin with a warning and trusts nothing", async () => {
+    await writeFile(legacy(), JSON.stringify({ id: OTHER_EXT }));
+    const logs: string[] = [];
+    const tracked = (root: string, rel: string) =>
+      root === dir && rel === ".pinta/trusted-extension.json" ? ("tracked" as const) : ("untracked" as const);
+    expect(migrateLegacyPin(dir, userStorePath, (m) => logs.push(m), tracked)).toBe("ignored-tracked");
+    expect(readTrustStore(userStorePath).ids).toEqual([]);
+    expect((await stat(legacy())).isFile()).toBe(true);
+    expect(logs.some((l) => l.includes("git-tracked"))).toBe(true);
+    expect(new ExtensionTrust(dir, { allowIds: [], userStorePath }).check(OTHER_EXT)).toBe("untrusted");
+  });
+
+  it("ignores a malformed pin", async () => {
+    await writeFile(legacy(), JSON.stringify({ id: "../../nope" }));
+    expect(migrateLegacyPin(dir, userStorePath, () => {}, () => "untracked")).toBe("invalid");
+    expect(readTrustStore(userStorePath).ids).toEqual([]);
+  });
+});
+
+describe("pinta-companion trust / untrust CLI", () => {
+  let dir: string;
+  let storePath: string;
+  beforeEach(async () => {
+    dir = await mkdtemp(join(tmpdir(), "pinta-trust-cli-"));
+    storePath = join(dir, "trusted-extensions.json");
+  });
+  afterEach(async () => {
+    await rm(dir, { recursive: true, force: true });
+  });
+
+  it("validates arguments and ids", () => {
+    for (const argv of [["trust"], ["untrust"], ["trust", OTHER_EXT, "extra"], ["trust", "--bogus"], ["untrust", "--list"]]) {
+      const r = runTrustCommand(argv, storePath, undefined);
+      expect(r.code, argv.join(" ")).toBe(1);
+      expect(r.out).toMatch(/Usage:/);
+    }
+    const bad = runTrustCommand(["trust", "zzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzz"], storePath, undefined);
+    expect(bad.code).toBe(1);
+    expect(bad.out).toMatch(/Invalid extension id/);
+    expect(runTrustCommand(["trust", "abc"], storePath, undefined).code).toBe(1);
+    expect(readTrustStore(storePath).ids).toEqual([]);
+  });
+
+  it("trust, list, untrust — printing what changed", () => {
+    const t = runTrustCommand(["trust", OTHER_EXT], storePath, undefined);
+    expect(t).toMatchObject({ code: 0 });
+    expect(t.out).toContain(`Trusted extension ${OTHER_EXT}`);
+    expect(runTrustCommand(["trust", OTHER_EXT], storePath, undefined).out).toContain("already trusted");
+
+    const list = runTrustCommand(["trust", "--list"], storePath, THIRD_EXT);
+    expect(list.code).toBe(0);
+    expect(list.out).toContain(WEB_STORE_EXTENSION_ID);
+    expect(list.out).toContain(OTHER_EXT);
+    expect(list.out).toContain(`PINTA_EXTENSION_IDS: ${THIRD_EXT}`);
+
+    const u = runTrustCommand(["untrust", OTHER_EXT], storePath, undefined);
+    expect(u.out).toContain(`Untrusted extension ${OTHER_EXT}`);
+    expect(runTrustCommand(["untrust", OTHER_EXT], storePath, undefined).out).toContain("nothing changed");
+    expect(runTrustCommand(["trust", "--list"], storePath, undefined).out).toContain("(none)");
+  });
+
+  it("F72: exits 1 with a clear error and leaves a corrupt store untouched", async () => {
+    await writeFile(storePath, "{hand-edited");
+    for (const argv of [["trust", OTHER_EXT], ["untrust", OTHER_EXT], ["trust", "--list"]]) {
+      const res = runTrustCommand(argv, storePath, undefined);
+      expect(res.code, argv.join(" ")).toBe(1);
+      expect(res.out, argv.join(" ")).toMatch(/not a valid trust store.*refusing to overwrite/);
+    }
+    expect(await readFile(storePath, "utf8")).toBe("{hand-edited");
+  });
+});
+
+describe("WRITING_QUERY_OPS matches the SKILL.md §7.9 Writing-ops column", () => {
+  it("has set parity with the table", async () => {
+    const skill = await readFile(fileURLToPath(new URL("../../skill/pinta/SKILL.md", import.meta.url)), "utf8");
+    const start = skill.indexOf("| Module id | § | Read-only ops | Writing ops");
+    expect(start).toBeGreaterThan(-1);
+    const rows = skill
+      .slice(start)
+      .split(/\r?\n/)
+      .map((l) => l.replace(/^>\s?/, "").trim())
+      .filter((l, i, all) => l.startsWith("|") && all.slice(0, i + 1).every((x) => x.startsWith("|")))
+      .slice(2); // header + separator
+    expect(rows.length).toBeGreaterThan(5);
+    const ops = new Set<string>();
+    for (const row of rows) {
+      const cells = row.split("|").slice(1, -1).map((c) => c.trim());
+      const writing = cells[3] ?? "";
+      // Each op is a leading backticked token of a comma-separated entry;
+      // the parenthesised notes after it (`glab`, paths) are not ops.
+      for (const entry of writing.replace(/\([^)]*\)/g, "").split(",")) {
+        const m = /^`?([a-z][a-z0-9-]*)`?$/.exec(entry.trim());
+        if (m) ops.add(m[1]!);
+      }
+    }
+    expect([...ops].sort()).toEqual([...WRITING_QUERY_OPS].sort());
+  });
+});
+
+describe("SKILL.md security rules the companion relies on (AI1, AI4, AI6)", () => {
+  const skillPath = (rel: string) => fileURLToPath(new URL(`../../${rel}`, import.meta.url));
+  const flat = (s: string) => s.replace(/^>\s?/gm, "").replace(/\s+/g, " ");
+
+  it("§7.9 gates writing ops on the companion-only ws-query origin marker", async () => {
+    const skill = flat(await readFile(skillPath("skill/pinta/SKILL.md"), "utf8"));
+    expect(skill).toMatch(/session\.origin` is `"ws-query"`/);
+    expect(skill).toMatch(/modules\[0\]\.id` owns the op/);
+    expect(skill).toMatch(/else `mark_session_error`/);
+  });
+
+  it("§3.6 protected paths include the Pinta trust/module files and Claude config", async () => {
+    const skill = await readFile(skillPath("skill/pinta/SKILL.md"), "utf8");
+    const start = skill.indexOf("### Writing-op preflight");
+    expect(start).toBeGreaterThan(-1);
+    const section = flat(skill.slice(start, skill.indexOf("\n## ", start)));
+    for (const p of ["`.claude/**`", "`CLAUDE.md`", "`.pinta/modules/**`", "`.pinta/trusted-extension*`", "`.git/`", "`.env*`"]) {
+      expect(section, p).toContain(p);
+    }
+  });
+
+  it("§7.12 write-files, git-commit and test-file-issues all cite the §3.6 preflight", async () => {
+    const skill = flat(await readFile(skillPath("skill/pinta/SKILL.md"), "utf8"));
+    expect(skill).toMatch(/`write-files` \| [^|]*always after the §3\.6 preflight/);
+    expect(skill).toMatch(/refuse `"all"`[^.]*dirty §3\.6 protected path/);
+    expect(skill).toMatch(/`glab` \(§3\.6 writing-op preflight/);
+    expect(skill).toMatch(/body's LAST line/);
+  });
+
+  it("the plugin copy of SKILL.md is in sync", async () => {
+    const [a, b] = await Promise.all([
+      readFile(skillPath("skill/pinta/SKILL.md"), "utf8"),
+      readFile(skillPath("pinta-plugin/skills/pinta/SKILL.md"), "utf8"),
+    ]);
+    expect(b === a).toBe(true);
   });
 });
 
@@ -294,7 +554,7 @@ describe("HTTP origin gate + ingest (C1, I2, I4, I9) — live server", () => {
   beforeEach(async () => {
     dir = await mkdtemp(join(tmpdir(), "pinta-sec-http-"));
     store = new SessionStore(dir);
-    trust = new ExtensionTrust(dir, { allowIds: [] });
+    trust = new ExtensionTrust(dir, { allowIds: [], userStorePath: join(dir, "user-trust.json") });
     started = await startServer({ port: 0, store, trust });
     port = (started.server.address() as AddressInfo).port;
   });
@@ -348,12 +608,12 @@ describe("HTTP origin gate + ingest (C1, I2, I4, I9) — live server", () => {
     expect(r.status).toBe(403);
   });
 
-  it("module install needs the trusted extension — not no-Origin, not an unpinned or mismatched extension", async () => {
+  it("module install needs the trusted extension — not no-Origin, not an unknown extension", async () => {
     const body = { package: {}, grantedCapabilities: [] };
     expect((await http(port, "POST", "/v1/modules", { body })).status).toBe(403);
     expect((await http(port, "POST", "/v1/modules", { body, origin: ext(OTHER_EXT) })).status).toBe(403);
 
-    trust.pinOrCheck(OTHER_EXT);
+    addTrustedId(join(dir, "user-trust.json"), OTHER_EXT); // `pinta-companion trust <id>`
     // Past the gate → the store's validation answers (400 empty package).
     expect((await http(port, "POST", "/v1/modules", { body, origin: ext(OTHER_EXT) })).status).toBe(400);
     expect((await http(port, "POST", "/v1/modules", { body, origin: ext(WEB_STORE_EXTENSION_ID) })).status).toBe(400);
@@ -362,8 +622,144 @@ describe("HTTP origin gate + ingest (C1, I2, I4, I9) — live server", () => {
     expect(rogue.status).toBe(403);
     expect((await http(port, "GET", "/v1/sessions", { origin: ext(THIRD_EXT) })).status).toBe(403);
     expect((await http(port, "DELETE", "/v1/sessions", { origin: ext(THIRD_EXT) })).status).toBe(403);
-    // …but discovery still works so the side panel can surface the problem.
-    expect((await http(port, "GET", "/v1/health", { origin: ext(THIRD_EXT) })).status).toBe(200);
+  });
+
+  it("an untrusted extension gets 403 + a machine-readable fix on every route, /v1/health included", async () => {
+    for (const [method, path] of [["GET", "/v1/health"], ["GET", "/v1/sessions"], ["POST", "/v1/url-patterns"]] as const) {
+      const r = await http(port, method, path, { origin: ext(THIRD_EXT), body: method === "POST" ? { pattern: "x" } : undefined });
+      expect(r.status, path).toBe(403);
+      expect(JSON.parse(r.body), path).toEqual({
+        error: "untrusted-extension",
+        extensionId: THIRD_EXT,
+        fix: `npx pinta-companion trust ${THIRD_EXT}`,
+      });
+    }
+    await expect(stat(join(dir, ".pinta", "trusted-extension.json"))).rejects.toThrow();
+    addTrustedId(join(dir, "user-trust.json"), THIRD_EXT);
+    const ok = await http(port, "GET", "/v1/health", { origin: ext(THIRD_EXT) });
+    expect(ok.status).toBe(200);
+    expect(JSON.parse(ok.body).projectRoot).toBe(dir);
+  });
+
+  // F40/F41: Chromium sends no Origin on GET/HEAD from extension pages (only
+  // Sec-Fetch-Site), so reads from browser contexts need the bearer token.
+  const browserGet = (path: string, headers: Record<string, string> = {}) =>
+    http(port, "GET", path, { headers: { "Sec-Fetch-Site": "none", "Sec-Fetch-Mode": "cors", ...headers } });
+  const tokenFor = async (id: string) =>
+    (JSON.parse((await http(port, "POST", "/v1/auth/token", { origin: ext(id) })).body) as { token: string }).token;
+
+  it("POST /v1/auth/token: trusted extension → token; untrusted → untrusted-extension 403; no/foreign Origin → 403", async () => {
+    const ok = await http(port, "POST", "/v1/auth/token", { origin: ext(WEB_STORE_EXTENSION_ID) });
+    expect(ok.status).toBe(200);
+    expect(ok.headers["access-control-allow-headers"]).toMatch(/Authorization/);
+    const { token } = JSON.parse(ok.body) as { token: string };
+    expect(token).toMatch(/^[A-Za-z0-9_-]{43}$/);
+    // Stable for the process lifetime.
+    expect(await tokenFor(WEB_STORE_EXTENSION_ID)).toBe(token);
+
+    const untrusted = await http(port, "POST", "/v1/auth/token", { origin: ext(THIRD_EXT) });
+    expect(untrusted.status).toBe(403);
+    expect(JSON.parse(untrusted.body)).toEqual({
+      error: "untrusted-extension",
+      extensionId: THIRD_EXT,
+      fix: `npx pinta-companion trust ${THIRD_EXT}`,
+    });
+    const none = await http(port, "POST", "/v1/auth/token");
+    expect(none.status).toBe(403);
+    expect(none.body).not.toContain(token);
+    expect((await http(port, "POST", "/v1/auth/token", { headers: { "Sec-Fetch-Site": "none" } })).status).toBe(403);
+    expect((await http(port, "POST", "/v1/auth/token", { origin: "https://evil.example" })).status).toBe(403);
+    expect((await http(port, "GET", "/v1/auth/token", { origin: ext(WEB_STORE_EXTENSION_ID) })).status).toBe(405);
+  });
+
+  it("browser-context requests without an Origin need the token (Bearer or ?token=); health + OPTIONS stay open", async () => {
+    const token = await tokenFor(WEB_STORE_EXTENSION_ID);
+    for (const path of ["/v1/sessions", "/v1/modules", "/v1/registry", "/v1/watch/events", "/v1/report-shot?key=x"]) {
+      const r = await browserGet(path);
+      expect(r.status, path).toBe(401);
+      expect(JSON.parse(r.body), path).toEqual({ error: "auth-required" });
+    }
+    expect((await browserGet("/v1/sessions", { Authorization: "Bearer wrong-token" })).status).toBe(401);
+    expect((await browserGet("/v1/sessions", { Authorization: `Bearer ${token}x` })).status).toBe(401);
+    expect((await browserGet("/v1/sessions?token=nope")).status).toBe(401);
+
+    expect((await browserGet("/v1/sessions", { Authorization: `Bearer ${token}` })).status).toBe(200);
+    expect((await browserGet(`/v1/sessions?token=${encodeURIComponent(token)}`)).status).toBe(200);
+    // Past the gate → the route answers (no such shot).
+    expect((await browserGet(`/v1/report-shot?key=missing&token=${token}`)).status).toBe(404);
+    // A cross-site <img>/no-cors request has the same shape — refused without the token.
+    expect((await http(port, "GET", "/v1/sessions", { headers: { "Sec-Fetch-Site": "cross-site" } })).status).toBe(401);
+
+    const health = await browserGet("/v1/health");
+    expect(health.status).toBe(200);
+    expect(JSON.parse(health.body).projectRoot).toBe(dir);
+    expect((await http(port, "OPTIONS", "/v1/sessions", { headers: { "Sec-Fetch-Site": "none" } })).status).toBe(204);
+  });
+
+  it("a token is per extension id and stops working once that extension is untrusted", async () => {
+    const storeFile = join(dir, "user-trust.json");
+    addTrustedId(storeFile, OTHER_EXT);
+    const token = await tokenFor(OTHER_EXT);
+    expect(token).not.toBe(await tokenFor(WEB_STORE_EXTENSION_ID));
+    expect((await browserGet("/v1/sessions", { Authorization: `Bearer ${token}` })).status).toBe(200);
+    removeTrustedId(storeFile, OTHER_EXT);
+    const after = await browserGet("/v1/sessions", { Authorization: `Bearer ${token}` });
+    expect(after.status).toBe(403);
+    expect(JSON.parse(after.body).error).toBe("untrusted-extension");
+  });
+
+  it("Node/curl-style callers (no Origin, no Sec-Fetch-Site) are unchanged — even with Node fetch's sec-fetch-mode", async () => {
+    expect((await http(port, "GET", "/v1/sessions")).status).toBe(200);
+    expect((await http(port, "GET", "/v1/sessions", { headers: { "Sec-Fetch-Mode": "cors" } })).status).toBe(200);
+    expect((await http(port, "GET", "/v1/registry")).status).toBe(200);
+    // Real Node fetch — what the MCP HTTP backend uses.
+    expect((await fetch(`http://127.0.0.1:${port}/v1/sessions`)).status).toBe(200);
+  });
+
+  it("POST /v1/sessions refuses query annotations (AI1)", async () => {
+    const query = {
+      id: "q1",
+      createdAt: 0,
+      kind: "query",
+      strokes: [],
+      color: "#000",
+      comment: JSON.stringify({ op: "audit-fix", checkId: "c1" }),
+    };
+    const r = await http(port, "POST", "/v1/sessions", {
+      body: fakeSession({ id: "posted-query", annotations: [query as never], modules: [{ id: "audit-flow", settings: {} }] }),
+    });
+    expect(r.status).toBe(400);
+    expect(JSON.parse(r.body).error).toMatch(/query annotations/);
+    expect(store.get("posted-query")).toBeNull();
+
+    // A query hidden behind a normal annotation is refused too, from any caller.
+    const mixed = fakeSession({
+      id: "posted-mixed",
+      annotations: [{ ...query, id: "n1", kind: "select", comment: "make it pink" } as never, { ...query, id: "q2" } as never],
+    });
+    for (const origin of [undefined, ext(WEB_STORE_EXTENSION_ID)]) {
+      const m = await http(port, "POST", "/v1/sessions", { body: mixed, origin });
+      expect(m.status, String(origin)).toBe(400);
+    }
+    expect(store.get("posted-mixed")).toBeNull();
+  });
+
+  it("POST /v1/sessions strips modules / origin / ephemeral / claimedBy (AI1)", async () => {
+    const r = await http(port, "POST", "/v1/sessions", {
+      body: {
+        ...fakeSession({ id: "posted-mods", modules: [{ id: "git-commit", settings: {} }], claimedBy: "x", claimedAt: 1 }),
+        origin: "ws-query",
+        ephemeral: true,
+      },
+    });
+    expect(r.status).toBe(201);
+    for (const s of [JSON.parse(r.body) as Record<string, unknown>, store.get("posted-mods")! as unknown as Record<string, unknown>]) {
+      expect(s.modules).toBeUndefined();
+      expect(s.origin).toBeUndefined();
+      expect(s.ephemeral).toBeUndefined();
+      expect(s.claimedBy).toBeUndefined();
+      expect(s.claimedAt).toBeUndefined();
+    }
   });
 
   it("MCP get_screenshot returns image/jpeg for a .jpg screenshot (and PNG stays PNG)", async () => {
@@ -394,7 +790,7 @@ describe("WebSocket gate (I4/AI6) — live server", () => {
   beforeEach(async () => {
     dir = await mkdtemp(join(tmpdir(), "pinta-sec-ws-"));
     store = new SessionStore(dir);
-    trust = new ExtensionTrust(dir, { allowIds: [] });
+    trust = new ExtensionTrust(dir, { allowIds: [], userStorePath: join(dir, "user-trust.json") });
   });
   afterEach(async () => {
     for (const s of sockets.splice(0)) s.terminate();
@@ -410,18 +806,22 @@ describe("WebSocket gate (I4/AI6) — live server", () => {
     queryComment: JSON.stringify({ op: "audit-fix", checkId: "c1" }),
   });
 
-  it("rejects web origins and no-Origin upgrades by default; pins the first extension and refuses a second", async () => {
+  it("rejects web origins, no-Origin upgrades and unknown extensions; never pins; trusts after the CLI adds an id", async () => {
     await boot(false);
     expect(await wsConnect(port)).toMatchObject({ ok: false, status: 403 });
     expect(await wsConnect(port, "https://evil.example")).toMatchObject({ ok: false, status: 403 });
 
+    // The first extension to connect is NOT pinned.
+    expect(await wsConnect(port, `chrome-extension://${OTHER_EXT}`)).toMatchObject({ ok: false, status: 403 });
+    expect(trust.check(OTHER_EXT)).toBe("untrusted");
+
+    addTrustedId(join(dir, "user-trust.json"), OTHER_EXT);
     const first = await wsConnect(port, `chrome-extension://${OTHER_EXT}`);
     expect(first.ok).toBe(true);
     if (first.ok) sockets.push(first.socket);
-    expect(trust.check(OTHER_EXT)).toBe("trusted");
 
     expect(await wsConnect(port, `chrome-extension://${THIRD_EXT}`)).toMatchObject({ ok: false, status: 403 });
-    // Allow-listed Web Store id still connects even though another id holds the pin.
+    // The Web Store id always connects.
     const store2 = await wsConnect(port, `chrome-extension://${WEB_STORE_EXTENSION_ID}`);
     expect(store2.ok).toBe(true);
     if (store2.ok) sockets.push(store2.socket);
@@ -437,6 +837,9 @@ describe("WebSocket gate (I4/AI6) — live server", () => {
     const msg = (await created) as { session: Session };
     expect(msg.session.autoApply).toBe(true);
     expect(msg.session.status).toBe("submitted");
+    // Server-only marker the skill requires before running a writing op (AI1).
+    expect(msg.session.origin).toBe("ws-query");
+    expect(store.get(msg.session.id)!.origin).toBe("ws-query");
   });
 
   it("an opted-in no-Origin socket is untrusted: writing ops refused, read-only ops pass, submits never auto-apply", async () => {
@@ -454,7 +857,9 @@ describe("WebSocket gate (I4/AI6) — live server", () => {
     c.socket.send(
       JSON.stringify({ ...writingQuery("chat"), queryComment: JSON.stringify({ op: "chat", text: "hi" }) }),
     );
-    expect(((await created) as { session: Session }).session.status).toBe("submitted");
+    const readOnly = ((await created) as { session: Session }).session;
+    expect(readOnly.status).toBe("submitted");
+    expect(readOnly.origin).toBeUndefined();
 
     const synced = nextMessage(c.socket, "session.created");
     c.socket.send(JSON.stringify({ type: "session.create", url: "http://x/" }));

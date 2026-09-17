@@ -431,6 +431,24 @@ describe("nav sync", () => {
     expect(storableTargetUrl("data:text/html,x")).toBe("");
   });
 
+  it("urlOrigin accepts only http(s) — gallery origin gate (S3)", () => {
+    expect(urlOrigin("https://app.example.com:8443/x")).toBe("https://app.example.com:8443");
+    expect(urlOrigin("HTTP://LOCALHOST:5173/")).toBe("http://localhost:5173");
+    for (const bad of [
+      "chrome-extension://abcdefghijklmnop/src/sidepanel/index.html",
+      "file:///C:/Users/x/index.html",
+      "javascript:alert(1)",
+      "data:text/html,<script>1</script>",
+      "blob:http://localhost:5173/uuid",
+      "about:blank",
+      "ftp://host/x",
+      "",
+      "not a url",
+    ]) {
+      expect(urlOrigin(bad), bad).toBeNull();
+    }
+  });
+
   it("first report is a position fix; a later same-origin change propagates", () => {
     const t = new NavSyncTracker();
     expect(t.report("a", "http://localhost:5173/", target, 0).verdict).toBe("record");

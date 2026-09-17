@@ -98,8 +98,8 @@ class ContentState {
    *  (overlay.ready) without reaching into the component. */
   announceFrame: () => void = () => {};
   /** Set by Overlay.svelte so overlay.ts can arm a tool itself. Activating
-   *  a device frame has to work without the side panel: the canvas->frame
-   *  postMessage hop is the only one a sandboxed sub-frame can rely on. */
+   *  a device frame has to work without the side panel (it may be closed):
+   *  the canvas's activation ping alone arms Select. */
   requestMode: (next: Mode, tool?: DrawTool) => void = () => {};
   frameActive = $state(
     window.top === window.self ||

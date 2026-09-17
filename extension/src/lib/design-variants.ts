@@ -1314,6 +1314,37 @@ function normText(el: Element): string {
   return (el.textContent ?? "").replace(/\s+/g, " ").trim();
 }
 
+/** Raw text is read in windows of at least this many chars, so a huge
+ *  text node is never whitespace-collapsed in one go. */
+const BOUNDED_TEXT_WINDOW = 256;
+
+/**
+ * normText, but stops reading once the result is known to be longer than
+ * `maxLen`. When the element's normalized text fits, the return value is
+ * identical to normText(el); otherwise it is a prefix of it whose length
+ * is > maxLen (enough for "too long" decisions without reading a whole
+ * page's textContent).
+ */
+export function boundedNormText(el: Element, maxLen: number): string {
+  const doc = el.ownerDocument;
+  // SHOW_TEXT | SHOW_CDATA_SECTION — the node set textContent concatenates.
+  const walker = doc.createTreeWalker(el, 0x4 | 0x8);
+  let acc = "";
+  for (let n = walker.nextNode(); n; n = walker.nextNode()) {
+    const data = (n as CharacterData).data;
+    for (let off = 0; off < data.length; ) {
+      const size = Math.max(BOUNDED_TEXT_WINDOW, Math.ceil(maxLen - acc.length) + 1);
+      let chunk = data.slice(off, off + size).replace(/\s+/g, " ");
+      off += size;
+      // Collapse a whitespace run split across nodes / windows; drop leading.
+      if (chunk.startsWith(" ") && (acc === "" || acc.endsWith(" "))) chunk = chunk.slice(1);
+      acc += chunk;
+      if (acc.trimEnd().length > maxLen) return acc.trimEnd();
+    }
+  }
+  return acc.trimEnd();
+}
+
 function nodeLabel(el: Element, index: number | null): string {
   const tag = el.tagName.toLowerCase();
   const text = normText(el);
@@ -1379,9 +1410,12 @@ function pairChildren(
   exp: Element[],
   act: Element[],
 ): { pairs: [Element, Element, number][]; missing: [Element, number][] } {
+  // Each child's text is computed once (it was re-read per comparison).
+  const expText = exp.map(normText);
+  const actText = act.map(normText);
   const aligned =
     exp.length === act.length &&
-    exp.every((e, i) => normText(e) === normText(act[i]!));
+    expText.every((t, i) => t === actText[i]);
   if (aligned) {
     return { pairs: exp.map((e, i) => [e, act[i]!, i]), missing: [] };
   }
@@ -1389,11 +1423,11 @@ function pairChildren(
   const missing: [Element, number][] = [];
   let from = 0;
   exp.forEach((e, i) => {
-    const t = normText(e);
+    const t = expText[i]!;
     const k = act.findIndex((a, j) => {
       if (j < from) return false;
-      if (t !== "") return normText(a) === t;
-      return a.tagName === e.tagName && normText(a) === "";
+      if (t !== "") return actText[j] === t;
+      return a.tagName === e.tagName && actText[j] === "";
     });
     if (k >= 0) {
       pairs.push([e, act[k]!, i]);
@@ -1652,7 +1686,9 @@ export function locateAppliedElement(
     const el = stack.pop()!;
     visited++;
     if (LOCATE_SKIP_SUBTREES.has(el.localName.toLowerCase())) continue;
-    const len = textOf(el).length;
+    // Only as much text as the length test needs: a page-level wrapper's
+    // full textContent can be megabytes. Cached full text wins when present.
+    const len = (texts.get(el) ?? boundedNormText(el, maxLen)).length;
     if (len < minLen) continue;
     if (len <= maxLen) cands.push(el);
     const kids = el.children;

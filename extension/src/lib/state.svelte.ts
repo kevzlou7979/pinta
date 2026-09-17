@@ -69,9 +69,18 @@ import {
   type WatchPending,
 } from "./watch-notify.js";
 import {
-  discoverCompanions,
+  discoverCompanionsDetailed,
   type Companion,
+  type UntrustedCompanion,
 } from "./companions.js";
+import {
+  acquireCompanionToken,
+  cachedCompanionToken,
+  companionFetch,
+  onCompanionToken,
+  onCompanionUntrusted,
+  withCompanionToken,
+} from "./companion-http.js";
 import { findCompanionForUrl, matchAny } from "./url-patterns.js";
 import {
   loadByOrigin,
@@ -83,7 +92,7 @@ import {
   removeImportedSession,
   clearImportedSessions,
 } from "./local-store.js";
-import { decodePintaFile, decodePintaMarkdown } from "./pinta-file.js";
+import { decodePintaFile, decodePintaMarkdown, filterShareableAnnotations } from "./pinta-file.js";
 import { uid } from "./id.js";
 import {
   countRedactionPlaceholders,
@@ -145,6 +154,8 @@ import {
   type ReviewRun,
   type ReviewVerdict,
 } from "./code-review.js";
+import { DEFAULT_SUBMIT_OPTIONS, parseSubmitOptions, type SubmitOptions } from "./submit-options.js";
+import { createCoalescer } from "./coalesce.js";
 
 const SELECTED_KEY = "pinta-selected-companion";
 
@@ -478,6 +489,56 @@ class ExtensionState {
   selectedCompanion = $state<Companion | null>(null);
   /** True while the first discovery scan is in flight. */
   scanning = $state(false);
+  /**
+   * A companion that answered the port scan but refused this extension
+   * (HTTP 403 `untrusted-extension` — the user hasn't run
+   * `npx pinta-companion trust <id>` yet). Drives the amber "doesn't trust
+   * this browser extension" notice. Null when none, or dismissed.
+   */
+  untrustedCompanion = $state<UntrustedCompanion | null>(null);
+  /** `port:extensionId` of a dismissed untrusted notice, so passive
+   *  (navigation) rescans don't re-open it. A forced rescan (Retry /
+   *  Rescan) clears it. */
+  private untrustedDismissedKey: string | null = null;
+  /** Bearer token for the selected companion (see lib/companion-http.ts).
+   *  Reactive so <img> URLs that carry `?token=` rebuild when it changes. */
+  companionToken = $state<string | null>(null);
+  /** Companion HTTP signals: a refused token / gated call raises the
+   *  untrusted notice (and drops a selected companion that now refuses us,
+   *  so the WS doesn't retry a 403 forever); token changes refresh URLs. */
+  private readonly companionHttpUnsubs = [
+    onCompanionUntrusted((base, refusal) => this.handleCompanionRefusal(base, refusal)),
+    onCompanionToken((base, token) => {
+      if (this.httpBase() === base) this.companionToken = token;
+    }),
+  ];
+
+  private handleCompanionRefusal(
+    base: string,
+    refusal: { extensionId: string | null; fix: string | null },
+  ): void {
+    let port: number;
+    try {
+      port = Number(new URL(base).port);
+    } catch {
+      return;
+    }
+    if (!port) return;
+    const key = `${port}:${refusal.extensionId ?? ""}`;
+    if (key !== this.untrustedDismissedKey) {
+      this.untrustedCompanion = { port, extensionId: refusal.extensionId, fix: refusal.fix };
+    }
+    if (this.selectedCompanion?.port === port) {
+      this.companions = this.companions.filter((c) => c.port !== port);
+      void this.connectTo(null);
+    }
+  }
+  /** Coalesced rescan runner (see `rescan`): one scan at a time, bursts
+   *  collapse into a single trailing run, `force` is sticky. */
+  private rescanCoalesced = createCoalescer<{ url: string | null; force: boolean }>(
+    (q) => this.rescanNow(q.url, q.force),
+    (queued, next) => ({ url: next.url, force: next.force || (queued?.force ?? false) }),
+  );
 
   /** Sessions imported from `.pinta` share files. Read-only — viewable
    *  in History, optionally forkable into an editable local session. */
@@ -513,6 +574,8 @@ class ExtensionState {
    * is dismissible — see the Annotate / AuditFlow pattern).
    */
   moduleError = $state<string | null>(null);
+  /** Dismissible info note after sending a shared `.pinta` to the agent. */
+  importNotice = $state<string | null>(null);
   /**
    * Per-session opt-in checkboxes — module ids the user has ticked for
    * the current submit. In-memory only; cleared on each new session so
@@ -523,11 +586,7 @@ class ExtensionState {
   /** Submit-footer choices. Remembered across submits AND panel reloads —
    *  the side panel unmounts every time it closes, and re-ticking the same
    *  boxes on every batch is busywork. */
-  submitOptions = $state<{
-    autoApply: boolean;
-    includeScreenshot: boolean;
-    justAsk: boolean;
-  }>({ autoApply: true, includeScreenshot: false, justAsk: false });
+  submitOptions = $state<SubmitOptions>({ ...DEFAULT_SUBMIT_OPTIONS });
   /**
    * Draft for the Annotate "Add a task" composer (NoteComposer). Held in
    * the store, not the component, so an in-progress task survives an
@@ -1627,7 +1686,11 @@ class ExtensionState {
     const ctrl = new AbortController();
     const t = setTimeout(() => ctrl.abort(), timeoutMs);
     try {
-      return await fetch(input, { ...rest, signal: ctrl.signal });
+      // Companion URLs go through the token-aware helper (bearer token,
+      // one refresh on 401, untrusted-extension signal).
+      return typeof input === "string"
+        ? await companionFetch(input, { ...rest, signal: ctrl.signal })
+        : await fetch(input, { ...rest, signal: ctrl.signal });
     } catch (err) {
       if ((err as Error).name === "AbortError") {
         throw new Error(`request timed out after ${timeoutMs}ms`);
@@ -6473,7 +6536,10 @@ class ExtensionState {
     const port = this.selectedCompanion?.port;
     const rec = this.moduleBoards[moduleId]?.cardShots?.[cardId];
     if (!port || !rec) return null;
-    return `http://127.0.0.1:${port}/v1/report-shot?key=${encodeURIComponent(shotKey)}&t=${rec.capturedAt}`;
+    return withCompanionToken(
+      `http://127.0.0.1:${port}/v1/report-shot?key=${encodeURIComponent(shotKey)}&t=${rec.capturedAt}`,
+      this.companionToken,
+    );
   }
 
   /** Routed from onMessage when a card step-screenshots session lands
@@ -7300,9 +7366,12 @@ class ExtensionState {
     const shot = this.report.shots[itemId];
     const port = this.selectedCompanion?.port;
     if (!shot || !port) return null;
-    return `http://127.0.0.1:${port}/v1/report-shot?key=${encodeURIComponent(
-      shot.shotKey,
-    )}&t=${shot.capturedAt}`;
+    return withCompanionToken(
+      `http://127.0.0.1:${port}/v1/report-shot?key=${encodeURIComponent(
+        shot.shotKey,
+      )}&t=${shot.capturedAt}`,
+      this.companionToken,
+    );
   }
 
   /** Fire a screenshot capture for one report entry. No-op if one's already
@@ -9021,7 +9090,7 @@ class ExtensionState {
    * triggers download. Returns `null` when there's no catalog so the
    * UI can skip the download dance.
    */
-  exportTesterSheetDocx(): Uint8Array | null {
+  async exportTesterSheetDocx(): Promise<Uint8Array | null> {
     const c = this.testPilot.catalog;
     if (!c) return null;
     return composeTesterSheetDocx(c);
@@ -9033,7 +9102,7 @@ class ExtensionState {
    * and per-row chat threads. Caller wraps in a Blob + triggers
    * download. Returns `null` when there's no catalog.
    */
-  exportResultsDocx(): Uint8Array | null {
+  async exportResultsDocx(): Promise<Uint8Array | null> {
     const c = this.testPilot.catalog;
     if (!c) return null;
     const today = new Date().toISOString().slice(0, 10);
@@ -9089,31 +9158,13 @@ class ExtensionState {
       const stored = await chrome.storage?.local?.get(
         ExtensionState.SUBMIT_OPTIONS_KEY,
       );
-      const raw = stored?.[ExtensionState.SUBMIT_OPTIONS_KEY] as
-        | {
-            autoApply?: unknown;
-            includeScreenshot?: unknown;
-            justAsk?: unknown;
-            ticked?: Record<string, unknown>;
-          }
-        | undefined;
+      const raw = stored?.[ExtensionState.SUBMIT_OPTIONS_KEY];
       if (!raw || typeof raw !== "object") return;
-      if (typeof raw.autoApply === "boolean") {
-        this.submitOptions.autoApply = raw.autoApply;
-      }
-      if (typeof raw.includeScreenshot === "boolean") {
-        this.submitOptions.includeScreenshot = raw.includeScreenshot;
-      }
-      if (typeof raw.justAsk === "boolean") {
-        this.submitOptions.justAsk = raw.justAsk;
-      }
-      if (raw.ticked && typeof raw.ticked === "object") {
-        const next: Record<string, boolean> = {};
-        for (const [id, on] of Object.entries(raw.ticked)) {
-          if (on === true) next[id] = true;
-        }
-        this.tickedModules = next;
-      }
+      const { options, ticked } = parseSubmitOptions(raw);
+      this.submitOptions.autoApply = options.autoApply;
+      this.submitOptions.includeScreenshot = options.includeScreenshot;
+      this.submitOptions.justAsk = options.justAsk;
+      if (ticked) this.tickedModules = ticked;
     } catch {
       // storage missing (test env) — defaults are fine
     }
@@ -9476,6 +9527,18 @@ class ExtensionState {
         "Send to agent requires a connected companion. Switch projects from the picker, or use Fork in standalone mode.";
       return null;
     }
+    // A shared `.pinta` is untrusted input: only forward normal,
+    // user-authored annotation kinds. `query` annotations are module RPCs
+    // the agent executes (some write files), so a crafted share must not
+    // be able to post one as a plain submitted session.
+    const { kept: shareable, dropped } = filterShareableAnnotations(imported.session.annotations);
+    if (shareable.length === 0) {
+      this.lastError =
+        dropped > 0
+          ? "This shared file has no regular annotations to send — it only contains module queries, which Pinta won't forward to the agent from a share."
+          : "This shared file has no annotations to send.";
+      return null;
+    }
     const now = Date.now();
     const payload: Session = {
       id: crypto.randomUUID(),
@@ -9485,7 +9548,7 @@ class ExtensionState {
       submittedAt: now,
       // Fresh annotation ids so per-annotation status updates from the
       // agent don't collide with anything in the source-side history.
-      annotations: imported.session.annotations.map((a) => ({
+      annotations: shareable.map((a) => ({
         ...a,
         id: uid("ann"),
         status: undefined,
@@ -9498,13 +9561,10 @@ class ExtensionState {
       // already handles 'test' submissions identically to extension ones.
       producer: "test",
       autoApply: opts.autoApply,
-      // Modules ride along with imported sessions too — recipients of a
-      // shared `.pinta` may want to file the friend's annotations as
-      // GitLab issues against their *own* project. Modules are stripped
-      // from share-file exports, so configuration is always the
-      // recipient's own.
-      modules: this.buildSessionModules(),
+      // No `modules`: the companion strips per-submit modules from shared
+      // sessions, so ticked ones are surfaced as a notice instead.
     };
+    const tickedCount = this.buildSessionModules()?.length ?? 0;
     try {
       const res = await ExtensionState.fetchWithTimeout(`${base}/v1/sessions`, {
         method: "POST",
@@ -9516,6 +9576,10 @@ class ExtensionState {
         const text = await res.text().catch(() => "");
         throw new Error(`HTTP ${res.status}${text ? `: ${text.slice(0, 200)}` : ""}`);
       }
+      this.importNotice =
+        tickedCount > 0
+          ? "Sent without your ticked modules — per-submit modules (e.g. GitLab Issues) don't apply to shared files."
+          : null;
       return payload.id;
     } catch (err) {
       this.lastError = `send to agent failed: ${(err as Error).message}`;
@@ -9610,6 +9674,21 @@ class ExtensionState {
     activeTabUrl: string | null = this.lastUrl,
     force: boolean = false,
   ): Promise<void> {
+    // Coalesce bursts: SPA navigations fire `tabs.onUpdated` repeatedly and
+    // each would otherwise start an overlapping 21-port scan. While one is
+    // in flight, remember only the latest request (force is sticky) and run
+    // it once after the current scan settles.
+    return this.rescanCoalesced({ url: activeTabUrl, force });
+  }
+
+  /** Dismiss the "companion doesn't trust this extension" notice. */
+  dismissUntrustedCompanion(): void {
+    const u = this.untrustedCompanion;
+    if (u) this.untrustedDismissedKey = `${u.port}:${u.extensionId ?? ""}`;
+    this.untrustedCompanion = null;
+  }
+
+  private async rescanNow(activeTabUrl: string | null, force: boolean): Promise<void> {
     if (
       !force &&
       this.selectedCompanion &&
@@ -9642,7 +9721,15 @@ class ExtensionState {
 
     this.scanning = true;
     try {
-      this.companions = await discoverCompanions();
+      const discovery = await discoverCompanionsDetailed();
+      this.companions = discovery.companions;
+      if (force) this.untrustedDismissedKey = null;
+      const untrusted = discovery.untrusted[0] ?? null;
+      this.untrustedCompanion =
+        untrusted &&
+        `${untrusted.port}:${untrusted.extensionId ?? ""}` !== this.untrustedDismissedKey
+          ? untrusted
+          : null;
 
       // Don't pre-wipe the standalone session here. Both follow-up paths
       // handle it themselves: connectTo() nulls `this.session` before the
@@ -9797,6 +9884,16 @@ class ExtensionState {
     this.session = null;
     this.markCreatingSession(false);
     this.selectedCompanion = companion;
+    this.companionToken = companion
+      ? cachedCompanionToken(`http://127.0.0.1:${companion.port}`)
+      : null;
+    if (companion) {
+      // Discovery normally acquired it already; this covers a restored
+      // selection. A refusal routes through handleCompanionRefusal.
+      void acquireCompanionToken(`http://127.0.0.1:${companion.port}`).then((r) => {
+        if (r.kind === "token" && this.selectedCompanion === companion) this.companionToken = r.token;
+      });
+    }
     // Re-arm the "missing endpoint" warning so a companion restart on
     // a new build re-probes for the per-author results route instead
     // of staying silent forever after the first 404.
@@ -10060,7 +10157,7 @@ class ExtensionState {
     const base = this.httpBase();
     if (current && current.status !== "drafting" && base) {
       try {
-        await fetch(
+        await companionFetch(
           `${base}/v1/sessions/${encodeURIComponent(current.id)}/status`,
           {
             method: "POST",

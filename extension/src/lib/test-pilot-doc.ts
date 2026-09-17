@@ -6,7 +6,6 @@
 // output. The state class wraps them with persistence + companion
 // disk-sync side effects.
 
-import { zipSync, strToU8 } from "fflate";
 import type {
   TestPilotCatalog,
   TestPilotSection,
@@ -270,7 +269,7 @@ function docxRow(cells: string[]): string {
  * so the rendered hierarchy doesn't depend on a built-in style being
  * present in Word's normal.dotx.
  */
-export function composeTesterSheetDocx(catalog: TestPilotCatalog): Uint8Array {
+export async function composeTesterSheetDocx(catalog: TestPilotCatalog): Promise<Uint8Array> {
   const body: string[] = [];
 
   const title = catalog.title?.trim() || catalog.filename;
@@ -350,7 +349,10 @@ export function composeTesterSheetDocx(catalog: TestPilotCatalog): Uint8Array {
  * `word/document.xml`. Word opens this and ignores the absence of
  * optional theme/styles/setting parts.
  */
-function wrapDocxBody(body: string[]): Uint8Array {
+// fflate is loaded on demand (only when a .docx is actually exported) so
+// it stays out of the side panel's startup bundle.
+async function wrapDocxBody(body: string[]): Promise<Uint8Array> {
+  const { zipSync, strToU8 } = await import("fflate");
   const documentXml =
     `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>` +
     `<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">` +
@@ -393,7 +395,7 @@ function wrapDocxBody(body: string[]): Uint8Array {
 export function composeResultsDocx(
   catalog: TestPilotCatalog,
   today: string,
-): Uint8Array {
+): Promise<Uint8Array> {
   const body: string[] = [];
 
   let pass = 0,

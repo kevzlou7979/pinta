@@ -6,6 +6,8 @@ import {
   pintaFilename,
   PintaFileError,
   MAX_PINTA_FILE_BYTES,
+  filterShareableAnnotations,
+  isShareableAnnotation,
 } from "./pinta-file.js";
 
 function makeSession(): Session {
@@ -166,5 +168,39 @@ describe("pintaFilename", () => {
     );
     expect(name).toMatch(/^pinta-staging\.example\.com-/);
     expect(name.endsWith(".pinta")).toBe(true);
+  });
+});
+
+describe("filterShareableAnnotations", () => {
+  const ann = (kind: string, id = kind) =>
+    ({ id, createdAt: 0, kind, strokes: [], color: "#f0f", comment: "" }) as unknown as Session["annotations"][number];
+
+  it("keeps every normal user-authored kind", () => {
+    const kinds = ["arrow", "rect", "circle", "freehand", "pin", "select", "image", "note", "move", "text-insert", "delete"];
+    const { kept, dropped } = filterShareableAnnotations(kinds.map((k) => ann(k)));
+    expect(kept.map((a) => a.kind)).toEqual(kinds);
+    expect(dropped).toBe(0);
+  });
+
+  it("drops query-kind annotations (module RPCs) and unknown kinds", () => {
+    const { kept, dropped } = filterShareableAnnotations([
+      ann("select", "a"),
+      ann("query", "b"),
+      ann("exec-shell", "c"),
+      { id: "d" } as unknown as Session["annotations"][number],
+    ]);
+    expect(kept.map((a) => a.id)).toEqual(["a"]);
+    expect(dropped).toBe(3);
+  });
+
+  it("reports zero kept for a share made only of queries", () => {
+    const { kept, dropped } = filterShareableAnnotations([ann("query")]);
+    expect(kept).toEqual([]);
+    expect(dropped).toBe(1);
+  });
+
+  it("tolerates a missing annotations array", () => {
+    expect(filterShareableAnnotations(undefined)).toEqual({ kept: [], dropped: 0 });
+    expect(isShareableAnnotation(null)).toBe(false);
   });
 });

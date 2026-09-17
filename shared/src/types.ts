@@ -317,6 +317,14 @@ export type Session = {
   claimedAt?: number;
 
   /**
+   * Server-only provenance marker. The companion stamps `"ws-query"` on
+   * sessions it mints for `module.query.submit` from a trusted extension
+   * socket. Clients can never set it: `POST /v1/sessions` always deletes
+   * it. The /pinta skill runs a writing op only when it is present.
+   */
+  origin?: "ws-query";
+
+  /**
    * Built-in modules the user opted into for this submit. Each entry
    * carries the module's id and the user-supplied settings the agent
    * needs to do its work (project ids, tokens, etc.). The skill ships

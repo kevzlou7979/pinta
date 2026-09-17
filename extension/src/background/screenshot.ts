@@ -222,7 +222,15 @@ function createStitcher(dims: PageDims, height: number) {
         out.getContext("2d")?.drawImage(oc, 0, 0);
         oc.width = oc.height = 1; // release the tall backing store early
       }
-      const blob = await out.convertToBlob({ type: "image/jpeg", quality: STITCHED_JPEG_QUALITY });
+      let blob: Blob;
+      try {
+        blob = await out.convertToBlob({ type: "image/jpeg", quality: STITCHED_JPEG_QUALITY });
+      } finally {
+        // Release the backing stores now, on both paths — the worker may
+        // live on for a while and a 16k-tall canvas is ~250 MB raw.
+        out.width = out.height = 1;
+        oc.width = oc.height = 1;
+      }
       return await blobToDataUrl(blob);
     },
   };

@@ -17,10 +17,14 @@ import {
 import { addUrlPattern, readProjectConfig } from "./project-config.js";
 import {
   BadRequestError,
+  CompanionTokens,
   ExtensionTrust,
   extensionIdFromOrigin,
+  isBrowserContextRequest,
   isLoopbackHost,
   isSafeSessionId,
+  requestTokenOf,
+  trustFixCommand,
 } from "./security.js";
 
 export type ServerOptions = {
@@ -49,8 +53,8 @@ export type ServerOptions = {
   getWatchEvents?: () => WatchEvent[];
   /**
    * Which chrome-extension:// origins count as Pinta (Web Store id,
-   * $PINTA_EXTENSION_IDS, trust-on-first-use pin). Share the instance
-   * with attachWebSocket so a WS pin is seen by HTTP immediately.
+   * $PINTA_EXTENSION_IDS, the per-user store edited by
+   * `pinta-companion trust`). Share the instance with attachWebSocket.
    * Defaults to a fresh one for the store's project root.
    */
   trust?: ExtensionTrust;
@@ -92,10 +96,13 @@ export async function startServer(opts: ServerOptions): Promise<StartedServer> {
   const rangeEnd = opts.portRangeEnd ?? DEFAULT_PORT_RANGE_END;
 
   const trust = opts.trust ?? new ExtensionTrust(store.projectRoot, { log });
+  // Per-process bearer tokens for browser contexts (see POST /v1/auth/token).
+  // In memory only — never logged, gone on restart.
+  const tokens = new CompanionTokens();
 
   const server = createServer(async (req, res) => {
     try {
-      await handle(req, res, store, log, opts, trust);
+      await handle(req, res, store, log, opts, trust, tokens);
     } catch (err) {
       log(`error: ${(err as Error).message}`);
       if (res.headersSent) {
@@ -164,22 +171,31 @@ async function handle(
   log: (msg: string) => void,
   opts: ServerOptions,
   trust: ExtensionTrust,
+  tokens: CompanionTokens,
 ): Promise<void> {
   const url = new URL(req.url ?? "/", "http://localhost");
   const method = (req.method ?? "GET").toUpperCase();
   const path = url.pathname;
 
-  // Origin gate. The companion binds 127.0.0.1 and has no auth, which
-  // doesn't help when the attacker is a tab (or another extension) in
-  // the user's own browser. Callers fall into three groups:
+  // Origin gate. The companion binds 127.0.0.1, which doesn't help when
+  // the attacker is a tab (or another extension) in the user's own
+  // browser. Callers fall into four groups:
   //
-  //  - no Origin: the agent's curl, the CLI, the MCP stdio backend →
-  //    full access (a local process can already touch the project).
-  //  - chrome-extension://<id>: full access when the id is trusted (Web
-  //    Store id, $PINTA_EXTENSION_IDS, or the TOFU pin written on the
-  //    first WS connect). Before anything is pinned, an extension may
-  //    read/write except module install/uninstall. A pinned mismatch is
-  //    refused everywhere except /v1/health.
+  //  - chrome-extension://<id> (every POST/PUT/DELETE and WS upgrade from
+  //    the extension): full access when the id is trusted (Web Store id,
+  //    $PINTA_EXTENSION_IDS, or ~/.pinta/trusted-extensions.json via
+  //    `pinta-companion trust <id>`). Any other extension gets 403 on every
+  //    route with an `untrusted-extension` body naming the fix. Nothing is
+  //    pinned automatically. POST /v1/auth/token hands a trusted extension
+  //    its bearer token.
+  //  - no Origin but a Sec-Fetch-Site header: a browser context of unknown
+  //    identity — Chromium omits Origin on GET/HEAD from extension pages, and
+  //    <img>/no-cors page requests look the same. Needs the bearer token
+  //    (Authorization or ?token=) on every route except GET /v1/health and
+  //    OPTIONS; missing/invalid → 401 auth-required.
+  //  - no Origin, no Sec-Fetch-Site: the agent's curl, the CLI, the MCP
+  //    backend (Node fetch sends only sec-fetch-mode) → full access, as
+  //    before (a local process can already touch the project).
   //  - any other Origin (web pages, file://, "null"): 403 on every route
   //    except a minimal /v1/health that leaks nothing. No ACAO header is
   //    ever sent for them, so a page can't read companion data.
@@ -206,7 +222,7 @@ async function handle(
       "Access-Control-Allow-Methods",
       "GET, POST, PUT, DELETE, OPTIONS",
     );
-    res.setHeader("Access-Control-Allow-Headers", "Content-Type");
+    res.setHeader("Access-Control-Allow-Headers", "Content-Type, Authorization");
   }
 
   if (isForeignOrigin) {
@@ -221,13 +237,39 @@ async function handle(
     return;
   }
 
-  if (trustVerdict === "untrusted" && !isHealth) {
-    trust.logRefused(extensionId);
+  const refuseUntrusted = (id: string | null) => {
+    trust.logRefused(id);
     return sendJson(res, 403, {
-      error:
-        "untrusted extension — this project is pinned to another Pinta build " +
-        "(delete .pinta/trusted-extension.json or set PINTA_EXTENSION_IDS)",
+      error: "untrusted-extension",
+      extensionId: id,
+      fix: trustFixCommand(id),
     });
+  };
+
+  if (trustVerdict === "untrusted") return refuseUntrusted(extensionId);
+
+  // Token issuance: only a trusted chrome-extension:// Origin (untrusted
+  // ones were refused above with the untrusted-extension body the side
+  // panel keys its notice on). No-Origin callers never need a token.
+  if (path === "/v1/auth/token") {
+    if (method !== "POST") return sendJson(res, 405, { error: "method not allowed" });
+    if (trustVerdict !== "trusted" || !extensionId) {
+      log(`rejected ${method} ${path} — token requires the trusted Pinta extension Origin`);
+      return sendJson(res, 403, { error: "forbidden origin" });
+    }
+    return sendJson(res, 200, { token: tokens.issue(extensionId) });
+  }
+
+  // Browser-context bearer gate (no Origin + Sec-Fetch-Site). The token
+  // names the extension it was issued to; re-check trust so an `untrust`
+  // applies on the next request.
+  if (!isExtensionOrigin && isBrowserContextRequest(req.headers) && !isHealth) {
+    const tokenId = tokens.resolve(requestTokenOf(req.headers.authorization, url.searchParams));
+    if (!tokenId) {
+      log(`rejected ${method} ${path} — browser request without a valid token`);
+      return sendJson(res, 401, { error: "auth-required" });
+    }
+    if (trust.check(tokenId) !== "trusted") return refuseUntrusted(tokenId);
   }
 
   // Module install/uninstall is the highest-leverage mutation — it can

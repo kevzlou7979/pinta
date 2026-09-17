@@ -303,6 +303,21 @@
     handleSend();
   }
 
+  /** Escape closes the sheet — unless an IME is composing, a nested
+   *  menu/listbox/open <details> owns the key, or the image lightbox is
+   *  up (Escape closes that first). */
+  function onDialogKeyDown(e: KeyboardEvent) {
+    if (e.key !== "Escape" || e.isComposing || e.defaultPrevented) return;
+    const t = e.target as HTMLElement | null;
+    if (t?.closest?.('[role="menu"], [role="listbox"], details[open]')) return;
+    e.stopPropagation();
+    if (lightbox) {
+      lightbox = null;
+      return;
+    }
+    handleClose();
+  }
+
   function handleClose() {
     draft = "";
     attachedImages = [];
@@ -437,6 +452,8 @@
     style="height: 70%; max-height: 600px; animation: pinta-sheet-slide-up 250ms ease-out;"
     role="dialog"
     aria-label="Chat with agent"
+    tabindex="-1"
+    onkeydown={onDialogKeyDown}
   >
     <!-- Sheet header — avatar + AI assistant title + context status row.
          Matches the v0.4 chat-redesign mock: square gradient avatar with

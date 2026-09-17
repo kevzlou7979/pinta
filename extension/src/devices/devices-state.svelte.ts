@@ -5,7 +5,6 @@
 // chrome.storage.local keys: its own state blob, and the shared module
 // settings (read-only, for the customDevices catalog additions).
 
-import { RELAYABLE_FRAME_MESSAGES } from "../lib/devices-frame.js";
 import {
   CUSTOM_SIZE_MAX,
   CUSTOM_SIZE_MIN,
@@ -374,21 +373,19 @@ class DevicesPageState {
     this.syncPinging();
   }
 
-  /** The frame's overlay answered — annotation is really live there. */
-  handleAnnotateAck(event: MessageEvent): boolean {
-    const data = event.data as { type?: unknown; on?: unknown } | null;
-    if (!data || data.type !== "pinta-annotate-ack") return false;
-    for (const [id, el] of this.iframeEls) {
-      if (el.contentWindow !== event.source) continue;
-      if (data.on === true && this.annotateFrameId === id) {
-        this.clearAnnotateTimer();
-        this.annotateReadyId = id;
-      } else if (this.annotateReadyId === id) {
-        this.annotateReadyId = null;
-      }
-      return true;
+  /** The frame's overlay answered — annotation is really live there.
+   *  Callers must pass only acks that arrived over chrome.runtime straight
+   *  from a sub-frame of this tab (isDirectSubframeSender): a page can post
+   *  anything to its parent window but can't send a runtime message. The
+   *  `token` is the frame id the activation ping carried. */
+  handleAnnotateAck(token: string, on: boolean): void {
+    if (!this.iframeEls.has(token)) return;
+    if (on && this.annotateFrameId === token) {
+      this.clearAnnotateTimer();
+      this.annotateReadyId = token;
+    } else if (this.annotateReadyId === token) {
+      this.annotateReadyId = null;
     }
-    return false;
   }
 
   /** No ack means no Pinta in that frame yet. Reload it once (content
@@ -421,52 +418,6 @@ class DevicesPageState {
     this.setAnnotateFrame(this.annotateFrameId === id ? null : id);
   }
 
-  /** Forward a side-panel message into the annotating frame. Returns
-   *  false when no frame is annotating. */
-  relayToAnnotateFrame(payload: unknown): boolean {
-    const id = this.annotateFrameId;
-    const el = id ? this.iframeEls.get(id) : null;
-    const origin = id ? this.expectedOrigin(id) : null;
-    if (!el || !origin) return false;
-    try {
-      el.contentWindow?.postMessage({ type: "pinta-relay", payload }, origin);
-      return true;
-    } catch {
-      return false;
-    }
-  }
-
-  /**
-   * A frame mirrored one of its own messages — hand it back so the canvas
-   * can forward it to the side panel.
-   *
-   * This hop is a page -> extension privilege boundary and has to be read
-   * that way. A framed page cannot reach `chrome.runtime` at all, but its
-   * MAIN world shares the `contentWindow` identity AND the origin of the
-   * overlay's isolated world, so NEITHER an `event.source` match nor an
-   * `event.origin` check can tell the two apart. The only real defence is
-   * to keep this path away from anything with side effects: it carries
-   * UI-state messages, and everything that reaches the agent or spends the
-   * user's tokens must arrive over the direct `chrome.runtime.sendMessage`
-   * the overlay also makes — that one carries a real `sender.frameId` no
-   * page can forge. The checks below are still worth their lines: they stop
-   * an inactive frame, or one that wandered to another origin, from
-   * speaking at all.
-   */
-  readFrameOut(event: MessageEvent): unknown | null {
-    const data = event.data as { type?: unknown; payload?: unknown } | null;
-    if (!data || data.type !== "pinta-frame-out" || !data.payload) return null;
-    const id = this.annotateReadyId;
-    if (!id) return null;
-    const el = this.iframeEls.get(id);
-    if (!el || el.contentWindow !== event.source) return null;
-    const origin = this.expectedOrigin(id);
-    if (!origin || event.origin !== origin) return null;
-    const type = (data.payload as { type?: unknown }).type;
-    if (typeof type !== "string" || !RELAYABLE_FRAME_MESSAGES.has(type)) return null;
-    return data.payload;
-  }
-
   /** Re-send activation to the current target (the side panel asks when
    *  it hasn't heard from a frame). Returns whether one is set. */
   repingAnnotate(): boolean {
@@ -482,7 +433,7 @@ class DevicesPageState {
     try {
       this.iframeEls
         .get(id)
-        ?.contentWindow?.postMessage({ type: "pinta-annotate", on }, origin);
+        ?.contentWindow?.postMessage({ type: "pinta-annotate", on, token: id }, origin);
     } catch {
       // frame detached — ignore
     }
@@ -537,14 +488,20 @@ class DevicesPageState {
     if (this.state.sync || this.annotateFrameId) this.pingFrames();
   }
 
-  /** Activate the nav reporters. The ping is harmless and idempotent
-   *  (a started reporter ignores repeats), so a short interval covers
-   *  every timing race: content script not yet injected at load-event
-   *  time, frames added later, reloads. */
-  /** Ping while anything needs it: nav sync, or an annotating frame. */
+  /** Ping while anything needs it: nav sync, or an annotating frame. The
+   *  ping activates the nav reporters; it's harmless and idempotent (a
+   *  started reporter ignores repeats), so a short interval covers every
+   *  timing race: content script not yet injected at load-event time,
+   *  frames added later, reloads. */
   private syncPinging(): void {
-    if (this.state.sync || this.annotateFrameId) this.startPinging();
-    else this.stopPinging();
+    if (this.state.sync || this.annotateFrameId) {
+      // Sync off but still pinging for an annotating frame (which no longer
+      // re-starts reporters): stop every reporter's poll now.
+      if (!this.state.sync) this.postNavStop();
+      this.startPinging();
+    } else {
+      this.stopPinging(); // posts pinta-nav-stop once
+    }
   }
 
   private startPinging(): void {
@@ -556,6 +513,20 @@ class DevicesPageState {
   private stopPinging(): void {
     if (this.pingTimer) clearInterval(this.pingTimer);
     this.pingTimer = null;
+    if (!this.state.sync) this.postNavStop();
+  }
+
+  /** Tell every frame's nav reporter to stop polling (nav-reporter.ts). */
+  private postNavStop(): void {
+    for (const [id, el] of this.iframeEls) {
+      const origin = this.expectedOrigin(id);
+      if (!origin) continue;
+      try {
+        el.contentWindow?.postMessage({ type: "pinta-nav-stop" }, origin);
+      } catch {
+        // frame detached — ignore
+      }
+    }
   }
 
   private pingFrames(): void {
@@ -567,7 +538,7 @@ class DevicesPageState {
           el.contentWindow?.postMessage({ type: "pinta-nav-start" }, origin);
         }
         if (this.annotateFrameId === id) {
-          el.contentWindow?.postMessage({ type: "pinta-annotate", on: true }, origin);
+          el.contentWindow?.postMessage({ type: "pinta-annotate", on: true, token: id }, origin);
         }
       } catch {
         // frame detached mid-iteration — ignore

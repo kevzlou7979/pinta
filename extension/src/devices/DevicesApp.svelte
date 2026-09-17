@@ -13,6 +13,7 @@
     modelsForGroup,
     type DeviceGroup,
   } from "../lib/devices.js";
+  import { isDirectSubframeSender, parseAnnotateAck } from "../lib/devices-frame.js";
 
   let addModelId = $state("iphone-16-pro");
   let customW = $state(480);
@@ -43,20 +44,11 @@
       .catch(() => {
         myTabId = null;
       });
+    // Window messages from frames are nav reports only. Nothing the side
+    // panel needs is relayed through this page: frames talk to the panel
+    // over chrome.runtime and the panel answers with a frame-targeted
+    // chrome.tabs.sendMessage (see lib/devices-frame.ts).
     const onMsg = (e: MessageEvent): void => {
-      if (devices.handleAnnotateAck(e)) return;
-      const out = devices.readFrameOut(e);
-      if (out) {
-        // Forward the frame's message to the side panel, tagged with this
-        // tab so the panel can treat it as coming from the device frame.
-        void tabIdReady.then(() => {
-          if (myTabId == null) return;
-          void chrome.runtime
-            .sendMessage({ type: "devices.frame-out", tabId: myTabId, payload: out })
-            .catch(() => {});
-        });
-        return;
-      }
       devices.handleNavMessage(e);
     };
     window.addEventListener("message", onMsg);
@@ -66,15 +58,20 @@
       sendResponse: (r: unknown) => void,
     ): boolean | undefined => {
       if (sender.id !== chrome.runtime.id) return;
+      // A device frame's overlay confirming activation — accepted only
+      // straight from a content script in a sub-frame of THIS tab.
+      const ack = parseAnnotateAck(msg);
+      if (ack) {
+        if (isDirectSubframeSender(sender, chrome.runtime.id, myTabId)) {
+          devices.handleAnnotateAck(ack.token, ack.on);
+        }
+        return;
+      }
       const m = msg as { type?: string; tabId?: number; payload?: unknown } | null;
       if (m?.tabId !== myTabId) return;
       if (m.type === "devices.annotate-frame-rect") {
         void devices.annotateFrameRect().then((rect) => sendResponse({ rect }));
         return true;
-      }
-      if (m.type === "devices.relay") {
-        sendResponse({ delivered: devices.relayToAnnotateFrame(m.payload) });
-        return;
       }
       if (m.type === "devices.reping-annotate") {
         // The panel didn't hear from a frame — re-activate the current

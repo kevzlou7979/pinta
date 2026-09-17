@@ -14,3 +14,6 @@ build/
 
 # Vercel
 .vercel
+
+# /work-task pipeline state (local only)
+.claude/work-task/

@@ -104,9 +104,9 @@ For the architectural design behind each item, see
 
 ### Changed
 
-- **Side panel loads faster.** Module tabs and the zip library load on
-  demand, so the side panel's initial script drops from ~186 KB to ~58 KB
-  gzipped.
+- **Side panel loads faster.** Module tabs, chat, the code highlighter and
+  the zip library load on demand, so the JavaScript the side panel loads at
+  open drops from ~182 KB to ~139 KB gzipped.
 - **Screenshots are lighter.** Full-page capture returns only what the
   caller needs (the stitched image for submit, slices for export), is
   capped at 16,384 px / 60M px² and 18 s (a partial shot is flagged
@@ -115,8 +115,7 @@ For the architectural design behind each item, see
 - **Leaner agent runs.** The skill's read budgets shrink (Design Variants
   ~30 files / 150 KB; AuditFlow grep-first, per-category caps), locale
   checks read keys only, the Fix differences payload is capped per string,
-  and Refine no longer repeats your message in its history. SKILL.md ends
-  10 lines shorter despite the new safety rules.
+  and Refine no longer repeats your message in its history.
 - **Skill: Test Pilot "Suggest tests" now has a real handler**, plus one
   table of built-in modules showing which ops can write.
 - **Accessibility audits don't penalise English-only apps.** Without an
@@ -157,11 +156,18 @@ For the architectural design behind each item, see
 - **Web pages can no longer read companion data.** Non-extension origins get
   403 on every route except a minimal `/v1/health`, and DNS-rebound hosts are
   refused.
-- **Only the trusted Pinta extension** (the Web Store id, `PINTA_EXTENSION_IDS`,
-  or the first extension that connects, pinned in
-  `.pinta/trusted-extension.json`) may open the WebSocket, install modules or
-  send code-editing ops. Switching between an unpacked and a Web Store build
-  needs that file deleted or the env var set.
+- **Only a trusted Pinta extension** may open the WebSocket, install modules
+  or send code-editing ops. Trusted = the Web Store id, `PINTA_EXTENSION_IDS`,
+  or an id you add in a terminal with `npx pinta-companion trust <id>`
+  (`untrust <id>`, `trust --list`; stored per user in
+  `~/.pinta/trusted-extensions.json`). Nothing is trusted automatically: any
+  other extension gets 403 with an `untrusted-extension` body naming that
+  command. An existing untracked `.pinta/trusted-extension.json` pin is
+  migrated once; a git-tracked one is ignored.
+- **Posted sessions can't run module ops.** `POST /v1/sessions` refuses
+  `kind: "query"` annotations and strips `modules`, `ephemeral` and claim
+  fields; the skill runs a writing op only on sessions the companion marked
+  as coming from the extension's WebSocket.
 - **Design Variants markup goes through a strict allowlist sanitizer**, and
   extension pages get a tighter Content Security Policy: agent HTML can no
   longer load remote resources, hide instructions in comments or attributes,
@@ -172,7 +178,8 @@ For the architectural design behind each item, see
 - **Skill safety rules:** git and glab calls pass untrusted text through
   files (`git commit -F`, no shell interpolation) and validate ids; every
   code-editing op runs a preflight (protected paths, no scripts / remote code
-  / new dependencies, visual CSS only for variants); the untrusted-input
+  / new dependencies, visual CSS only for variants; `.claude/`, `CLAUDE.md`,
+  `.pinta/modules/` and trust files are protected); the untrusted-input
   table covers every module, screenshots and browser pages.
 - Device-frame capture only runs from extension pages and only captures the
   active Devices tab.

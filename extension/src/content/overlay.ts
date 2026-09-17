@@ -162,14 +162,29 @@ if (!document.querySelector(HOST_TAG)) {
 
   // Devices frame: the canvas toggles which frame is the annotation target.
   // Same trust rule as nav-reporter — only our extension origin, only the
-  // parent canvas.
+  // parent canvas. The answer goes back over chrome.runtime, NOT
+  // window.postMessage: the framed page can post to its parent as this
+  // very window, so a window ack would be forgeable (see devices-frame.ts).
   if (content.inFrame) {
     const EXT_ORIGIN = new URL(chrome.runtime.getURL("")).origin;
+    const g = globalThis as { __pintaFrameToken?: string };
+    // = ANNOTATE_ACK_MESSAGE in lib/devices-frame.ts, inlined so this
+    // content script (every page) doesn't pull in that chunk.
+    const ANNOTATE_ACK = "devices.annotate-ack";
+    let token = typeof g.__pintaFrameToken === "string" ? g.__pintaFrameToken : "";
+    const ack = (on: boolean): void => {
+      if (!token) return;
+      try {
+        void chrome.runtime
+          .sendMessage({ type: ANNOTATE_ACK, on, token })
+          ?.catch(() => {});
+      } catch {
+        // extension context gone — ignore
+      }
+    };
     // Clicking "Annotate" on a device frame should highlight elements
-    // straight away. Waiting for the side panel to push a tool would put
-    // the whole feature behind a panel -> sandboxed-sub-frame message hop;
-    // arming Select here needs only the canvas message we just got. The
-    // resulting mode.changed lights up the panel's Select button.
+    // straight away, without waiting for the side panel to push a tool.
+    // The resulting mode.changed lights up the panel's Select button.
     const apply = (on: boolean): void => {
       content.frameActive = on;
       host.style.display = on ? "" : "none";
@@ -178,17 +193,14 @@ if (!document.querySelector(HOST_TAG)) {
       // it the canvas can't tell "activated" from "no Pinta in this frame"
       // (frames that were already open when the extension loaded have no
       // content script until they reload).
-      try {
-        window.parent.postMessage({ type: "pinta-annotate-ack", on }, EXT_ORIGIN);
-      } catch {
-        // parent gone — ignore
-      }
+      ack(on);
     };
     apply(content.frameActive);
     window.addEventListener("message", (e: MessageEvent) => {
       if (e.origin !== EXT_ORIGIN || e.source !== window.parent) return;
-      const d = e.data as { type?: unknown; on?: unknown } | null;
+      const d = e.data as { type?: unknown; on?: unknown; token?: unknown } | null;
       if (!d || d.type !== "pinta-annotate") return;
+      if (typeof d.token === "string" && d.token) token = d.token;
       const on = d.on === true;
       if (on !== content.frameActive) {
         apply(on);
@@ -199,11 +211,7 @@ if (!document.querySelector(HOST_TAG)) {
       // first announcement (it unmounts whenever it closes), and it can't
       // address this frame until it hears from it.
       if (on) {
-        try {
-          window.parent.postMessage({ type: "pinta-annotate-ack", on: true }, EXT_ORIGIN);
-        } catch {
-          // parent gone — ignore
-        }
+        ack(true);
         content.announceFrame();
         // Deliberately NOT re-arming a tool here. apply() already arms
         // Select the moment a frame is activated, so any idle state at this

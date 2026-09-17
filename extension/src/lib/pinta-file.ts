@@ -367,3 +367,45 @@ function mapKind(label: string): AnnotationKind {
   // element with no extra geometry, which is what we'd render anyway.
   return "select";
 }
+
+/**
+ * Annotation kinds a shared `.pinta` file may carry into a "Send to
+ * agent" submission. `query` is deliberately absent: query annotations
+ * are module-internal RPCs (Test Pilot / AuditFlow / Variants ops) that
+ * the agent executes — some of them write files — so an imported share
+ * must never be able to smuggle one in as a plain submitted session.
+ * Anything not in this list (unknown/crafted kinds) is dropped too.
+ */
+const SHAREABLE_ANNOTATION_KINDS: ReadonlySet<AnnotationKind> = new Set<AnnotationKind>([
+  "arrow",
+  "rect",
+  "circle",
+  "freehand",
+  "pin",
+  "select",
+  "image",
+  "note",
+  "move",
+  "text-insert",
+  "delete",
+]);
+
+/** True when an imported annotation is a normal, user-authored kind that
+ *  is safe to forward to the agent. */
+export function isShareableAnnotation(a: Pick<Annotation, "kind"> | null | undefined): boolean {
+  return !!a && typeof a.kind === "string" && SHAREABLE_ANNOTATION_KINDS.has(a.kind);
+}
+
+/**
+ * Filter an imported share's annotations down to the kinds safe to post
+ * to the companion. Returns the kept annotations plus how many were
+ * dropped so the caller can explain an empty result.
+ */
+export function filterShareableAnnotations(annotations: readonly Annotation[] | null | undefined): {
+  kept: Annotation[];
+  dropped: number;
+} {
+  const list = Array.isArray(annotations) ? annotations : [];
+  const kept = list.filter((a) => isShareableAnnotation(a));
+  return { kept, dropped: list.length - kept.length };
+}

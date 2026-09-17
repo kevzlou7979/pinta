@@ -14,7 +14,12 @@ import { attachWebSocket, broadcastAll } from "./ws.js";
 import { startWatcher, type WatchEvent } from "./watcher.js";
 import { registerEntry, unregister, type RegistryEntry } from "./registry.js";
 import { readProjectConfig } from "./project-config.js";
-import { ExtensionTrust } from "./security.js";
+import {
+  ExtensionTrust,
+  defaultUserTrustStorePath,
+  migrateLegacyPin,
+} from "./security.js";
+import { runTrustCommand } from "./trust-cli.js";
 
 // Bundled by esbuild — declared at build time. See build.mjs.
 declare const __PINTA_VERSION__: string;
@@ -69,6 +74,9 @@ function printHelp(): void {
       "  pinta-companion [--project <path>] [--port 7878] [--verbose]",
       "  pinta-companion <project_path>",
       "  pinta-companion install-skill        install the /pinta Claude Code skill",
+      "  pinta-companion trust <extension-id> trust a Pinta build (e.g. an unpacked dev build)",
+      "  pinta-companion untrust <extension-id>",
+      "  pinta-companion trust --list         list trusted extension ids",
       "",
       "Defaults:",
       "  --project  cwd",
@@ -150,6 +158,12 @@ async function main(): Promise<void> {
     installSkill();
     return;
   }
+  if (rawArgs[0] === "trust" || rawArgs[0] === "untrust") {
+    const { code, out } = runTrustCommand(rawArgs);
+    (code === 0 ? process.stdout : process.stderr).write(out);
+    process.exitCode = code;
+    return;
+  }
 
   const args = parseArgs(rawArgs);
   const log = args.verbose
@@ -173,12 +187,14 @@ async function main(): Promise<void> {
   // Chrome notifications while the side panel (and its WS) is closed.
   const watchEvents: WatchEvent[] = [];
 
-  // One trust instance for HTTP + WS so the first-connect pin is shared.
-  // Its messages (pinned / refused extension) always print — they tell
-  // the user how to recover, so they can't hide behind --verbose.
-  const trust = new ExtensionTrust(args.projectRoot, {
-    log: (msg) => process.stderr.write(`[pinta] ${msg}\n`),
-  });
+  // One trust instance for HTTP + WS. Its messages (migrated / refused
+  // extension) always print — they tell the user how to recover, so they
+  // can't hide behind --verbose.
+  const trustLog = (msg: string) => process.stderr.write(`[pinta] ${msg}\n`);
+  // Carry an old untracked per-project trust-on-first-use pin into the
+  // per-user store once, so an existing unpacked dev build keeps working.
+  migrateLegacyPin(args.projectRoot, defaultUserTrustStorePath(), trustLog);
+  const trust = new ExtensionTrust(args.projectRoot, { log: trustLog });
 
   const { port, server } = await startServer({
     port: args.port,

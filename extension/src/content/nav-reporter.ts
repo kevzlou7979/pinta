@@ -32,7 +32,7 @@ function overlayModuleUrl(): string | null {
 
 window.addEventListener("message", (e: MessageEvent) => {
   if (e.origin !== EXT_ORIGIN || e.source !== window.parent) return;
-  const data = e.data as { type?: unknown; on?: unknown } | null;
+  const data = e.data as { type?: unknown; on?: unknown; token?: unknown } | null;
   if (data?.type === "pinta-annotate") {
     // First activation loads the overlay; later on/off toggles are handled
     // by the overlay's own listener (overlay.ts).
@@ -43,29 +43,46 @@ window.addEventListener("message", (e: MessageEvent) => {
       return;
     }
     overlayRequested = true;
-    (globalThis as { __pintaFrameAnnotate?: boolean }).__pintaFrameAnnotate = true;
+    const g = globalThis as { __pintaFrameAnnotate?: boolean; __pintaFrameToken?: string };
+    g.__pintaFrameAnnotate = true;
+    // The canvas's id for this frame — the overlay echoes it in its runtime ack.
+    g.__pintaFrameToken = typeof data.token === "string" ? data.token : "";
     import(/* @vite-ignore */ url).catch((err: unknown) => {
       overlayRequested = false;
       console.error("[pinta] couldn't load the annotate overlay in this frame", err);
     });
     return;
   }
+  if (data?.type === "pinta-nav-stop") {
+    stopReporting();
+    return;
+  }
   if (!data || data.type !== "pinta-nav-start") return;
   // Only meaningful inside a frame whose parent is the canvas page.
   if (window.top === window.self || started) return;
   started = true;
-
-  let last = "";
-  const report = (): void => {
-    if (location.href === last) return;
-    last = location.href;
-    window.parent.postMessage(
-      { type: "pinta-nav", url: location.href },
-      EXT_ORIGIN,
-    );
-  };
+  lastReported = "";
   window.addEventListener("popstate", report);
   window.addEventListener("hashchange", report);
-  setInterval(report, 600);
+  pollTimer = setInterval(report, 600);
   report();
 });
+
+let lastReported = "";
+let pollTimer: ReturnType<typeof setInterval> | null = null;
+
+function report(): void {
+  if (location.href === lastReported) return;
+  lastReported = location.href;
+  window.parent.postMessage({ type: "pinta-nav", url: location.href }, EXT_ORIGIN);
+}
+
+/** Sync turned off on the canvas: stop polling until the next start ping. */
+function stopReporting(): void {
+  if (!started) return;
+  started = false;
+  if (pollTimer) clearInterval(pollTimer);
+  pollTimer = null;
+  window.removeEventListener("popstate", report);
+  window.removeEventListener("hashchange", report);
+}

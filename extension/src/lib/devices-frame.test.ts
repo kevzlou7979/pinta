@@ -3,8 +3,10 @@ import {
   devicesCanvasTargetUrl,
   frameCaptureGeometry,
   isDevicesCanvasUrl,
-  NEVER_RELAYABLE_FRAME_MESSAGES,
-  RELAYABLE_FRAME_MESSAGES,
+  ANNOTATE_ACK_MESSAGE,
+  deviceFrameReadyUrl,
+  isDirectSubframeSender,
+  parseAnnotateAck,
 } from "./devices-frame.js";
 import * as devices from "./devices.js";
 
@@ -66,26 +68,56 @@ describe("frameCaptureGeometry", () => {
   });
 });
 
-describe("canvas relay allowlist", () => {
-  // The Devices canvas relay is a page -> extension hop: a framed page's
-  // MAIN world shares the contentWindow identity AND the origin of the
-  // overlay's isolated world, so no source/origin check can tell them
-  // apart. Keeping side-effectful messages off this path is the defence,
-  // so the allowlist is a security boundary, not a convenience list.
-  it("never carries a message that reaches the agent", () => {
-    for (const type of NEVER_RELAYABLE_FRAME_MESSAGES) {
-      expect(RELAYABLE_FRAME_MESSAGES.has(type)).toBe(false);
-    }
+describe("device-frame messaging gates", () => {
+  const ext = "abcdefghijklmnop";
+  const direct = { id: ext, frameId: 3, url: "http://localhost:5173/a", tab: { id: 7 } };
+
+  it("accepts only a direct sub-frame content-script sender of the canvas tab", () => {
+    expect(isDirectSubframeSender(direct, ext, 7)).toBe(true);
+    // relayed copy (no frameId), top frame, bad ids, other tab / extension
+    expect(isDirectSubframeSender({ ...direct, frameId: undefined }, ext, 7)).toBe(false);
+    expect(isDirectSubframeSender({ ...direct, frameId: 0 }, ext, 7)).toBe(false);
+    expect(isDirectSubframeSender({ ...direct, frameId: -1 }, ext, 7)).toBe(false);
+    expect(isDirectSubframeSender({ ...direct, frameId: 1.5 }, ext, 7)).toBe(false);
+    expect(isDirectSubframeSender(direct, ext, 8)).toBe(false);
+    expect(isDirectSubframeSender(direct, ext, null)).toBe(false);
+    expect(isDirectSubframeSender({ ...direct, tab: null }, ext, 7)).toBe(false);
+    expect(isDirectSubframeSender({ ...direct, id: "other" }, ext, 7)).toBe(false);
+    expect(isDirectSubframeSender(direct, "", 7)).toBe(false);
+    expect(isDirectSubframeSender(null, ext, 7)).toBe(false);
+    expect(isDirectSubframeSender({ ...direct, id: undefined }, ext, 7)).toBe(false);
+    expect(isDirectSubframeSender({ ...direct, frameId: "3" as unknown as number }, ext, 7)).toBe(false);
+    expect(isDirectSubframeSender({ ...direct, tab: {} }, ext, 7)).toBe(false);
   });
 
-  it("carries the UI-state messages the panel needs from a device frame", () => {
-    for (const type of ["overlay.ready", "mode.changed", "frame.inactive"]) {
-      expect(RELAYABLE_FRAME_MESSAGES.has(type)).toBe(true);
-    }
+  it("adopts an overlay.ready URL only when http(s) and on the frame's real origin", () => {
+    const frame = "http://localhost:5173/course/1";
+    expect(deviceFrameReadyUrl("http://localhost:5173/course/2#x", frame)).toBe("http://localhost:5173/course/2#x");
+    expect(deviceFrameReadyUrl("https://evil.example/", frame)).toBe("");
+    expect(deviceFrameReadyUrl("http://localhost:5174/", frame)).toBe("");
+    expect(deviceFrameReadyUrl("javascript:alert(1)", frame)).toBe("");
+    expect(deviceFrameReadyUrl("chrome-extension://abc/x.html", "chrome-extension://abc/y.html")).toBe("");
+    expect(deviceFrameReadyUrl("http://localhost:5173/", "file:///C:/x.html")).toBe("");
+    expect(deviceFrameReadyUrl("http://localhost:5173/", undefined)).toBe("");
+    expect(deviceFrameReadyUrl(42, frame)).toBe("");
+    expect(deviceFrameReadyUrl("http://", frame)).toBe("");
+    // Userinfo / scheme tricks resolve to a different real origin.
+    expect(deviceFrameReadyUrl("http://localhost:5173@evil.example/", frame)).toBe("");
+    expect(deviceFrameReadyUrl("https://localhost:5173/", frame)).toBe("");
+    expect(deviceFrameReadyUrl("data:text/html,http://localhost:5173/", frame)).toBe("");
+    expect(deviceFrameReadyUrl(" http://localhost:5173/", frame)).toBe("");
+    // A forged claim with no browser-reported sender url is refused.
+    expect(deviceFrameReadyUrl("http://localhost:5173/", "")).toBe("");
   });
 
-  it("is closed — an unknown message type is refused by default", () => {
-    expect(RELAYABLE_FRAME_MESSAGES.has("session.submit")).toBe(false);
-    expect(RELAYABLE_FRAME_MESSAGES.has("")).toBe(false);
+  it("parses only well-formed annotate acks", () => {
+    // content/overlay.ts inlines this literal (keeps the chunk out of every page).
+    expect(ANNOTATE_ACK_MESSAGE).toBe("devices.annotate-ack");
+    expect(parseAnnotateAck({ type: ANNOTATE_ACK_MESSAGE, token: "f1", on: true })).toEqual({ token: "f1", on: true });
+    expect(parseAnnotateAck({ type: ANNOTATE_ACK_MESSAGE, token: "f1", on: false })).toEqual({ token: "f1", on: false });
+    expect(parseAnnotateAck({ type: "pinta-annotate-ack", token: "f1", on: true })).toBeNull();
+    expect(parseAnnotateAck({ type: ANNOTATE_ACK_MESSAGE, token: "", on: true })).toBeNull();
+    expect(parseAnnotateAck({ type: ANNOTATE_ACK_MESSAGE, token: "f1", on: "true" })).toBeNull();
+    expect(parseAnnotateAck(null)).toBeNull();
   });
 });

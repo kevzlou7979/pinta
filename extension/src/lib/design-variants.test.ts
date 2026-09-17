@@ -22,6 +22,7 @@ import {
   SRCDOC_CSP,
   mountShadowCard,
   locateAppliedElement,
+  boundedNormText,
   LOCATE_MAX_CANDIDATES,
   makeDefaultStyleOf,
   DEFAULT_DEVICE_PRESETS,
@@ -811,6 +812,31 @@ describe("post-apply check hardening", () => {
     const text = "In progress You have started this course";
     expect(locateAppliedElement(document, "section.gone > div", text, { allowGlobal: false })).toBeNull();
     expect(locateAppliedElement(document, "section.gone > div", text)?.className).toBe("hero");
+  });
+
+  it("reads only as much text as the length test needs", () => {
+    const norm = (el: Element) => (el.textContent ?? "").replace(/\s+/g, " ").trim();
+    document.body.innerHTML =
+      "<div id='a'>  Hello \n <b>big</b>\t<i> </i>  world <span>again</span>  </div>";
+    const a = document.getElementById("a")!;
+    // Fits: identical to the full normalized text (runs across nodes collapse).
+    expect(boundedNormText(a, 100)).toBe(norm(a));
+    expect(boundedNormText(a, norm(a).length)).toBe(norm(a));
+    // Too long: a prefix just past the limit, never the whole text.
+    const big = document.createElement("div");
+    big.innerHTML = Array.from({ length: 2000 }, (_, i) => `<p> row ${i}   text </p>`).join("");
+    document.body.append(big);
+    const full = norm(big);
+    const cut = boundedNormText(big, 40);
+    expect(cut.length).toBeGreaterThan(40);
+    expect(cut.length).toBeLessThan(full.length / 10);
+    expect(full.startsWith(cut)).toBe(true);
+    // One huge text node is also read in windows.
+    const huge = document.createElement("div");
+    huge.textContent = "word  ".repeat(50_000);
+    expect(boundedNormText(huge, 30).length).toBeLessThan(600);
+    expect(norm(huge).startsWith(boundedNormText(huge, 30))).toBe(true);
+    expect(boundedNormText(document.createElement("div"), 5)).toBe("");
   });
 
   it("bounds the page walk", () => {

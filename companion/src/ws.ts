@@ -20,7 +20,7 @@ export type AttachOptions = {
   server: HttpServer;
   store: SessionStore;
   log?: (msg: string) => void;
-  /** Shared with startServer so a WS pin is honored by HTTP. */
+  /** Shared with startServer so HTTP and WS agree on which extensions are trusted. */
   trust?: ExtensionTrust;
   /**
    * Accept WS upgrades that carry no Origin header. Nothing legitimate
@@ -58,13 +58,19 @@ export type WsOriginVerdict =
  * we accept only:
  *
  *  - the trusted Pinta extension (Web Store id, $PINTA_EXTENSION_IDS, or
- *    the first extension ever to connect — pinned trust-on-first-use)
+ *    an id the user added with `pinta-companion trust <id>`)
  *  - no Origin header, only when explicitly opted in (untrusted socket)
  *
  * Anything else (web pages, other extensions, a rebound Host) is refused.
  * Without this, a page or rogue extension could open ws://127.0.0.1:7878/
  * and fire `session.submit` / writing module ops the agent would run
- * with no user click. Exported for unit tests.
+ * with no user click.
+ *
+ * Scope: Origin is set by the browser, so this only separates browser
+ * contexts (pages, other extensions) from Pinta. A local process can send
+ * any Origin header it likes — it is not a boundary against local code,
+ * which can already read and write the project anyway. Exported for unit
+ * tests.
  */
 export function verifyWsOrigin(
   req: Pick<IncomingMessage, "headers">,
@@ -82,7 +88,7 @@ export function verifyWsOrigin(
   }
   const id = extensionIdFromOrigin(origin);
   if (!id) return { ok: false, reason: `forbidden origin ${origin}` };
-  if (!trust.pinOrCheck(id)) {
+  if (!trust.verify(id)) {
     return { ok: false, reason: `untrusted extension ${id}` };
   }
   return { ok: true, trusted: true };
@@ -371,7 +377,8 @@ export async function dispatch(
       // submitted with the module. The agent picks it up like any
       // other submitted session and responds via mark_session_done.
       // Writing ops (edit / commit / file issues) run with no further
-      // confirmation, so only the trusted extension may send them.
+      // confirmation, so only the trusted extension may send them (a
+      // browser-context check — see verifyWsOrigin for its limits).
       if (!ctx.trusted && isWritingQueryComment(msg.queryComment)) {
         throw new Error("writing ops are only accepted from the Pinta extension");
       }
@@ -383,6 +390,10 @@ export async function dispatch(
         url: msg.url,
         ephemeral: true,
       });
+      // Server-only provenance marker: the skill runs a writing op only
+      // when it is present. POST /v1/sessions always strips it, so only
+      // a trusted extension socket can produce it.
+      if (ctx.trusted) session.origin = "ws-query";
       const queryAnnotation: Annotation = {
         id: randomUUID(),
         createdAt: Date.now(),

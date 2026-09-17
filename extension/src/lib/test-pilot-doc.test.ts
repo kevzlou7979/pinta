@@ -317,8 +317,8 @@ describe("composeTesterSheetMarkdown + parseTestDocMarkdown round-trip", () => {
 });
 
 describe("composeTesterSheetDocx", () => {
-  it("produces a non-empty zip with a PK header", () => {
-    const bytes = composeTesterSheetDocx(
+  it("produces a non-empty zip with a PK header", async () => {
+    const bytes = await composeTesterSheetDocx(
       makeCatalog({
         title: "Smoke",
         sections: [
@@ -339,7 +339,7 @@ describe("composeTesterSheetDocx", () => {
     expect(bytes[3]).toBe(0x04);
   });
 
-  it("strips illegal XML control chars so later sections aren't truncated", () => {
+  it("strips illegal XML control chars so later sections aren't truncated", async () => {
     // A form-feed / vertical-tab in an early section's text used to leak
     // into document.xml, making it not well-formed — Word rendered up to
     // that byte and silently dropped every later section. Build the bad
@@ -364,7 +364,7 @@ describe("composeTesterSheetDocx", () => {
         { title: "Section Three", tests: [{ id: "S3-1", test: "c", expected: "d", status: "untested" }] },
       ],
     });
-    const xml = docxText(composeTesterSheetDocx(cat));
+    const xml = docxText(await composeTesterSheetDocx(cat));
     // No illegal control char survived into the OOXML.
     const illegal = [...xml].filter((c) => {
       const n = c.charCodeAt(0);
@@ -377,14 +377,14 @@ describe("composeTesterSheetDocx", () => {
     expect(xml).toContain("Section Three");
   });
 
-  it("keeps valid astral characters (emoji) intact", () => {
+  it("keeps valid astral characters (emoji) intact", async () => {
     const cat = makeCatalog({
       title: "Emoji",
       sections: [
         { title: "S", tests: [{ id: "E-1", test: "rocket 🚀 ok", expected: "✓", status: "untested" }] },
       ],
     });
-    const xml = docxText(composeTesterSheetDocx(cat));
+    const xml = docxText(await composeTesterSheetDocx(cat));
     expect(xml).toContain("🚀");
     expect(xml).toContain("✓");
   });
@@ -415,14 +415,14 @@ describe("composeResultsDocx", () => {
     ],
   });
 
-  it("produces a valid .docx zip (PK header)", () => {
-    const bytes = composeResultsDocx(cat, "2026-06-04");
+  it("produces a valid .docx zip (PK header)", async () => {
+    const bytes = await composeResultsDocx(cat, "2026-06-04");
     expect(bytes.length).toBeGreaterThan(200);
     expect([bytes[0], bytes[1], bytes[2], bytes[3]]).toEqual([0x50, 0x4b, 0x03, 0x04]);
   });
 
-  it("renders the results title, meta tally, and filled Result marks", () => {
-    const xml = docxText(composeResultsDocx(cat, "2026-06-04"));
+  it("renders the results title, meta tally, and filled Result marks", async () => {
+    const xml = docxText(await composeResultsDocx(cat, "2026-06-04"));
     expect(xml).toContain("Test Pilot results — Checkout UAT");
     expect(xml).toContain("Run on 2026-06-04");
     expect(xml).toContain("by QA");
@@ -433,8 +433,8 @@ describe("composeResultsDocx", () => {
     expect(xml).toContain("⚠ Untested");
   });
 
-  it("includes a Conversations block only for rows with a chat thread", () => {
-    const xml = docxText(composeResultsDocx(cat, "2026-06-04"));
+  it("includes a Conversations block only for rows with a chat thread", async () => {
+    const xml = docxText(await composeResultsDocx(cat, "2026-06-04"));
     expect(xml).toContain("Conversation — C-2");
     expect(xml).toContain("tester: ");
     expect(xml).toContain("agent: ");

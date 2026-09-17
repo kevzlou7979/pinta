@@ -511,6 +511,13 @@
         <a href="https://github.com/kevzlou7979/pinta" target="_blank" rel="noopener">GitHub repo</a>
         if you want the unreleased build.
       </p>
+      <p>
+        An unpacked build has its own extension id, so the companion refuses it
+        until you trust it once, from a terminal (copy the id from
+        <code>chrome://extensions</code>):
+      </p>
+      <pre><code>npx pinta-companion trust &lt;extension-id&gt;
+# undo: npx pinta-companion untrust &lt;extension-id&gt;   list: npx pinta-companion trust --list</code></pre>
 
       <h3>2. Start the companion in your project</h3>
       <pre><code>npx pinta-companion .
@@ -797,7 +804,8 @@ changed, and hit Submit. I'll wait."</code></pre>
       <p>
         See your running app on many devices at once. Enable it in Settings,
         open the <strong>Devices</strong> tab, and launch the canvas — a
-        full browser tab of live, clickable device frames. No agent involved.
+        full browser tab of live, clickable device frames. The canvas needs no
+        agent; annotations you make inside a device go to the agent like any other.
       </p>
       <ul>
         <li>Add phones, tablets, laptops and desktops (or a whole group), or a <strong>Custom size</strong>. Rotate, zoom, expand one frame, drag frames anywhere; <strong>Rearrange</strong> tidies the canvas.</li>
@@ -959,6 +967,16 @@ Terminal 4: /pinta --chat         # Just-Ask + global chat</code></pre>
         If it complains about another companion already on the port,
         check <code>~/.pinta/registry.json</code> — stale entries from
         crashed companions can linger.
+      </p>
+
+      <h3>Side panel says the companion refuses this extension</h3>
+      <p>
+        The companion only talks to the Web Store build, ids in
+        <code>PINTA_EXTENSION_IDS</code>, and ids you trusted with
+        <code>npx pinta-companion trust &lt;extension-id&gt;</code> (stored in
+        <code>~/.pinta/trusted-extensions.json</code>). Nothing is trusted
+        automatically, so another extension can't pose as Pinta. Run the
+        trust command only for a build you loaded yourself.
       </p>
 
       <h3>Companion is running but the agent doesn't pick up sessions</h3>

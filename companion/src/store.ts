@@ -585,6 +585,13 @@ export class SessionStore {
    * posted session can't skip the plan-confirm gate), and any
    * client-supplied screenshot path is dropped — only a screenshot we
    * extract ourselves may set it.
+   *
+   * Module queries (and so writing ops) only arrive over the trusted
+   * extension's WebSocket (`module.query.submit`), so a posted
+   * `kind: "query"` annotation is refused outright, and `modules`,
+   * `ephemeral`, `claimedBy`/`claimedAt` and the server-only `origin`
+   * marker are stripped — an HTTP caller can't dress a session up as a
+   * module run.
    */
   async ingestSession(session: Session): Promise<Session> {
     if (!session || typeof session !== "object") {
@@ -593,6 +600,11 @@ export class SessionStore {
     assertSafeSessionId(session.id);
     if (!Array.isArray(session.annotations)) {
       throw new BadRequestError("session.annotations must be an array");
+    }
+    if (session.annotations.some((a) => (a as { kind?: unknown } | null)?.kind === "query")) {
+      throw new BadRequestError(
+        "query annotations are not accepted over HTTP (module queries must come from the Pinta extension)",
+      );
     }
     const shot = session.fullPageScreenshot as unknown;
     if (shot !== undefined && (typeof shot !== "string" || (shot !== "" && !parseImageDataUrl(shot)))) {
@@ -604,6 +616,11 @@ export class SessionStore {
       autoApply: false,
     };
     delete stored.fullPageScreenshotPath;
+    delete stored.modules;
+    delete stored.origin;
+    delete stored.claimedBy;
+    delete stored.claimedAt;
+    delete (stored as { ephemeral?: unknown }).ephemeral;
     await this.extractScreenshot(stored);
     this.sessions.set(stored.id, stored);
     if (stored.status === "drafting") this.activeId = stored.id;

@@ -1,6 +1,7 @@
 <script lang="ts">
   import { onMount, onDestroy } from "svelte";
   import { app } from "../lib/state.svelte.js";
+  import { companionFetch } from "../lib/companion-http.js";
   import { confirmDialog } from "../lib/confirm.svelte.js";
 
   // `open` is $bindable so the popover can be driven from outside (the
@@ -60,7 +61,7 @@
         summaries = [];
         error = null;
       } else {
-        const res = await fetch(`${base}/v1/sessions`);
+        const res = await companionFetch(`${base}/v1/sessions`);
         if (!res.ok) throw new Error(`HTTP ${res.status}`);
         summaries = (await res.json()) as Summary[];
         error = null;
