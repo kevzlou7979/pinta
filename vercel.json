@@ -4,5 +4,5 @@
   "installCommand": "echo \"static docs site: no install\"",
   "buildCommand": "echo \"static docs site: no build\"",
   "outputDirectory": "docs",
-  "ignoreCommand": "git diff --quiet ${VERCEL_GIT_PREVIOUS_SHA:-HEAD^} HEAD -- docs/"
+  "ignoreCommand": "bash scripts/vercel-ignore.sh"
 }
