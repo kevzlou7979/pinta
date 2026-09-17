@@ -812,9 +812,9 @@ on `module.id`.
 >
 > **Built-in modules — the canonical list** (match `op` when unsure).
 > Query sessions are read + emit only, EXCEPT Writing ops: run one only if
-> `session.origin` is `"ws-query"` (companion-set; HTTP posts never carry
-> it) AND `modules[0].id` owns the op, else `mark_session_error`; then §3.6
-> preflight. Per-submit modules skip this gate.
+> `modules[0].id` owns the op AND `session.origin` is `"ws-query"` (set by
+> companion ≥0.9.0; skip only this check if `/v1/health` `version` is <0.9.0),
+> else `mark_session_error`; then §3.6 preflight. Per-submit modules skip it.
 >
 > | Module id | § | Read-only ops | Writing ops (may write) |
 > |---|---|---|---|
