@@ -4,9 +4,24 @@ Notable changes shipped on top of the original V1 pipeline. Newest first.
 For the architectural design behind each item, see
 [`spec/SPEC.md`](spec/SPEC.md).
 
-## Unreleased
+## 0.9.0 — 2026-09-17
 
 ### Added
+
+- **Design Variants module (Phase 22).** Pick an element (or the whole
+  page) and the agent returns 1–5 on-system alternatives as preview cards
+  at any device width. Preview one live on the page, refine it in chat,
+  and **Use this** applies it to source — then an automatic match check
+  compares page and card (details below). Enable in Settings → Design
+  Variants.
+- **Code Review module (Phase 23).** Plays your uncommitted changes (or the
+  last commit) as a review deck — one card per logical change, Pass / Fail
+  with keyboard shortcuts, a streak and a grade. **Learn** opens a chat that
+  explains the change; failed cards get a one-click agent fix.
+- **Report: invoice-ready summary export.** Day headings use the full date
+  ("August 26 2026"), identical lines collapse into one `×N` entry, work is
+  balanced across days so each stays under PayPal's 1000-character line
+  limit, and weekend work folds into the adjacent weekday for every range.
 
 - **AuditFlow: localization bugs in the Accessibility category.** Eight
   i18n checks join the built-in Accessibility audit (SKILL §7.11):
@@ -111,7 +126,9 @@ For the architectural design behind each item, see
   caller needs (the stitched image for submit, slices for export), is
   capped at 16,384 px / 60M px² and 18 s (a partial shot is flagged
   `capped`), and composites and exported images are JPEG. Device-frame
-  shots are never upscaled (long edge ≤ 1568 px).
+  shots are never upscaled (long edge ≤ 1568 px). The screenshot sent to
+  the agent crops to the annotated part of a tall page before its 1568 px
+  cap, so text stays readable; exported images keep full size.
 - **Leaner agent runs.** The skill's read budgets shrink (Design Variants
   ~30 files / 150 KB; AuditFlow grep-first, per-category caps), locale
   checks read keys only, the Fix differences payload is capped per string,
@@ -123,12 +140,20 @@ For the architectural design behind each item, see
 
 ### Fixed
 
-- **Annotating a device frame no longer depends on tab messaging.** The
-  side panel hands tool/annotation messages to the Devices canvas, which
-  posts them straight into the annotating frame (the same hop activation
-  uses), and the frame mirrors its own messages back the same way. The
-  frame also re-announces itself on every activation ping, and the panel
-  shows whether it is connected to a device frame.
+- **Annotating a device frame connects reliably.** The panel reaches the
+  annotating frame directly by frame id over extension messaging, the frame
+  re-announces itself on every activation ping, and the panel shows whether
+  it is connected to a device frame.
+- **Voice dictation keeps working** after Chrome restarts the extension's
+  service worker (the stale offscreen recorder is recycled).
+- **Report tab no longer crashes** when a run carries duplicate dates or
+  item ids.
+- **Pasting a small GIF or WebP** as a Design Variants reference image
+  works; Escape closes chat sheets; the Test Pilot Export menu stays on
+  screen in a narrow panel; a failed Word export or chat load shows an
+  error instead of failing silently.
+- **Standalone header has a Rescan button**, so a dismissed notice or a
+  late-starting companion is one click away.
 - **Devices nav sync and device annotation load reliably.** Content scripts
   that crxjs emits as classic scripts no longer bundle Vite's preload helper
   (`import.meta` parse error that disabled nav sync and frame annotation).
@@ -143,6 +168,7 @@ For the architectural design behind each item, see
 - **Submit options stick.** Auto-apply, Include full-page screenshot, Just Ask
   and per-submit module ticks (e.g. Create GitLab issues) are remembered across
   submits and panel reloads instead of resetting after every batch.
+  Auto-apply now starts **off** for new installs (your saved choice is kept).
 - **Side panel** removes its tab listeners on close and skips the companion
   port scan when a connected catch-all companion still applies.
 - Keyboard shortcuts in Settings and the docs now list the Ctrl+Alt tool keys,
@@ -162,8 +188,17 @@ For the architectural design behind each item, see
   (`untrust <id>`, `trust --list`; stored per user in
   `~/.pinta/trusted-extensions.json`). Nothing is trusted automatically: any
   other extension gets 403 with an `untrusted-extension` body naming that
-  command. An existing untracked `.pinta/trusted-extension.json` pin is
-  migrated once; a git-tracked one is ignored.
+  command, and the side panel shows it with Copy + Retry. An existing
+  `.pinta/trusted-extension.json` pin is migrated only when git proves it
+  untracked; the trust store is written atomically and a corrupt one is
+  never overwritten.
+- **Other extensions can't read companion data.** Extension pages send no
+  `Origin` on GETs, so browser requests without one now need a per-process
+  token that only a trusted extension can get (`POST /v1/auth/token`);
+  local tools (the agent, MCP backend, CLI) are unchanged.
+- **Device frames can't read annotation data.** The Devices canvas no longer
+  relays messages through `window.postMessage`; only data-free control pings
+  cross into the page. The Pages gallery frames http(s) origins only.
 - **Posted sessions can't run module ops.** `POST /v1/sessions` refuses
   `kind: "query"` annotations and strips `modules`, `ephemeral` and claim
   fields; the skill runs a writing op only on sessions the companion marked

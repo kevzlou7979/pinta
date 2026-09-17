@@ -37,34 +37,46 @@ matching source files for you.
 
 Recent additions on top of the original V1 pipeline:
 
-**Unreleased**
+**v0.9.0 — Devices, Design Variants, Code Review + security hardening**
 
-- **Design Variants** *(unreleased)*. Pick an element (or the whole page)
+- **Design Variants** *(v0.9.0)*. Pick an element (or the whole page)
   and get 1–5 variants that stay inside your design system, as preview
   cards. Add an art direction or paste a reference screenshot; **Preview
   on page**, **Refine** in chat, then **Use this** to apply to source. A
   match check then compares the live element with the card and **Fix
   differences** sends only the gaps back. See `spec/SPEC.md` §8 Phase 22.
-- **Code Review** *(unreleased)*. A game-style review of your uncommitted
+- **Code Review** *(v0.9.0)*. A game-style review of your uncommitted
   diff (or a topic you name): one card per logical change, Pass / Fail /
   Learn, a graded run, and Fix on failed cards. See `spec/SPEC.md` §8
   Phase 23.
-- **Devices canvas** *(unreleased)*. Your running app in many live device
+- **Devices canvas** *(v0.9.0)*. Your running app in many live device
   frames in one tab — device groups and custom sizes, drag / rearrange,
   expand, and nav **Sync**. **Annotate this device** makes one frame the
   annotation target: the side panel's tools work inside it, its width
   scopes the edit to that breakpoint, and screenshots crop to the device
   viewport. See `spec/SPEC.md` §8 Phase 24.
-- **Test Pilot: Smoke / Thorough + GitLab filing** *(unreleased)*. Generate
-  a quick happy-path catalog or a thorough one with edge cases; **File
-  failed tests** files each failed row as a GitLab issue via `glab` (or
-  `.pinta/tasks.md` without GitLab). See `spec/SPEC.md` §8 Phase 12.
-- **Report: invoice-ready export** *(unreleased)*. The whole-report export
-  is a summary with one paragraph per weekday under 1000 characters, full
-  dates, duplicates collapsed, and the load balanced across days. See
-  `spec/SPEC.md` §8 Phase 16.
+- **Test Pilot, AuditFlow + Report upgrades** *(v0.9.0)*. Test Pilot
+  generates a quick **Smoke** or a **Thorough** catalog, and **File failed
+  tests** files each failed row as a GitLab issue via `glab` (or
+  `.pinta/tasks.md` without GitLab). AuditFlow's Accessibility audit adds
+  eight localization checks. Report's whole-range export is an
+  invoice-ready summary: one paragraph per weekday under 1000 characters,
+  full dates, duplicates collapsed, load balanced, no weekends.
+- **Security hardening** *(v0.9.0)*. The companion trusts nothing
+  automatically: only the Web Store build, ids in `PINTA_EXTENSION_IDS`,
+  or ids you trust once. **Loading Pinta unpacked? Run
+  `npx pinta-companion trust <extension-id>` one time** (id from
+  `chrome://extensions`; stored per user in
+  `~/.pinta/trusted-extensions.json`). Web pages can't read companion
+  data, posted sessions can't run writing ops, Design Variants markup
+  goes through a strict sanitizer under a tighter CSP, and credential-like
+  URL parameters are redacted.
+- **Faster and leaner** *(v0.9.0)*. The side panel's startup JavaScript
+  drops from ~182 KB to ~139 KB gzipped (chat, code highlighter and zip
+  load on demand), agent screenshots crop to the annotated area, and
+  Auto-apply now defaults off for new installs.
 
-**Released**
+**Earlier releases**
 
 - **Task watcher — desktop notifications for new tracker items** *(v0.8.0)*.
   An opt-in, module-scoped companion poll (`.pinta/watch.json`) fires a
@@ -345,6 +357,8 @@ then step through the resulting catalog row-by-row.
 - **Markdown rendering** in the step list — inline `` `code ``,
   fenced code blocks with Prism syntax highlighting (bash + json),
   block-quote callouts. Each fenced block has a **Copy** button.
+- **Smoke / Thorough** generation depth, and **File failed tests** as
+  GitLab issues via `glab` (`.pinta/tasks.md` fallback).
 - **Markdown export** of the whole catalog as a report with
   pass/fail/total tallies. Pipe through `pandoc results.md -o results.pdf`
   for a PDF version.
@@ -365,8 +379,9 @@ for the full design.
 ### 🛡️  AuditFlow  ·  *interactive*
 
 Lighthouse-style audits in their own side-panel tab — five built-ins
-(security, performance, accessibility, mobile, cross-browser) plus
-custom checks you define with the same markdown format.
+(security, performance, accessibility incl. eight localization checks,
+mobile, cross-browser) plus custom checks you define with the same
+markdown format.
 
 - **Per-finding "Fix with agent" edits the source in place** — a per-row
   loader, concurrent fixes, and **Fix All** on a category — instead of
@@ -386,17 +401,35 @@ never edit source. See `spec/SPEC.md` §8 Phase 14.
 
 Merged git + GitHub activity and Pinta sessions as Read-mode day cards —
 daily, weekly, 10-day sprint, or a custom range, multi-project aware.
-One-click Markdown export, per-day or whole-range. See `spec/SPEC.md`
-§8 Phase 16.
+One-click Markdown export per day, or an invoice-ready summary for the
+whole range. See `spec/SPEC.md` §8 Phase 16.
 
-### 🎨  Design Variants · 🔍  Code Review · 📱  Devices  ·  *interactive, unreleased*
+### 🎨  Design Variants  ·  *interactive*
 
-**Design Variants** proposes 1–5 on-system variants for an element or
-page and applies the one you pick, then checks the page matches the card
-(Phase 22). **Code Review** deals your diff as Pass / Fail / Learn cards
-(Phase 23). **Devices** shows your app in many live device frames, with
-nav sync and annotate-in-a-device — no agent involved (Phase 24). See
-`spec/SPEC.md` §8.
+Pick an element (or the whole page) and the agent proposes 1–5 variants
+that stay inside your design system. Steer it with an art direction or a
+pasted reference screenshot, **Preview on page**, **Refine** in chat, then
+**Use this** to apply. A match check (no agent tokens) compares the live
+element with the card; **Fix differences** sends only the gaps. Agent
+markup is sanitized before it reaches the panel or page. See
+`spec/SPEC.md` §8 Phase 22.
+
+### 🔍  Code Review  ·  *interactive*
+
+Your uncommitted diff (or the last commit, or a topic you name) as a deck
+of review cards, one per logical change. **Pass** / **Fail** / **Learn**
+with `P` / `F` / `L`; Learn opens a read-only chat; the end card grades
+the run S–D and offers **Fix** on each failed card — the only action that
+edits code. See `spec/SPEC.md` §8 Phase 23.
+
+### 📱  Devices  ·  *interactive*
+
+A full-tab canvas of live device frames — phones, tablets, laptops,
+desktops, whole groups, or a custom size. Drag, **Rearrange**, expand,
+and **Sync** navigation across frames. The canvas needs no agent;
+**Annotate** inside a device and the annotation goes to the agent scoped
+to that breakpoint, with screenshots cropped to the device viewport. See
+`spec/SPEC.md` §8 Phase 24.
 
 ### Writing your own
 
@@ -493,7 +526,7 @@ The slash command is a Claude Code **skill** — it is **not** installed by
 **B1 — npm installer (one command):**
 
 ```bash
-npx pinta-companion@0.8.2 install-skill   # writes ~/.claude/skills/pinta/
+npx pinta-companion@0.9.0 install-skill   # writes ~/.claude/skills/pinta/
 ```
 
 Then **fully restart Claude Code** (skills load at startup — `/clear` is not
@@ -709,7 +742,10 @@ endpoints respond as specified.
 
 ## Roadmap
 
-V1 covers the core loop. What's next, in priority order:
+V1 covers the core loop. Recently shipped: Phase 21 (annotation toolset +
+Drift Check, v0.7.0), Phase 20 floating toolbar (v0.8.0), and Phases 22–24
+(Design Variants, Code Review, Devices, v0.9.0). What's next, in priority
+order:
 
 - **Phase 6 — Vite source-mapping plugin.** Inject `data-source-file` /
   `data-source-line` in dev so the agent doesn't have to grep. Targets >95%

@@ -775,11 +775,17 @@
     .module--auditflow { --module-accent: #0E9F84; --module-accent-soft: rgba(14, 159, 132, 0.10); }
     .module--chat      { --module-accent: #2563EB; --module-accent-soft: rgba(37, 99, 235, 0.10); }
     .module--report    { --module-accent: #B45309; --module-accent-soft: rgba(180, 83, 9, 0.10); }
+    .module--variants  { --module-accent: #0891B2; --module-accent-soft: rgba(8, 145, 178, 0.10); }
+    .module--review    { --module-accent: #4D7C0F; --module-accent-soft: rgba(77, 124, 15, 0.10); }
+    .module--devices   { --module-accent: #475569; --module-accent-soft: rgba(71, 85, 105, 0.10); }
     [data-theme="dark"] .module--gitlab    { --module-accent: #FF9A6B; }
     [data-theme="dark"] .module--testpilot { --module-accent: #C4A3FC; }
     [data-theme="dark"] .module--auditflow { --module-accent: #5FD9BC; }
     [data-theme="dark"] .module--chat      { --module-accent: #8FB8FE; }
     [data-theme="dark"] .module--report    { --module-accent: #F0B25B; }
+    [data-theme="dark"] .module--variants  { --module-accent: #5ED3EA; }
+    [data-theme="dark"] .module--review    { --module-accent: #A8D86A; }
+    [data-theme="dark"] .module--devices   { --module-accent: #A7B4C6; }
     .module-icon {
       width: 52px; height: 52px;
       border-radius: var(--r-lg);
@@ -1277,7 +1283,7 @@
     <div class="container">
       <img class="hero-logo" src="assets/icons/icon-256.png" alt="Pinta logo" width="84" height="84" />
       <div>
-        <span class="version-chip"><span class="dot" aria-hidden="true"></span> <strong>v0.8.2</strong>&nbsp;— task watcher + floating toolbar + Free Transform</span>
+        <span class="version-chip"><span class="dot" aria-hidden="true"></span> <strong>v0.9.0</strong>&nbsp;— Devices, Design Variants, Code Review + security hardening</span>
       </div>
       <h1 class="hero-title">
         <span class="mark-wrap"><span class="mark-box" aria-hidden="true"><i class="h tl"></i><i class="h tr"></i><i class="h bl"></i><i class="h br"></i><span class="mark-pin">1</span></span>Annotate</span> your running app.<br />
@@ -1371,11 +1377,18 @@
   <section id="features">
     <div class="container">
       <div class="section-head">
-        <span class="eyebrow">What Pinta includes &middot; v0.8.2</span>
+        <span class="eyebrow">What Pinta includes &middot; v0.9.0</span>
         <h2>The whole loop, shipped.</h2>
-        <p class="sub">The core annotate → submit → edit loop plus the polish phases (inline editing, protocol, standalone, share files) — and five built-in modules: GitLab Issues, Test Pilot, AuditFlow, Chat, and Report. See <a href="https://github.com/kevzlou7979/pinta/blob/main/spec/SPEC.md">the spec</a> for the phase-by-phase breakdown.</p>
+        <p class="sub">The core annotate → submit → edit loop plus the polish phases (inline editing, protocol, standalone, share files) — and eight built-in modules: GitLab Issues, Test Pilot, AuditFlow, Chat, Report, Design Variants, Code Review, and Devices (plus opt-in Voice Command dictation). See <a href="https://github.com/kevzlou7979/pinta/blob/main/spec/SPEC.md">the spec</a> for the phase-by-phase breakdown.</p>
       </div>
       <div class="features">
+        <div class="feature">
+          <div class="ico">
+            <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="4" width="13" height="10" rx="1.5"/><rect x="17" y="8" width="5" height="12" rx="1.2"/><path d="M6 18h5"/></svg>
+          </div>
+          <h3>Devices, Design Variants + Code Review</h3>
+          <p>See your app in many live device frames and annotate inside one; get on-system design variants with a match check after apply; review your own diff card by card. Plus a hardened companion: nothing is trusted automatically, so an unpacked build needs a one-time <code>npx pinta-companion trust &lt;id&gt;</code>. <span class="pill">v0.9</span></p>
+        </div>
         <div class="feature">
           <div class="ico">
             <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 8V4h4"/><path d="M20 8V4h-4"/><path d="M4 16v4h4"/><path d="M20 16v4h-4"/><rect x="9" y="9" width="6" height="6" rx="1"/></svg>
@@ -1501,9 +1514,10 @@
         <p class="sub">
           Modules ride along on a session or run interactively from their
           own tab — tick a checkbox, grant whatever setup the module
-          needs once, and the agent handles the rest. Five ship today —
-          GitLab Issues, Test Pilot, AuditFlow, Chat, and Report — plus an
-          SDK for writing your own.
+          needs once, and the agent handles the rest. Eight ship today —
+          GitLab Issues, Test Pilot, AuditFlow, Chat, Report, Design
+          Variants, Code Review, and Devices — plus an SDK for writing
+          your own.
         </p>
       </div>
       <div class="modules">
@@ -1555,6 +1569,7 @@
             <li>Pass / Fail / Untested marking, with per-section tallies</li>
             <li>Inline <strong>Details</strong> checkbox — short tester-friendly steps or deep technical context per Re-ask</li>
             <li>Steps render with inline <code>code</code>, fenced blocks (Prism syntax-highlighted), and <code>&gt; Note:</code> callouts</li>
+            <li>Smoke or Thorough generation depth; file failed tests as GitLab issues in one click</li>
             <li>Export the catalog as markdown for sharing or <code>pandoc</code> → PDF</li>
           </ul>
         </article>
@@ -1578,7 +1593,7 @@
             <strong>Fix All</strong> on the category.
           </p>
           <ul class="module-list">
-            <li>Five built-in audits — security, performance, accessibility, mobile, cross-browser</li>
+            <li>Five built-in audits — security, performance, accessibility (now with eight localization checks), mobile, cross-browser</li>
             <li>Define your own audits with a markdown spec — same format the built-ins use</li>
             <li>Per-finding <strong>Fix with agent</strong> edits the source in place — runs concurrently, with <strong>Fix All</strong> per category</li>
             <li>Pass/fail summary per audit, re-run on demand, results persist per project</li>
@@ -1630,7 +1645,83 @@
             <li>Daily / weekly / sprint ranges, plus arbitrary custom windows</li>
             <li>Multi-project — combine extra repos, grouped by project per day</li>
             <li>Read-mode day cards with weekend-fold</li>
-            <li>One-click Markdown export, per-day or whole-range</li>
+            <li>One-click Markdown export per day, or an invoice-ready summary for the whole range</li>
+          </ul>
+        </article>
+        <article class="module module--variants">
+          <div class="module-icon">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+              <rect x="3" y="3" width="8" height="8" rx="1.5" />
+              <rect x="13" y="3" width="8" height="8" rx="1.5" />
+              <rect x="3" y="13" width="8" height="8" rx="1.5" />
+              <path d="M17 14v6" /><path d="M14 17h6" />
+            </svg>
+          </div>
+          <div class="module-meta">
+            <h3>Design Variants</h3>
+            <span class="module-mode">Interactive</span>
+          </div>
+          <p class="module-desc">
+            Pick an element (or the whole page) and the agent returns 1–5
+            variants that stay inside your design system. Preview one on
+            the page, refine it in chat, then <strong>Use this</strong> —
+            and a match check confirms the page now looks like the card.
+          </p>
+          <ul class="module-list">
+            <li>Optional art direction, or paste a reference screenshot of the look you want</li>
+            <li><strong>Preview on page</strong> swaps the live element; <code>Esc</code> restores</li>
+            <li>Automatic match check after apply (zero agent tokens); <strong>Fix differences</strong> sends only the gaps</li>
+            <li>Agent markup runs through a strict sanitizer before it reaches the panel or page</li>
+          </ul>
+        </article>
+        <article class="module module--review">
+          <div class="module-icon">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+              <polyline points="8 6 2 12 8 18" />
+              <polyline points="16 6 22 12 16 18" />
+              <polyline points="10 12.5 12 14.5 15 10" />
+            </svg>
+          </div>
+          <div class="module-meta">
+            <h3>Code Review</h3>
+            <span class="module-mode">Interactive</span>
+          </div>
+          <p class="module-desc">
+            A game-style review of your own change. The agent deals your
+            uncommitted diff (or the last commit, or a topic you name) as
+            one card per logical change — you Pass, Fail, or Learn each
+            one, and fix what failed in one click.
+          </p>
+          <ul class="module-list">
+            <li>Pass / Fail / Learn with <code>P</code> / <code>F</code> / <code>L</code> keys and a streak counter</li>
+            <li><strong>Learn</strong> opens a read-only chat that explains the code</li>
+            <li>End card grades the run S–D and lists failed cards</li>
+            <li>One-click <strong>Fix</strong> per failed card — the only action that edits code</li>
+          </ul>
+        </article>
+        <article class="module module--devices">
+          <div class="module-icon">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+              <rect x="2" y="4" width="13" height="10" rx="1.5" />
+              <path d="M5.5 18h6" />
+              <rect x="17" y="7" width="5" height="13" rx="1.2" />
+            </svg>
+          </div>
+          <div class="module-meta">
+            <h3>Devices</h3>
+            <span class="module-mode">Interactive</span>
+          </div>
+          <p class="module-desc">
+            Your running app in many live, clickable device frames in one
+            tab — phones, tablets, laptops, desktops, or custom sizes. The
+            canvas needs no agent; annotations you draw inside a device
+            go to the agent scoped to that breakpoint.
+          </p>
+          <ul class="module-list">
+            <li>Add single devices, whole groups, or a custom Width × Height</li>
+            <li>Drag frames anywhere, <strong>Rearrange</strong> to re-pack, expand one to full window</li>
+            <li><strong>Sync</strong> — navigate in one frame and the others follow</li>
+            <li><strong>Annotate</strong> inside a device; screenshots crop to its viewport</li>
           </ul>
         </article>
       </div>
@@ -1802,7 +1893,7 @@
 npx pinta-companion .
 
 # 3. Install the /pinta skill, then fully restart Claude Code
-npx pinta-companion@0.8.2 install-skill
+npx pinta-companion@0.9.0 install-skill
 
 # 4. Open Pinta in your browser, annotate, hit Submit
 #    Then in Claude Code:  /pinta
@@ -1833,7 +1924,7 @@ npx pinta-companion@0.8.2 install-skill
       <div class="section-head">
         <span class="eyebrow">What's next</span>
         <h2>Roadmap</h2>
-        <p class="sub">V1 covers the core loop end-to-end. Next milestones, in priority order.</p>
+        <p class="sub">V1 covers the core loop end-to-end. Shipped phases are marked; the rest is genuine upcoming work.</p>
       </div>
       <div class="timeline">
         <div class="timeline-item">
@@ -1854,6 +1945,7 @@ npx pinta-companion@0.8.2 install-skill
           <div class="timeline-card">
             <h3>Test Pilot catalog editing</h3>
             <p>Delete, add, edit, rename, and reorder sections + tests from the side panel. The on-disk spec stays in sync so the agent's "?" works on rows you added yourself.</p>
+            <span class="timeline-status is-shipped">Shipped</span>
           </div>
         </div>
         <div class="timeline-item">
@@ -1930,6 +2022,50 @@ npx pinta-companion@0.8.2 install-skill
           <div class="timeline-card">
             <h3>Floating toolkit</h3>
             <p>A draggable Photoshop-style palette on the page itself — every tool one keystroke away (<code>Ctrl+Alt</code>), plus Free Transform: batch move / resize / edit / delete of one element into a single annotation, with undo / redo.</p>
+            <span class="timeline-status is-shipped">Shipped</span>
+          </div>
+        </div>
+        <div class="timeline-item">
+          <div class="timeline-node" aria-label="Phase 21">
+            <span class="node-label">Phase</span>
+            <span class="node-num">21</span>
+          </div>
+          <div class="timeline-card">
+            <h3>Annotation toolset + Drift Check</h3>
+            <p>Move, Text, Delete, Resize, Paint, and Scale tools that combine losslessly on one element; Drift Check verifies each applied change landed; Voice Command dictation; board modules with batch actions and inline "How to test" steps.</p>
+            <span class="timeline-status is-shipped">Shipped</span>
+          </div>
+        </div>
+        <div class="timeline-item">
+          <div class="timeline-node" aria-label="Phase 22">
+            <span class="node-label">Phase</span>
+            <span class="node-num">22</span>
+          </div>
+          <div class="timeline-card">
+            <h3>Design Variants</h3>
+            <p>1–5 on-system variants for an element or page — previewed on the page, refined in chat, and applied to source, then an automatic match check with Fix differences. Paste a reference image to steer the look.</p>
+            <span class="timeline-status is-shipped">Shipped</span>
+          </div>
+        </div>
+        <div class="timeline-item">
+          <div class="timeline-node" aria-label="Phase 23">
+            <span class="node-label">Phase</span>
+            <span class="node-num">23</span>
+          </div>
+          <div class="timeline-card">
+            <h3>Code Review</h3>
+            <p>Your diff (or a topic) as a deck of review cards: Pass / Fail / Learn, a graded run, a read-only Learn chat, and one-click Fix for failed cards.</p>
+            <span class="timeline-status is-shipped">Shipped</span>
+          </div>
+        </div>
+        <div class="timeline-item">
+          <div class="timeline-node" aria-label="Phase 24">
+            <span class="node-label">Phase</span>
+            <span class="node-num">24</span>
+          </div>
+          <div class="timeline-card">
+            <h3>Devices</h3>
+            <p>A multi-device live canvas: device groups and custom sizes, drag / masonry / rearrange, expand, nav Sync, and annotating inside a device frame.</p>
             <span class="timeline-status is-shipped">Shipped</span>
           </div>
         </div>

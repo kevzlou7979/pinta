@@ -538,7 +538,7 @@ node ~/.claude/skills/pinta/start-companion.js .</code></pre>
         Code</strong> (skills load at startup; <code>/clear</code> is not
         enough):
       </p>
-      <pre><code>npx pinta-companion@0.8.2 install-skill</code></pre>
+      <pre><code>npx pinta-companion@0.9.0 install-skill</code></pre>
       <p>
         The <code>@0.5.0</code> is deliberate — <code>npx</code> may have an
         older <code>pinta-companion</code> cached, and the
@@ -577,8 +577,9 @@ changed, and hit Submit. I'll wait."</code></pre>
       </ol>
 
       <div class="callout tip">
-        <strong>Tip:</strong> If you tick <strong>Auto-apply (no agent
-        confirmation)</strong> in the submit footer, the agent skips the
+        <strong>Tip:</strong> Auto-apply is off by default. If you tick
+        <strong>Auto-apply (no agent confirmation)</strong> in the submit
+        footer (it stays ticked for later submits), the agent skips the
         wait-for-go step and applies directly. The plan is still shown
         briefly so you can see what's happening.
       </div>
@@ -767,7 +768,7 @@ changed, and hit Submit. I'll wait."</code></pre>
         70+ Good, 50+ Needs work, else Poor.
       </p>
 
-      <h2 id="design-variants">Design Variants <span class="chip shipped">module</span> <span class="chip planned">unreleased</span></h2>
+      <h2 id="design-variants">Design Variants <span class="chip shipped">module</span> <span class="chip shipped">v0.9.0</span></h2>
       <p>
         Ask for design options without leaving your app. Pick an element (or
         the whole page) and the agent returns 1–5 variants that stay inside
@@ -786,7 +787,7 @@ changed, and hit Submit. I'll wait."</code></pre>
         is sanitized before it reaches the panel or your page.
       </p>
 
-      <h2 id="code-review">Code Review <span class="chip shipped">module</span> <span class="chip planned">unreleased</span></h2>
+      <h2 id="code-review">Code Review <span class="chip shipped">module</span> <span class="chip shipped">v0.9.0</span></h2>
       <p>
         A game-style review of your own change. The agent reads your
         uncommitted diff (or the last commit when the tree is clean) and
@@ -800,7 +801,7 @@ changed, and hit Submit. I'll wait."</code></pre>
         <li>The end card grades the run (S–D) and lists failed cards, each with <strong>Fix</strong> — the only action that edits code.</li>
       </ul>
 
-      <h2 id="devices">Devices <span class="chip shipped">module</span> <span class="chip planned">unreleased</span></h2>
+      <h2 id="devices">Devices <span class="chip shipped">module</span> <span class="chip shipped">v0.9.0</span></h2>
       <p>
         See your running app on many devices at once. Enable it in Settings,
         open the <strong>Devices</strong> tab, and launch the canvas — a

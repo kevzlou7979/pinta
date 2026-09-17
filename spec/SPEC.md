@@ -1976,7 +1976,7 @@ the `module.query.submit` op envelope) — the only new `AnnotationKind`s are
   (`ModuleTab.cardStepsOp`, inline StepList) and **Generate screenshots**
   (`cardStepsShotsOp`, one PNG/step over the Report proof-shot rails).
 
-### Phase 22 — Design Variants module — Built (unreleased)
+### Phase 22 — Design Variants module — Shipped (0.9.0)
 
 Replaces the "paste a screenshot into claude.ai and ask for 3 options"
 loop. A built-in interactive module (`design-variants`): the user picks
@@ -2056,7 +2056,7 @@ and the `variants` claim role (Phase 18b).
 - **Non-goals (v1)**: full-page in-page preview (page scope is cards
   only), match check for page scope, variant history across runs.
 
-### Phase 23 — Code Review module — Built (unreleased)
+### Phase 23 — Code Review module — Shipped (0.9.0)
 
 Gamified review of the user's own change set. Built-in interactive
 module (`code-review`, no settings): the agent gathers the uncommitted
@@ -2099,7 +2099,7 @@ skimmed, `source:"topic"`, excerpts rendered as context lines).
 
 ---
 
-### Phase 24 — Devices module (multi-device canvas) — Built (unreleased)
+### Phase 24 — Devices module (multi-device canvas) — Shipped (0.9.0)
 
 The Multi-Device Canvas idea from Phase 20, shipped as a module: a
 Mobile-View-style simulator that renders the user's running app in many
