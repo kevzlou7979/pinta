@@ -529,6 +529,16 @@ The slash command is a Claude Code **skill** — it is **not** installed by
 npx pinta-companion@0.9.0 install-skill   # writes ~/.claude/skills/pinta/
 ```
 
+> **v0.9.0 is not on npm yet** (npm account recovery in progress). Until it is,
+> run the companion straight from the release tarball — same CLI, no registry:
+>
+> ```bash
+> npx https://github.com/kevzlou7979/pinta/releases/download/v0.9.0/pinta-companion-0.9.0.tgz .              # start the companion
+> npx https://github.com/kevzlou7979/pinta/releases/download/v0.9.0/pinta-companion-0.9.0.tgz install-skill  # install the /pinta skill
+> ```
+>
+> `npx pinta-companion .` still works and gives you 0.8.2.
+
 Then **fully restart Claude Code** (skills load at startup — `/clear` is not
 enough), type `/`, and confirm `pinta` is in the list. Run `/pinta`.
 
