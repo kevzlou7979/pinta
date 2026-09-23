@@ -21,8 +21,10 @@
   import {
     encodePintaFile,
     pintaFilename,
+    isShareableAnnotation,
     PintaFileError,
   } from "../lib/pinta-file.js";
+  import type { TestPilotSignoff } from "../lib/test-pilot-md.js";
   import { theme, toggleTheme } from "../lib/theme.svelte.js";
   // Tool defs (id / label / icon / shortcut) are shared with the on-page
   // floating toolbar via lib/tools.ts so the two never drift.
@@ -574,6 +576,11 @@
   let pintaAccentColor = $state(ACCENT_PALETTE[0]!);
   let importBusy = $state(false);
   let importedSendBusy = $state(false);
+  /** WS3 — annotation ids ticked for "File selected to GitLab" in the
+   *  imported viewer. Reseeded per viewed import (see the $effect):
+   *  default = every shareable, not-yet-filed annotation checked. */
+  let importedSelected = $state<Set<string>>(new Set());
+  let importedSelectedFor = $state<string | null>(null);
   let importedToastAt = $state<number | null>(null);
   let importedToastLabel = $state<string | null>(null);
   let importFileInput: HTMLInputElement | null = $state(null);
@@ -603,6 +610,15 @@
     }
   }
 
+  // ── WS2b — Test Pilot sign-off riding the .pinta bundle ──────────
+  // Shown ONLY when a catalog with at least one marked row is loaded
+  // (the tester persona). Tester name/email/environment persist via
+  // app.testerInfo (pinta-tester-info); date + notes are per-export.
+  let pintaIncludeResults = $state(true);
+  let pintaSignDate = $state("");
+  let pintaSignNotes = $state("");
+  let pintaSignRunType = $state("Smoke");
+
   function openPintaExportForm() {
     if (!annotations.length) return;
     downloadMenuOpen = false;
@@ -615,6 +631,21 @@
       } catch {
         pintaTitle = `Session — ${new Date().toLocaleDateString()}`;
       }
+    }
+    if (app.testPilotHasMarks) {
+      // Prefill the sign-off half of the form (same record TestPilotTab
+      // uses) while the form opens.
+      void app.loadTesterInfo();
+      pintaIncludeResults = true;
+      pintaSignDate = new Date().toISOString().slice(0, 10);
+      pintaSignNotes = "";
+      // Default the run type from the catalog's generation depth — same
+      // rule as TestPilotTab's sign-off form (a thorough catalog is
+      // usually being run thoroughly; the tester can still flip it).
+      pintaSignRunType =
+        app.modules["test-pilot"]?.settings?.thorough_tests === true
+          ? "Thorough"
+          : "Smoke";
     }
     pintaFormOpen = true;
   }
@@ -632,10 +663,29 @@
       accentColor: pintaAccentColor,
       exportedAt: Date.now(),
     };
+    // WS2b — when a marked Test Pilot catalog is loaded and the tester
+    // kept "include test results" on, the bundle carries docId +
+    // sign-off + statuses so the developer's import overlays them.
+    let testPilot: ReturnType<typeof app.buildPintaTestPilot>;
+    if (pintaIncludeResults && app.testPilotHasMarks) {
+      let signoff: TestPilotSignoff | null = null;
+      if (app.testerInfo.name.trim()) {
+        app.saveTesterInfo();
+        signoff = {
+          tester: app.testerInfo.name.trim(),
+          email: app.testerInfo.email.trim() || undefined,
+          date: pintaSignDate || new Date().toISOString().slice(0, 10),
+          environment: app.testerInfo.environment,
+          runType: pintaSignRunType || undefined,
+          notes: pintaSignNotes.trim() || undefined,
+        };
+      }
+      testPilot = app.buildPintaTestPilot(signoff);
+    }
     // Snapshot strips Svelte 5 reactive proxies so the JSON encoder
     // sees plain objects (matches the local-store save pattern).
     const snapshot = $state.snapshot(session) as Session;
-    const blob = encodePintaFile(snapshot, manifest);
+    const blob = encodePintaFile(snapshot, manifest, testPilot);
     const objUrl = URL.createObjectURL(blob);
     const a = document.createElement("a");
     a.href = objUrl;
@@ -1636,8 +1686,11 @@
             next === "resize" ||
             next === "paint" ||
             next === "scale" ||
-            next === "transform"
-          ? next
+            // "transform" left the Tool union when the free-transform
+            // tool was parked — string-compare keeps this future-proof
+            // without a dead-comparison type error.
+            (next as string) === "transform"
+          ? (next as ActiveMode)
           : "draw";
     try {
       if (mode !== "idle" && !(await ensureDeviceFrameLive())) {
@@ -1977,6 +2030,31 @@
       sendToPage({ type: "imported.hide" })
         .catch(() => {});
     }
+  });
+
+  // WS3 — reseed the GitLab-filing selection when the viewed import
+  // changes: all shareable, not-yet-filed annotations start checked;
+  // already-filed rows start unchecked. Same-id updates (e.g. Filed
+  // marks landing after a run) keep the user's ticks — filed rows drop
+  // out of the count via the `!filedIssues` guards at render time.
+  $effect(() => {
+    const viewing = app.viewingImportedId
+      ? app.importedSessions.find((s) => s.id === app.viewingImportedId)
+      : null;
+    if (!viewing) {
+      if (importedSelectedFor !== null) {
+        importedSelectedFor = null;
+        importedSelected = new Set();
+      }
+      return;
+    }
+    if (importedSelectedFor === viewing.id) return;
+    importedSelectedFor = viewing.id;
+    importedSelected = new Set(
+      viewing.session.annotations
+        .filter((a) => isShareableAnnotation(a) && !viewing.filedIssues?.[a.id])
+        .map((a) => a.id),
+    );
   });
 
   async function copyToClipboard() {
@@ -3016,6 +3094,7 @@
     {:else if app.viewingImportedId}
       {@const imp = app.importedSessions.find((s) => s.id === app.viewingImportedId)}
       {#if imp}
+        {@const impSelectable = imp.session.annotations.filter((a) => isShareableAnnotation(a) && !imp.filedIssues?.[a.id])}
         <section class="space-y-2">
           <div class="flex items-start justify-between gap-2">
             <div class="min-w-0 flex-1">
@@ -3052,10 +3131,43 @@
               ✕
             </button>
           </div>
+          <!-- WS2b — bundle carried a Test Pilot results block: say what
+               happened to it (applied, or docId-mismatch guidance). -->
+          {#if app.testPilot.bundleNotice}
+            <div class="rounded-md border border-brand-pink/40 dark:border-brand-pink-light/40 bg-brand-pink/5 px-2.5 py-1.5 text-[11.5px] text-ink-800 dark:text-night-text leading-snug flex items-start gap-2">
+              <p class="flex-1 min-w-0 break-words">{app.testPilot.bundleNotice}</p>
+              <button
+                type="button"
+                class="shrink-0 text-ink-500 dark:text-night-mute hover:text-ink-900 dark:hover:text-night-text leading-none"
+                onclick={() => (app.testPilot.bundleNotice = null)}
+                aria-label="Dismiss"
+                title="Dismiss"
+              >
+                ✕
+              </button>
+            </div>
+          {/if}
           <div class="flex items-center justify-between gap-2 pt-1">
-            <h3 class="text-xs uppercase tracking-wide text-ink-500 dark:text-night-mute font-medium">
-              Annotations ({imp.session.annotations.length})
-            </h3>
+            <div class="flex items-center gap-2">
+              <h3 class="text-xs uppercase tracking-wide text-ink-500 dark:text-night-mute font-medium">
+                Annotations ({imp.session.annotations.length})
+              </h3>
+              {#if app.appMode === "connected" && impSelectable.length > 0}
+                <!-- WS3 — all/none toggle for the GitLab-filing checkboxes -->
+                <button
+                  type="button"
+                  class="text-[10px] font-medium text-brand-pink dark:text-brand-pink-light hover:text-brand-magenta dark:hover:opacity-80 underline underline-offset-2"
+                  onclick={() => {
+                    importedSelected =
+                      impSelectable.every((a) => importedSelected.has(a.id))
+                        ? new Set()
+                        : new Set(impSelectable.map((a) => a.id));
+                  }}
+                >
+                  {impSelectable.every((a) => importedSelected.has(a.id)) ? "None" : "All"}
+                </button>
+              {/if}
+            </div>
             {#if importedLocated && importedLocated.total > 0}
               {@const allLocated = importedLocated.matched === importedLocated.total}
               <span
@@ -3080,6 +3192,20 @@
               </span>
             {/if}
           </div>
+          {#if app.importedFileError}
+            <div class="flex items-start gap-2 text-xs text-red-600 border border-red-200 bg-red-50 dark:text-red-300 dark:border-red-900/40 dark:bg-red-950/40 rounded-md p-2">
+              <p class="flex-1 min-w-0 break-words">{app.importedFileError}</p>
+              <button
+                type="button"
+                class="shrink-0 text-red-500 hover:text-red-700 dark:text-red-400 dark:hover:text-red-200 leading-none px-1"
+                onclick={() => (app.importedFileError = null)}
+                aria-label="Dismiss error"
+                title="Dismiss"
+              >
+                ✕
+              </button>
+            </div>
+          {/if}
           {#if imp.session.annotations.length === 0}
             <p class="text-xs text-ink-500 dark:text-night-dim italic">
               This session has no annotations.
@@ -3087,14 +3213,62 @@
           {:else}
             <ul class="space-y-2">
               {#each imp.session.annotations as a, i (`${a.id}:${i}`)}
-                <AnnotationCard
-                  annotation={a}
-                  canEdit={false}
-                  accentColorOverride={imp.manifest.accentColor}
-                  index={i + 1}
-                  onremove={() => {}}
-                  onsave={() => {}}
-                />
+                {@const filed = imp.filedIssues?.[a.id]}
+                <li class="flex items-start gap-2">
+                  {#if app.appMode === "connected" && isShareableAnnotation(a)}
+                    <!-- WS3 — per-annotation selection for GitLab filing.
+                         Filed rows lose their checkbox (the chip takes
+                         its place) so they can't be re-filed. -->
+                    {#if !filed}
+                      <input
+                        type="checkbox"
+                        class="mt-3 shrink-0 accent-brand-pink"
+                        disabled={app.importedFilePending === imp.id}
+                        checked={importedSelected.has(a.id)}
+                        onchange={(e) => {
+                          const next = new Set(importedSelected);
+                          if (e.currentTarget.checked) next.add(a.id);
+                          else next.delete(a.id);
+                          importedSelected = next;
+                        }}
+                        aria-label={`Include annotation ${i + 1} when filing to GitLab`}
+                      />
+                    {/if}
+                  {/if}
+                  <div class="flex-1 min-w-0 space-y-1">
+                    {#if filed}
+                      <span
+                        class="inline-flex items-center gap-1 px-1.5 py-0.5 rounded-full text-[10px] font-medium border border-emerald-300 bg-emerald-50 text-emerald-800 dark:border-emerald-800 dark:bg-emerald-950 dark:text-emerald-200"
+                        title={filed.target === "gitlab"
+                          ? (filed.title ?? "Filed as a GitLab issue")
+                          : `Filed to ${filed.path ?? ".pinta/tasks.md"}`}
+                      >
+                        {#if filed.url}
+                          <a
+                            href={filed.url}
+                            target="_blank"
+                            rel="noreferrer noopener"
+                            class="underline underline-offset-2"
+                          >
+                            Filed ✓
+                          </a>
+                        {:else}
+                          Filed ✓{filed.target === "local" ? " · tasks.md" : ""}
+                        {/if}
+                      </span>
+                    {/if}
+                    <ul class="list-none">
+                      <AnnotationCard
+                        annotation={a}
+                        canEdit={false}
+                        accentColorOverride={imp.manifest.accentColor}
+                        index={i + 1}
+                        onremove={() => {}}
+                        onsave={() => {}}
+                      />
+                    </ul>
+                  </div>
+                </li>
               {/each}
             </ul>
           {/if}
@@ -3748,6 +3922,9 @@
     {#if app.viewingImportedId}
       {@const impFooter = app.importedSessions.find((s) => s.id === app.viewingImportedId)}
       {#if impFooter}
+        {@const impFileCount = impFooter.session.annotations.filter(
+          (a) => isShareableAnnotation(a) && !impFooter.filedIssues?.[a.id] && importedSelected.has(a.id),
+        ).length}
         {#if app.appMode === "connected"}
           <label
             class="flex items-start gap-2 text-[12px] text-ink-700 dark:text-night-dim cursor-pointer select-none"
@@ -3795,6 +3972,29 @@
           >
             <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><line x1="22" y1="2" x2="11" y2="13"/><polygon points="22 2 15 22 11 13 2 9 22 2"/></svg>
             {importedSendBusy ? "Sending…" : "Send to agent"}
+          </button>
+          <!-- WS3 — file the ticked annotations as tracker issues via the
+               agent's import-file-issues writing op. -->
+          <button
+            type="button"
+            class="flex-1 min-w-[150px] rounded-md border border-brand-pink dark:border-brand-pink-light text-brand-pink dark:text-brand-pink-light text-sm font-medium py-2 hover:bg-brand-pink/10 dark:hover:bg-brand-pink-light/10 disabled:opacity-50 inline-flex items-center justify-center gap-1.5"
+            disabled={app.appMode !== "connected" || impFileCount === 0 || app.importedFilePending !== null}
+            title={app.appMode === "connected"
+              ? "Files one GitLab issue per ticked annotation via the glab CLI (needs /pinta running). Falls back to .pinta/tasks.md when the GitLab Issues module is off or glab isn't set up."
+              : "Connect to a companion to file issues from this share"}
+            onclick={() => {
+              if (app.appMode !== "connected" || impFileCount === 0) return;
+              void app.fileImportedToGitLab(impFooter.id, [...importedSelected]);
+            }}
+          >
+            {#if app.importedFilePending === impFooter.id}
+              <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="animate-spin" aria-hidden="true">
+                <path d="M21 12a9 9 0 1 1-6.219-8.56" />
+              </svg>
+              Filing…
+            {:else}
+              File selected to GitLab ({impFileCount})
+            {/if}
           </button>
           <button
             type="button"
@@ -3908,6 +4108,83 @@
             />
           </div>
         </div>
+        <!-- WS2b — Test Pilot results ride the bundle. Only shown when a
+             catalog with at least one marked row is loaded; the checkbox
+             lets the tester send annotations only. -->
+        {#if app.testPilotHasMarks}
+          <div class="rounded border border-brand-pink/40 dark:border-brand-pink-light/40 bg-brand-pink/5 p-2 space-y-1.5">
+            <label class="flex items-center gap-1.5 text-[11px] font-medium text-ink-700 dark:text-night-text cursor-pointer">
+              <input type="checkbox" bind:checked={pintaIncludeResults} class="accent-brand-pink" />
+              Include test results (Test Pilot marks + sign-off)
+            </label>
+            {#if pintaIncludeResults}
+              <!-- Same field set + order as TestPilotTab's sign-off form
+                   (name → email → date → environment → run type → notes)
+                   so testers see one sign-off shape everywhere; only the
+                   container styling differs per surface. -->
+              <input
+                type="text"
+                bind:value={app.testerInfo.name}
+                class="w-full rounded border border-ink-300 bg-white text-ink-900 px-2 py-1 text-xs focus:outline-none focus:ring-2 focus:ring-brand-pink dark:border-night-line dark:bg-night-card dark:text-night-text"
+                placeholder="Tester name (blank = results without sign-off)"
+                aria-label="Tester name"
+              />
+              <input
+                type="email"
+                bind:value={app.testerInfo.email}
+                class="w-full rounded border border-ink-300 bg-white text-ink-900 px-2 py-1 text-xs focus:outline-none focus:ring-2 focus:ring-brand-pink dark:border-night-line dark:bg-night-card dark:text-night-text"
+                placeholder="Email (optional)"
+                aria-label="Tester email"
+              />
+              <div class="grid grid-cols-2 gap-1.5">
+                <label class="block min-w-0 text-[11px] text-ink-600 dark:text-night-dim">
+                  <span class="block text-[10px] font-medium text-ink-500 dark:text-night-mute mb-0.5">Run date</span>
+                  <input
+                    type="date"
+                    bind:value={pintaSignDate}
+                    class="w-full rounded border border-ink-300 bg-white text-ink-900 px-2 py-1 text-xs focus:outline-none focus:ring-2 focus:ring-brand-pink dark:border-night-line dark:bg-night-card dark:text-night-text"
+                    aria-label="Run date"
+                  />
+                </label>
+                <label class="block min-w-0 text-[11px] text-ink-600 dark:text-night-dim">
+                  <span class="block text-[10px] font-medium text-ink-500 dark:text-night-mute mb-0.5">Environment</span>
+                  <select
+                    bind:value={app.testerInfo.environment}
+                    class="w-full rounded border border-ink-300 bg-white text-ink-900 px-2 py-1 text-xs focus:outline-none focus:ring-2 focus:ring-brand-pink dark:border-night-line dark:bg-night-card dark:text-night-text"
+                    aria-label="Environment"
+                  >
+                    <option value="">Environment…</option>
+                    <option>Dev</option>
+                    <option>Staging</option>
+                    <option>UAT</option>
+                    <option>Prod</option>
+                    <option>Other</option>
+                  </select>
+                </label>
+                <label class="col-span-2 block min-w-0 text-[11px] text-ink-600 dark:text-night-dim">
+                  <span class="block text-[10px] font-medium text-ink-500 dark:text-night-mute mb-0.5">Run type</span>
+                  <select
+                    bind:value={pintaSignRunType}
+                    class="w-full rounded border border-ink-300 bg-white text-ink-900 px-2 py-1 text-xs focus:outline-none focus:ring-2 focus:ring-brand-pink dark:border-night-line dark:bg-night-card dark:text-night-text"
+                    aria-label="Run type"
+                    title="What kind of pass this run was"
+                  >
+                    <option>Smoke</option>
+                    <option>Thorough</option>
+                    <option>Regression</option>
+                  </select>
+                </label>
+                <textarea
+                  rows={2}
+                  bind:value={pintaSignNotes}
+                  class="col-span-2 w-full rounded border border-ink-300 bg-white text-ink-900 px-2 py-1 text-xs focus:outline-none focus:ring-2 focus:ring-brand-pink dark:border-night-line dark:bg-night-card dark:text-night-text resize-y"
+                  placeholder="Notes for this run (optional — blockers, build under test, …)"
+                  aria-label="Run notes"
+                ></textarea>
+              </div>
+            {/if}
+          </div>
+        {/if}
         <button
           type="button"
           class="w-full rounded-md bg-brand-pink text-white text-sm font-medium py-1.5 hover:bg-brand-magenta dark:hover:bg-brand-pink-light disabled:opacity-50"

@@ -703,16 +703,52 @@ export type ImportedSession = {
   manifest: SessionManifest;
   session: Session;
   importedAt: number;
+  /**
+   * WS3 — tracker issues filed FROM this import ("File selected to
+   * GitLab" in the imported viewer), keyed by the source annotation id.
+   * Additive + optional (no IDB migration); lives only in the local
+   * IndexedDB record and is NEVER included in a `.pinta` export.
+   */
+  filedIssues?: Record<
+    string,
+    { target: "gitlab" | "local"; url?: string; path?: string; title?: string; at: number }
+  >;
+};
+
+/**
+ * Optional Test Pilot results block riding in a `.pinta` bundle — the
+ * tester sends ONE file back carrying annotations + marks + sign-off.
+ * `signoff` is structurally identical to the extension's
+ * `TestPilotSignoff` (extension/src/lib/test-pilot-md.ts); shared/
+ * cannot import from extension/, so the shape is declared here and the
+ * two must stay in lockstep. `statuses` is keyed by test id.
+ */
+export type PintaFileTestPilot = {
+  docId: string;
+  signoff: {
+    tester: string;
+    email?: string;
+    /** YYYY-MM-DD */
+    date: string;
+    environment: string;
+    runType?: string;
+    notes?: string;
+  } | null;
+  statuses: Record<string, "untested" | "pass" | "fail">;
 };
 
 /**
  * Schema-versioned envelope of a `.pinta` share file. Validators must
  * reject unknown `$pinta` values to leave room for future format changes.
+ * `testPilot` is additive (same `$pinta: "1"`): decoders that don't know
+ * it ignore it, and validators that do drop it when malformed rather
+ * than failing the whole file.
  */
 export type PintaFile = {
   $pinta: "1";
   manifest: SessionManifest;
   session: Session;
+  testPilot?: PintaFileTestPilot;
 };
 
 export type ClientMessage =

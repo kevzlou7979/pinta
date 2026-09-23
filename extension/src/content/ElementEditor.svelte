@@ -293,7 +293,9 @@
   function joinSides(s: Sides): string {
     const raw = [s.top, s.right, s.bottom, s.left].map((x) => x.trim());
     if (raw.every((x) => x === "")) return "";
-    const [t, r, b, l] = raw.map((x) => (x === "" ? "0" : x));
+    // Tuple assert: map() loses the fixed length under
+    // noUncheckedIndexedAccess, but `raw` is always exactly 4 sides.
+    const [t, r, b, l] = raw.map((x) => (x === "" ? "0" : x)) as [string, string, string, string];
     if (t === r && r === b && b === l) return t;
     if (t === b && r === l) return `${t} ${r}`;
     if (r === l) return `${t} ${r} ${b}`;

@@ -11,6 +11,7 @@ import type {
   AuditRun,
   ClientMessage,
   ImportedSession,
+  PintaFileTestPilot,
   ServerMessage,
   Session,
   SessionModule,
@@ -106,7 +107,20 @@ import {
   composeResultsDocx,
   nextUserTestId as nextUserTestIdPure,
   parseTestDocMarkdown,
+  selectUnfiledFailures,
 } from "./test-pilot-doc.js";
+import {
+  composeFrontmatter,
+  overlayResults,
+  overlayResultsSidecar,
+  overlayStatusesById,
+  parsePintaResultsMarkdown,
+  renderSignoffBlock,
+  restoreStatuses,
+  snapshotStatuses,
+  type ResultsSidecarEntry,
+  type TestPilotSignoff,
+} from "./test-pilot-md.js";
 import {
   categoryDisplayName,
   composeAuditFixComment,
@@ -156,6 +170,10 @@ import {
 } from "./code-review.js";
 import { DEFAULT_SUBMIT_OPTIONS, parseSubmitOptions, type SubmitOptions } from "./submit-options.js";
 import { createCoalescer } from "./coalesce.js";
+import {
+  buildImportFileIssueItems,
+  parseImportedIssuesFiled,
+} from "./import-issues.js";
 
 const SELECTED_KEY = "pinta-selected-companion";
 
@@ -268,6 +286,22 @@ export type TestPilotCatalog = {
  *                    free-form drawing / vague note with no anchor).
  */
 export type DriftStatus = "ok" | "drifted" | "missing" | "unverifiable";
+
+/**
+ * A tester's returned results run overlaid onto the developer's catalog
+ * (sign-off round-trip). While set, the catalog shows the run's marks
+ * read-only; `clearImportedRun()` restores `priorStatuses`. Persisted
+ * beside the catalog so the banner (and the path back to the
+ * developer's own marks) survives a side-panel reload.
+ */
+export type TestPilotImportedRun = {
+  signoff: TestPilotSignoff | null;
+  overlaidAt: number;
+  /** The developer's own marks, snapshotted just before the overlay. */
+  priorStatuses: Record<string, TestPilotStatus>;
+  applied: number;
+  unknownIds: string[];
+};
 
 /** In-flight query metadata so we can route the eventual session.synced
  *  to the right Test Pilot slot. */
@@ -547,6 +581,12 @@ class ExtensionState {
    *  imported session instead of the regular drafting UI. Closing the
    *  viewer (or forking it) clears this back to null. */
   viewingImportedId = $state<string | null>(null);
+  /** WS3 — the imported-session id whose "File selected to GitLab" run
+   *  is in flight (one at a time). Drives the footer spinner. */
+  importedFilePending = $state<string | null>(null);
+  /** Dismissible error for the imported-viewer filing flow. */
+  importedFileError = $state<string | null>(null);
+  private importedFileTimer: ReturnType<typeof setTimeout> | null = null;
 
   /**
    * Per-module enable + settings, persisted to chrome.storage.local under
@@ -674,7 +714,22 @@ class ExtensionState {
       string,
       { target: "gitlab" | "local"; url?: string; path?: string; title?: string; at: number }
     >;
-  }>({ catalog: null, pending: null, pendingDetails: {}, pendingChats: {}, pendingSectionSuggest: {}, sectionSuggestions: {}, pendingSectionChats: {}, error: null, editingActive: false, pendingFileIssues: false, filedIssues: {} });
+    /** Sign-off round-trip — a tester's returned run overlaid onto this
+     *  catalog. Non-null while the imported view is active (marks are
+     *  read-only until cleared). Persisted under `${key}:run`. */
+    importedRun: TestPilotImportedRun | null;
+    /** A parsed results file whose doc-id doesn't match the loaded
+     *  catalog — parked for the UI's confirm-replace prompt. Transient,
+     *  not persisted. */
+    pendingImportConflict: {
+      run: TestPilotCatalog;
+      signoff: TestPilotSignoff | null;
+    } | null;
+    /** WS2b — outcome line for a `.pinta` bundle that carried a
+     *  testPilot block ("applied to Test Pilot" / mismatch guidance).
+     *  Transient, dismissible in the imported-session viewer. */
+    bundleNotice: string | null;
+  }>({ catalog: null, pending: null, pendingDetails: {}, pendingChats: {}, pendingSectionSuggest: {}, sectionSuggestions: {}, pendingSectionChats: {}, error: null, editingActive: false, pendingFileIssues: false, filedIssues: {}, importedRun: null, pendingImportConflict: null, bundleNotice: null });
 
   /**
    * Phase 14 — cross-cutting chat state for the two non-Test-Pilot
@@ -1012,6 +1067,14 @@ class ExtensionState {
     return `pinta-test-pilot:${companion.projectRoot}`;
   }
 
+  /** Standalone slot — a tester running without a companion has no
+   *  projectRoot to scope to, and works one tester sheet at a time.
+   *  Claimed into the per-project key on the next connect IF that key
+   *  is empty (see loadTestPilot); otherwise left alone so a
+   *  temporarily-offline developer never loses their project catalog. */
+  private static readonly STANDALONE_TEST_PILOT_KEY =
+    "pinta-test-pilot:standalone";
+
   /** Holds the legacy catalog between `readLegacyTestPilot` (called from
    *  `start`) and the first `loadTestPilot(companion)` call that claims
    *  it. Null afterwards. */
@@ -1084,15 +1147,80 @@ class ExtensionState {
     this.testPilot.pendingDetails = {};
     this.testPilot.pendingChats = {};
     this.testPilot.pendingFileIssues = false;
+    this.testPilot.importedRun = null;
+    this.testPilot.pendingImportConflict = null;
+    this.testPilot.bundleNotice = null;
     this.testPilot.error = null;
   }
 
+  /** Storage key for the catalog in the current mode — per-project when
+   *  connected, the standalone slot otherwise. */
+  private testPilotStorageKey(): string {
+    const companion = this.selectedCompanion;
+    return companion
+      ? ExtensionState.testPilotKeyFor(companion)
+      : ExtensionState.STANDALONE_TEST_PILOT_KEY;
+  }
+
+  /** Hydrate `testPilot.importedRun` for the active storage key. */
+  private async loadImportedRun(key: string): Promise<void> {
+    try {
+      const runKey = `${key}:run`;
+      const stored = await chrome.storage?.local?.get(runKey);
+      const raw = stored?.[runKey] as TestPilotImportedRun | undefined;
+      if (raw && typeof raw === "object" && raw.priorStatuses) {
+        this.testPilot.importedRun = raw;
+      }
+    } catch {
+      // storage missing (test env) — defaults are fine
+    }
+  }
+
+  /** Persist (or remove) the imported-run sidecar for the active key.
+   *  Kept separate from the catalog value so older readers of the
+   *  catalog key keep working. */
+  private async saveImportedRun(): Promise<void> {
+    const runKey = `${this.testPilotStorageKey()}:run`;
+    try {
+      if (this.testPilot.importedRun) {
+        await chrome.storage?.local?.set({
+          [runKey]: $state.snapshot(this.testPilot.importedRun),
+        });
+      } else {
+        await chrome.storage?.local?.remove(runKey);
+      }
+    } catch {
+      // best-effort — the catalog save is the one that reports quota
+    }
+  }
+
   /** Hydrate Test Pilot state for the given companion. Pass null to
-   *  enter standalone (clears state, no load). Idempotent. */
+   *  enter standalone (loads the standalone slot instead of a
+   *  per-project key). Idempotent. */
   async loadTestPilot(companion: Companion | null): Promise<void> {
     this.resetTestPilotState();
     void this.loadTestPilotFiled(companion);
-    if (!companion) return;
+    if (!companion) {
+      // Standalone (tester persona): hydrate the standalone slot so an
+      // imported tester sheet and its Pass/Fail marks survive side-panel
+      // reloads. No disk sidecar to overlay — there is no companion.
+      try {
+        const stored = await chrome.storage?.local?.get(
+          ExtensionState.STANDALONE_TEST_PILOT_KEY,
+        );
+        const raw = stored?.[ExtensionState.STANDALONE_TEST_PILOT_KEY] as
+          | TestPilotCatalog
+          | undefined;
+        if (raw && typeof raw === "object" && Array.isArray(raw.sections)) {
+          ExtensionState.migrateCommentsToChat(raw);
+          this.testPilot.catalog = raw;
+          await this.loadImportedRun(ExtensionState.STANDALONE_TEST_PILOT_KEY);
+        }
+      } catch {
+        // storage missing (test env) — defaults are fine
+      }
+      return;
+    }
     const key = ExtensionState.testPilotKeyFor(companion);
     try {
       const stored = await chrome.storage?.local?.get(key);
@@ -1106,6 +1234,7 @@ class ExtensionState {
         // `comment` is gone after the first pass.
         ExtensionState.migrateCommentsToChat(raw);
         this.testPilot.catalog = raw;
+        await this.loadImportedRun(key);
         // Overlay the per-author results sidecar from disk. Disk wins
         // on conflict — it's the durable source of truth. No-op when
         // the file doesn't exist (fresh catalog, no marks yet) or
@@ -1114,6 +1243,54 @@ class ExtensionState {
         // the overlay refines it once the network round-trip lands.
         void this.loadResultsFromCompanion();
         return;
+      }
+      // Standalone claim — a catalog worked on while disconnected (the
+      // tester persona, or a developer whose companion died mid-run) is
+      // adopted by the first project that connects with an empty slot.
+      // When the project already has a catalog, the standalone slot is
+      // left untouched — no silent overwrite in either direction; the
+      // sign-off MD round-trip is the reconciliation path.
+      try {
+        const standaloneStored = await chrome.storage?.local?.get(
+          ExtensionState.STANDALONE_TEST_PILOT_KEY,
+        );
+        const standalone = standaloneStored?.[
+          ExtensionState.STANDALONE_TEST_PILOT_KEY
+        ] as TestPilotCatalog | undefined;
+        if (
+          standalone &&
+          typeof standalone === "object" &&
+          Array.isArray(standalone.sections)
+        ) {
+          ExtensionState.migrateCommentsToChat(standalone);
+          this.testPilot.catalog = standalone;
+          await chrome.storage?.local?.set({
+            [key]: $state.snapshot(this.testPilot.catalog),
+          });
+          await chrome.storage?.local?.remove(
+            ExtensionState.STANDALONE_TEST_PILOT_KEY,
+          );
+          // The imported-run sidecar moves with its catalog — claim it
+          // under the project key so the banner survives the connect.
+          await this.loadImportedRun(ExtensionState.STANDALONE_TEST_PILOT_KEY);
+          await chrome.storage?.local?.remove(
+            `${ExtensionState.STANDALONE_TEST_PILOT_KEY}:run`,
+          );
+          if (this.testPilot.importedRun) {
+            await chrome.storage?.local?.set({
+              [`${key}:run`]: $state.snapshot(this.testPilot.importedRun),
+            });
+          }
+          void this.pushTestDocToCompanion();
+          // Also push the per-author results sidecar so a stale on-disk
+          // results file (from a previous run under this project) can't
+          // overlay old marks on the next reload — the claimed catalog's
+          // marks are the current truth for both disk twins.
+          this.pushResultsToCompanion();
+          return;
+        }
+      } catch {
+        // storage missing (test env) — fall through to legacy claim
       }
       // Legacy migration — the first companion picked after upgrade
       // inherits the pre-v0.3.2 global catalog. After this runs the
@@ -1149,15 +1326,66 @@ class ExtensionState {
       : false;
   }
 
+  /** Sign-off form prefill (tester side) + "Email to tester" recipient
+   *  (developer side). Both personas keep their half in the same small
+   *  record; date + notes are per-run and never persisted. */
+  private static readonly TESTER_INFO_KEY = "pinta-tester-info";
+
+  testerInfo = $state<{
+    name: string;
+    email: string;
+    environment: string;
+    /** Developer side — where "Email to tester" drafts go. */
+    recipient: string;
+  }>({ name: "", email: "", environment: "", recipient: "" });
+
+  private testerInfoLoaded = false;
+
+  /** Lazy, idempotent hydrate — called when the sign-off form or the
+   *  email-to-tester affordance opens. */
+  async loadTesterInfo(): Promise<void> {
+    if (this.testerInfoLoaded) return;
+    this.testerInfoLoaded = true;
+    try {
+      const stored = await chrome.storage?.local?.get(
+        ExtensionState.TESTER_INFO_KEY,
+      );
+      const raw = stored?.[ExtensionState.TESTER_INFO_KEY] as
+        | Partial<typeof this.testerInfo>
+        | undefined;
+      if (raw && typeof raw === "object") {
+        this.testerInfo.name = typeof raw.name === "string" ? raw.name : "";
+        this.testerInfo.email = typeof raw.email === "string" ? raw.email : "";
+        this.testerInfo.environment =
+          typeof raw.environment === "string" ? raw.environment : "";
+        this.testerInfo.recipient =
+          typeof raw.recipient === "string" ? raw.recipient : "";
+      }
+    } catch {
+      // storage missing (test env) — defaults are fine
+    }
+  }
+
+  saveTesterInfo(): void {
+    try {
+      void chrome.storage?.local?.set({
+        [ExtensionState.TESTER_INFO_KEY]: $state.snapshot(this.testerInfo),
+      });
+    } catch {
+      // best-effort convenience — the export still works without it
+    }
+  }
+
   private async saveTestPilot(): Promise<void> {
     const companion = this.selectedCompanion;
-    // Standalone has no project context to scope this catalog to.
-    // Mutations from the UI shouldn't reach here in standalone (the
-    // empty state hides the import/generate affordances), but if they
-    // do, drop the write silently rather than leaking back into the
-    // legacy global slot.
-    if (!companion) return;
-    const key = ExtensionState.testPilotKeyFor(companion);
+    // Standalone writes land in a dedicated slot: the tester persona
+    // imports a sheet and marks Pass/Fail with no companion running,
+    // and those marks must survive side-panel reloads. The slot is
+    // claimed by the next project that connects with an empty catalog
+    // (see loadTestPilot).
+    const key = companion
+      ? ExtensionState.testPilotKeyFor(companion)
+      : ExtensionState.STANDALONE_TEST_PILOT_KEY;
     try {
       if (this.testPilot.catalog) {
         await chrome.storage?.local?.set({
@@ -1177,7 +1405,9 @@ class ExtensionState {
           "Browser storage is full — Test Pilot couldn't save your latest change. " +
           "Most likely cause: global chat with image attachments. " +
           "Try clearing global chat (header icon → … or via DevTools: chrome.storage.local.remove('pinta-global-chat')). " +
-          "Your catalog structure + Pass/Fail marks are still safe on disk at .pinta/test-docs/.";
+          (companion
+            ? "Your catalog structure + Pass/Fail marks are still safe on disk at .pinta/test-docs/."
+            : "Export your results (.md) now so your marks aren't lost.");
       }
     }
   }
@@ -1239,7 +1469,198 @@ class ExtensionState {
     });
   }
 
+  /**
+   * Import routing for a Pinta-authored export (frontmatter envelope).
+   * Called before either import branch: files we authored ourselves
+   * parse locally even when connected — an agent round-trip would just
+   * burn tokens re-reading our own format.
+   *
+   * Overlay vs replace: a returned run (sign-off present, or at least
+   * one marked row) whose doc-id matches the loaded catalog OVERLAYS
+   * statuses by test id, keeping the developer's structure/steps/chats.
+   * An unmarked sheet (e.g. re-importing the tester sheet itself) is a
+   * structure import and falls back to the replace path. A doc-id
+   * mismatch parks the parsed run in `pendingImportConflict` for the
+   * UI to confirm-replace.
+   *
+   * Returns true when the file was handled here.
+   */
+  private tryImportPintaMd(filename: string, content: string): boolean {
+    const parsed = parsePintaResultsMarkdown(filename, content);
+    if (!parsed) return false;
+    const { catalog: run, signoff } = parsed;
+    const current = this.testPilot.catalog;
+    const hasMarks =
+      signoff !== null ||
+      run.sections.some((s) => s.tests.some((t) => t.status !== "untested"));
+    if (current && hasMarks && current.docId === run.docId) {
+      this.applyRunOverlay(run, signoff);
+      return true;
+    }
+    if (current && hasMarks && current.docId !== run.docId) {
+      // Results belong to a different catalog — don't silently blow the
+      // loaded one away. The UI renders a confirm-replace prompt.
+      this.testPilot.pendingImportConflict = { run, signoff };
+      return true;
+    }
+    if (
+      current &&
+      !hasMarks &&
+      current.sections.some((s) => s.tests.some((t) => t.status !== "untested"))
+    ) {
+      // An unmarked sheet (structure import) over a catalog that HAS
+      // marks would silently wipe the user's Pass/Fail progress — park
+      // it for the same confirm-replace prompt as a doc-id mismatch.
+      this.testPilot.pendingImportConflict = { run, signoff };
+      return true;
+    }
+    // No catalog loaded (tester side), or an unmarked sheet over an
+    // unmarked catalog: replace.
+    this.adoptImportedCatalog(run, signoff);
+    return true;
+  }
+
+  /** Replace the catalog with a parsed Pinta export. When the file was
+   *  a signed results run, keep the sign-off visible via importedRun
+   *  (read-only review mode — there are no prior marks to restore). */
+  private adoptImportedCatalog(
+    run: TestPilotCatalog,
+    signoff: TestPilotSignoff | null,
+  ): void {
+    this.testPilot.catalog = run;
+    this.testPilot.pending = null;
+    this.testPilot.error = null;
+    this.testPilot.importedRun = signoff
+      ? {
+          signoff,
+          overlaidAt: Date.now(),
+          priorStatuses: {},
+          applied: run.sections.reduce((n, s) => n + s.tests.length, 0),
+          unknownIds: [],
+        }
+      : null;
+    void this.saveTestPilot();
+    void this.saveImportedRun();
+    this.pushTestDocToCompanion();
+  }
+
+  /** Overlay a returned run's marks onto the loaded catalog (doc-ids
+   *  already matched). Snapshot first so Clear can restore. */
+  private applyRunOverlay(
+    run: TestPilotCatalog,
+    signoff: TestPilotSignoff | null,
+  ): void {
+    const catalog = this.testPilot.catalog;
+    if (!catalog) return;
+    const priorStatuses = snapshotStatuses(catalog);
+    const { applied, unknownIds } = overlayResults(catalog, run);
+    this.testPilot.importedRun = {
+      signoff,
+      overlaidAt: Date.now(),
+      priorStatuses,
+      applied,
+      unknownIds,
+    };
+    this.testPilot.pending = null;
+    this.testPilot.error = null;
+    void this.saveTestPilot();
+    void this.saveImportedRun();
+    // Keep the disk twins in step with the overlaid marks (same pair
+    // of writes as setTestStatus) so a panel reload doesn't resurrect
+    // pre-overlay marks from the per-author sidecar.
+    this.pushTestDocToCompanion();
+    this.pushResultsToCompanion();
+  }
+
+  /** UI answer to the doc-id-mismatch prompt. Replace adopts the parsed
+   *  run wholesale; either way the conflict slot is cleared. */
+  resolveImportConflict(replace: boolean): void {
+    const conflict = this.testPilot.pendingImportConflict;
+    this.testPilot.pendingImportConflict = null;
+    if (!conflict || !replace) return;
+    this.adoptImportedCatalog(conflict.run, conflict.signoff);
+  }
+
+  // ── WS2b — ONE .pinta bundle (testPilot block) ────────────────────
+
+  /** True when a catalog is loaded AND the tester marked at least one
+   *  row — the gate for showing the .pinta export's sign-off fields
+   *  and including a `testPilot` block in the bundle. */
+  get testPilotHasMarks(): boolean {
+    const c = this.testPilot.catalog;
+    return !!c && c.sections.some((s) => s.tests.some((t) => t.status !== "untested"));
+  }
+
+  /** Build the `testPilot` block for a `.pinta` export — docId +
+   *  sign-off + full status map (untested rows ride too, so the
+   *  developer sees the run exactly as the tester left it). Returns
+   *  undefined when there's nothing worth carrying (no catalog, or no
+   *  marks yet). */
+  buildPintaTestPilot(
+    signoff: TestPilotSignoff | null,
+  ): PintaFileTestPilot | undefined {
+    const c = this.testPilot.catalog;
+    if (!c || !this.testPilotHasMarks) return undefined;
+    return {
+      docId: c.docId,
+      signoff,
+      statuses: snapshotStatuses(c),
+    };
+  }
+
+  /** Apply a bundle's testPilot block after import. Matching docId →
+   *  the WS2 overlay path (banner, read-only marks, Clear restores).
+   *  No catalog / docId mismatch → never overwrite silently; a bundle
+   *  carries statuses only (no catalog structure), so there's nothing
+   *  to confirm-replace WITH — surface guidance instead. */
+  private applyBundleTestPilot(tp: PintaFileTestPilot): void {
+    const catalog = this.testPilot.catalog;
+    if (catalog && catalog.docId === tp.docId) {
+      const priorStatuses = snapshotStatuses(catalog);
+      const { applied, unknownIds } = overlayStatusesById(catalog, tp.statuses);
+      this.testPilot.importedRun = {
+        signoff: tp.signoff,
+        overlaidAt: Date.now(),
+        priorStatuses,
+        applied,
+        unknownIds,
+      };
+      this.testPilot.pending = null;
+      this.testPilot.error = null;
+      void this.saveTestPilot();
+      void this.saveImportedRun();
+      // Same disk-twin writes as applyRunOverlay so a reload doesn't
+      // resurrect pre-overlay marks from the per-author sidecar.
+      this.pushTestDocToCompanion();
+      this.pushResultsToCompanion();
+      this.testPilot.bundleNotice = "Includes test results — applied to Test Pilot.";
+    } else if (!catalog) {
+      this.testPilot.bundleNotice =
+        "This bundle includes test results, but no Test Pilot catalog is loaded — import the tester sheet first, then re-import the bundle.";
+    } else {
+      this.testPilot.bundleNotice =
+        "This bundle includes test results for a different catalog — import that catalog's tester sheet first, then re-import the bundle.";
+    }
+  }
+
+  /** Drop the imported-run view and put the developer's own marks back. */
+  clearImportedRun(): void {
+    const run = this.testPilot.importedRun;
+    const catalog = this.testPilot.catalog;
+    this.testPilot.importedRun = null;
+    if (run && catalog) {
+      restoreStatuses(catalog, run.priorStatuses);
+      void this.saveTestPilot();
+      this.pushTestDocToCompanion();
+      this.pushResultsToCompanion();
+    }
+    void this.saveImportedRun();
+  }
+
   async importTestDoc(filename: string, content: string): Promise<void> {
+    // Pinta-authored exports (frontmatter envelope) short-circuit both
+    // branches below — parsed locally, connected or not.
+    if (this.tryImportPintaMd(filename, content)) return;
     // Standalone branch — no companion, no agent. Parse the markdown
     // locally so external testers can open a developer-shipped tester
     // sheet and walk through it without needing a Claude Code terminal
@@ -1475,10 +1896,12 @@ class ExtensionState {
       .catch(() => {});
   }
 
-  /** File every failed (and not-yet-filed) test as a tracker issue —
-   *  GitLab via `glab` when the gitlab-issues module is enabled, else
-   *  the `.pinta/tasks.md` local fallback. One bulk agent run. */
-  async fileFailedTestsToGitLab(): Promise<void> {
+  /** File failed (and not-yet-filed) tests as tracker issues — GitLab
+   *  via `glab` when the gitlab-issues module is enabled, else the
+   *  `.pinta/tasks.md` local fallback. One bulk agent run. WS4: when
+   *  `selectedIds` is given, only those unfiled failures are filed
+   *  (the UI's checkbox sheet); omitted → all of them. */
+  async fileFailedTestsToGitLab(selectedIds?: string[]): Promise<void> {
     if (this.testPilot.pendingFileIssues) return;
     const catalog = this.testPilot.catalog;
     if (!catalog) return;
@@ -1487,24 +1910,22 @@ class ExtensionState {
         "No companion connected. Start `pinta-companion .` in your project to file issues.";
       return;
     }
-    const failed = catalog.sections.flatMap((s) =>
-      s.tests
-        .filter((t) => t.status === "fail")
-        .map((t) => ({
-          id: t.id,
-          section: s.title,
-          test: t.test,
-          expected: t.expected,
-        })),
-    );
-    const unfiled = failed.filter((t) => !this.testPilot.filedIssues[t.id]);
-    if (unfiled.length === 0) {
-      this.testPilot.error =
-        failed.length > 0
-          ? "Every failed test already has an issue filed."
-          : "No failed tests to file — mark failures first.";
+    // Pure selection logic lives in test-pilot-doc.ts (unit-tested
+    // directly); this method just layers the error copy + wire send.
+    const allUnfiled = selectUnfiledFailures(catalog, this.testPilot.filedIssues);
+    if (allUnfiled.length === 0) {
+      const anyFailed = catalog.sections.some((s) =>
+        s.tests.some((t) => t.status === "fail"),
+      );
+      this.testPilot.error = anyFailed
+        ? "Every failed test already has an issue filed."
+        : "No failed tests to file — mark failures first.";
       return;
     }
+    const unfiled = selectedIds
+      ? selectUnfiledFailures(catalog, this.testPilot.filedIssues, selectedIds)
+      : allUnfiled;
+    if (unfiled.length === 0) return; // nothing ticked — no-op
     const gl = this.modules["gitlab-issues"];
     const gitlab = gl?.enabled
       ? {
@@ -1728,6 +2149,9 @@ class ExtensionState {
   setTestStatus(testId: string, status: TestPilotStatus): void {
     const catalog = this.testPilot.catalog;
     if (!catalog) return;
+    // Imported-run view is read-only — the marks on screen are the
+    // tester's, not yours. Clear the imported run to edit again.
+    if (this.testPilot.importedRun) return;
     for (const section of catalog.sections) {
       for (const t of section.tests) {
         if (t.id === testId) {
@@ -2986,32 +3410,30 @@ class ExtensionState {
       if (res.status === 404) return; // no results yet — nothing to overlay
       if (!res.ok) return; // transient; non-fatal
       const body = (await res.json()) as {
-        results?: Record<
-          string,
-          {
-            status?: TestPilotStatus;
-            chat?: ChatMessage[];
-            detail?: { steps: string[]; askedAt: number };
-          }
-        >;
+        results?: Record<string, ResultsSidecarEntry>;
       };
       const results = body.results ?? {};
-      for (const section of c.sections) {
-        for (const t of section.tests) {
-          const r = results[t.id];
-          if (!r) continue;
-          // Disk wins — overwrite the in-memory values. This is what
-          // makes the sidecar a true recovery path: even if
-          // chrome.storage had stale or no values for this test, the
-          // disk file restores it.
-          if (r.status) t.status = r.status;
-          if (r.chat) t.chat = r.chat;
-          if (r.detail) t.detail = r.detail;
-        }
-      }
+      // Disk wins — overwrite the in-memory values. This is what makes
+      // the sidecar a true recovery path: even if chrome.storage had
+      // stale or no values for this test, the disk file restores it.
+      // EXCEPT while an imported tester run is overlaid: the run banner
+      // says the marks on screen are the tester's, so a stale sidecar
+      // (written before the overlay, or whose overlay-time re-push never
+      // landed) must not restore pre-overlay statuses underneath it.
+      // Chat threads + cached detail steps still merge either way.
+      const importedRunActive = !!this.testPilot.importedRun;
+      overlayResultsSidecar(c, results, { skipStatuses: importedRunActive });
       // Persist the merged catalog back to chrome.storage so the next
       // panel open sees the disk-overlaid values without re-fetching.
       void this.saveTestPilot();
+      if (importedRunActive) {
+        // Re-push both disk twins so the on-disk .md Result column and
+        // the per-author sidecar reflect the overlaid run — closes the
+        // gap where the overlay-time push was lost (panel closed early)
+        // and the next reload would have found the stale sidecar again.
+        this.pushTestDocToCompanion();
+        this.pushResultsToCompanion();
+      }
     } catch {
       // Network / parse failure — leave in-memory catalog as-is.
     }
@@ -6191,25 +6613,13 @@ class ExtensionState {
   // module-agnostic: the agent returns a ModuleBoard, the generic
   // ModuleBoardTab renders it. Mirrors the audit op/sync lifecycle.
 
-  private ensureModuleBoard(moduleId: string): {
-    board: ModuleBoard | null;
-    pending: { runId: string; startedAt: number; op: string } | null;
-    error: string | null;
-    pendingSessionId?: string | null;
-    cardSteps?: Record<string, { steps: string[]; askedAt: number }>;
-    cardStepsPending?: string | null;
-    cardStepsError?: string | null;
-    cardShots?: Record<
-      string,
-      {
-        shots: { step: number; shotKey: string; ok: boolean; note?: string }[];
-        capturedAt: number;
-      }
-    >;
-    cardShotsPending?: string | null;
-    cardShotsError?: string | null;
-    batchRemaining?: string[] | null;
-  } {
+  private ensureModuleBoard(
+    moduleId: string,
+    // Return type mirrors one `moduleBoards` slot exactly — a stale
+    // hand-copied annotation here once drifted (string vs Record for
+    // the per-card pending/error maps) and broke the whole file's
+    // typecheck, so derive it from the field instead.
+  ): NonNullable<ExtensionState["moduleBoards"][string]> {
     if (!this.moduleBoards[moduleId]) {
       this.moduleBoards[moduleId] = { board: null, pending: null, error: null };
     }
@@ -8998,8 +9408,12 @@ class ExtensionState {
     return this.renderChatMarkdown(`Pinta Test Pilot chat — ${testId}`, null, []);
   }
 
-  /** Render a markdown report from the current catalog. */
-  exportResults(): string {
+  /** Render a markdown report from the current catalog. The optional
+   *  sign-off (tester name / email / date / environment / notes) rides
+   *  in the frontmatter for the importer and as a readable block for
+   *  humans; without one, the envelope still carries the doc-id so the
+   *  file overlays cleanly on re-import. */
+  exportResults(signoff?: TestPilotSignoff): string {
     const c = this.testPilot.catalog;
     if (!c) return "# Test Pilot — no catalog loaded\n";
     let pass = 0,
@@ -9015,13 +9429,16 @@ class ExtensionState {
     const total = pass + fail + untested;
     const today = new Date().toISOString().slice(0, 10);
     const heading = c.title?.trim() || c.filename;
-    let out = `# Test Pilot results — ${heading}\n`;
-    const metaBits: string[] = [`Run on ${today}`];
-    if (c.author?.trim()) metaBits.push(`by ${c.author.trim()}`);
+    let out = composeFrontmatter(c.docId, signoff);
+    out += `# Test Pilot results — ${heading}\n`;
+    const metaBits: string[] = [`Run on ${signoff?.date || today}`];
+    if (signoff?.tester.trim()) metaBits.push(`by ${signoff.tester.trim()}`);
+    else if (c.author?.trim()) metaBits.push(`by ${c.author.trim()}`);
     metaBits.push(
       `${pass}/${total} passed, ${fail} failed, ${untested} untested`,
     );
     out += `_${metaBits.join(", ")}_\n\n`;
+    if (signoff) out += renderSignoffBlock(signoff);
     if (c.description?.trim()) out += `${c.description.trim()}\n\n`;
     for (const s of c.sections) {
       out += `## ${s.title}\n\n`;
@@ -9082,7 +9499,10 @@ class ExtensionState {
   exportTesterSheetMarkdown(): string {
     const c = this.testPilot.catalog;
     if (!c) return "# Test Pilot — no catalog loaded\n";
-    return composeTesterSheetMarkdown(c);
+    // The frontmatter carries the doc-id out to the tester so their
+    // returned results file overlays onto this catalog instead of
+    // minting a fresh identity (see tryImportPintaMd).
+    return composeFrontmatter(c.docId) + composeTesterSheetMarkdown(c);
   }
 
   /**
@@ -9102,11 +9522,17 @@ class ExtensionState {
    * and per-row chat threads. Caller wraps in a Blob + triggers
    * download. Returns `null` when there's no catalog.
    */
-  async exportResultsDocx(): Promise<Uint8Array | null> {
+  async exportResultsDocx(
+    signoff?: TestPilotSignoff,
+  ): Promise<Uint8Array | null> {
     const c = this.testPilot.catalog;
     if (!c) return null;
-    const today = new Date().toISOString().slice(0, 10);
-    return composeResultsDocx($state.snapshot(c) as TestPilotCatalog, today);
+    const today = signoff?.date || new Date().toISOString().slice(0, 10);
+    return composeResultsDocx(
+      $state.snapshot(c) as TestPilotCatalog,
+      today,
+      signoff,
+    );
   }
 
   clearTestPilot(): void {
@@ -9114,7 +9540,10 @@ class ExtensionState {
     this.testPilot.catalog = null;
     this.testPilot.pending = null;
     this.testPilot.error = null;
+    this.testPilot.importedRun = null;
+    this.testPilot.pendingImportConflict = null;
     void this.saveTestPilot();
+    void this.saveImportedRun();
     // Also wipe the on-disk copy of the spec. UAT docs often contain
     // real credentials / internal URLs — leaving them lying around in
     // .pinta/test-docs/ after the user has cleared the catalog is a
@@ -9455,9 +9884,17 @@ class ExtensionState {
       name.endsWith(".md") ||
       name.endsWith(".markdown") ||
       (!name.endsWith(".pinta") && !text.trimStart().startsWith("{"));
-    const imported = isMarkdown ? decodePintaMarkdown(text) : decodePintaFile(text);
+    // WS2b: a `.pinta` bundle may carry a testPilot results block. It's
+    // split off BEFORE persisting — the IDB record stays annotations
+    // only (viewer behavior unchanged); the results overlay onto the
+    // Test Pilot catalog like an imported results .md.
+    this.testPilot.bundleNotice = null;
+    const decoded = isMarkdown ? decodePintaMarkdown(text) : decodePintaFile(text);
+    const { testPilot: bundleTestPilot, ...imported } =
+      decoded as ImportedSession & { testPilot?: PintaFileTestPilot };
     await addImportedSession(imported);
     await this.refreshImported();
+    if (bundleTestPilot) this.applyBundleTestPilot(bundleTestPilot);
     return imported;
   }
 
@@ -9578,7 +10015,7 @@ class ExtensionState {
       }
       this.importNotice =
         tickedCount > 0
-          ? "Sent without your ticked modules — per-submit modules (e.g. GitLab Issues) don't apply to shared files."
+          ? "Sent without your ticked modules — per-submit modules don't apply to shared files. To file GitLab issues from this share, use \"File selected to GitLab\" in the imported viewer."
           : null;
       return payload.id;
     } catch (err) {
@@ -9590,6 +10027,147 @@ class ExtensionState {
   /** Close the read-only viewer. */
   closeImportedViewer(): void {
     this.viewingImportedId = null;
+  }
+
+  /**
+   * WS3 — file the ticked annotations of an imported `.pinta` session as
+   * tracker issues via the trusted-extension writing query op
+   * `import-file-issues` (moduleId `gitlab-issues`). Mirrors
+   * `fileFailedTestsToGitLab`: GitLab via `glab` when the module is
+   * enabled, `.pinta/tasks.md` fallback otherwise. Token-lean payload —
+   * no base64 rides the query comment; the bundle's page screenshot goes
+   * on `module.query.submit`'s `screenshot` field so the companion
+   * extracts it to disk.
+   */
+  async fileImportedToGitLab(
+    importedId: string,
+    annotationIds: string[],
+  ): Promise<void> {
+    if (this.importedFilePending) return;
+    const imported = this.importedSessions.find((s) => s.id === importedId);
+    if (!imported) return;
+    if (!this.client || this.connectionStatus !== "connected") {
+      this.importedFileError =
+        "No companion connected. Start `pinta-companion .` in your project to file issues.";
+      return;
+    }
+    // An imported share is untrusted input — only normal, user-authored
+    // annotation kinds may be forwarded (same rule as Send to agent),
+    // and already-filed rows are skipped.
+    const wanted = new Set(annotationIds);
+    const { kept } = filterShareableAnnotations(imported.session.annotations);
+    const selected = kept.filter(
+      (a) => wanted.has(a.id) && !imported.filedIssues?.[a.id],
+    );
+    if (selected.length === 0) {
+      this.importedFileError =
+        "Nothing to file — tick at least one annotation that hasn't been filed yet.";
+      return;
+    }
+    // Pure payload shaping (incl. the comment/nearby-text token caps)
+    // lives in import-issues.ts — unit-tested directly.
+    const items = buildImportFileIssueItems(selected, imported.session.url);
+    const gl = this.modules["gitlab-issues"];
+    const gitlab = gl?.enabled
+      ? {
+          projectId: (gl.settings?.project_id as string) || undefined,
+          labels: (gl.settings?.labels as string) || undefined,
+        }
+      : null;
+    const queryComment = JSON.stringify({
+      op: "import-file-issues",
+      importedId,
+      source: {
+        title: imported.manifest.title,
+        author: imported.manifest.author,
+        exportedAt: imported.manifest.exportedAt,
+        url: imported.session.url,
+      },
+      items,
+      gitlab,
+      fallbackToLocal: true,
+    });
+    this.importedFileError = null;
+    this.importedFilePending = importedId;
+    this.armImportedFileTimeout(items.length);
+    this.send({
+      type: "module.query.submit",
+      url: this.queryUrl,
+      moduleId: "gitlab-issues",
+      moduleSettings: gl?.settings ?? {},
+      queryComment,
+      screenshot: imported.session.fullPageScreenshot || undefined,
+    });
+  }
+
+  private armImportedFileTimeout(count: number): void {
+    this.clearImportedFileTimeout();
+    const what = `file ${count} imported annotation${count === 1 ? "" : "s"} as issues`;
+    this.armAgentWait({
+      softMs: ExtensionState.TEST_PILOT_TIMEOUT_MS,
+      what,
+      setHandle: (t) => {
+        this.importedFileTimer = t;
+      },
+      stillPending: () => this.importedFilePending !== null,
+      giveUp: () => {
+        this.importedFilePending = null;
+        this.importedFileError = ExtensionState.slowWaitGiveUp(what);
+      },
+    });
+  }
+
+  private clearImportedFileTimeout(): void {
+    if (this.importedFileTimer) {
+      clearTimeout(this.importedFileTimer);
+      this.importedFileTimer = null;
+    }
+    this.retireAgentWaitNotice();
+  }
+
+  /** session.synced routing target for op "import-file-issues". Writes
+   *  the returned per-annotation Filed markers onto the ImportedSession
+   *  IDB record (upsert) and refreshes the imported list. */
+  private handleImportedFileIssuesSync(session: Session): void {
+    if (session.status === "done") {
+      this.clearImportedFileTimeout();
+      this.importedFilePending = null;
+      // Tolerant envelope parse (untrusted agent output) lives in
+      // import-issues.ts — unit-tested directly.
+      const parsed = parseImportedIssuesFiled(session.appliedSummary, Date.now());
+      if (!parsed) {
+        this.importedFileError =
+          "Agent finished but returned no filed-issue list — restart /pinta so it loads the updated skill (§7.9.1) and retry.";
+        return;
+      }
+      const importedId = ExtensionState.queryField(session, "importedId");
+      const imported = importedId
+        ? this.importedSessions.find((s) => s.id === importedId)
+        : undefined;
+      if (!imported) {
+        this.importedFileError =
+          "Issues were filed, but the imported session is no longer in History — Filed marks couldn't be saved.";
+        return;
+      }
+      const filed = { ...(imported.filedIssues ?? {}), ...parsed };
+      const updated: ImportedSession = {
+        ...($state.snapshot(imported) as ImportedSession),
+        filedIssues: filed,
+      };
+      void (async () => {
+        try {
+          await addImportedSession(updated);
+        } catch (err) {
+          this.importedFileError = `saving Filed marks failed: ${(err as Error).message}`;
+        }
+        await this.refreshImported();
+      })();
+    } else if (session.status === "error") {
+      this.clearImportedFileTimeout();
+      this.importedFilePending = null;
+      this.importedFileError =
+        session.errorMessage ?? "Filing the imported annotations didn't finish.";
+    }
   }
 
   /**
@@ -9898,9 +10476,11 @@ class ExtensionState {
     // a new build re-probes for the per-author results route instead
     // of staying silent forever after the first 404.
     this.resultsEndpointWarned = false;
-    // Swap Test Pilot catalogs to match. Standalone clears state
-    // entirely (catalogs are scoped per project — there's nothing to
-    // show without one). loadTestPilot handles both branches.
+    // Swap Test Pilot catalogs to match. Standalone hydrates the
+    // dedicated standalone slot (the tester persona works without a
+    // companion); connected loads the per-project key and may claim
+    // the standalone slot when its own is empty. loadTestPilot
+    // handles both branches.
     void this.loadTestPilot(companion);
     // Imported modules live in the companion's `.pinta/modules/` — refresh
     // them on every (re)connect, clear them when going companion-less.
@@ -10528,6 +11108,21 @@ class ExtensionState {
             return;
           }
           this.handleAuditSync(msg.session);
+          return;
+        }
+        // WS3 — "File selected to GitLab" from the imported-`.pinta`
+        // viewer rides moduleId "gitlab-issues" with op
+        // "import-file-issues". Op-gated: regular annotation batches can
+        // also carry gitlab-issues as a per-submit module and MUST keep
+        // flowing into the draft / in-flight handling below. Same
+        // early-return discipline as the audit / chat branches —
+        // intermediate statuses are no-ops on the imported slot but must
+        // never overwrite the user's annotation draft.
+        if (
+          msg.session.modules?.[0]?.id === "gitlab-issues" &&
+          ExtensionState.queryOp(msg.session) === "import-file-issues"
+        ) {
+          this.handleImportedFileIssuesSync(msg.session);
           return;
         }
         // Phase 16 — Report module sessions (modules: [{id: "report"}])
@@ -11181,6 +11776,11 @@ class ExtensionState {
   clearTestPilotMarks(): void {
     const c = this.testPilot.catalog;
     if (!c) return;
+    // Imported-run view is read-only — the marks on screen are the
+    // tester's, not yours. Wiping them here would silently destroy the
+    // overlaid run (the toolbar button is disabled too; this guard is
+    // the state-level backstop). Clear the imported run first.
+    if (this.testPilot.importedRun) return;
     for (const section of c.sections) {
       for (const test of section.tests) {
         test.status = "untested";

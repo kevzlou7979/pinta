@@ -123,7 +123,9 @@ export function moduleWantsToast(
  *  "badge but no toast" is otherwise undiagnosable. */
 export function raiseWatchToast(title: string, items: WatchNudgeItem[]): void {
   try {
-    const create = chrome.notifications?.create as
+    // Via `unknown`: the bundled @types/chrome declares callback-style
+    // overloads returning void; MV3 actually returns a Promise.
+    const create = chrome.notifications?.create as unknown as
       | ((id: string, o: chrome.notifications.NotificationOptions<true>) => Promise<string>)
       | undefined;
     if (!create) {

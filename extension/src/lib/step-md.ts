@@ -95,7 +95,7 @@ export function parseStep(raw: string): StepBlock[] {
   let i = 0;
 
   while (i < lines.length) {
-    const line = lines[i];
+    const line = lines[i]!;
 
     // Fenced code block
     const fence = FENCE_RE.exec(line);
@@ -103,8 +103,8 @@ export function parseStep(raw: string): StepBlock[] {
       const lang = fence[1] || "";
       const bodyLines: string[] = [];
       i++;
-      while (i < lines.length && !FENCE_RE.test(lines[i])) {
-        bodyLines.push(lines[i]);
+      while (i < lines.length && !FENCE_RE.test(lines[i]!)) {
+        bodyLines.push(lines[i]!);
         i++;
       }
       if (i < lines.length) i++; // skip closing fence
@@ -119,19 +119,19 @@ export function parseStep(raw: string): StepBlock[] {
     if (
       TABLE_ROW_RE.test(line) &&
       i + 1 < lines.length &&
-      TABLE_SEP_RE.test(lines[i + 1])
+      TABLE_SEP_RE.test(lines[i + 1]!)
     ) {
       const headers = splitTableRow(line).map((c) => parseInline(c));
       i += 2; // skip header + separator
       const rows: InlinePart[][][] = [];
-      while (i < lines.length && TABLE_ROW_RE.test(lines[i])) {
-        rows.push(splitTableRow(lines[i]).map((c) => parseInline(c)));
+      while (i < lines.length && TABLE_ROW_RE.test(lines[i]!)) {
+        rows.push(splitTableRow(lines[i]!).map((c) => parseInline(c)));
         i++;
       }
       blocks.push({ kind: "table", headers, rows });
       // Skip trailing blank so the next paragraph isn't glued to the
       // table's bottom edge.
-      if (i < lines.length && lines[i].trim() === "") i++;
+      if (i < lines.length && lines[i]!.trim() === "") i++;
       continue;
     }
 
@@ -141,24 +141,24 @@ export function parseStep(raw: string): StepBlock[] {
     // parsed too so `### **Important:** more` renders correctly.
     const heading = HEADING_RE.exec(line);
     if (heading) {
-      const level = heading[1].length;
+      const level = heading[1]!.length;
       blocks.push({
         kind: "heading",
         level,
-        parts: parseInline(heading[2]),
+        parts: parseInline(heading[2]!),
       });
       i++;
       // Skip a single trailing blank so the heading doesn't visually
       // crowd the next paragraph.
-      if (i < lines.length && lines[i].trim() === "") i++;
+      if (i < lines.length && lines[i]!.trim() === "") i++;
       continue;
     }
 
     // Block-quote note callout — one or more consecutive `> ` lines.
     if (line.startsWith(">")) {
       const noteLines: string[] = [];
-      while (i < lines.length && lines[i].startsWith(">")) {
-        noteLines.push(lines[i].replace(/^>\s?/, ""));
+      while (i < lines.length && lines[i]!.startsWith(">")) {
+        noteLines.push(lines[i]!.replace(/^>\s?/, ""));
         i++;
       }
       blocks.push({ kind: "note", parts: parseInline(noteLines.join(" ")) });
@@ -175,7 +175,7 @@ export function parseStep(raw: string): StepBlock[] {
       const ordered = !firstBullet && !!firstNumbered;
       const items: InlinePart[][] = [];
       while (i < lines.length) {
-        const cur = lines[i];
+        const cur = lines[i]!;
         const b = BULLET_RE.exec(cur);
         const n = NUMBERED_RE.exec(cur);
         if (!b && !n) break;
@@ -185,7 +185,7 @@ export function parseStep(raw: string): StepBlock[] {
       blocks.push({ kind: "list", ordered, items });
       // Skip a single trailing blank so the following paragraph isn't
       // glued onto the list visually.
-      if (i < lines.length && lines[i].trim() === "") i++;
+      if (i < lines.length && lines[i]!.trim() === "") i++;
       continue;
     }
 
@@ -194,22 +194,22 @@ export function parseStep(raw: string): StepBlock[] {
     const paraLines: string[] = [];
     while (
       i < lines.length &&
-      lines[i].trim() !== "" &&
-      !FENCE_RE.test(lines[i]) &&
-      !lines[i].startsWith(">") &&
-      !BULLET_RE.test(lines[i]) &&
-      !NUMBERED_RE.test(lines[i]) &&
-      !HEADING_RE.test(lines[i]) &&
-      !(TABLE_ROW_RE.test(lines[i]) && i + 1 < lines.length && TABLE_SEP_RE.test(lines[i + 1]))
+      lines[i]!.trim() !== "" &&
+      !FENCE_RE.test(lines[i]!) &&
+      !lines[i]!.startsWith(">") &&
+      !BULLET_RE.test(lines[i]!) &&
+      !NUMBERED_RE.test(lines[i]!) &&
+      !HEADING_RE.test(lines[i]!) &&
+      !(TABLE_ROW_RE.test(lines[i]!) && i + 1 < lines.length && TABLE_SEP_RE.test(lines[i + 1]!))
     ) {
-      paraLines.push(lines[i]);
+      paraLines.push(lines[i]!);
       i++;
     }
     if (paraLines.length) {
       blocks.push({ kind: "text", parts: parseInline(paraLines.join(" ")) });
     }
     // skip blank line
-    if (i < lines.length && lines[i].trim() === "") i++;
+    if (i < lines.length && lines[i]!.trim() === "") i++;
   }
 
   return blocks;
@@ -246,8 +246,8 @@ export function parseTestSuggestions(
   const out: { test: string; expected: string }[] = [];
   let m: RegExpExecArray | null;
   while ((m = re.exec(raw)) !== null) {
-    const test = m[1].trim();
-    const expected = m[2].trim();
+    const test = m[1]!.trim();
+    const expected = m[2]!.trim();
     if (test && expected) out.push({ test, expected });
   }
   return out;
