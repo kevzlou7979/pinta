@@ -209,6 +209,9 @@ export function targetAnchor(
       if (!Number.isFinite(minX)) return null;
       return { x: (minX + maxX) / 2, y: (minY + maxY) / 2 };
     }
+    default:
+      // Non-stroke kinds (note/query/delete) have no geometry to point at.
+      return null;
   }
 }
 
@@ -253,6 +256,9 @@ export function badgeAnchor(
       }
       return Number.isFinite(minX) ? { x: minX, y: minY } : null;
     }
+    default:
+      // Non-stroke kinds (note/query/delete) draw no badge on canvas.
+      return null;
   }
 }
 

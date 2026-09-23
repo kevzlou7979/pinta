@@ -102,6 +102,7 @@ export const WRITING_QUERY_OPS: ReadonlySet<string> = new Set([
   "review-fix",
   "git-commit",
   "test-file-issues",
+  "import-file-issues",
   "generate-doc",
   "report-screenshot",
 ]);

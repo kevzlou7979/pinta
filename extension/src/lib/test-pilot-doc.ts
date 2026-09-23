@@ -11,6 +11,9 @@ import type {
   TestPilotSection,
   TestPilotTest,
 } from "./state.svelte.js";
+// Type-only — erased at compile time, so no runtime cycle with
+// test-pilot-md.ts (which imports parseTestDocMarkdown from here).
+import type { TestPilotSignoff } from "./test-pilot-md.js";
 
 /**
  * Compose a catalog back into the markdown shape the agent emits on
@@ -82,6 +85,47 @@ export function nextUserTestId(catalog: TestPilotCatalog): string {
     }
   }
   return `USER-${max + 1}`;
+}
+
+/** One failed row selected for bulk issue-filing — the flattened shape
+ *  `fileFailedTestsToGitLab` ships to the agent per test. */
+export type UnfiledFailure = {
+  id: string;
+  section: string;
+  test: string;
+  expected: string;
+};
+
+/**
+ * Failed rows that don't have an issue filed yet — the universe the
+ * bulk "file failed tests" flow operates on. When `selectedIds` is
+ * given (the UI's checkbox sheet), only those unfiled failures are
+ * kept; omitted → all of them. Pure — extracted from
+ * `ExtensionState.fileFailedTestsToGitLab` for direct unit coverage.
+ */
+export function selectUnfiledFailures(
+  catalog: TestPilotCatalog,
+  filedIssues: Record<string, unknown>,
+  selectedIds?: string[],
+): UnfiledFailure[] {
+  const failed = catalog.sections.flatMap((s) =>
+    s.tests
+      .filter((t) => t.status === "fail")
+      .map((t) => ({
+        id: t.id,
+        section: s.title,
+        test: t.test,
+        expected: t.expected,
+      })),
+  );
+  let unfiled = failed.filter(
+    (t) => !Object.prototype.hasOwnProperty.call(filedIssues, t.id),
+  );
+  if (selectedIds) {
+    const wanted = new Set(selectedIds);
+    unfiled = unfiled.filter((t) => wanted.has(t.id));
+  }
+  return unfiled;
 }
 
 // ─────────────────────────────────────────────────────────────────────
@@ -395,6 +439,7 @@ async function wrapDocxBody(body: string[]): Promise<Uint8Array> {
 export function composeResultsDocx(
   catalog: TestPilotCatalog,
   today: string,
+  signoff?: TestPilotSignoff,
 ): Promise<Uint8Array> {
   const body: string[] = [];
 
@@ -414,11 +459,33 @@ export function composeResultsDocx(
   body.push(docxHeading(`Test Pilot results — ${title}`, 1));
 
   const metaBits: string[] = [`Run on ${today}`];
-  if (catalog.author?.trim()) metaBits.push(`by ${catalog.author.trim()}`);
+  if (signoff?.tester.trim()) metaBits.push(`by ${signoff.tester.trim()}`);
+  else if (catalog.author?.trim()) metaBits.push(`by ${catalog.author.trim()}`);
   metaBits.push(`${pass}/${total} passed, ${fail} failed, ${untested} untested`);
   body.push(
     `<w:p>${docxRun(metaBits.join(", "), { sz: 22, color: "555555" })}</w:p>`,
   );
+  if (signoff) {
+    // Sign-off block — Word twin of the markdown export's readable
+    // sign-off lines. The .docx never round-trips back into Pinta, so
+    // this is purely for the human reviewer.
+    const bits: string[] = [signoff.tester.trim()];
+    if (signoff.email?.trim()) bits.push(signoff.email.trim());
+    if (signoff.environment.trim()) bits.push(signoff.environment.trim());
+    if (signoff.runType?.trim()) bits.push(`${signoff.runType.trim()} run`);
+    if (signoff.date.trim()) bits.push(signoff.date.trim());
+    body.push(
+      `<w:p>${docxRun("Sign-off: ", { bold: true, sz: 20 })}${docxRun(bits.filter(Boolean).join(" · "), { sz: 20 })}</w:p>`,
+    );
+    if (signoff.notes?.trim()) {
+      body.push(
+        docxParagraph(signoff.notes.replace(/\r?\n+/g, " ").trim(), {
+          sz: 20,
+          spaceAfter: 200,
+        }),
+      );
+    }
+  }
   if (catalog.description?.trim()) {
     body.push(docxParagraph(catalog.description.trim(), { sz: 22, spaceAfter: 240 }));
   }

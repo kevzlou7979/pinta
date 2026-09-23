@@ -27,6 +27,7 @@ import {
   isLoopbackHost,
   isSafeSessionId,
   isWritingQueryComment,
+  queryOpOf,
   parseImageDataUrl,
   resolveInside,
 } from "./security.js";
@@ -152,11 +153,44 @@ describe("security primitives", () => {
   });
 
   it("classifies writing ops", () => {
-    for (const op of ["audit-fix", "variants-apply", "review-fix", "git-commit", "test-file-issues", "audit-file-issue"]) {
+    for (const op of ["audit-fix", "variants-apply", "review-fix", "git-commit", "test-file-issues", "audit-file-issue", "import-file-issues"]) {
       expect(isWritingQueryComment(JSON.stringify({ op }))).toBe(true);
     }
     expect(isWritingQueryComment(JSON.stringify({ op: "chat" }))).toBe(false);
     expect(isWritingQueryComment("plain text")).toBe(false);
+  });
+
+  it("queryOpOf tolerates malformed / adversarial op JSON", () => {
+    // Leading whitespace before the JSON object still parses.
+    expect(queryOpOf('  {"op":"import-file-issues"}')).toBe("import-file-issues");
+    expect(isWritingQueryComment('  {"op":"import-file-issues","importedId":"x"}')).toBe(true);
+    // Non-string op, empty object, truncated JSON → null, never a throw.
+    expect(queryOpOf('{"op":5}')).toBeNull();
+    expect(queryOpOf('{"op":null}')).toBeNull();
+    expect(queryOpOf("{}")).toBeNull();
+    expect(queryOpOf('{"op":"import-file-issues"')).toBeNull();
+    // JSON that isn't an object literal at the top level → null.
+    expect(queryOpOf('[{"op":"import-file-issues"}]')).toBeNull();
+    expect(queryOpOf('"import-file-issues"')).toBeNull();
+    // Non-string comments → null.
+    expect(queryOpOf(5)).toBeNull();
+    expect(queryOpOf(null)).toBeNull();
+    expect(queryOpOf(undefined)).toBeNull();
+    expect(queryOpOf({ op: "import-file-issues" })).toBeNull();
+    // Only the TOP-LEVEL op counts — a nested writing op can't smuggle in.
+    expect(isWritingQueryComment('{"op":"chat","inner":{"op":"import-file-issues"}}')).toBe(false);
+    for (const c of [5, null, undefined, "{}", '{"op":"import-file-issues"']) {
+      expect(isWritingQueryComment(c), String(c)).toBe(false);
+    }
+  });
+
+  it("import-file-issues is registered as a writing op", () => {
+    expect(WRITING_QUERY_OPS.has("import-file-issues")).toBe(true);
+    expect(
+      isWritingQueryComment(
+        JSON.stringify({ op: "import-file-issues", importedId: "imp-1", items: [], fallbackToLocal: true }),
+      ),
+    ).toBe(true);
   });
 });
 
@@ -839,6 +873,45 @@ describe("WebSocket gate (I4/AI6) — live server", () => {
     expect(msg.session.status).toBe("submitted");
     // Server-only marker the skill requires before running a writing op (AI1).
     expect(msg.session.origin).toBe("ws-query");
+    expect(store.get(msg.session.id)!.origin).toBe("ws-query");
+  });
+
+  it("import-file-issues: trusted socket passes with the ws-query marker, an untrusted socket is refused", async () => {
+    await boot(true);
+    const importQuery = {
+      type: "module.query.submit",
+      moduleId: "gitlab-issues",
+      url: "http://x/",
+      queryComment: JSON.stringify({
+        op: "import-file-issues",
+        importedId: "imp-1",
+        source: { title: "t", author: "a", exportedAt: 1, url: "http://x/" },
+        items: [{ annotationId: "ann-1", kind: "select", comment: "c", url: "http://x/", where: {}, hasImages: false }],
+        gitlab: null,
+        fallbackToLocal: true,
+      }),
+    };
+
+    // Opted-in no-Origin socket (untrusted) → refused, nothing stored.
+    const anon = await wsConnect(port);
+    if (!anon.ok) throw new Error("connect failed");
+    sockets.push(anon.socket);
+    const err = nextMessage(anon.socket, "error");
+    anon.socket.send(JSON.stringify(importQuery));
+    expect(String((await err).message)).toMatch(/writing ops/);
+    expect(store.list().filter((s) => s.status === "submitted")).toHaveLength(0);
+
+    // Trusted extension socket → accepted, carrying the server-only marker
+    // the skill checks before running the writing op.
+    const c = await wsConnect(port, `chrome-extension://${WEB_STORE_EXTENSION_ID}`);
+    if (!c.ok) throw new Error("connect failed");
+    sockets.push(c.socket);
+    const created = nextMessage(c.socket, "module.query.created");
+    c.socket.send(JSON.stringify(importQuery));
+    const msg = (await created) as { session: Session };
+    expect(msg.session.status).toBe("submitted");
+    expect(msg.session.origin).toBe("ws-query");
+    expect(msg.session.autoApply).toBe(true);
     expect(store.get(msg.session.id)!.origin).toBe("ws-query");
   });
 

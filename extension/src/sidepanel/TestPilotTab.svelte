@@ -13,6 +13,7 @@
   import { onMount, tick } from "svelte";
   import { app, type TestPilotTest, type TestPilotStatus, type TestPilotSection } from "../lib/state.svelte.js";
   import { confirmDialog } from "../lib/confirm.svelte.js";
+  import type { TestPilotSignoff } from "../lib/test-pilot-md.js";
   import MicButton from "../lib/voice/MicButton.svelte";
   import { parseStep } from "../lib/step-md.js";
   import { escapeHtml, loadChatSheet, loadPrism } from "../lib/lazy-ui.js";
@@ -129,6 +130,12 @@
   // header icon). Off by default — users opt in.
   const chatEnabled = $derived(app.moduleReady("chat"));
   const gitlabReady = $derived(app.moduleReady("gitlab-issues"));
+  // WS2 — an imported tester run is overlaid: every mark-editing surface
+  // (row status trigger, detail Pass/Fail, Clear marks) is read-only
+  // until the run is cleared. One shared title so the reason is visible
+  // at each disabled control, not just in the banner.
+  const readOnlyRun = $derived(!!app.testPilot.importedRun);
+  const READ_ONLY_TITLE = "Read-only — Clear the imported run to edit";
   /** Smoke vs Thorough generation depth — the `thorough_tests` module
    *  setting, toggleable inline so the choice sits next to Generate. */
   const thoroughOn = $derived(
@@ -142,6 +149,43 @@
   const chatPending = $derived(
     chatTestId ? !!app.testPilot.pendingChats[chatTestId] : false,
   );
+
+  // ── WS4 — failed-test selection sheet ─────────────────────────────
+  // The "File failed tests" icon opens a small inline checkbox sheet
+  // (all rows pre-checked) instead of filing everything blind.
+  let fileIssuesOpen = $state(false);
+  let fileIssuesSelected = $state<Record<string, boolean>>({});
+  /** Failed rows that don't have an issue filed yet — the sheet's list
+   *  and the universe `fileFailedTestsToGitLab(selectedIds)` filters. */
+  const failedUnfiled = $derived(
+    (app.testPilot.catalog?.sections ?? []).flatMap((s) =>
+      s.tests
+        .filter((t) => t.status === "fail" && !app.testPilot.filedIssues[t.id])
+        .map((t) => ({ id: t.id, section: s.title, test: t.test })),
+    ),
+  );
+  const fileIssuesCheckedCount = $derived(
+    failedUnfiled.filter((r) => fileIssuesSelected[r.id]).length,
+  );
+  function openFileIssuesSheet(): void {
+    if (failedUnfiled.length === 0) {
+      // Nothing left to pick — let the state method surface the
+      // "already filed" / "no failures" message (no agent run).
+      void app.fileFailedTestsToGitLab();
+      return;
+    }
+    const sel: Record<string, boolean> = {};
+    for (const r of failedUnfiled) sel[r.id] = true;
+    fileIssuesSelected = sel;
+    fileIssuesOpen = true;
+  }
+  function confirmFileIssues(): void {
+    const ids = failedUnfiled
+      .filter((r) => fileIssuesSelected[r.id])
+      .map((r) => r.id);
+    fileIssuesOpen = false;
+    if (ids.length > 0) void app.fileFailedTestsToGitLab(ids);
+  }
   // Bound to the message-list div so we can keep the most recent
   // bubble in view as the conversation grows.
   let chatScrollEl = $state<HTMLDivElement | null>(null);
@@ -286,8 +330,11 @@
       dropHint = null;
       return;
     }
+    // Snapshot into a const so the narrowing above survives into the
+    // findIndex/find callbacks (TS can't keep it on a mutable let).
+    const drag = dragging;
     // Drop onto self → no-op.
-    if (dropHint.key === dragKey(dragging)) {
+    if (dropHint.key === dragKey(drag)) {
       dragging = null;
       dropHint = null;
       return;
@@ -298,7 +345,7 @@
       dropHint = null;
       return;
     }
-    if (dragging.kind === "section" && dropHint.key.startsWith("section:")) {
+    if (drag.kind === "section" && dropHint.key.startsWith("section:")) {
       const targetTitle = dropHint.key.slice("section:".length);
       let toIdx = catalog.sections.findIndex(
         (s) => s.title === targetTitle,
@@ -306,32 +353,32 @@
       if (toIdx >= 0) {
         if (dropHint.position === "below") toIdx += 1;
         const fromIdx = catalog.sections.findIndex(
-          (s) => s.title === dragging.sectionTitle,
+          (s) => s.title === drag.sectionTitle,
         );
         // Adjust for the splice-out that happens before splice-in:
         // when the source is before the destination, every index
         // ≥ source shifts down by 1 after the removal.
         if (fromIdx >= 0 && fromIdx < toIdx) toIdx -= 1;
-        app.reorderTestPilotSection(dragging.sectionTitle, toIdx);
+        app.reorderTestPilotSection(drag.sectionTitle, toIdx);
       }
     } else if (
-      dragging.kind === "test" &&
-      dragging.testId &&
+      drag.kind === "test" &&
+      drag.testId &&
       dropHint.key.startsWith("test:")
     ) {
       const targetTestId = dropHint.key.slice("test:".length);
       const section = catalog.sections.find(
-        (s) => s.title === dragging.sectionTitle,
+        (s) => s.title === drag.sectionTitle,
       );
       if (section) {
         let toIdx = section.tests.findIndex((t) => t.id === targetTestId);
         if (toIdx >= 0) {
           if (dropHint.position === "below") toIdx += 1;
           const fromIdx = section.tests.findIndex(
-            (t) => t.id === dragging.testId,
+            (t) => t.id === drag.testId,
           );
           if (fromIdx >= 0 && fromIdx < toIdx) toIdx -= 1;
-          app.reorderTestPilotTest(dragging.testId, toIdx);
+          app.reorderTestPilotTest(drag.testId, toIdx);
         }
       }
     }
@@ -627,6 +674,9 @@
   function clearMarks() {
     const c = app.testPilot.catalog;
     if (!c) return;
+    // Read-only while an imported run is shown (button is disabled too;
+    // this mirrors the state-level guard in clearTestPilotMarks).
+    if (readOnlyRun) return;
     const marked = c.sections.reduce(
       (n, s) => n + s.tests.filter((t) => t.status !== "untested").length,
       0,
@@ -645,6 +695,20 @@
     if (!file) return;
     const text = await file.text();
     await app.importTestDoc(file.name, text);
+    // A results file for a DIFFERENT catalog — or an unmarked sheet
+    // that would replace a catalog which already has Pass/Fail marks —
+    // parks itself in pendingImportConflict. Surface the shared confirm
+    // modal instead of silently replacing what's loaded.
+    if (app.testPilot.pendingImportConflict) {
+      const ok = await confirmDialog({
+        title: "Replace test catalog?",
+        message:
+          "Importing this file will replace the loaded test catalog and its Pass/Fail marks (it's either an unmarked sheet, or results for a different catalog). Replace what's loaded?",
+        confirmLabel: "Replace catalog",
+        danger: true,
+      });
+      app.resolveImportConflict(ok);
+    }
     // After import, collapse all sections except the first so the
     // catalog isn't an overwhelming wall of tests on first view.
     const catalog = app.testPilot.catalog;
@@ -889,8 +953,8 @@
     exportMenuOpen = false;
   }
 
-  function downloadResultsMd() {
-    const md = app.exportResults();
+  function downloadResultsMd(signoff?: TestPilotSignoff) {
+    const md = app.exportResults(signoff);
     const ts = new Date().toISOString().slice(0, 10);
     downloadBlob(
       new Blob([md], { type: "text/markdown" }),
@@ -899,14 +963,73 @@
     exportMenuOpen = false;
   }
 
-  async function downloadResultsDocx() {
+  async function downloadResultsDocx(signoff?: TestPilotSignoff) {
     const ts = new Date().toISOString().slice(0, 10);
     try {
-      downloadDocx(await app.exportResultsDocx(), `${exportStem()}-results-${ts}.docx`);
+      downloadDocx(await app.exportResultsDocx(signoff), `${exportStem()}-results-${ts}.docx`);
     } catch (err) {
       app.testPilot.error = `Word export failed: ${(err as Error).message}`;
       exportMenuOpen = false;
     }
+  }
+
+  // ── Sign-off form (results export) ────────────────────────────────
+  // Compact inline form that opens when either Results format is
+  // clicked. Tester name/email/environment persist in
+  // chrome.storage["pinta-tester-info"]; date + notes are per-run.
+  let signoffOpen = $state<null | "md" | "docx">(null);
+  let signoffDate = $state("");
+  let signoffNotes = $state("");
+  let signoffRunType = $state("Smoke");
+
+  async function openSignoff(fmt: "md" | "docx") {
+    exportMenuOpen = false;
+    await app.loadTesterInfo();
+    signoffDate = new Date().toISOString().slice(0, 10);
+    signoffNotes = "";
+    // Default the run type from the catalog's generation depth — a
+    // thorough catalog is usually being run thoroughly. Tester can
+    // still flip it (e.g. a quick smoke over a thorough catalog).
+    signoffRunType = thoroughOn ? "Thorough" : "Smoke";
+    signoffOpen = fmt;
+  }
+
+  async function exportResultsWithSignoff(signed: boolean) {
+    const fmt = signoffOpen;
+    if (!fmt) return;
+    let signoff: TestPilotSignoff | undefined;
+    if (signed) {
+      app.saveTesterInfo();
+      signoff = {
+        tester: app.testerInfo.name.trim(),
+        email: app.testerInfo.email.trim() || undefined,
+        date: signoffDate,
+        environment: app.testerInfo.environment,
+        runType: signoffRunType || undefined,
+        notes: signoffNotes.trim() || undefined,
+      };
+    }
+    signoffOpen = null;
+    if (fmt === "md") downloadResultsMd(signoff);
+    else await downloadResultsDocx(signoff);
+  }
+
+  /** "Email to tester" — mail clients can't take attachments from a
+   *  link, so this downloads the tester sheet and opens a prefilled
+   *  draft for the developer to drop the file into. */
+  async function emailTesterSheet() {
+    await app.loadTesterInfo();
+    downloadTesterSheetMd();
+    const subject = encodeURIComponent(`[Pinta tester sheet] ${exportStem()}`);
+    const body = encodeURIComponent(
+      "Hi,\n\nAttached is the Pinta tester sheet (.md — it just downloaded on my side, dragging it in now).\n\n" +
+        "To run it: open the Pinta side panel → Test Pilot → Import tester sheet (no companion needed), walk through the tests and mark Pass/Fail.\n\n" +
+        "When you're done, send ONE file back:\n" +
+        "- If you annotated any bugs on the page, use Share session as .pinta with \"Include test results\" ticked — that single .pinta bundle carries your annotations AND your Pass/Fail marks + sign-off.\n" +
+        "- If you didn't annotate anything, just use Export → Results (.md) with sign-off instead.\n\nThanks!",
+    );
+    const to = encodeURIComponent(app.testerInfo.recipient.trim());
+    window.open(`mailto:${to}?subject=${subject}&body=${body}`, "_blank");
   }
 
   function downloadTesterSheetMd() {
@@ -1065,7 +1188,7 @@
       <h2 class="text-sm font-semibold text-ink-900 dark:text-night-text">Test Pilot</h2>
     </div>
     <p class="text-[12px] text-ink-700 dark:text-night-dim leading-snug">
-      Got a tester sheet from the developer? Import it and start walking through the tests. Pass/Fail marks save locally; export your results back as markdown when you're done.
+      Got a tester sheet from the developer? Import it and start walking through the tests. Pass/Fail marks save locally; export your results back as markdown when you're done — or, if you also annotate bugs on the page, share one <code class="font-mono text-[10px] bg-ink-100 dark:bg-night-alt px-1 rounded">.pinta</code> bundle with “Include test results” ticked so your annotations and marks travel together.
     </p>
     <button
       type="button"
@@ -1430,18 +1553,20 @@
       <div class="flex items-center gap-2 pt-1">
         <button
           type="button"
-          class="flex-1 inline-flex items-center justify-center gap-1.5 rounded-md bg-emerald-500 hover:bg-emerald-600 text-white text-[13px] font-semibold py-2.5 disabled:opacity-50"
+          class="flex-1 inline-flex items-center justify-center gap-1.5 rounded-md bg-emerald-500 hover:bg-emerald-600 text-white text-[13px] font-semibold py-2.5 disabled:opacity-50 disabled:cursor-not-allowed"
           onclick={() => setStatusAndClose("pass")}
-          disabled={app.testPilot.pending !== null}
+          disabled={app.testPilot.pending !== null || readOnlyRun}
+          title={readOnlyRun ? READ_ONLY_TITLE : undefined}
         >
           <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"/></svg>
           Pass
         </button>
         <button
           type="button"
-          class="flex-1 inline-flex items-center justify-center gap-1.5 rounded-md border border-ink-300 dark:border-night-line bg-transparent text-ink-700 dark:text-night-dim hover:bg-ink-50 dark:hover:bg-night-alt text-[13px] font-semibold py-2.5 disabled:opacity-50"
+          class="flex-1 inline-flex items-center justify-center gap-1.5 rounded-md border border-ink-300 dark:border-night-line bg-transparent text-ink-700 dark:text-night-dim hover:bg-ink-50 dark:hover:bg-night-alt text-[13px] font-semibold py-2.5 disabled:opacity-50 disabled:cursor-not-allowed"
           onclick={() => setStatusAndClose("fail")}
-          disabled={app.testPilot.pending !== null}
+          disabled={app.testPilot.pending !== null || readOnlyRun}
+          title={readOnlyRun ? READ_ONLY_TITLE : undefined}
         >
           <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
           Fail
@@ -1613,10 +1738,12 @@
           type="button"
           class="inline-flex items-center justify-center w-8 h-8 text-ink-700 dark:text-night-dim hover:text-red-600 dark:hover:text-red-400 hover:bg-ink-50 dark:hover:bg-night-alt disabled:opacity-40 disabled:cursor-not-allowed disabled:hover:bg-transparent disabled:hover:text-ink-700 dark:disabled:hover:text-night-dim"
           onclick={clearMarks}
-          disabled={t.pass + t.fail === 0}
-          title={t.pass + t.fail === 0
-            ? "Clear marks — nothing to clear, no rows are marked yet"
-            : "Clear marks — reset all Pass/Fail marks back to untested (keeps the catalog)"}
+          disabled={t.pass + t.fail === 0 || readOnlyRun}
+          title={readOnlyRun
+            ? READ_ONLY_TITLE
+            : t.pass + t.fail === 0
+              ? "Clear marks — nothing to clear, no rows are marked yet"
+              : "Clear marks — reset all Pass/Fail marks back to untested (keeps the catalog)"}
           aria-label="Clear all Pass/Fail marks"
         >
           <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 6h18"/><path d="M8 6V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/><path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6"/></svg>
@@ -1624,13 +1751,15 @@
         <button
           type="button"
           class="inline-flex items-center justify-center w-8 h-8 text-ink-700 dark:text-night-dim hover:text-brand-pink dark:hover:text-brand-pink-light hover:bg-ink-50 dark:hover:bg-night-alt disabled:opacity-40 disabled:cursor-not-allowed disabled:hover:bg-transparent disabled:hover:text-ink-700 dark:disabled:hover:text-night-dim"
-          onclick={() => void app.fileFailedTestsToGitLab()}
-          disabled={t.fail === 0 || app.testPilot.pendingFileIssues}
-          title={t.fail === 0
-            ? "File failed tests — no failures marked yet"
-            : gitlabReady
-              ? `File ${t.fail} failed test${t.fail === 1 ? "" : "s"} as GitLab issues (one per test, via glab)`
-              : `File ${t.fail} failed test${t.fail === 1 ? "" : "s"} — GitLab Issues module is off, entries land in .pinta/tasks.md`}
+          onclick={openFileIssuesSheet}
+          disabled={app.appMode === "standalone" || t.fail === 0 || app.testPilot.pendingFileIssues}
+          title={app.appMode === "standalone"
+            ? "File failed tests — needs a connected companion (export your results and send them to the developer instead)"
+            : t.fail === 0
+              ? "File failed tests — no failures marked yet"
+              : gitlabReady
+                ? `File ${t.fail} failed test${t.fail === 1 ? "" : "s"} as GitLab issues (one per test, via glab)`
+                : `File ${t.fail} failed test${t.fail === 1 ? "" : "s"} — GitLab Issues module is off, entries land in .pinta/tasks.md`}
           aria-label="File failed tests as issues"
         >
           {#if app.testPilot.pendingFileIssues}
@@ -1646,6 +1775,9 @@
             onclick={(e) => {
               exportMenuAlignLeft = e.currentTarget.getBoundingClientRect().right < 288 + 8;
               exportMenuOpen = !exportMenuOpen;
+              // Prefill the tester-email input (and later the sign-off
+              // form) while the menu animates open.
+              if (exportMenuOpen) void app.loadTesterInfo();
             }}
             title="Export this catalog — Results or Tester sheet, as Markdown or Word (.docx)"
             aria-haspopup="menu"
@@ -1682,8 +1814,8 @@
                 <div class="text-[12px] font-semibold text-ink-900 dark:text-night-text">Results</div>
                 <div class="text-[10.5px] text-ink-500 dark:text-night-mute leading-snug mt-0.5 mb-2">Sign-off report with Pass/Fail marks + per-row chat threads.</div>
                 <div class="flex items-center gap-1.5">
-                  {@render fmtBtn(".md", "Results as Markdown", downloadResultsMd)}
-                  {@render fmtBtn(".docx", "Results as Word — opens directly in Word, no pandoc needed", downloadResultsDocx)}
+                  {@render fmtBtn(".md", "Results as Markdown — opens the sign-off form (re-importable by the developer)", () => void openSignoff("md"))}
+                  {@render fmtBtn(".docx", "Results as Word — opens the sign-off form; opens directly in Word, no pandoc needed", () => void openSignoff("docx"))}
                 </div>
               </div>
 
@@ -1691,15 +1823,211 @@
                 <div class="text-[12px] font-semibold text-ink-900 dark:text-night-text">Tester sheet</div>
                 <div class="text-[10.5px] text-ink-500 dark:text-night-mute leading-snug mt-0.5 mb-2">Help-generated steps per row, Result left blank for the tester. Re-importable in standalone mode.</div>
                 <div class="flex items-center gap-1.5">
-                  {@render fmtBtn(".md", "Tester sheet as Markdown", downloadTesterSheetMd)}
+                  {@render fmtBtn(".md", "Tester sheet as Markdown", () => downloadTesterSheetMd())}
                   {@render fmtBtn(".docx", "Tester sheet as Word — opens directly in Word, no pandoc needed", downloadTesterSheetDocx)}
+                  {@render fmtBtn("Email…", "Download the .md and open a prefilled email draft to your tester — attach the downloaded file and send", () => void emailTesterSheet())}
                 </div>
+                <input
+                  type="email"
+                  class="mt-1.5 w-full px-2 py-1 text-[11px] rounded-md border border-ink-200 dark:border-night-line bg-white dark:bg-night-card text-ink-900 dark:text-night-text placeholder:text-ink-400 dark:placeholder:text-night-mute outline-none focus:border-brand-pink dark:focus:border-brand-pink-light"
+                  placeholder="Tester email for the Email… draft (optional)"
+                  bind:value={app.testerInfo.recipient}
+                  onchange={() => app.saveTesterInfo()}
+                  aria-label="Tester email address"
+                />
               </div>
             </div>
           {/if}
         </div>
       </div>
     </div>
+
+    <!-- SIGN-OFF form (inline, per locked spec — no overlay). Opens when
+         either Results export format is clicked. Name/email/environment
+         prefill from pinta-tester-info; date + notes are per-run. -->
+    {#if signoffOpen}
+      <div class="rounded-md border border-brand-pink/40 dark:border-brand-pink-light/40 bg-brand-pink/5 p-2.5 space-y-2">
+        {#if readOnlyRun}
+          <!-- Imported run active — the marks on screen are the tester's,
+               so offering the developer a sign-off here would re-sign
+               someone else's run as their own. Unsigned export stays. -->
+          <div class="text-[12px] font-semibold text-ink-900 dark:text-night-text">Export results</div>
+          <p class="text-[11.5px] text-ink-700 dark:text-night-dim leading-snug">
+            The marks on screen are from the imported run{app.testPilot.importedRun?.signoff
+              ? ` signed by ${app.testPilot.importedRun.signoff.tester}`
+              : ""} — signing them as your own is disabled. Export without sign-off, or Clear the imported run to sign your own marks.
+          </p>
+        {:else}
+          <div class="text-[12px] font-semibold text-ink-900 dark:text-night-text">Sign off this run</div>
+          <div class="grid grid-cols-2 gap-1.5">
+            <input
+              type="text"
+              class="col-span-2 w-full px-2 py-1.5 text-[12px] rounded-md border border-ink-200 dark:border-night-line bg-white dark:bg-night-card text-ink-900 dark:text-night-text placeholder:text-ink-400 dark:placeholder:text-night-mute outline-none focus:border-brand-pink dark:focus:border-brand-pink-light"
+              placeholder="Tester name (required to sign)"
+              bind:value={app.testerInfo.name}
+              aria-label="Tester name"
+            />
+            <input
+              type="email"
+              class="col-span-2 w-full px-2 py-1.5 text-[12px] rounded-md border border-ink-200 dark:border-night-line bg-white dark:bg-night-card text-ink-900 dark:text-night-text placeholder:text-ink-400 dark:placeholder:text-night-mute outline-none focus:border-brand-pink dark:focus:border-brand-pink-light"
+              placeholder="Email (optional)"
+              bind:value={app.testerInfo.email}
+              aria-label="Tester email"
+            />
+            <label class="block min-w-0">
+              <span class="block text-[10px] font-medium text-ink-500 dark:text-night-mute mb-0.5">Run date</span>
+              <input
+                type="date"
+                class="w-full px-2 py-1.5 text-[12px] rounded-md border border-ink-200 dark:border-night-line bg-white dark:bg-night-card text-ink-900 dark:text-night-text outline-none focus:border-brand-pink dark:focus:border-brand-pink-light"
+                bind:value={signoffDate}
+                aria-label="Run date"
+              />
+            </label>
+            <label class="block min-w-0">
+              <span class="block text-[10px] font-medium text-ink-500 dark:text-night-mute mb-0.5">Environment</span>
+              <select
+                class="w-full px-2 py-1.5 text-[12px] rounded-md border border-ink-200 dark:border-night-line bg-white dark:bg-night-card text-ink-900 dark:text-night-text outline-none focus:border-brand-pink dark:focus:border-brand-pink-light"
+                bind:value={app.testerInfo.environment}
+                aria-label="Environment"
+              >
+                <option value="">Environment…</option>
+                <option>Dev</option>
+                <option>Staging</option>
+                <option>UAT</option>
+                <option>Prod</option>
+                <option>Other</option>
+              </select>
+            </label>
+            <label class="col-span-2 block min-w-0">
+              <span class="block text-[10px] font-medium text-ink-500 dark:text-night-mute mb-0.5">Run type</span>
+              <select
+                class="w-full px-2 py-1.5 text-[12px] rounded-md border border-ink-200 dark:border-night-line bg-white dark:bg-night-card text-ink-900 dark:text-night-text outline-none focus:border-brand-pink dark:focus:border-brand-pink-light"
+                bind:value={signoffRunType}
+                aria-label="Run type"
+                title="What kind of pass this run was — recorded in the results file"
+              >
+                <option>Smoke</option>
+                <option>Thorough</option>
+                <option>Regression</option>
+              </select>
+            </label>
+            <textarea
+              rows="2"
+              class="col-span-2 w-full px-2 py-1.5 text-[12px] rounded-md border border-ink-200 dark:border-night-line bg-white dark:bg-night-card text-ink-900 dark:text-night-text placeholder:text-ink-400 dark:placeholder:text-night-mute outline-none focus:border-brand-pink dark:focus:border-brand-pink-light resize-y"
+              placeholder="Notes for this run (optional — blockers, build under test, …)"
+              bind:value={signoffNotes}
+              aria-label="Run notes"
+            ></textarea>
+          </div>
+        {/if}
+        <div class="flex items-center gap-1.5 flex-wrap">
+          {#if !readOnlyRun}
+            <button
+              type="button"
+              class="inline-flex items-center rounded-md bg-brand-pink text-white text-[11.5px] font-semibold px-2.5 py-1.5 hover:bg-brand-magenta dark:hover:bg-brand-pink-light disabled:opacity-40 disabled:cursor-not-allowed"
+              disabled={!app.testerInfo.name.trim()}
+              onclick={() => void exportResultsWithSignoff(true)}
+            >
+              Export signed results (.{signoffOpen})
+            </button>
+          {/if}
+          <button
+            type="button"
+            class="text-[11.5px] text-ink-600 dark:text-night-dim hover:text-ink-900 dark:hover:text-night-text underline"
+            onclick={() => void exportResultsWithSignoff(false)}
+          >
+            Export without sign-off
+          </button>
+          <button
+            type="button"
+            class="ml-auto text-[11.5px] text-ink-500 dark:text-night-mute hover:text-ink-900 dark:hover:text-night-text"
+            onclick={() => (signoffOpen = null)}
+          >
+            Cancel
+          </button>
+        </div>
+      </div>
+    {/if}
+
+    <!-- IMPORTED-RUN banner — a tester's returned results are overlaid;
+         marks are read-only until cleared (Clear restores your own). -->
+    {#if app.testPilot.importedRun}
+      {@const run = app.testPilot.importedRun}
+      <div class="rounded-md border border-brand-pink/40 dark:border-brand-pink-light/40 bg-brand-pink/5 p-2.5 text-[12px] text-ink-800 dark:text-night-text leading-snug flex items-start gap-2">
+        <div class="flex-1 min-w-0 space-y-0.5">
+          <div>
+            <span class="font-semibold">Imported run</span>
+            {#if run.signoff}
+              — {run.signoff.tester}{run.signoff.environment ? ` · ${run.signoff.environment}` : ""}{run.signoff.runType ? ` · ${run.signoff.runType} run` : ""}{run.signoff.date ? ` · ${run.signoff.date}` : ""}
+            {/if}
+            <span class="text-ink-500 dark:text-night-mute"> · {run.applied} result{run.applied === 1 ? "" : "s"} applied{run.unknownIds.length > 0 ? `, ${run.unknownIds.length} unknown id${run.unknownIds.length === 1 ? "" : "s"} skipped` : ""}</span>
+          </div>
+          {#if run.signoff?.notes}
+            <div class="text-[11px] text-ink-600 dark:text-night-dim">“{run.signoff.notes}”</div>
+          {/if}
+          <div class="text-[11px] text-ink-500 dark:text-night-mute">Marks are read-only while this run is shown — Clear to get your own marks back.</div>
+        </div>
+        <button
+          type="button"
+          class="shrink-0 text-[11.5px] font-semibold text-brand-pink dark:text-brand-pink-light hover:underline"
+          onclick={() => app.clearImportedRun()}
+        >
+          Clear
+        </button>
+      </div>
+    {/if}
+
+    <!-- FILE-FAILED-TESTS selection sheet (WS4) — small inline sheet,
+         failed + unfiled rows with checkboxes (all pre-checked). -->
+    {#if fileIssuesOpen}
+      <div class="rounded-md border border-ink-200 dark:border-night-line bg-white dark:bg-night-card p-2.5 space-y-2">
+        <div class="text-[12px] font-semibold text-ink-900 dark:text-night-text">
+          File failed tests as issues
+        </div>
+        <ul class="space-y-1 max-h-48 overflow-y-auto">
+          {#each failedUnfiled as row (row.id)}
+            <li>
+              <label class="flex items-start gap-1.5 text-[11.5px] text-ink-800 dark:text-night-text cursor-pointer rounded px-1 -mx-1 py-0.5 hover:bg-ink-50 dark:hover:bg-night-alt">
+                <input
+                  type="checkbox"
+                  class="accent-brand-pink mt-0.5"
+                  bind:checked={fileIssuesSelected[row.id]}
+                />
+                <span class="min-w-0">
+                  <span class="font-mono text-[10.5px] text-ink-500 dark:text-night-mute tabular-nums">{row.id}</span>
+                  <span class="text-ink-500 dark:text-night-mute"> · {row.section}</span>
+                  <span class="block truncate" title={row.test}>{row.test}</span>
+                </span>
+              </label>
+            </li>
+          {/each}
+        </ul>
+        <div class="flex items-center gap-1.5">
+          <button
+            type="button"
+            class="inline-flex items-center rounded-md bg-brand-pink text-white text-[11.5px] font-semibold px-2.5 py-1.5 hover:bg-brand-magenta dark:hover:bg-brand-pink-light disabled:opacity-40 disabled:cursor-not-allowed"
+            disabled={fileIssuesCheckedCount === 0}
+            onclick={confirmFileIssues}
+          >
+            File {fileIssuesCheckedCount} issue{fileIssuesCheckedCount === 1 ? "" : "s"}
+          </button>
+          <button
+            type="button"
+            class="text-[11.5px] text-ink-600 dark:text-night-dim hover:text-ink-900 dark:hover:text-night-text"
+            onclick={() => (fileIssuesOpen = false)}
+          >
+            Cancel
+          </button>
+          <span class="ml-auto text-[10.5px] text-ink-500 dark:text-night-mute">
+            {app.appMode === "standalone"
+              ? "Needs a connected companion — nothing will be filed"
+              : gitlabReady
+                ? "via glab, one issue per test"
+                : "GitLab module off — entries land in .pinta/tasks.md"}
+          </span>
+        </div>
+      </div>
+    {/if}
 
     <!-- SEARCH — filters the catalog by id (AUTH-1), category (section
          title), or content (test title / expected). While active, all
@@ -2220,7 +2548,7 @@
                     <button
                       type="button"
                       data-pinta-status-trigger
-                      class="shrink-0 w-5 h-5 mt-0.5 inline-flex items-center justify-center rounded transition-colors"
+                      class="shrink-0 w-5 h-5 mt-0.5 inline-flex items-center justify-center rounded transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
                       class:bg-emerald-500={test.status === "pass"}
                       class:text-white={test.status === "pass" || test.status === "fail"}
                       class:bg-red-500={test.status === "fail"}
@@ -2230,6 +2558,8 @@
                       class:bg-white={test.status === "untested"}
                       class:dark:bg-night-alt={test.status === "untested"}
                       onclick={() => toggleStatusMenu(test.id)}
+                      disabled={readOnlyRun}
+                      title={readOnlyRun ? READ_ONLY_TITLE : undefined}
                       aria-label="Set status for {test.id}"
                       aria-haspopup="menu"
                       aria-expanded={dropdownTestId === test.id}
@@ -2410,9 +2740,9 @@
                            input the only target. -->
                       {#if !editingTitle && !editingExpected}
                         {@const sIdx2 = app.testPilot.catalog.sections.findIndex((s) => s.title === section.title)}
-                        {@const tIdx = sIdx2 >= 0 ? app.testPilot.catalog.sections[sIdx2].tests.findIndex((t) => t.id === test.id) : -1}
+                        {@const tIdx = sIdx2 >= 0 ? app.testPilot.catalog.sections[sIdx2]!.tests.findIndex((t) => t.id === test.id) : -1}
                         {@const isFirstTest = tIdx === 0}
-                        {@const isLastTest = sIdx2 >= 0 && tIdx === app.testPilot.catalog.sections[sIdx2].tests.length - 1}
+                        {@const isLastTest = sIdx2 >= 0 && tIdx === app.testPilot.catalog.sections[sIdx2]!.tests.length - 1}
                         <button
                           type="button"
                           data-pinta-kebab-trigger
@@ -2499,8 +2829,10 @@
                     >
                       <button
                         type="button"
-                        class="w-full flex items-center gap-2 px-3 py-1.5 text-[12px] text-ink-700 dark:text-night-dim hover:bg-emerald-50 dark:hover:bg-emerald-950/30 hover:text-emerald-700 dark:hover:text-emerald-300"
+                        class="w-full flex items-center gap-2 px-3 py-1.5 text-[12px] text-ink-700 dark:text-night-dim hover:bg-emerald-50 dark:hover:bg-emerald-950/30 hover:text-emerald-700 dark:hover:text-emerald-300 disabled:opacity-40 disabled:cursor-not-allowed"
                         onclick={() => setStatusFromMenu(test.id, "pass")}
+                        disabled={readOnlyRun}
+                        title={readOnlyRun ? READ_ONLY_TITLE : undefined}
                         role="menuitem"
                       >
                         <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" class="text-emerald-600 dark:text-emerald-400"><polyline points="20 6 9 17 4 12"/></svg>
@@ -2508,8 +2840,10 @@
                       </button>
                       <button
                         type="button"
-                        class="w-full flex items-center gap-2 px-3 py-1.5 text-[12px] text-ink-700 dark:text-night-dim hover:bg-red-50 dark:hover:bg-red-950/30 hover:text-red-700 dark:hover:text-red-300"
+                        class="w-full flex items-center gap-2 px-3 py-1.5 text-[12px] text-ink-700 dark:text-night-dim hover:bg-red-50 dark:hover:bg-red-950/30 hover:text-red-700 dark:hover:text-red-300 disabled:opacity-40 disabled:cursor-not-allowed"
                         onclick={() => setStatusFromMenu(test.id, "fail")}
+                        disabled={readOnlyRun}
+                        title={readOnlyRun ? READ_ONLY_TITLE : undefined}
                         role="menuitem"
                       >
                         <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" class="text-red-600 dark:text-red-400"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
@@ -2517,8 +2851,10 @@
                       </button>
                       <button
                         type="button"
-                        class="w-full flex items-center gap-2 px-3 py-1.5 text-[12px] text-ink-700 dark:text-night-dim hover:bg-ink-50 dark:hover:bg-night-alt"
+                        class="w-full flex items-center gap-2 px-3 py-1.5 text-[12px] text-ink-700 dark:text-night-dim hover:bg-ink-50 dark:hover:bg-night-alt disabled:opacity-40 disabled:cursor-not-allowed"
                         onclick={() => setStatusFromMenu(test.id, "untested")}
+                        disabled={readOnlyRun}
+                        title={readOnlyRun ? READ_ONLY_TITLE : undefined}
                         role="menuitem"
                       >
                         <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" class="text-ink-400 dark:text-night-mute"><circle cx="12" cy="12" r="9"/></svg>

@@ -16,6 +16,7 @@ import type {
   AnnotationTarget,
   ImportedSession,
   PintaFile,
+  PintaFileTestPilot,
   Session,
   SessionManifest,
 } from "@pinta/shared";
@@ -51,11 +52,13 @@ function stripTransient(session: Session): Session {
 export function encodePintaFile(
   session: Session,
   manifest: SessionManifest,
+  testPilot?: PintaFileTestPilot,
 ): Blob {
   const payload: PintaFile = {
     $pinta: SCHEMA_VERSION,
     manifest,
     session: stripTransient(session),
+    ...(testPilot ? { testPilot } : {}),
   };
   const json = JSON.stringify(payload);
   return new Blob([json], { type: "application/json" });
@@ -121,12 +124,55 @@ function isSession(x: unknown): x is Session {
   );
 }
 
+/** Defensive validator for the optional `testPilot` block. A malformed
+ *  block returns undefined (the field is DROPPED, the file still
+ *  imports) — the annotations are the primary cargo and a hand-edited
+ *  or future-versioned results block must not brick them. Unknown
+ *  status values and non-string keys are discarded entry-by-entry. */
+function sanitizeTestPilot(x: unknown): PintaFileTestPilot | undefined {
+  if (!x || typeof x !== "object") return undefined;
+  const tp = x as Record<string, unknown>;
+  if (typeof tp.docId !== "string" || !tp.docId) return undefined;
+  if (!tp.statuses || typeof tp.statuses !== "object" || Array.isArray(tp.statuses)) {
+    return undefined;
+  }
+  const statuses: PintaFileTestPilot["statuses"] = {};
+  for (const [id, status] of Object.entries(tp.statuses as Record<string, unknown>)) {
+    if (status === "untested" || status === "pass" || status === "fail") {
+      statuses[id] = status;
+    }
+  }
+  let signoff: PintaFileTestPilot["signoff"] = null;
+  const so = tp.signoff;
+  if (so && typeof so === "object") {
+    const s = so as Record<string, unknown>;
+    if (typeof s.tester === "string" && s.tester.trim()) {
+      signoff = {
+        tester: s.tester,
+        email: typeof s.email === "string" ? s.email : undefined,
+        date: typeof s.date === "string" ? s.date : "",
+        environment: typeof s.environment === "string" ? s.environment : "",
+        runType: typeof s.runType === "string" ? s.runType : undefined,
+        notes: typeof s.notes === "string" ? s.notes : undefined,
+      };
+    }
+  }
+  return { docId: tp.docId, signoff, statuses };
+}
+
+/** decodePintaFile result — the ImportedSession that lands in IDB plus
+ *  the bundle's optional Test Pilot results block (kept OUT of the
+ *  persisted session; the caller overlays it onto the loaded catalog). */
+export type DecodedPintaFile = ImportedSession & {
+  testPilot?: PintaFileTestPilot;
+};
+
 /**
  * Validate + parse a `.pinta` payload. Throws PintaFileError on any
  * malformed input. The returned ImportedSession has a fresh local id
  * so multiple imports of the same source file are distinguishable.
  */
-export function decodePintaFile(text: string): ImportedSession {
+export function decodePintaFile(text: string): DecodedPintaFile {
   if (text.length > MAX_PINTA_FILE_BYTES) {
     throw new PintaFileError(
       `file too large (${text.length} bytes; max ${MAX_PINTA_FILE_BYTES})`,
@@ -153,11 +199,13 @@ export function decodePintaFile(text: string): ImportedSession {
   if (!isSession(p.session)) {
     throw new PintaFileError("session is missing or malformed");
   }
+  const testPilot = sanitizeTestPilot(p.testPilot);
   return {
     id: crypto.randomUUID(),
     manifest: p.manifest,
     session: p.session,
     importedAt: Date.now(),
+    ...(testPilot ? { testPilot } : {}),
   };
 }
 

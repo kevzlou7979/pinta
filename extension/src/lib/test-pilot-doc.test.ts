@@ -7,6 +7,7 @@ import {
   composeTesterSheetMarkdown,
   nextUserTestId,
   parseTestDocMarkdown,
+  selectUnfiledFailures,
 } from "./test-pilot-doc.js";
 import type { TestPilotCatalog } from "./state.svelte.js";
 
@@ -443,5 +444,60 @@ describe("composeResultsDocx", () => {
     expect(xml).not.toContain("**remove**");
     // Rows without chat don't spawn a conversation heading.
     expect(xml).not.toContain("Conversation — C-1");
+  });
+});
+
+describe("selectUnfiledFailures", () => {
+  const failCat = () =>
+    makeCatalog({
+      sections: [
+        {
+          title: "1.1 Auth",
+          tests: [
+            { id: "AUTH-01", test: "Login", expected: "Dashboard", status: "fail" },
+            { id: "AUTH-02", test: "Bad PIN", expected: "Error", status: "pass" },
+          ],
+        },
+        {
+          title: "1.2 Claims",
+          tests: [
+            { id: "CLM-01", test: "List", expected: "Rows", status: "fail" },
+            { id: "CLM-02", test: "Filter", expected: "Subset", status: "untested" },
+          ],
+        },
+      ],
+    });
+
+  it("returns every failed row with its section, skipping pass/untested", () => {
+    const out = selectUnfiledFailures(failCat(), {});
+    expect(out).toEqual([
+      { id: "AUTH-01", section: "1.1 Auth", test: "Login", expected: "Dashboard" },
+      { id: "CLM-01", section: "1.2 Claims", test: "List", expected: "Rows" },
+    ]);
+  });
+
+  it("drops rows that already have an issue filed", () => {
+    const out = selectUnfiledFailures(failCat(), { "AUTH-01": { at: 1 } });
+    expect(out.map((t) => t.id)).toEqual(["CLM-01"]);
+  });
+
+  it("selectedIds narrows to the ticked unfiled failures only", () => {
+    const out = selectUnfiledFailures(failCat(), {}, ["CLM-01", "AUTH-02", "GONE-9"]);
+    // AUTH-02 passed and GONE-9 doesn't exist — only CLM-01 survives.
+    expect(out.map((t) => t.id)).toEqual(["CLM-01"]);
+  });
+
+  it("returns [] when nothing is ticked or nothing failed", () => {
+    expect(selectUnfiledFailures(failCat(), {}, [])).toEqual([]);
+    expect(selectUnfiledFailures(makeCatalog(), {})).toEqual([]);
+  });
+
+  it("a filed map with hostile keys doesn't hide real failures", () => {
+    // Object.prototype members must not read as "already filed".
+    const out = selectUnfiledFailures(failCat(), Object.create(null));
+    expect(out).toHaveLength(2);
+    const cat = failCat();
+    cat.sections[0]!.tests[0]!.id = "constructor";
+    expect(selectUnfiledFailures(cat, {}).map((t) => t.id)).toContain("constructor");
   });
 });

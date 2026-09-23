@@ -170,7 +170,8 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
     const scripts = (chrome.runtime.getManifest().content_scripts ?? []).filter(
       // Skip the MAIN-world reload-guard (document_start, dev-only HMR hold) —
       // only the ISOLATED overlay renders the UI.
-      (cs) => cs.world !== "MAIN" && Array.isArray(cs.js) && cs.js.length > 0,
+      // `world` is missing from the bundled manifest typings — cast.
+      (cs) => (cs as { world?: string }).world !== "MAIN" && Array.isArray(cs.js) && cs.js.length > 0,
     );
     Promise.all(
       scripts.map((cs) =>

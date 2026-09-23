@@ -150,6 +150,200 @@ describe("encode/decode pinta file", () => {
     const huge = "x".repeat(MAX_PINTA_FILE_BYTES + 1);
     expect(() => decodePintaFile(huge)).toThrowError(/too large/);
   });
+
+  // ── WS2b — optional testPilot block (ONE .pinta bundle) ───────────
+  it("round-trips the optional testPilot results block", async () => {
+    const testPilot = {
+      docId: "doc-abc",
+      signoff: {
+        tester: "Jess Reyes",
+        email: "jess@example.com",
+        date: "2026-09-23",
+        environment: "UAT",
+        runType: "Regression",
+        notes: "blocked on claims",
+      },
+      statuses: { "AUTH-01": "pass", "AUTH-02": "fail", "CLM-01": "untested" },
+    } as const;
+    const blob = encodePintaFile(makeSession(), makeManifest(), {
+      ...testPilot,
+      statuses: { ...testPilot.statuses },
+    });
+    const imported = decodePintaFile(await blob.text());
+    expect(imported.testPilot).toEqual(testPilot);
+  });
+
+  it("omits testPilot when not passed to encode", async () => {
+    const blob = encodePintaFile(makeSession(), makeManifest());
+    const text = await blob.text();
+    expect(JSON.parse(text).testPilot).toBeUndefined();
+    expect(decodePintaFile(text).testPilot).toBeUndefined();
+  });
+
+  it("drops a malformed testPilot block without failing the file", () => {
+    const cases: unknown[] = [
+      "not an object",
+      { signoff: null, statuses: {} }, // missing docId
+      { docId: "d", signoff: null, statuses: [] }, // statuses not a record
+      { docId: "", signoff: null, statuses: {} }, // empty docId
+    ];
+    for (const testPilot of cases) {
+      const text = JSON.stringify({
+        $pinta: "1",
+        manifest: makeManifest(),
+        session: makeSession(),
+        testPilot,
+      });
+      const imported = decodePintaFile(text);
+      expect(imported.testPilot).toBeUndefined();
+      expect(imported.session.id).toBe("sess-123");
+    }
+  });
+
+  it("discards unknown status values and keeps the valid ones", () => {
+    const text = JSON.stringify({
+      $pinta: "1",
+      manifest: makeManifest(),
+      session: makeSession(),
+      testPilot: {
+        docId: "doc-abc",
+        signoff: { tester: "" }, // blank tester → treated as unsigned
+        statuses: { "AUTH-01": "pass", "AUTH-02": "exploded", "CLM-01": 42 },
+      },
+    });
+    const imported = decodePintaFile(text);
+    expect(imported.testPilot).toEqual({
+      docId: "doc-abc",
+      signoff: null,
+      statuses: { "AUTH-01": "pass" },
+    });
+  });
+});
+
+// ── Tester gap tests (feat/tester-roundtrip QA pass) ──────────────────
+
+describe("testPilot block hygiene", () => {
+  it("emits exactly $pinta/manifest/session/testPilot — never filedIssues", async () => {
+    const blob = encodePintaFile(makeSession(), makeManifest(), {
+      docId: "doc-abc",
+      signoff: null,
+      statuses: { "AUTH-01": "pass" },
+    });
+    const text = await blob.text();
+    const payload = JSON.parse(text) as Record<string, unknown>;
+    expect(Object.keys(payload).sort()).toEqual(["$pinta", "manifest", "session", "testPilot"]);
+    expect(Object.keys(payload.testPilot as object).sort()).toEqual(["docId", "signoff", "statuses"]);
+    // Filed-issue markers live only in the local IndexedDB record
+    // (shared/types.ts ImportedSession.filedIssues) — never in a share.
+    expect(text).not.toContain("filedIssues");
+  });
+
+  it("still strips modules (secrets) and claim metadata when testPilot rides along", async () => {
+    const session = {
+      ...makeSession(),
+      modules: [{ id: "gitlab-issues", settings: { token: "SECRET-PAT-123" } }],
+    } as Session;
+    const blob = encodePintaFile(session, makeManifest(), {
+      docId: "doc-abc",
+      signoff: null,
+      statuses: { "AUTH-01": "fail" },
+    });
+    const text = await blob.text();
+    expect(text).not.toContain("SECRET-PAT-123");
+    const imported = decodePintaFile(text);
+    expect(imported.session.modules).toBeUndefined();
+    expect(imported.session.claimedBy).toBeUndefined();
+    expect(imported.testPilot?.statuses).toEqual({ "AUTH-01": "fail" });
+  });
+
+  it("unicode test ids survive the byte round-trip", async () => {
+    const statuses = { "AUTH-Ω": "pass", "試験-01": "fail" } as const;
+    const blob = encodePintaFile(makeSession(), makeManifest(), {
+      docId: "doc-abc",
+      signoff: null,
+      statuses: { ...statuses },
+    });
+    const imported = decodePintaFile(await blob.text());
+    expect(imported.testPilot?.statuses).toEqual(statuses);
+  });
+
+  it("a __proto__ status entry neither pollutes nor survives sanitize", () => {
+    const text = JSON.stringify({
+      $pinta: "1",
+      manifest: makeManifest(),
+      session: makeSession(),
+      testPilot: {
+        docId: "doc-abc",
+        signoff: null,
+        statuses: JSON.parse('{"__proto__": "pass", "AUTH-01": "fail"}'),
+      },
+    });
+    const imported = decodePintaFile(text);
+    expect(Object.keys(imported.testPilot!.statuses)).toEqual(["AUTH-01"]);
+    expect(Object.prototype.hasOwnProperty.call(imported.testPilot!.statuses, "__proto__")).toBe(false);
+    // No prototype pollution leaked out of the sanitize pass.
+    expect(({} as Record<string, unknown>)["AUTH-01"]).toBeUndefined();
+  });
+
+  it("treats a non-object signoff as unsigned but keeps the statuses", () => {
+    for (const signoff of ["Jess", 5, true]) {
+      const text = JSON.stringify({
+        $pinta: "1",
+        manifest: makeManifest(),
+        session: makeSession(),
+        testPilot: { docId: "doc-abc", signoff, statuses: { "AUTH-01": "pass" } },
+      });
+      const imported = decodePintaFile(text);
+      expect(imported.testPilot, String(signoff)).toEqual({
+        docId: "doc-abc",
+        signoff: null,
+        statuses: { "AUTH-01": "pass" },
+      });
+    }
+  });
+
+  it("coerces wrong-typed sign-off fields instead of failing the file", () => {
+    const text = JSON.stringify({
+      $pinta: "1",
+      manifest: makeManifest(),
+      session: makeSession(),
+      testPilot: {
+        docId: "doc-abc",
+        signoff: {
+          tester: "Jess",
+          email: 5,
+          date: null,
+          environment: {},
+          runType: 7,
+          notes: ["a"],
+          extraField: "dropped",
+        },
+        statuses: {},
+      },
+    });
+    const imported = decodePintaFile(text);
+    expect(imported.testPilot?.signoff).toEqual({
+      tester: "Jess",
+      email: undefined,
+      date: "",
+      environment: "",
+      runType: undefined,
+      notes: undefined,
+    });
+    expect(imported.testPilot?.signoff).not.toHaveProperty("extraField");
+  });
+
+  it("drops a null-statuses testPilot block without failing the file", () => {
+    const text = JSON.stringify({
+      $pinta: "1",
+      manifest: makeManifest(),
+      session: makeSession(),
+      testPilot: { docId: "doc-abc", signoff: null, statuses: null },
+    });
+    const imported = decodePintaFile(text);
+    expect(imported.testPilot).toBeUndefined();
+    expect(imported.session.id).toBe("sess-123");
+  });
 });
 
 describe("pintaFilename", () => {

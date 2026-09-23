@@ -1,7 +1,14 @@
 <script lang="ts">
   import { onMount } from "svelte";
-  import { drawAnnotation, badgeAnchor, drawNumberBadge } from "./tools/draw.js";
+  import { drawAnnotation, badgeAnchor, drawNumberBadge, DRAW_TOOLS, type DrawTool } from "./tools/draw.js";
   import { content } from "./state.svelte.js";
+  import type { AnnotationKind } from "@pinta/shared";
+
+  /** Narrow an annotation kind to the stroke-drawable subset — the
+   *  canvas pipeline only renders DRAW_TOOLS kinds; everything else
+   *  (select, image, move, text-insert, …) has its own overlay. */
+  const isDrawTool = (k: AnnotationKind): k is DrawTool =>
+    (DRAW_TOOLS as readonly AnnotationKind[]).includes(k);
 
   const COMMITTED_ALPHA = 0.55;
   const IN_PROGRESS_ALPHA = 1.0;
@@ -69,8 +76,9 @@
     for (const a of content.committed) {
       // Selects use DOM-attached badges (Overlay.svelte). Image-kind
       // annotations get their own placement overlay (Phase 3) — neither
-      // belongs in the stroke-canvas pipeline.
-      if (a.kind === "select" || a.kind === "image") continue;
+      // belongs in the stroke-canvas pipeline; nor does any other
+      // non-stroke kind (move / text-insert / note / query / delete).
+      if (!isDrawTool(a.kind)) continue;
       drawAnnotation(ctx, a.kind, a.strokes, {
         color: a.color,
         opacity: COMMITTED_ALPHA,
