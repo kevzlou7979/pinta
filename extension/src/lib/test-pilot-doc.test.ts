@@ -1,8 +1,12 @@
 import { describe, expect, it } from "vitest";
 import { unzipSync, strFromU8 } from "fflate";
 import {
+  appendRevision,
   composeResultsDocx,
   composeTestDocMarkdown,
+  diffCatalogs,
+  isEmptyDiff,
+  REVISION_LOG_LIMIT,
   composeTesterSheetDocx,
   composeTesterSheetMarkdown,
   nextUserTestId,
@@ -499,5 +503,441 @@ describe("selectUnfiledFailures", () => {
     const cat = failCat();
     cat.sections[0]!.tests[0]!.id = "constructor";
     expect(selectUnfiledFailures(cat, {}).map((t) => t.id)).toContain("constructor");
+  });
+});
+
+describe("diffCatalogs", () => {
+  const catalogWith = (
+    tests: { id: string; test: string; expected?: string }[],
+  ) =>
+    makeCatalog({
+      sections: [
+        {
+          title: "1.1 Auth",
+          tests: tests.map((t) => ({
+            id: t.id,
+            test: t.test,
+            expected: t.expected ?? "ok",
+            status: "untested" as const,
+          })),
+        },
+      ],
+    });
+
+  it("reports nothing for an identical regenerate", () => {
+    const a = catalogWith([{ id: "AUTH-01", test: "login" }]);
+    const b = catalogWith([{ id: "AUTH-01", test: "login" }]);
+    const diff = diffCatalogs(a, b);
+    expect(diff).toEqual({ added: [], changed: [], removed: [] });
+    expect(isEmptyDiff(diff)).toBe(true);
+  });
+
+  it("ignores pure whitespace reflow", () => {
+    const a = catalogWith([{ id: "AUTH-01", test: "log  in", expected: "ok" }]);
+    const b = catalogWith([{ id: "AUTH-01", test: "log in", expected: " ok " }]);
+    expect(isEmptyDiff(diffCatalogs(a, b))).toBe(true);
+  });
+
+  it("separates added, reworded and removed rows", () => {
+    const a = catalogWith([
+      { id: "AUTH-01", test: "login" },
+      { id: "AUTH-02", test: "logout" },
+    ]);
+    const b = catalogWith([
+      { id: "AUTH-01", test: "login with SSO" },
+      { id: "AUTH-03", test: "reset password" },
+    ]);
+    expect(diffCatalogs(a, b)).toEqual({
+      added: ["AUTH-03"],
+      changed: ["AUTH-01"],
+      removed: ["AUTH-02"],
+    });
+  });
+
+  it("treats a missing prior catalog as all-new", () => {
+    const b = catalogWith([{ id: "AUTH-01", test: "login" }]);
+    expect(diffCatalogs(null, b)).toEqual({
+      added: ["AUTH-01"],
+      changed: [],
+      removed: [],
+    });
+  });
+
+  it("matches ids across sections, not positions", () => {
+    const a = makeCatalog({
+      sections: [
+        { title: "A", tests: [{ id: "X-1", test: "t", expected: "e", status: "untested" }] },
+      ],
+    });
+    const b = makeCatalog({
+      sections: [
+        { title: "B", tests: [{ id: "X-1", test: "t", expected: "e", status: "untested" }] },
+      ],
+    });
+    expect(isEmptyDiff(diffCatalogs(a, b))).toBe(true);
+  });
+});
+
+describe("appendRevision", () => {
+  const entry = (rev: number) => ({
+    rev,
+    at: rev,
+    added: [],
+    changed: [],
+    removed: [],
+  });
+
+  it("appends newest last", () => {
+    const log = appendRevision(appendRevision(undefined, entry(1)), entry(2));
+    expect(log.map((r) => r.rev)).toEqual([1, 2]);
+  });
+
+  it("caps the log so storage stays small", () => {
+    let log = appendRevision(undefined, entry(1));
+    for (let rev = 2; rev <= REVISION_LOG_LIMIT + 5; rev++) {
+      log = appendRevision(log, entry(rev));
+    }
+    expect(log).toHaveLength(REVISION_LOG_LIMIT);
+    expect(log[log.length - 1]!.rev).toBe(REVISION_LOG_LIMIT + 5);
+  });
+});
+
+describe("Rev column round-trip", () => {
+  it("writes the last-changed revision and reads it back", () => {
+    const md = composeTestDocMarkdown(
+      makeCatalog({
+        sections: [
+          {
+            title: "1.1 Auth",
+            tests: [
+              {
+                id: "AUTH-01",
+                test: "login",
+                expected: "lands on dashboard",
+                status: "pass",
+                firstSeenRev: 1,
+                lastChangedRev: 3,
+              },
+              {
+                id: "AUTH-02",
+                test: "logout",
+                expected: "back to login",
+                status: "untested",
+                firstSeenRev: 2,
+              },
+            ],
+          },
+        ],
+      }),
+    );
+    expect(md).toContain("| ID | Test | Expected Result | Result | Rev |");
+    expect(md).toContain("| AUTH-01 | login | lands on dashboard | ✓ Pass | 3 |");
+    expect(md).toContain("| AUTH-02 | logout | back to login |  | 2 |");
+
+    const parsed = parseTestDocMarkdown("uat.md", md)!;
+    const rows = parsed.sections[0]!.tests;
+    expect(rows[0]!.lastChangedRev).toBe(3);
+    expect(rows[1]!.lastChangedRev).toBe(2);
+    expect(rows[0]!.status).toBe("pass");
+  });
+
+  it("leaves rows from a pre-versioning file unstamped", () => {
+    const md = [
+      "# UAT",
+      "",
+      "## 1.1 Auth",
+      "",
+      "| ID | Test | Expected Result | Result |",
+      "|----|------|-----------------|--------|",
+      "| AUTH-01 | login | ok | |",
+      "",
+    ].join(String.fromCharCode(10));
+    const parsed = parseTestDocMarkdown("uat.md", md)!;
+    expect(parsed.sections[0]!.tests[0]!.lastChangedRev).toBeUndefined();
+  });
+});
+
+// ─────────────────────────────────────────────────────────────────────
+// Phase 21 gaps — recycled ids, junk Rev cells, [chat] + Rev together,
+// escaped pipes through the 5-column table, and the tester sheet's
+// silent loss of provenance.
+// ─────────────────────────────────────────────────────────────────────
+
+describe("diffCatalogs — an id reused after its row was deleted", () => {
+  const one = (id: string, test: string) =>
+    makeCatalog({
+      sections: [
+        {
+          title: "1.1 Auth",
+          tests: [{ id, test, expected: "ok", status: "untested" as const }],
+        },
+      ],
+    });
+
+  it("a same-regenerate recycle reads as a reword, not add+remove", () => {
+    // AUTH-02 used to be "logout"; this regenerate hands the id to a
+    // completely unrelated scenario. There is no way to tell the two
+    // apart from ids alone, so the row inherits AUTH-02's history.
+    const prior = one("AUTH-02", "logout");
+    const next = one("AUTH-02", "delete account and purge PII");
+    expect(diffCatalogs(prior, next)).toEqual({
+      added: [],
+      changed: ["AUTH-02"],
+      removed: [],
+    });
+  });
+
+  it("a delete-then-readd across two regenerates does read as added", () => {
+    const rev1 = makeCatalog({
+      sections: [
+        {
+          title: "1.1 Auth",
+          tests: [
+            { id: "AUTH-01", test: "login", expected: "ok", status: "untested" },
+            { id: "AUTH-02", test: "logout", expected: "ok", status: "untested" },
+          ],
+        },
+      ],
+    });
+    const rev2 = one("AUTH-01", "login");
+    expect(diffCatalogs(rev1, rev2).removed).toEqual(["AUTH-02"]);
+    const rev3 = makeCatalog({
+      sections: [
+        {
+          title: "1.1 Auth",
+          tests: [
+            { id: "AUTH-01", test: "login", expected: "ok", status: "untested" },
+            {
+              id: "AUTH-02",
+              test: "delete account",
+              expected: "ok",
+              status: "untested",
+            },
+          ],
+        },
+      ],
+    });
+    expect(diffCatalogs(rev2, rev3)).toEqual({
+      added: ["AUTH-02"],
+      changed: [],
+      removed: [],
+    });
+  });
+});
+
+describe("Rev cell with junk text", () => {
+  const rowWithRev = (rev: string) =>
+    [
+      "# UAT",
+      "",
+      "## 1.1 Auth",
+      "",
+      "| ID | Test | Expected Result | Result | Rev |",
+      "|----|------|-----------------|--------|-----|",
+      `| AUTH-01 | login | ok |  | ${rev} |`,
+      "",
+    ].join("\n");
+
+  const revOf = (cell: string) =>
+    parseTestDocMarkdown("uat.md", rowWithRev(cell))!.sections[0]!.tests[0]!;
+
+  it("non-numeric junk leaves the row unstamped", () => {
+    for (const junk of ["n/a", "v3", "TBD", "", "  "]) {
+      const row = revOf(junk);
+      expect(
+        row.firstSeenRev,
+        `rev cell ${JSON.stringify(junk)}`,
+      ).toBeUndefined();
+      expect(row.lastChangedRev).toBeUndefined();
+    }
+  });
+
+  it("zero and negative revisions are rejected, not stamped", () => {
+    expect(revOf("0").lastChangedRev).toBeUndefined();
+    expect(revOf("-1").lastChangedRev).toBeUndefined();
+  });
+
+  it("a leading-numeric cell is taken at face value (parseInt prefix)", () => {
+    // Documents current behaviour: "3 (new)" and "3abc" both read as 3.
+    expect(revOf("3 (new)").lastChangedRev).toBe(3);
+    expect(revOf("3abc").lastChangedRev).toBe(3);
+    // …but a leading non-digit is not salvaged.
+    expect(revOf("rev 3").lastChangedRev).toBeUndefined();
+  });
+
+  it("a fractional cell truncates rather than rejecting", () => {
+    expect(revOf("2.9").lastChangedRev).toBe(2);
+  });
+});
+
+describe("Result cell carrying [chat] next to a Rev column", () => {
+  const parse = (result: string, rev: string) =>
+    parseTestDocMarkdown(
+      "uat.md",
+      [
+        "# UAT",
+        "",
+        "## 1.1 Auth",
+        "",
+        "| ID | Test | Expected Result | Result | Rev |",
+        "|----|------|-----------------|--------|-----|",
+        `| AUTH-01 | login | ok | ${result} | ${rev} |`,
+        "",
+      ].join("\n"),
+    )!.sections[0]!.tests[0]!;
+
+  it("keeps the mark and the revision when the exporter appended [chat]", () => {
+    const row = parse("✓ Pass [chat]", "4");
+    expect(row.status).toBe("pass");
+    expect(row.lastChangedRev).toBe(4);
+  });
+
+  it("does the same for a failed row", () => {
+    const row = parse("✗ Fail [chat]", "7");
+    expect(row.status).toBe("fail");
+    expect(row.lastChangedRev).toBe(7);
+  });
+
+  it("⚠ Untested [chat] stays untested and still carries its revision", () => {
+    const row = parse("⚠ Untested [chat]", "2");
+    expect(row.status).toBe("untested");
+    expect(row.lastChangedRev).toBe(2);
+  });
+});
+
+describe("escaped pipes through the 5-column doc table", () => {
+  it("round-trips pipes in every text cell, including a trailing one", () => {
+    const md = composeTestDocMarkdown(
+      makeCatalog({
+        sections: [
+          {
+            title: "1.1 Filters",
+            tests: [
+              {
+                id: "FLT-01",
+                test: "choose A|B from the picker",
+                expected: "grid shows A|B|C",
+                status: "fail",
+                firstSeenRev: 2,
+                lastChangedRev: 5,
+              },
+              {
+                id: "FLT-02",
+                // A cell whose text ENDS with a pipe sits flush against
+                // the row's own closing delimiter after escaping.
+                test: "trailing pipe|",
+                expected: "|leading pipe",
+                status: "pass",
+                firstSeenRev: 5,
+                lastChangedRev: 5,
+              },
+            ],
+          },
+        ],
+      }),
+    );
+    expect(md).toContain("choose A\\|B from the picker");
+    expect(md).toContain("grid shows A\\|B\\|C");
+
+    const rows = parseTestDocMarkdown("uat.md", md)!.sections[0]!.tests;
+    expect(rows).toHaveLength(2);
+    expect(rows[0]).toMatchObject({
+      id: "FLT-01",
+      test: "choose A|B from the picker",
+      expected: "grid shows A|B|C",
+      status: "fail",
+      lastChangedRev: 5,
+    });
+    expect(rows[1]).toMatchObject({
+      id: "FLT-02",
+      test: "trailing pipe|",
+      expected: "|leading pipe",
+      status: "pass",
+      lastChangedRev: 5,
+    });
+  });
+
+  it("a pipe in the id survives the escape and still keys the row", () => {
+    const md = composeTestDocMarkdown(
+      makeCatalog({
+        sections: [
+          {
+            title: "S",
+            tests: [
+              {
+                id: "A|B-1",
+                test: "t",
+                expected: "e",
+                status: "untested",
+                lastChangedRev: 3,
+              },
+            ],
+          },
+        ],
+      }),
+    );
+    expect(md).toContain("| A\\|B-1 |");
+    const row = parseTestDocMarkdown("uat.md", md)!.sections[0]!.tests[0]!;
+    expect(row.id).toBe("A|B-1");
+    expect(row.lastChangedRev).toBe(3);
+  });
+});
+
+describe("composeTesterSheetMarkdown vs the 5-column doc table", () => {
+  const catalog = makeCatalog({
+    sections: [
+      {
+        title: "1.1 Auth",
+        tests: [
+          {
+            id: "AUTH-01",
+            test: "login",
+            expected: "dashboard",
+            status: "pass",
+            firstSeenRev: 1,
+            lastChangedRev: 4,
+          },
+        ],
+      },
+    ],
+  });
+
+  it("the tester sheet emits four columns with no Rev header", () => {
+    const sheet = composeTesterSheetMarkdown(catalog);
+    expect(sheet).toContain("| ID | Test | Expected Result | Result |");
+    expect(sheet).not.toContain("| Rev |");
+  });
+
+  it("the doc table emits five columns with the Rev value filled", () => {
+    const doc = composeTestDocMarkdown(catalog);
+    expect(doc).toContain("| ID | Test | Expected Result | Result | Rev |");
+    expect(doc).toContain("| AUTH-01 | login | dashboard | ✓ Pass | 4 |");
+  });
+
+  it("a tester-sheet round trip silently drops the revision stamps", () => {
+    // Known gap: the sheet the tester actually edits has no Rev column,
+    // so re-importing it as the catalog loses provenance and every
+    // "new & changed since vN" scope degrades to revision 1.
+    const back = parseTestDocMarkdown(
+      "uat.md",
+      composeTesterSheetMarkdown(catalog),
+    )!;
+    const row = back.sections[0]!.tests[0]!;
+    expect(row.id).toBe("AUTH-01");
+    expect(row.firstSeenRev).toBeUndefined();
+    expect(row.lastChangedRev).toBeUndefined();
+    // …whereas the doc table keeps them.
+    const kept = parseTestDocMarkdown(
+      "uat.md",
+      composeTestDocMarkdown(catalog),
+    )!.sections[0]!.tests[0]!;
+    expect(kept.lastChangedRev).toBe(4);
+  });
+
+  it("neither composer carries catalog.rev — only per-row stamps", () => {
+    const withRev = makeCatalog({ ...catalog, rev: 9, revisions: [] });
+    const md = composeTestDocMarkdown(withRev);
+    expect(parseTestDocMarkdown("uat.md", md)!.rev).toBeUndefined();
+    expect(parseTestDocMarkdown("uat.md", md)!.revisions).toBeUndefined();
   });
 });

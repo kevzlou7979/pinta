@@ -1,0 +1,79 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Pinta layout harness</title>
+    <script>
+      // Minimal chrome.* stub — must exist before any module evaluates.
+      // Explicit APIs first; any other chrome.x.y resolves to a no-op
+      // event/function so unrelated state.svelte.ts code can't throw.
+      (function () {
+        var noop = function () {};
+        var ev = function () {
+          return { addListener: noop, removeListener: noop, hasListener: function () { return false; } };
+        };
+        var pick = function (s, k) {
+          if (k == null) return Object.assign({}, s);
+          if (typeof k === "string") return k in s ? { [k]: s[k] } : {};
+          if (Array.isArray(k)) { var o = {}; k.forEach(function (x) { if (x in s) o[x] = s[x]; }); return o; }
+          var r = {}; Object.keys(k).forEach(function (x) { r[x] = x in s ? s[x] : k[x]; }); return r;
+        };
+        var area = function () {
+          var s = {};
+          return {
+            get: function (k, cb) { var r = pick(s, k); if (cb) cb(r); return Promise.resolve(r); },
+            set: function (o, cb) { Object.assign(s, o); if (cb) cb(); return Promise.resolve(); },
+            remove: function (k, cb) { [].concat(k).forEach(function (x) { delete s[x]; }); if (cb) cb(); return Promise.resolve(); },
+          };
+        };
+        var fallback = function () {
+          // Callable proxy: property access yields another proxy, calls
+          // resolve to undefined (sync) — good enough for listeners/badges.
+          var f = function () { return Promise.resolve(undefined); };
+          return new Proxy(f, {
+            get: function (t, p) {
+              if (p === "then") return undefined;
+              if (p === "addListener" || p === "removeListener") return noop;
+              if (p === "hasListener") return function () { return false; };
+              if (!(p in t)) t[p] = fallback();
+              return t[p];
+            },
+          });
+        };
+        var base = {
+          storage: { local: area(), session: area(), sync: area(), onChanged: ev() },
+          runtime: {
+            id: "pinta-e2e-layout",
+            onMessage: ev(),
+            sendMessage: function () { return Promise.resolve({}); },
+            getManifest: function () { return { version: "0.9.0" }; },
+            getURL: function (p) { return p; },
+            connect: function () { return { onMessage: ev(), onDisconnect: ev(), postMessage: noop, disconnect: noop }; },
+          },
+          tabs: {
+            query: function () { return Promise.resolve([]); },
+            sendMessage: function () { return Promise.resolve({}); },
+            onActivated: ev(), onUpdated: ev(), onRemoved: ev(),
+          },
+          windows: { WINDOW_ID_NONE: -1, onFocusChanged: ev() },
+        };
+        var wrap = function (obj) {
+          return new Proxy(obj, {
+            get: function (t, p) {
+              if (!(p in t)) t[p] = fallback();
+              var v = t[p];
+              return v && typeof v === "object" && !Array.isArray(v) ? wrap(v) : v;
+            },
+          });
+        };
+        window.chrome = wrap(base);
+        // No companion here — fail fast instead of scanning localhost ports.
+        window.fetch = function () { return Promise.reject(new Error("offline (e2e-layout)")); };      })();
+    </script>
+  </head>
+  <body>
+    <div id="app"></div>
+    <script type="module" src="./main.ts"></script>
+  </body>
+</html>

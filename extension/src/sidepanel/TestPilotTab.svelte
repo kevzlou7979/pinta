@@ -1,3 +1,36 @@
+<script module lang="ts">
+  // Module-scoped state. App.svelte unmounts this tab whenever another
+  // tab is active, so anything that must outlive a tab switch lives
+  // here rather than in the instance: a tester-sheet prep that is still
+  // generating steps keeps its progress (and its single-run guard) for
+  // the instance that mounts next, and the Ask-all bulk queue keeps
+  // serializing agent calls across instances.
+  export type TesterSheetTarget = "md" | "docx" | "gmail" | "mailto";
+  /** Live tester-sheet prep: `cancel` = stop after the in-flight row,
+   *  `inFlight` = the row currently asked (for "Stop now"). */
+  let stepPrep = $state<{ done: number; total: number; cancel: boolean; inFlight: string | null } | null>(null);
+  /** Outcome line when a prep could not complete (standalone, cancelled,
+   *  agent error, scope changed) — offers Retry / download anyway. */
+  let stepPrepNote = $state<string | null>(null);
+  /** Which export asked, so the status lands under the right block and
+   *  Retry / anyway re-run the same export. */
+  let stepPrepTarget = $state<TesterSheetTarget | null>(null);
+  // Section-level "Ask all" — keyed by section.title, true while the
+  // sequential bulk fetch is running OR queued. We fire one query,
+  // wait for its pendingDetails entry to clear (response, error, or
+  // timeout), then fire the next. Going parallel would blow the per-row
+  // 120s timer since the agent processes Claude sessions one-at-a-time
+  // anyway.
+  let bulkFetchingSections = $state<Record<string, boolean>>({});
+  // Cross-section serialization. If the user clicks "Ask all" on
+  // multiple sections, each one chains onto this promise so loops run
+  // back-to-back instead of fighting for the agent's queue (which would
+  // pin per-row 120s timers on rows still waiting their turn AND cause
+  // one section's error to cascade-cancel the others via the shared
+  // `app.testPilot.error` field). Non-reactive — plain Promise chain.
+  let bulkQueue: Promise<void> = Promise.resolve();
+</script>
+
 <script lang="ts">
   // Test Pilot tab — interactive module surface.
   //
@@ -18,6 +51,7 @@
   import { parseStep } from "../lib/step-md.js";
   import { escapeHtml, loadChatSheet, loadPrism } from "../lib/lazy-ui.js";
   import { safeExternalUrl } from "../content/capture.js";
+  import { isEmailish, openMailDraftTab, type MailDraft, type MailVia } from "../lib/mail.js";
 
   // Prism (and ChatSheet, which bundles it) load on demand — code blocks
   // render as escaped plain text until the highlighter arrives.
@@ -49,6 +83,107 @@
   // surfaced as a small menu off the Export button. Closes on outside
   // click via the existing onDocClick handler below.
   let exportMenuOpen = $state(false);
+  /** Export trigger — Escape inside the popover hands focus back here. */
+  let exportBtnEl = $state<HTMLButtonElement | null>(null);
+  /** Email section: in-flight flag + the "it downloaded" confirmation,
+   *  so the popover isn't a black hole while the draft opens. */
+  let emailBusy = $state(false);
+  let emailedNote = $state<string | null>(null);
+  const emailReady = $derived(isEmailish(app.testerInfo.recipient));
+  /** The last `mailto:` draft we handed to the OS. After a long step
+   *  prep the click gesture is gone, so a popup blocker may have eaten
+   *  it — the confirmation line offers to open it again from a fresh
+   *  click. (Gmail goes through the tabs API and needs no gesture.) */
+  let lastMailDraft = $state<{ draft: MailDraft; via: MailVia } | null>(null);
+  // Phase 21 — "Work on" scope. A pure view filter: rows stay in the
+  // catalog, keep their marks, and still ride the .pinta bundle.
+  const scopeActive = $derived(app.testPilot.scope.kind !== "all");
+  const catalogRev = $derived(app.testPilot.catalog?.rev ?? 1);
+  const revisionLog = $derived(app.testPilot.catalog?.revisions ?? []);
+  /** Base revisions worth offering: newest first, latest capped at a
+   *  handful so the dropdown stays readable on a long-lived catalog. */
+  const scopeBaseRevs = $derived(
+    revisionLog
+      .map((r) => r.rev - 1)
+      .filter((r) => r >= 1)
+      .filter((r, i, arr) => arr.indexOf(r) === i)
+      .sort((a, b) => b - a)
+      .slice(0, 5),
+  );
+  /** True once the catalog has been regenerated at least once — before
+   *  that there is no "what's new" to offer, and the selector says so
+   *  instead of silently omitting the option. */
+  const hasRevisionHistory = $derived(scopeBaseRevs.length > 0);
+  let planNameOpen = $state(false);
+  let planName = $state("");
+  let planNameEl = $state<HTMLInputElement | null>(null);
+  /** Inline blocker for the plan row — the shared error banner renders
+   *  below the stats block, which is off-screen on a 288px panel. */
+  let planError = $state<string | null>(null);
+
+  /** The dropdown's value is a token so one <select> can carry every
+   *  scope shape; these two translate. */
+  function scopeToToken(scope: typeof app.testPilot.scope): string {
+    if (scope.kind === "since") return `since:${scope.rev}`;
+    if (scope.kind === "plan") {
+      // A plan that no longer exists filters nothing, so the control
+      // shows "Everything" rather than rendering blank.
+      return app.testPilot.plans.some((p) => p.id === scope.id)
+        ? `plan:${scope.id}`
+        : "all";
+    }
+    return scope.kind;
+  }
+
+  function applyScopeToken(token: string): void {
+    if (token.startsWith("since:")) {
+      app.setTestPilotScope({ kind: "since", rev: Number(token.slice(6)) });
+    } else if (token.startsWith("plan:")) {
+      app.setTestPilotScope({ kind: "plan", id: token.slice(5) });
+    } else if (token === "failed" || token === "untested" || token === "all") {
+      app.setTestPilotScope({ kind: token });
+    }
+  }
+
+  function saveScopeAsPlan(): void {
+    if (!planName.trim()) {
+      planError = "Give the plan a name first.";
+      return;
+    }
+    const plan = app.saveCurrentScopeAsPlan(planName);
+    if (!plan) {
+      // saveCurrentScopeAsPlan sets the shared error for a duplicate
+      // name; an empty scope is the only other way it returns null.
+      planError =
+        app.testPilot.error ?? "Nothing in scope to save as a plan.";
+      app.testPilot.error = null;
+      return;
+    }
+    planError = null;
+    planName = "";
+    planNameOpen = false;
+  }
+
+  /** Open the name row and put the cursor in it — one click, not two. */
+  async function openPlanNameRow(): Promise<void> {
+    planNameOpen = !planNameOpen;
+    planError = null;
+    if (!planNameOpen) return;
+    await tick();
+    planNameEl?.focus();
+  }
+
+  async function removePlan(id: string): Promise<void> {
+    const plan = app.testPilot.plans.find((p) => p.id === id);
+    const ok = await confirmDialog({
+      title: "Delete this plan?",
+      message: `“${plan?.name ?? "This plan"}” will be removed from the Work-on list. The tests themselves stay in the catalog.`,
+      confirmLabel: "Delete plan",
+      danger: true,
+    });
+    if (!ok) return;
+    app.deleteTestPlan(id);
+  }
   /** Anchor the Export popover's left edge to the button when a
    *  right-anchored w-72 (288px) popover would spill off the panel's left. */
   let exportMenuAlignLeft = $state(false);
@@ -57,20 +192,7 @@
   // as a bookmark cursor and (b) scroll-restore back to it when the user
   // returns from the detail view via "Back to catalog".
   let activeTestId = $state<string | null>(null);
-  // Section-level "Ask all" — keyed by section.title, true while the
-  // sequential bulk fetch is running OR queued. We fire one query,
-  // wait for its pendingDetails entry to clear (response, error, or
-  // timeout), then fire the next. Going parallel would blow the per-row
-  // 120s timer since the agent processes Claude sessions one-at-a-time
-  // anyway.
-  let bulkFetchingSections = $state<Record<string, boolean>>({});
-  // Cross-section serialization. If the user clicks "Ask all" on
-  // multiple sections, each one chains onto this promise so loops run
-  // back-to-back instead of fighting for the agent's queue (which would
-  // pin per-row 120s timers on rows still waiting their turn AND cause
-  // one section's error to cascade-cancel the others via the shared
-  // `app.testPilot.error` field). Non-reactive — plain Promise chain.
-  let bulkQueue: Promise<void> = Promise.resolve();
+  // `bulkFetchingSections` / `bulkQueue` live in the module script above.
   // Per-section completion ledger. Plain Map (NOT `$state`) so the
   // auto-collapse $effect can read+write it without forming a tracked
   // read-write loop on its own dependency graph. The effect reads
@@ -135,6 +257,11 @@
   // until the run is cleared. One shared title so the reason is visible
   // at each disabled control, not just in the banner.
   const readOnlyRun = $derived(!!app.testPilot.importedRun);
+  /** Denominator for the imported-run banner — every test in the
+   *  catalog, scope ignored (the run's marks landed on the whole thing). */
+  const catalogTotal = $derived(
+    (app.testPilot.catalog?.sections ?? []).reduce((n, s) => n + s.tests.length, 0),
+  );
   const READ_ONLY_TITLE = "Read-only — Clear the imported run to edit";
   /** Smoke vs Thorough generation depth — the `thorough_tests` module
    *  setting, toggleable inline so the choice sits next to Generate. */
@@ -157,13 +284,23 @@
   let fileIssuesSelected = $state<Record<string, boolean>>({});
   /** Failed rows that don't have an issue filed yet — the sheet's list
    *  and the universe `fileFailedTestsToGitLab(selectedIds)` filters. */
-  const failedUnfiled = $derived(
-    (app.testPilot.catalog?.sections ?? []).flatMap((s) =>
+  const failedUnfiled = $derived.by(() => {
+    // Read the getter once — it rebuilds a Set on every access.
+    const scoped = app.scopedTestIds;
+    return (app.testPilot.catalog?.sections ?? []).flatMap((s) =>
       s.tests
-        .filter((t) => t.status === "fail" && !app.testPilot.filedIssues[t.id])
+        .filter(
+          (t) =>
+            t.status === "fail" &&
+            !app.testPilot.filedIssues[t.id] &&
+            // Follow the active scope — the button's count comes from
+            // the scoped tally, so its universe has to match or the
+            // sheet opens pre-checked with rows the tester can't see.
+            (!scoped || scoped.has(t.id)),
+        )
         .map((t) => ({ id: t.id, section: s.title, test: t.test })),
-    ),
-  );
+    );
+  });
   const fileIssuesCheckedCount = $derived(
     failedUnfiled.filter((r) => fileIssuesSelected[r.id]).length,
   );
@@ -603,6 +740,9 @@
     function onDocClick(e: MouseEvent) {
       const target = e.target as HTMLElement | null;
       if (!target) return;
+      // A programmatic <a download> click (downloadBlob) is not the
+      // user clicking away — leave every menu as it is.
+      if (target.closest("[data-pinta-download]")) return;
       const inStatus =
         target.closest("[data-pinta-status-trigger]") ||
         target.closest("[data-pinta-status-menu]");
@@ -615,7 +755,12 @@
         sectionKebabOpen = null;
         testKebabOpen = null;
       }
-      if (!inExport) exportMenuOpen = false;
+      if (!inExport && exportMenuOpen) {
+        // Closing on an outside click never fires the input's `change`,
+        // so the typed recipient would be lost on the next panel load.
+        app.saveTesterInfo();
+        exportMenuOpen = false;
+      }
     }
     document.addEventListener("click", onDocClick, true);
     return () => document.removeEventListener("click", onDocClick, true);
@@ -671,7 +816,7 @@
     fileInput?.click();
   }
 
-  function clearMarks() {
+  async function clearMarks() {
     const c = app.testPilot.catalog;
     if (!c) return;
     // Read-only while an imported run is shown (button is disabled too;
@@ -682,10 +827,21 @@
       0,
     );
     if (marked === 0) return;
-    const msg =
-      `Reset ${marked} marked test${marked === 1 ? "" : "s"} back to untested? ` +
-      `Cached step instructions will be cleared too. The spec itself isn't touched.`;
-    if (!confirm(msg)) return;
+    // The count in the prompt is the catalog-wide one this actually
+    // resets — saying "12" while the scoped counters above read "2"
+    // would be the lie. The scope note spells that out.
+    const ok = await confirmDialog({
+      title: "Reset all marks?",
+      message:
+        `Reset ${marked} marked test${marked === 1 ? "" : "s"} back to untested? ` +
+        `Cached step instructions will be cleared too. The spec itself isn't touched.` +
+        (scopeActive
+          ? ` This covers the whole catalog, not just “${app.scopeLabel}”.`
+          : ""),
+      confirmLabel: "Reset marks",
+      danger: true,
+    });
+    if (!ok) return;
     app.clearTestPilotMarks();
   }
   async function onFileChange(e: Event) {
@@ -734,6 +890,78 @@
     activeTestId = testId;
   }
 
+  /** Chain a job onto the cross-section bulk queue so only one loop is
+   *  firing agent requests at a time. Shared by the section-level Ask
+   *  and the tester-sheet prep. */
+  function enqueueBulk(job: () => Promise<void>): Promise<void> {
+    const prev = bulkQueue;
+    bulkQueue = (async () => {
+      try {
+        await prev;
+      } catch {
+        // Defensive — `prev` shouldn't reject (each job's try/finally
+        // swallows everything), but if it ever does, don't take this
+        // job down with it.
+      }
+      await job();
+    })();
+    return bulkQueue;
+  }
+
+  /** The sheet composers' notion of "has steps" — a cached detail with
+   *  zero steps still renders the "(no steps generated yet)" placeholder,
+   *  so it must be asked again, not skipped. */
+  function hasSteps(t: TestPilotTest): boolean {
+    return !!t.detail && t.detail.steps.length > 0;
+  }
+
+  /** Fetch steps for every row in `tests` that has none, strictly one
+   *  at a time. Stops early when the agent errors / times out (no sense
+   *  piling more onto a wedged agent — the user can retry), when the
+   *  catalog disappears (Clear catalog / companion switch), or when
+   *  `shouldStop()` turns true (checked between rows, so an in-flight
+   *  ask always lands rather than wasting the tokens it already cost). */
+  async function fetchStepsSequentially(
+    tests: TestPilotTest[],
+    opts: {
+      shouldStop?: () => boolean;
+      /** Rows to pass over without asking (e.g. scoped out mid-run). */
+      skip?: (test: TestPilotTest) => boolean;
+      onAsk?: (test: TestPilotTest) => void;
+      onRow?: (test: TestPilotTest) => void;
+    } = {},
+  ): Promise<void> {
+    for (const test of tests) {
+      if (opts.shouldStop?.()) break;
+      if (!app.testPilot.catalog) break;
+      if (hasSteps(test) || opts.skip?.(test)) {
+        // Answered elsewhere (per-row Ask / section Ask) while we were
+        // queued, or no longer wanted — still counts toward progress.
+        opts.onRow?.(test);
+        continue;
+      }
+      // If another caller has it in flight already (per-row Ask),
+      // just wait for that one to clear before moving on.
+      if (!app.testPilot.pendingDetails[test.id]) {
+        void app.fetchDetailSteps(test.id);
+      }
+      opts.onAsk?.(test);
+      // Poll until this row's pending entry clears (success, error,
+      // or timeout — handleDetailSync / armDetailTimeout / cancel
+      // all delete the entry). 50ms keeps cumulative idle wait
+      // under ~25ms/row average; a promise registry on state.svelte
+      // would be tidier but for now the cost of the tight poll is
+      // a single reactive object read every frame, which is free.
+      while (app.testPilot.pendingDetails[test.id]) {
+        await new Promise((r) => setTimeout(r, 50));
+      }
+      opts.onRow?.(test);
+      // The next queued job still gets a chance after an error: its
+      // first `fetchDetailSteps` call clears `error` in state.svelte.ts.
+      if (app.testPilot.error) break;
+    }
+  }
+
   async function askAllInSection(section: TestPilotSection) {
     if (bulkFetchingSections[section.title]) return; // already running/queued
     bulkFetchingSections[section.title] = true;
@@ -742,44 +970,140 @@
     collapsedSections[section.title] = false;
     // Chain onto the global queue — guarantees only one section's loop
     // is actively firing requests at a time. The spinner shown while
-    // we await `prev` is "queued, your turn is coming."
-    const prev = bulkQueue;
-    bulkQueue = (async () => {
+    // we wait for our turn is "queued, your turn is coming."
+    await enqueueBulk(async () => {
       try {
-        await prev;
-      } catch {
-        // Defensive — `prev` shouldn't reject (the inner try/finally
-        // swallows everything), but if it ever does, don't take this
-        // section's loop down with it.
-      }
-      try {
-        for (const test of section.tests) {
-          if (test.detail) continue; // already answered
-          // If another caller has it in flight already (per-row Ask),
-          // just wait for that one to clear before moving on.
-          if (!app.testPilot.pendingDetails[test.id]) {
-            void app.fetchDetailSteps(test.id);
-          }
-          // Poll until this row's pending entry clears (success, error,
-          // or timeout — handleDetailSync / armDetailTimeout / cancel
-          // all delete the entry). 50ms keeps cumulative idle wait
-          // under ~25ms/row average; a promise registry on state.svelte
-          // would be tidier but for now the cost of the tight poll is
-          // a single reactive object read every frame, which is free.
-          while (app.testPilot.pendingDetails[test.id]) {
-            await new Promise((r) => setTimeout(r, 50));
-          }
-          // Stop the queue if the last fetch errored or timed out — no
-          // sense piling more onto a wedged agent. The user can retry.
-          // The next queued section will still get a chance: its first
-          // `fetchDetailSteps` call clears `error` in state.svelte.ts.
-          if (app.testPilot.error) break;
-        }
+        await fetchStepsSequentially(section.tests);
       } finally {
         delete bulkFetchingSections[section.title];
       }
-    })();
-    await bulkQueue;
+    });
+  }
+
+  // ── Tester-sheet prep — auto-generate missing steps ────────────────
+
+  /** Rows in the export scope with no generated steps yet, with the
+   *  section each one lives in (for the section-level spinner). */
+  function rowsWithoutSteps(): { test: TestPilotTest; section: string }[] {
+    const c = app.scopedCatalogView();
+    if (!c) return [];
+    const out: { test: TestPilotTest; section: string }[] = [];
+    for (const s of c.sections) {
+      for (const t of s.tests) if (!hasSteps(t)) out.push({ test: t, section: s.title });
+    }
+    return out;
+  }
+
+  function nTests(n: number): string {
+    return `${n} test${n === 1 ? "" : "s"}`;
+  }
+
+  /** For the popover's "Generate missing steps first" hint. */
+  const steplessCount = $derived(rowsWithoutSteps().length);
+
+  /** A tester sheet without steps is just a list of titles, so every
+   *  tester-sheet export (.md / .docx / email) runs this first: generate
+   *  steps for every scoped row that lacks them — one agent call at a
+   *  time on the same queue as the section-level Ask — with progress in
+   *  the export popover and the usual per-row / per-section spinners.
+   *  Resolves true when the sheet is complete. Resolves false, leaving a
+   *  note with a "download anyway" escape hatch, when there is no
+   *  companion to ask, the user cancelled, or the agent errored and
+   *  rows are still empty. */
+  async function ensureStepsForTesterSheet(target: TesterSheetTarget): Promise<boolean> {
+    if (stepPrep) return false; // a prep is already running
+    stepPrepNote = null;
+    // "Generate missing steps first" unticked — export the sheet as it
+    // stands (rows without steps keep their placeholder).
+    if (!app.testerInfo.generateSteps) return true;
+    const missing = rowsWithoutSteps();
+    if (missing.length === 0) return true;
+    stepPrepTarget = target;
+    if (app.connectionStatus !== "connected") {
+      stepPrepNote = `${nTests(missing.length)} ${missing.length === 1 ? "has" : "have"} no steps yet and there is no companion to generate them. Start pinta-companion + /pinta, then`;
+      return false;
+    }
+    stepPrep = { done: 0, total: missing.length, cancel: false, inFlight: null };
+    // Light the section-level spinner on every section we'll touch that
+    // a queued Ask-all isn't already lighting (that job owns its flag),
+    // so progress shows on collapsed sections too; clear each of ours
+    // as its last empty row lands.
+    const mine = [...new Set(missing.map((m) => m.section))].filter((s) => !bulkFetchingSections[s]);
+    for (const s of mine) bulkFetchingSections[s] = true;
+    let cancelled = false;
+    try {
+      await enqueueBulk(() =>
+        fetchStepsSequentially(
+          missing.map((m) => m.test),
+          {
+            shouldStop: () => stepPrep?.cancel ?? true,
+            // Scope narrowed mid-prep — don't spend tokens on rows the
+            // sheet will no longer carry.
+            skip: (t) => app.scopedTestIds?.has(t.id) === false,
+            onAsk: (t) => {
+              if (stepPrep) stepPrep.inFlight = t.id;
+            },
+            onRow: (t) => {
+              if (stepPrep) {
+                stepPrep.done++;
+                stepPrep.inFlight = null;
+              }
+              const section = missing.find((m) => m.test.id === t.id)?.section;
+              if (
+                section &&
+                mine.includes(section) &&
+                !missing.some((m) => m.section === section && !hasSteps(m.test))
+              ) {
+                delete bulkFetchingSections[section];
+              }
+            },
+          },
+        ),
+      );
+    } finally {
+      for (const s of mine) delete bulkFetchingSections[s];
+      cancelled = stepPrep?.cancel ?? false;
+      stepPrep = null;
+    }
+    // Catalog gone mid-prep (Clear catalog / companion switch): there is
+    // no sheet to write and the empty-state view already says so.
+    if (!app.scopedCatalogView()) return false;
+    const left = rowsWithoutSteps().length;
+    if (left === 0) return true;
+    const still = `${nTests(left)} still ${left === 1 ? "has" : "have"} no steps`;
+    stepPrepNote = cancelled
+      ? `Stopped — ${still}.`
+      : app.testPilot.error
+        ? `${still} (the agent errored or timed out).`
+        : `${still}.`;
+    return false;
+  }
+
+  /** Stop after the in-flight row — its result still lands (the tokens
+   *  are already spent). */
+  function cancelStepPrep() {
+    if (stepPrep) stepPrep.cancel = true;
+  }
+
+  /** Wedged-agent escape: also drop the in-flight ask so the popover
+   *  unlocks now instead of after the 120 s + grace give-up. A late
+   *  reply for that row is ignored (its pending slot is gone). */
+  function stopStepPrepNow() {
+    if (!stepPrep) return;
+    stepPrep.cancel = true;
+    if (stepPrep.inFlight) app.cancelDetailFetch(stepPrep.inFlight);
+  }
+
+  /** Re-run the export that asked for the prep. `force` skips the prep
+   *  ("download anyway" — empty rows keep the "(no steps generated
+   *  yet)" placeholder in the sheet); without it, "Retry" asks again
+   *  for whatever is still missing. */
+  function rerunTesterSheetExport(force: boolean) {
+    const target = stepPrepTarget;
+    stepPrepNote = null;
+    if (target === "md") void downloadTesterSheetMdPrepared({ force });
+    else if (target === "docx") void downloadTesterSheetDocx({ force });
+    else if (target) void emailTesterSheet(target, { force });
   }
 
   function openDetail(test: TestPilotTest) {
@@ -859,11 +1183,15 @@
   function tally() {
     const catalog = app.testPilot.catalog;
     if (!catalog) return { pass: 0, fail: 0, untested: 0, total: 0 };
+    // Counters follow the active scope — "12 of 12 run" has to mean the
+    // slice the tester is actually working on, not the whole catalog.
+    const scoped = app.scopedTestIds;
     let pass = 0,
       fail = 0,
       untested = 0;
     for (const s of catalog.sections) {
       for (const t of s.tests) {
+        if (scoped && !scoped.has(t.id)) continue;
         if (t.status === "pass") pass++;
         else if (t.status === "fail") fail++;
         else untested++;
@@ -892,17 +1220,23 @@
    *  section title itself matches, every row is kept (the whole category
    *  is a hit); otherwise only content/id matches remain. */
   function visibleTests(section: TestPilotSection): TestPilotTest[] {
+    // Scope first, then search — the two compose (AND), and scope is the
+    // same chokepoint the search box already flows through.
+    const scoped = app.scopedTestIds;
+    const rows = scoped
+      ? section.tests.filter((t) => scoped.has(t.id))
+      : section.tests;
     const q = searchQuery.trim();
-    if (!q) return section.tests;
+    if (!q) return rows;
     if (section.title.toLowerCase().includes(q.toLowerCase())) {
-      return section.tests;
+      return rows;
     }
-    return section.tests.filter((t) => matchesQuery(t, section.title));
+    return rows.filter((t) => matchesQuery(t, section.title));
   }
 
-  /** A section is shown when there's no query, or it has ≥1 visible row. */
+  /** A section is shown when nothing is filtering, or it has ≥1 visible row. */
   function sectionVisible(section: TestPilotSection): boolean {
-    if (!searchActive) return true;
+    if (!searchActive && !scopeActive) return true;
     return visibleTests(section).length > 0;
   }
 
@@ -929,6 +1263,10 @@
     const a = document.createElement("a");
     a.href = url;
     a.download = filename;
+    // Marker for the outside-click handler: the synthetic click below
+    // lands outside the Export popover and used to close it, hiding the
+    // email flow's "attach it to the draft" confirmation.
+    a.setAttribute("data-pinta-download", "");
     document.body.appendChild(a);
     a.click();
     a.remove();
@@ -1016,33 +1354,78 @@
 
   /** "Email to tester" — mail clients can't take attachments from a
    *  link, so this downloads the tester sheet and opens a prefilled
-   *  draft for the developer to drop the file into. */
-  async function emailTesterSheet() {
-    await app.loadTesterInfo();
-    downloadTesterSheetMd();
-    const subject = encodeURIComponent(`[Pinta tester sheet] ${exportStem()}`);
-    const body = encodeURIComponent(
-      "Hi,\n\nAttached is the Pinta tester sheet (.md — it just downloaded on my side, dragging it in now).\n\n" +
+   *  draft for the developer to drop the file into.
+   *  `via: "gmail"` opens Gmail's web compose (no OS mail handler needed —
+   *  a bare `mailto:` on a Chrome-only machine just offers Chrome);
+   *  `via: "mailto"` falls back to whatever mail app the OS registered. */
+  async function emailTesterSheet(via: MailVia = "gmail", opts: { force?: boolean } = {}) {
+    if (!emailReady || emailBusy || stepPrep) return;
+    emailBusy = true;
+    emailedNote = null;
+    lastMailDraft = null;
+    try {
+      // Generate any missing steps first — a sheet of bare titles is
+      // no use to the tester. `force` is the "send anyway" path.
+      if (!opts.force && !(await ensureStepsForTesterSheet(via))) return;
+      if (!app.scopedCatalogView()) return; // cleared while we waited
+      await app.loadTesterInfo();
+      const filename = downloadTesterSheetMd({ keepOpen: true });
+      const subject = `[Pinta tester sheet] ${exportStem()}`;
+      const body =
+        "Hi,\n\nAttached is the Pinta tester sheet (.md — it just downloaded on my side, dragging it in now).\n\n" +
         "To run it: open the Pinta side panel → Test Pilot → Import tester sheet (no companion needed), walk through the tests and mark Pass/Fail.\n\n" +
         "When you're done, send ONE file back:\n" +
-        "- If you annotated any bugs on the page, use Share session as .pinta with \"Include test results\" ticked — that single .pinta bundle carries your annotations AND your Pass/Fail marks + sign-off.\n" +
-        "- If you didn't annotate anything, just use Export → Results (.md) with sign-off instead.\n\nThanks!",
-    );
-    const to = encodeURIComponent(app.testerInfo.recipient.trim());
-    window.open(`mailto:${to}?subject=${subject}&body=${body}`, "_blank");
+        "- If you annotated any bugs on the page, use Share session as .pinta with Contents set to \"Annotations + test results\" — that single .pinta bundle carries your annotations AND your Pass/Fail marks + sign-off.\n" +
+        "- If you didn't annotate anything, just use Export → Results (.md) with sign-off instead.\n\nThanks!";
+      // Tab-API opener: by now the click is long gone (the prep above
+      // can take minutes), so a plain window.open would be popup-blocked.
+      const draft: MailDraft = { to: app.testerInfo.recipient, subject, body };
+      const opened = await openMailDraftTab(draft, via);
+      if (!opened) {
+        app.testPilot.error =
+          "Chrome blocked the draft tab. Allow pop-ups for the side panel, or use your default mail app.";
+      } else if (via === "mailto") {
+        // A mailto: hand-off is unverifiable — Windows silently does
+        // nothing when no mail app is registered, so don't assert a draft.
+        emailedNote = `${filename} downloaded — attach it if your mail app opened a draft.`;
+        lastMailDraft = { draft, via };
+      } else {
+        emailedNote = `${filename} downloaded — attach it to the draft that just opened.`;
+      }
+    } catch (err) {
+      app.testPilot.error = `Email draft failed: ${(err as Error).message}`;
+    } finally {
+      emailBusy = false;
+    }
   }
 
-  function downloadTesterSheetMd() {
+  /** Tester sheet (.md) button — generates missing steps first, then
+   *  hands off to the synchronous writer below. `force` skips the prep
+   *  ("download anyway"). */
+  async function downloadTesterSheetMdPrepared(opts: { force?: boolean } = {}) {
+    if (stepPrep) return;
+    if (!opts.force && !(await ensureStepsForTesterSheet("md"))) return;
+    if (!app.scopedCatalogView()) return; // cleared while we waited
+    downloadTesterSheetMd();
+  }
+
+  /** Writes the sheet as it stands — callers run the step prep first.
+   *  Returns the filename so the email flow can name the attachment.
+   *  `keepOpen` leaves the popover up — the email flow still has its
+   *  confirmation line to show there. */
+  function downloadTesterSheetMd(opts: { keepOpen?: boolean } = {}): string {
     const md = app.exportTesterSheetMarkdown();
     const ts = new Date().toISOString().slice(0, 10);
-    downloadBlob(
-      new Blob([md], { type: "text/markdown" }),
-      `${exportStem()}-tester-${ts}.md`,
-    );
-    exportMenuOpen = false;
+    const filename = `${exportStem()}-tester-${ts}.md`;
+    downloadBlob(new Blob([md], { type: "text/markdown" }), filename);
+    if (!opts.keepOpen) exportMenuOpen = false;
+    return filename;
   }
 
-  async function downloadTesterSheetDocx() {
+  async function downloadTesterSheetDocx(opts: { force?: boolean } = {}) {
+    if (stepPrep) return;
+    if (!opts.force && !(await ensureStepsForTesterSheet("docx"))) return;
+    if (!app.scopedCatalogView()) return; // cleared while we waited
     const ts = new Date().toISOString().slice(0, 10);
     try {
       downloadDocx(await app.exportTesterSheetDocx(), `${exportStem()}-tester-${ts}.docx`);
@@ -1188,7 +1571,7 @@
       <h2 class="text-sm font-semibold text-ink-900 dark:text-night-text">Test Pilot</h2>
     </div>
     <p class="text-[12px] text-ink-700 dark:text-night-dim leading-snug">
-      Got a tester sheet from the developer? Import it and start walking through the tests. Pass/Fail marks save locally; export your results back as markdown when you're done — or, if you also annotate bugs on the page, share one <code class="font-mono text-[10px] bg-ink-100 dark:bg-night-alt px-1 rounded">.pinta</code> bundle with “Include test results” ticked so your annotations and marks travel together.
+      Got a tester sheet from the developer? Import it and start walking through the tests. Pass/Fail marks save locally; export your results back as markdown when you're done — or, if you also annotate bugs on the page, share one <code class="font-mono text-[10px] bg-ink-100 dark:bg-night-alt px-1 rounded">.pinta</code> bundle with Contents set to “Annotations + test results” so your annotations and marks travel together.
     </p>
     <button
       type="button"
@@ -1737,13 +2120,13 @@
         <button
           type="button"
           class="inline-flex items-center justify-center w-8 h-8 text-ink-700 dark:text-night-dim hover:text-red-600 dark:hover:text-red-400 hover:bg-ink-50 dark:hover:bg-night-alt disabled:opacity-40 disabled:cursor-not-allowed disabled:hover:bg-transparent disabled:hover:text-ink-700 dark:disabled:hover:text-night-dim"
-          onclick={clearMarks}
-          disabled={t.pass + t.fail === 0 || readOnlyRun}
+          onclick={() => void clearMarks()}
+          disabled={!app.testPilotHasMarks || readOnlyRun}
           title={readOnlyRun
             ? READ_ONLY_TITLE
-            : t.pass + t.fail === 0
+            : !app.testPilotHasMarks
               ? "Clear marks — nothing to clear, no rows are marked yet"
-              : "Clear marks — reset all Pass/Fail marks back to untested (keeps the catalog)"}
+              : "Clear marks — reset every Pass/Fail mark in the catalog back to untested (keeps the catalog)"}
           aria-label="Clear all Pass/Fail marks"
         >
           <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 6h18"/><path d="M8 6V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/><path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6"/></svg>
@@ -1752,14 +2135,16 @@
           type="button"
           class="inline-flex items-center justify-center w-8 h-8 text-ink-700 dark:text-night-dim hover:text-brand-pink dark:hover:text-brand-pink-light hover:bg-ink-50 dark:hover:bg-night-alt disabled:opacity-40 disabled:cursor-not-allowed disabled:hover:bg-transparent disabled:hover:text-ink-700 dark:disabled:hover:text-night-dim"
           onclick={openFileIssuesSheet}
-          disabled={app.appMode === "standalone" || t.fail === 0 || app.testPilot.pendingFileIssues}
+          disabled={app.appMode === "standalone" || failedUnfiled.length === 0 || app.testPilot.pendingFileIssues}
           title={app.appMode === "standalone"
             ? "File failed tests — needs a connected companion (export your results and send them to the developer instead)"
-            : t.fail === 0
-              ? "File failed tests — no failures marked yet"
+            : failedUnfiled.length === 0
+              ? scopeActive
+                ? `File failed tests — nothing unfiled in “${app.scopeLabel}”`
+                : "File failed tests — no failures marked yet"
               : gitlabReady
-                ? `File ${t.fail} failed test${t.fail === 1 ? "" : "s"} as GitLab issues (one per test, via glab)`
-                : `File ${t.fail} failed test${t.fail === 1 ? "" : "s"} — GitLab Issues module is off, entries land in .pinta/tasks.md`}
+                ? `File ${failedUnfiled.length} failed test${failedUnfiled.length === 1 ? "" : "s"} as GitLab issues (one per test, via glab)`
+                : `File ${failedUnfiled.length} failed test${failedUnfiled.length === 1 ? "" : "s"} — GitLab Issues module is off, entries land in .pinta/tasks.md`}
           aria-label="File failed tests as issues"
         >
           {#if app.testPilot.pendingFileIssues}
@@ -1771,20 +2156,35 @@
         <div class="relative" data-pinta-export-menu>
           <button
             type="button"
+            bind:this={exportBtnEl}
             class="inline-flex items-center justify-center gap-0.5 w-9 h-8 rounded-r-md text-ink-700 dark:text-night-dim hover:text-brand-pink dark:hover:text-brand-pink-light hover:bg-ink-50 dark:hover:bg-night-alt"
             onclick={(e) => {
               exportMenuAlignLeft = e.currentTarget.getBoundingClientRect().right < 288 + 8;
               exportMenuOpen = !exportMenuOpen;
+              emailedNote = null;
               // Prefill the tester-email input (and later the sign-off
               // form) while the menu animates open.
               if (exportMenuOpen) void app.loadTesterInfo();
             }}
-            title="Export this catalog — Results or Tester sheet, as Markdown or Word (.docx)"
-            aria-haspopup="menu"
+            title={stepPrep
+              ? `Generating tester-sheet steps (${Math.min(stepPrep.done + 1, stepPrep.total)} of ${stepPrep.total})…`
+              : "Export this catalog — Results or Tester sheet, as Markdown or Word (.docx)"}
+            aria-haspopup="dialog"
             aria-expanded={exportMenuOpen}
             aria-label="Export catalog"
+            onkeydown={(e) => {
+              // Escape with focus still on the trigger — the popover's
+              // own handler only sees keys once focus has moved inside.
+              if (e.key !== "Escape" || !exportMenuOpen) return;
+              e.stopPropagation();
+              exportMenuOpen = false;
+            }}
           >
-            <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
+            {#if stepPrep}
+              <svg class="animate-spin text-brand-pink dark:text-brand-pink-light" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21 12a9 9 0 1 1-6.219-8.56" /></svg>
+            {:else}
+              <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
+            {/if}
             <svg width="8" height="8" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="6 9 12 15 18 9"/></svg>
           </button>
           {#if exportMenuOpen}
@@ -1792,12 +2192,12 @@
                  sheet), each offering its format buttons (Markdown / Word).
                  Grid layout makes the full matrix obvious at a glance,
                  friendlier than a flat list as formats grow. -->
-            {#snippet fmtBtn(label: string, hint: string, onClick: () => void)}
+            {#snippet fmtBtn(label: string, hint: string, onClick: () => void, disabled: boolean = false)}
               <button
                 type="button"
-                class="flex-1 inline-flex items-center justify-center gap-1.5 rounded-md border border-ink-200 dark:border-night-line bg-white dark:bg-night-card px-2 py-1.5 text-[11.5px] font-semibold text-ink-700 dark:text-night-dim hover:border-brand-pink hover:text-brand-pink dark:hover:text-brand-pink-light hover:bg-brand-pink/5 transition-colors"
+                class="flex-1 inline-flex items-center justify-center gap-1.5 rounded-md border border-ink-200 dark:border-night-line bg-white dark:bg-night-card px-2 py-1.5 text-[11.5px] font-semibold text-ink-700 dark:text-night-dim enabled:hover:border-brand-pink enabled:hover:text-brand-pink dark:enabled:hover:text-brand-pink-light enabled:hover:bg-brand-pink/5 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
                 onclick={onClick}
-                role="menuitem"
+                {disabled}
                 title={hint}
               >
                 <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/></svg>
@@ -1805,8 +2205,16 @@
               </button>
             {/snippet}
             <div
-              class="absolute {exportMenuAlignLeft ? 'left-0' : 'right-0'} top-full mt-1 z-40 w-72 max-w-[calc(100vw-1rem)] rounded-md border border-ink-200 dark:border-night-line bg-white dark:bg-night-card shadow-lg overflow-hidden"
-              role="menu"
+              class="absolute {exportMenuAlignLeft ? 'left-0' : 'right-0'} top-full mt-1 z-40 w-72 max-w-[calc(100vw-1rem)] max-h-[70vh] overflow-y-auto rounded-md border border-ink-200 dark:border-night-line bg-white dark:bg-night-card shadow-lg"
+              role="dialog"
+              aria-label="Export options"
+              tabindex="-1"
+              onkeydown={(e) => {
+                if (e.key !== "Escape") return;
+                e.stopPropagation();
+                exportMenuOpen = false;
+                exportBtnEl?.focus();
+              }}
             >
               <div class="px-3 pt-2 pb-1 text-[10px] font-bold uppercase tracking-wider text-ink-400 dark:text-night-mute">Export</div>
 
@@ -1819,22 +2227,153 @@
                 </div>
               </div>
 
+            <!-- Step-prep status — progress while the missing steps are
+                 generated, or the outcome note + "download anyway" when
+                 the prep couldn't complete. Rendered under whichever
+                 block asked (Tester sheet vs Email). Amber = still
+                 working / needs a decision, never red. -->
+            {#snippet prepStatus(targets: TesterSheetTarget[])}
+              <!-- The live region stays mounted (empty when idle) so
+                   screen readers announce the text that lands in it. -->
+              <div role="status" aria-live="polite">
+                {#if stepPrep && stepPrepTarget && targets.includes(stepPrepTarget)}
+                  <div class="mt-1.5 flex items-center gap-1.5 text-[10.5px] text-ink-600 dark:text-night-dim leading-snug" data-pinta-step-prep>
+                    <svg class="animate-spin shrink-0 text-brand-pink dark:text-brand-pink-light" width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21 12a9 9 0 1 1-6.219-8.56"/></svg>
+                    <span class="flex-1">
+                      {stepPrep.cancel
+                        ? "Stopping after the current test…"
+                        : `Generating steps ${Math.min(stepPrep.done + 1, stepPrep.total)} of ${stepPrep.total}…`}
+                    </span>
+                    {#if !stepPrep.cancel}
+                      <button
+                        type="button"
+                        class="shrink-0 underline underline-offset-2 hover:text-brand-pink dark:hover:text-brand-pink-light"
+                        onclick={cancelStepPrep}
+                        aria-label="Cancel step generation"
+                      >Cancel</button>
+                    {:else if stepPrep.inFlight}
+                      <button
+                        type="button"
+                        class="shrink-0 underline underline-offset-2 hover:text-brand-pink dark:hover:text-brand-pink-light"
+                        onclick={stopStepPrepNow}
+                        title="Drop the in-flight ask too — use this if the agent isn't responding"
+                        aria-label="Stop now, dropping the in-flight ask"
+                      >Stop now</button>
+                    {/if}
+                  </div>
+                  <div class="mt-1 h-1 rounded-full bg-ink-200 dark:bg-night-line overflow-hidden" aria-hidden="true">
+                    <div class="h-full bg-brand-pink dark:bg-brand-pink-light transition-[width]" style="width:{Math.round((stepPrep.done / stepPrep.total) * 100)}%"></div>
+                  </div>
+                {:else if stepPrepNote && steplessCount > 0 && stepPrepTarget && targets.includes(stepPrepTarget)}
+                  <div class="mt-1.5 text-[10.5px] text-amber-700 dark:text-amber-400 leading-snug" data-pinta-step-prep-note>
+                    {stepPrepNote}
+                    <button
+                      type="button"
+                      class="underline underline-offset-2 font-semibold hover:text-brand-pink dark:hover:text-brand-pink-light"
+                      onclick={() => rerunTesterSheetExport(false)}
+                    >Retry</button>
+                    or
+                    <button
+                      type="button"
+                      class="underline underline-offset-2 font-semibold hover:text-brand-pink dark:hover:text-brand-pink-light"
+                      onclick={() => rerunTesterSheetExport(true)}
+                    >{stepPrepTarget === "md" || stepPrepTarget === "docx" ? "download anyway" : "send anyway"}</button>.
+                  </div>
+                {/if}
+              </div>
+            {/snippet}
+
               <div class="px-3 py-2">
                 <div class="text-[12px] font-semibold text-ink-900 dark:text-night-text">Tester sheet</div>
-                <div class="text-[10.5px] text-ink-500 dark:text-night-mute leading-snug mt-0.5 mb-2">Help-generated steps per row, Result left blank for the tester. Re-importable in standalone mode.</div>
+                <div class="text-[10.5px] text-ink-500 dark:text-night-mute leading-snug mt-0.5 mb-1.5">Steps per row, Result left blank for the tester. Re-importable in standalone mode.</div>
+                <!-- Applies to .md, .docx and Email below. Remembered with
+                     the other tester-sheet prefs (pinta-tester-info). -->
+                <label class="mb-2 flex items-start gap-1.5 text-[11px] text-ink-800 dark:text-night-text cursor-pointer" title="Ask the agent for steps on every test that has none before the sheet downloads or is emailed. Untick to export the sheet as it stands.">
+                  <input
+                    type="checkbox"
+                    class="mt-0.5 w-3.5 h-3.5 rounded border-ink-300 dark:border-night-line text-brand-pink focus:ring-1 focus:ring-brand-pink/40 cursor-pointer disabled:cursor-not-allowed"
+                    bind:checked={app.testerInfo.generateSteps}
+                    onchange={() => app.saveTesterInfo()}
+                    disabled={!!stepPrep}
+                    data-pinta-generate-steps
+                  />
+                  <span>
+                    Generate missing steps first
+                    <span class="text-ink-500 dark:text-night-mute">
+                      {steplessCount === 0 ? "— every test has steps" : `— ${nTests(steplessCount)} ${steplessCount === 1 ? "has" : "have"} none`}
+                    </span>
+                  </span>
+                </label>
                 <div class="flex items-center gap-1.5">
-                  {@render fmtBtn(".md", "Tester sheet as Markdown", () => downloadTesterSheetMd())}
-                  {@render fmtBtn(".docx", "Tester sheet as Word — opens directly in Word, no pandoc needed", downloadTesterSheetDocx)}
-                  {@render fmtBtn("Email…", "Download the .md and open a prefilled email draft to your tester — attach the downloaded file and send", () => void emailTesterSheet())}
+                  {@render fmtBtn(".md", app.testerInfo.generateSteps ? "Tester sheet as Markdown — generates any missing steps first" : "Tester sheet as Markdown, as it stands", () => void downloadTesterSheetMdPrepared(), !!stepPrep)}
+                  {@render fmtBtn(".docx", app.testerInfo.generateSteps ? "Tester sheet as Word — generates any missing steps first; opens directly in Word, no pandoc needed" : "Tester sheet as Word, as it stands — opens directly in Word, no pandoc needed", () => void downloadTesterSheetDocx(), !!stepPrep)}
                 </div>
+                {@render prepStatus(["md", "docx"])}
+              </div>
+
+              <div class="px-3 py-2 border-t border-ink-100 dark:border-night-line">
+                <div class="text-[12px] font-semibold text-ink-900 dark:text-night-text">Email</div>
+                <div class="text-[10.5px] text-ink-500 dark:text-night-mute leading-snug mt-0.5 mb-2">Downloads the tester sheet (.md){app.testerInfo.generateSteps ? ", generating any missing steps first," : ""} and opens a prefilled draft — attach the file and send.</div>
                 <input
                   type="email"
-                  class="mt-1.5 w-full px-2 py-1 text-[11px] rounded-md border border-ink-200 dark:border-night-line bg-white dark:bg-night-card text-ink-900 dark:text-night-text placeholder:text-ink-400 dark:placeholder:text-night-mute outline-none focus:border-brand-pink dark:focus:border-brand-pink-light"
-                  placeholder="Tester email for the Email… draft (optional)"
+                  class="w-full px-2 py-1 text-[11px] rounded-md border border-ink-200 dark:border-night-line bg-white dark:bg-night-card text-ink-900 dark:text-night-text placeholder:text-ink-400 dark:placeholder:text-night-mute outline-none focus:border-brand-pink dark:focus:border-brand-pink-light"
+                  placeholder="tester@example.com"
                   bind:value={app.testerInfo.recipient}
                   onchange={() => app.saveTesterInfo()}
+                  onkeydown={(e) => {
+                    if (e.key === "Enter" && emailReady && !stepPrep) void emailTesterSheet("gmail");
+                  }}
                   aria-label="Tester email address"
                 />
+                <!-- Inline, not tooltip-only — a disabled button leaves the
+                     tab order, so the reason has to be readable on the page. -->
+                {#if !emailReady}
+                  <div class="mt-1 text-[10.5px] text-ink-500 dark:text-night-mute">
+                    {app.testerInfo.recipient.trim() ? "That doesn't look like an email address." : "Enter your tester's email to send."}
+                  </div>
+                {:else if stepPrep && stepPrepTarget !== "gmail" && stepPrepTarget !== "mailto"}
+                  <div class="mt-1 text-[10.5px] text-ink-500 dark:text-night-mute">
+                    Waiting for the tester-sheet steps to finish generating…
+                  </div>
+                {/if}
+                {#if emailedNote}
+                  <div class="mt-1 text-[10.5px] text-emerald-600 dark:text-emerald-400 leading-snug">
+                    {emailedNote}
+                    {#if lastMailDraft}
+                      {@const again = lastMailDraft}
+                      <button
+                        type="button"
+                        class="underline underline-offset-2 font-semibold hover:text-brand-pink dark:hover:text-brand-pink-light"
+                        onclick={() => void openMailDraftTab(again.draft, again.via)}
+                        title="Open the same draft again from a fresh click (in case the first one was blocked)"
+                      >Open the draft again</button>
+                    {/if}
+                  </div>
+                {/if}
+                {@render prepStatus(["gmail", "mailto"])}
+                <button
+                  type="button"
+                  class="mt-1.5 w-full inline-flex items-center justify-center gap-1.5 rounded-md bg-brand-pink px-2 py-1.5 text-[11.5px] font-semibold text-white hover:bg-brand-magenta dark:hover:bg-brand-pink-light disabled:opacity-50 disabled:cursor-not-allowed disabled:hover:bg-brand-pink transition-colors"
+                  onclick={() => void emailTesterSheet("gmail")}
+                  disabled={!emailReady || emailBusy || !!stepPrep}
+                  title={app.testerInfo.generateSteps ? "Generates any missing steps, downloads the .md and opens a prefilled Gmail draft — attach the downloaded file and send" : "Downloads the .md as it stands and opens a prefilled Gmail draft — attach the downloaded file and send"}
+                >
+                  {#if emailBusy}
+                    <svg class="animate-spin" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21 12a9 9 0 1 1-6.219-8.56"/></svg>
+                  {:else}
+                    <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="2" y="4" width="20" height="16" rx="2"/><polyline points="22,6 12,13 2,6"/></svg>
+                  {/if}
+                  Open Gmail draft
+                </button>
+                <button
+                  type="button"
+                  class="mt-1 w-full text-[11px] text-ink-600 dark:text-night-dim hover:text-brand-pink dark:hover:text-brand-pink-light underline underline-offset-2 disabled:opacity-60 disabled:cursor-not-allowed disabled:no-underline disabled:hover:text-ink-600 dark:disabled:hover:text-night-dim transition-colors"
+                  onclick={() => void emailTesterSheet("mailto")}
+                  disabled={!emailReady || emailBusy || !!stepPrep}
+                  title="Open the draft in your default mail app instead (Outlook, Mail, Thunderbird…)"
+                >
+                  or use my default mail app
+                </button>
               </div>
             </div>
           {/if}
@@ -1960,7 +2499,7 @@
             {#if run.signoff}
               — {run.signoff.tester}{run.signoff.environment ? ` · ${run.signoff.environment}` : ""}{run.signoff.runType ? ` · ${run.signoff.runType} run` : ""}{run.signoff.date ? ` · ${run.signoff.date}` : ""}
             {/if}
-            <span class="text-ink-500 dark:text-night-mute"> · {run.applied} result{run.applied === 1 ? "" : "s"} applied{run.unknownIds.length > 0 ? `, ${run.unknownIds.length} unknown id${run.unknownIds.length === 1 ? "" : "s"} skipped` : ""}</span>
+            <span class="text-ink-500 dark:text-night-mute"> · {run.applied} of {catalogTotal} result{catalogTotal === 1 ? "" : "s"} applied{run.unknownIds.length > 0 ? `, ${run.unknownIds.length} unknown id${run.unknownIds.length === 1 ? "" : "s"} skipped` : ""}{run.scope ? ` · partial run: ${run.scope}` : ""}</span>
           </div>
           {#if run.signoff?.notes}
             <div class="text-[11px] text-ink-600 dark:text-night-dim">“{run.signoff.notes}”</div>
@@ -1971,6 +2510,7 @@
           type="button"
           class="shrink-0 text-[11.5px] font-semibold text-brand-pink dark:text-brand-pink-light hover:underline"
           onclick={() => app.clearImportedRun()}
+          aria-label="Clear imported run"
         >
           Clear
         </button>
@@ -2070,6 +2610,111 @@
       {/if}
     </div>
 
+    <!-- WORK ON — scope selector (Phase 21). Filters the list, the
+         counters and the exports; never touches stored marks, and the
+         .pinta bundle still carries every row. -->
+    <div class="flex items-center gap-1.5">
+      <label class="shrink-0 text-[11px] font-medium text-ink-500 dark:text-night-mute" for="pinta-scope">Work on</label>
+      <select
+        id="pinta-scope"
+        class="flex-1 min-w-0 px-2 py-1 text-[11.5px] rounded-md border border-ink-200 dark:border-night-line bg-white dark:bg-night-card text-ink-900 dark:text-night-text outline-none focus:border-brand-pink dark:focus:border-brand-pink-light"
+        value={scopeToToken(app.testPilot.scope)}
+        onchange={(e) => applyScopeToken(e.currentTarget.value)}
+        title="Which slice of the catalog to run — everything, only what changed in the latest revision, what failed, or a saved plan"
+      >
+        <option value="all">Everything ({app.testPilot.catalog?.sections.reduce((n, s) => n + s.tests.length, 0) ?? 0})</option>
+        {#each scopeBaseRevs as base (base)}
+          <option value="since:{base}">New in v{base + 1} (added or reworded)</option>
+        {/each}
+        {#if app.testPilot.scope.kind === "since" && !scopeBaseRevs.includes(app.testPilot.scope.rev)}
+          <!-- A scope restored from storage that predates the last five
+               revisions still needs an option, or the control would read
+               "Everything" while the list stays filtered. -->
+          <option value="since:{app.testPilot.scope.rev}">New in v{app.testPilot.scope.rev + 1} (added or reworded)</option>
+        {/if}
+        <option value="failed">Failed right now</option>
+        <option value="untested">Not run yet</option>
+        {#each app.testPilot.plans as plan (plan.id)}
+          <option value="plan:{plan.id}" title={plan.name}>{plan.name}</option>
+        {/each}
+      </select>
+      {#if app.testPilot.scope.kind === "plan"}
+        <button
+          type="button"
+          class="shrink-0 w-7 h-7 inline-flex items-center justify-center rounded-md text-ink-500 dark:text-night-mute hover:text-red-600 dark:hover:text-red-400 hover:bg-ink-50 dark:hover:bg-night-alt"
+          onclick={() => {
+            const scope = app.testPilot.scope;
+            if (scope.kind === "plan") void removePlan(scope.id);
+          }}
+          title="Delete this saved plan (the tests themselves stay)"
+          aria-label="Delete saved plan"
+        >
+          <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><polyline points="3 6 5 6 21 6"/><path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6"/><path d="M10 11v6M14 11v6"/><path d="M9 6V4a1 1 0 0 1 1-1h4a1 1 0 0 1 1 1v2"/></svg>
+        </button>
+      {:else}
+        <button
+          type="button"
+          class="shrink-0 w-7 h-7 inline-flex items-center justify-center rounded-md text-ink-500 dark:text-night-mute hover:text-brand-pink dark:hover:text-brand-pink-light hover:bg-ink-50 dark:hover:bg-night-alt disabled:opacity-50 disabled:cursor-not-allowed disabled:hover:text-ink-500"
+          onclick={() => void openPlanNameRow()}
+          disabled={!app.testPilot.catalog}
+          title="Save the tests currently in scope as a named plan"
+          aria-label="Save current scope as a plan"
+          aria-expanded={planNameOpen}
+          aria-controls="pinta-plan-name"
+        >
+          <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M19 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11l5 5v11a2 2 0 0 1-2 2z"/><polyline points="17 21 17 13 7 13 7 21"/><polyline points="7 3 7 8 15 8"/></svg>
+        </button>
+      {/if}
+    </div>
+    {#if planNameOpen}
+      <div class="flex items-center gap-1.5">
+        <input
+          type="text"
+          id="pinta-plan-name"
+          bind:this={planNameEl}
+          bind:value={planName}
+          maxlength="60"
+          placeholder="Plan name (e.g. Sprint 12 regression)"
+          aria-label="Plan name"
+          class="flex-1 min-w-0 px-2 py-1 text-[11.5px] rounded-md border border-ink-200 dark:border-night-line bg-white dark:bg-night-card text-ink-900 dark:text-night-text placeholder:text-ink-400 dark:placeholder:text-night-mute outline-none focus:border-brand-pink dark:focus:border-brand-pink-light"
+          oninput={() => (planError = null)}
+          onkeydown={(e) => {
+            if (e.key === "Enter") saveScopeAsPlan();
+            if (e.key === "Escape") {
+              planName = "";
+              planError = null;
+              planNameOpen = false;
+            }
+          }}
+        />
+        <button
+          type="button"
+          class="shrink-0 rounded-md bg-brand-pink px-2 py-1 text-[11.5px] font-semibold text-white hover:bg-brand-magenta dark:hover:bg-brand-pink-light disabled:opacity-50 disabled:cursor-not-allowed disabled:hover:bg-brand-pink"
+          disabled={!planName.trim()}
+          onclick={saveScopeAsPlan}
+        >
+          Save
+        </button>
+      </div>
+      {#if planError}
+        <div class="text-[10.5px] text-red-600 dark:text-red-400 px-0.5">{planError}</div>
+      {/if}
+    {/if}
+    {#if scopeActive}
+      {@const missing = app.scopeMissingIds}
+      <div class="text-[11px] text-ink-500 dark:text-night-mute leading-snug px-0.5">
+        Filtered view: <span class="font-semibold text-ink-700 dark:text-night-dim">{app.scopeLabel}</span> (catalog is at v{catalogRev}).
+        {#if !readOnlyRun}
+          Marks still belong to the whole catalog — but <span class="font-semibold text-ink-700 dark:text-night-dim">exports and the tester sheet carry only these rows</span>.
+        {:else}
+          Exports and the tester sheet carry only these rows.
+        {/if}
+        {#if missing.length > 0}
+          <span class="text-amber-600 dark:text-amber-400">{missing.length} test{missing.length === 1 ? "" : "s"} in this selection no longer exist.</span>
+        {/if}
+      </div>
+    {/if}
+
     <!-- STATS line — pass/fail/untested on the left, % complete on the
          right (matches the reference design). Progress bar runs the
          full panel width below, with "N of M tests run" tally caption. -->
@@ -2094,6 +2739,26 @@
       <div class="text-[11px] text-ink-500 dark:text-night-mute tabular-nums">
         {t.pass + t.fail} of {t.total} tests run
       </div>
+      <!-- Tester-sheet prep progress while the Export popover is closed —
+           a prep can take minutes and the spinner on the Export trigger
+           alone doesn't say how far along it is. Neutral, not amber:
+           it's working, nothing needs a decision. -->
+      {#if stepPrep && !exportMenuOpen}
+        <div role="status" class="text-[11px] text-ink-500 dark:text-night-mute flex items-center gap-1.5" data-pinta-step-prep-inline>
+          <span>Generating tester-sheet steps {Math.min(stepPrep.done + 1, stepPrep.total)} of {stepPrep.total}…</span>
+          <button
+            type="button"
+            class="underline underline-offset-2 hover:text-brand-pink dark:hover:text-brand-pink-light"
+            onclick={() => {
+              exportMenuAlignLeft = (exportBtnEl?.getBoundingClientRect().right ?? Infinity) < 288 + 8;
+              exportMenuOpen = true;
+              emailedNote = null;
+              void app.loadTesterInfo();
+            }}
+            title="Open the Export popover to follow or cancel the step generation"
+          >Show</button>
+        </div>
+      {/if}
     </div>
 
     {#if app.testPilot.error}
@@ -2119,7 +2784,7 @@
         {@const secFail = section.tests.filter((t) => t.status === "fail").length}
         {@const secTotal = section.tests.length}
         {@const secPct = secTotal > 0 ? Math.round(((secPass + secFail) / secTotal) * 100) : 0}
-        {@const secUnloaded = section.tests.filter((t) => !t.detail).length}
+        {@const secUnloaded = section.tests.filter((t) => !hasSteps(t)).length}
         {@const secBulkFetching = !!bulkFetchingSections[section.title]}
         {@const editingThisSection =
           editingField === `section:${section.title}` ||
@@ -2872,17 +3537,26 @@
       <!-- No-results state — only while a query is active and nothing
            matched. The search box above stays put so the user can edit
            or clear the query. -->
-      {#if searchActive && matchCount() === 0}
+      {#if (searchActive || scopeActive) && matchCount() === 0}
         <div class="rounded-lg border border-dashed border-ink-300 dark:border-night-line bg-ink-50 dark:bg-night-alt px-3 py-6 text-center space-y-2">
           <p class="text-[12px] text-ink-600 dark:text-night-dim">
-            No tests match “{searchQuery.trim()}”.
+            {#if searchActive && scopeActive}
+              No tests in “{app.scopeLabel}” match “{searchQuery.trim()}”.
+            {:else if searchActive}
+              No tests match “{searchQuery.trim()}”.
+            {:else}
+              Nothing in “{app.scopeLabel}” right now.
+            {/if}
           </p>
           <button
             type="button"
             class="text-[11px] font-medium text-brand-pink dark:text-brand-pink-light hover:underline"
-            onclick={() => (searchQuery = "")}
+            onclick={() => {
+              searchQuery = "";
+              app.setTestPilotScope({ kind: "all" });
+            }}
           >
-            Clear search
+            {searchActive && !scopeActive ? "Clear search" : "Show everything"}
           </button>
         </div>
       {/if}
@@ -2892,7 +3566,7 @@
            "+ Add author / + Add description" pattern in the header.
            Hidden while a search is active (adding a blank section into a
            filtered view would be confusing). -->
-      {#if !searchActive}
+      {#if !searchActive && !scopeActive}
         <button
           type="button"
           class="w-full inline-flex items-center justify-center gap-1.5 rounded-lg border border-dashed border-ink-300 dark:border-night-line bg-transparent text-[12px] font-medium text-ink-500 dark:text-night-mute hover:text-brand-pink dark:hover:text-brand-pink-light hover:border-brand-pink dark:hover:border-brand-pink-light py-2.5 transition-colors"

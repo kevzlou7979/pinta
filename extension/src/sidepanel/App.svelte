@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { onMount, onDestroy } from "svelte";
+  import { onMount, onDestroy, untrack } from "svelte";
   import type {
     Annotation,
     AnnotationImage,
@@ -25,6 +25,7 @@
     PintaFileError,
   } from "../lib/pinta-file.js";
   import type { TestPilotSignoff } from "../lib/test-pilot-md.js";
+  import { isEmailish, openMailDraftTab, type MailVia } from "../lib/mail.js";
   import { theme, toggleTheme } from "../lib/theme.svelte.js";
   // Tool defs (id / label / icon / shortcut) are shared with the on-page
   // floating toolbar via lib/tools.ts so the two never drift.
@@ -576,7 +577,7 @@
   let pintaAccentColor = $state(ACCENT_PALETTE[0]!);
   let importBusy = $state(false);
   let importedSendBusy = $state(false);
-  /** WS3 — annotation ids ticked for "File selected to GitLab" in the
+  /** WS3 — annotation ids ticked for "File issues" in the
    *  imported viewer. Reseeded per viewed import (see the $effect):
    *  default = every shareable, not-yet-filed annotation checked. */
   let importedSelected = $state<Set<string>>(new Set());
@@ -589,10 +590,15 @@
     try {
       const stored = await chrome.storage?.local?.get(PINTA_PREFS_KEY);
       const prefs = stored?.[PINTA_PREFS_KEY] as
-        | { author?: string; accentColor?: string }
+        | { author?: string; accentColor?: string; includeResults?: boolean }
         | undefined;
       if (prefs?.author) pintaAuthor = prefs.author;
       if (prefs?.accentColor) pintaAccentColor = prefs.accentColor;
+      // Contents choice sticks too — a tester who picked "annotations
+      // only" shouldn't have to re-pick it on every share.
+      if (typeof prefs?.includeResults === "boolean") {
+        pintaIncludeResults = prefs.includeResults;
+      }
     } catch {
       // storage perm missing or restricted page — defaults are fine
     }
@@ -603,6 +609,7 @@
         [PINTA_PREFS_KEY]: {
           author: pintaAuthor,
           accentColor: pintaAccentColor,
+          includeResults: pintaIncludeResults,
         },
       });
     } catch {
@@ -618,6 +625,15 @@
   let pintaSignDate = $state("");
   let pintaSignNotes = $state("");
   let pintaSignRunType = $state("Smoke");
+  /** Email-back block: confirmation line + readiness, so a disabled
+   *  button never has to explain itself through a tooltip alone. */
+  let pintaEmailedNote = $state<string | null>(null);
+  const pintaFormValid = $derived(
+    Boolean(pintaTitle.trim()) && Boolean(pintaAuthor.trim()),
+  );
+  const pintaEmailReady = $derived(
+    pintaFormValid && isEmailish(app.testerInfo.devEmail),
+  );
 
   function openPintaExportForm() {
     if (!annotations.length) return;
@@ -632,11 +648,12 @@
         pintaTitle = `Session — ${new Date().toLocaleDateString()}`;
       }
     }
+    // Prefill the persisted half of the form (same record TestPilotTab
+    // uses) while it opens — the developer's email for the send-back
+    // lives there too, so this runs with or without Test Pilot marks.
+    void app.loadTesterInfo();
+    pintaEmailedNote = null;
     if (app.testPilotHasMarks) {
-      // Prefill the sign-off half of the form (same record TestPilotTab
-      // uses) while the form opens.
-      void app.loadTesterInfo();
-      pintaIncludeResults = true;
       pintaSignDate = new Date().toISOString().slice(0, 10);
       pintaSignNotes = "";
       // Default the run type from the catalog's generation depth — same
@@ -650,12 +667,16 @@
     pintaFormOpen = true;
   }
 
-  function exportAsPinta() {
+  /** Downloads the .pinta bundle. Returns the filename (so the email
+   *  flow can name the attachment it asks the sender to drag in), or
+   *  null when the form isn't valid yet. `keepOpen` leaves the share
+   *  form up — the email flow still needs its fields. */
+  function exportAsPinta(opts: { keepOpen?: boolean } = {}): string | null {
     const session = app.session;
-    if (!session || !annotations.length) return;
+    if (!session || !annotations.length) return null;
     const trimmedTitle = pintaTitle.trim();
     const trimmedAuthor = pintaAuthor.trim();
-    if (!trimmedTitle || !trimmedAuthor) return;
+    if (!trimmedTitle || !trimmedAuthor) return null;
     const manifest: SessionManifest = {
       title: trimmedTitle,
       author: trimmedAuthor,
@@ -687,15 +708,56 @@
     const snapshot = $state.snapshot(session) as Session;
     const blob = encodePintaFile(snapshot, manifest, testPilot);
     const objUrl = URL.createObjectURL(blob);
+    const filename = pintaFilename(manifest, snapshot.url);
     const a = document.createElement("a");
     a.href = objUrl;
-    a.download = pintaFilename(manifest, snapshot.url);
+    a.download = filename;
     document.body.appendChild(a);
     a.click();
     document.body.removeChild(a);
     setTimeout(() => URL.revokeObjectURL(objUrl), 0);
     void saveSharePrefs();
-    pintaFormOpen = false;
+    if (!opts.keepOpen) pintaFormOpen = false;
+    return filename;
+  }
+
+  /** Tester side of the round-trip — same two-button pattern as Test
+   *  Pilot's "Email tester sheet", pointed the other way: download the
+   *  .pinta bundle, then open a prefilled draft back to the developer
+   *  for them to drag it into. Attachments can't ride a compose URL. */
+  async function emailPintaBundle(via: MailVia = "gmail") {
+    if (!pintaEmailReady) return;
+    const filename = exportAsPinta({ keepOpen: true });
+    if (!filename) return;
+    app.saveTesterInfo();
+    const withResults = pintaIncludeResults && app.testPilotHasMarks;
+    // exportAsPinta only writes a sign-off when the tester name is
+    // filled in — don't promise the developer one that isn't there.
+    const withSignoff = withResults && Boolean(app.testerInfo.name.trim());
+    const subject = `[Pinta] ${pintaTitle.trim()}`;
+    const body =
+      `Hi,\n\nAttached is my Pinta session bundle (${filename} — it just downloaded on my side, dragging it in now).\n\n` +
+      (withSignoff
+        ? "It carries my annotations AND my Test Pilot Pass/Fail marks + sign-off in the one file.\n\n"
+        : withResults
+          ? "It carries my annotations AND my Test Pilot Pass/Fail marks (no sign-off).\n\n"
+          : "It carries my annotations.\n\n") +
+      "To open it: Pinta side panel → Annotate → Import .pinta.\n\nThanks!";
+    // Tabs-API opener for Gmail (no popup-blocker false negatives);
+    // mailto keeps the window.open path inside it.
+    const opened = await openMailDraftTab(
+      { to: app.testerInfo.devEmail, subject, body },
+      via,
+    );
+    pintaEmailedNote = !opened
+      ? null
+      : via === "mailto"
+        ? `${filename} downloaded — attach it if your mail app opened a draft.`
+        : `${filename} downloaded — attach it to the draft that just opened.`;
+    if (!opened) {
+      app.lastError =
+        "Chrome blocked the draft tab. Allow pop-ups for the side panel, or use your default mail app.";
+    }
   }
 
   async function onImportFileChosen(ev: Event) {
@@ -1552,6 +1614,12 @@
   const fileOnlyMode = $derived(
     gitlabIssuesTickedAndReady && !submitOptions.autoApply,
   );
+  // Imported viewer mirrors the same footer contract: the per-annotation
+  // selection + "File issues" only exist while GitLab Issues is enabled
+  // AND ticked, exactly like the default draft footer.
+  const importGitlabTicked = $derived(
+    app.appMode === "connected" && gitlabIssuesTickedAndReady,
+  );
   $effect(() => {
     if (screenshotLocked && !submitOptions.includeScreenshot) {
       submitOptions.includeScreenshot = true;
@@ -1586,6 +1654,70 @@
   const showAssociatePrompt = $derived(
     !!app.selectedCompanion && isAssociatable && !matchesSelected,
   );
+
+  // Footer visibility — shared by the <footer> and the FAB offset. An
+  // imported id whose session is gone ("not found") gets no footer.
+  const footerShown = $derived(
+    !showAssociatePrompt &&
+      !app.viewingSettings &&
+      (app.viewingImportedId
+        ? app.importedSessions.some((s) => s.id === app.viewingImportedId)
+        : activeTab === "annotate"),
+  );
+  // Share-.pinta form takes over the panel body as ONE scroll surface:
+  // <main> and the draft submit controls hide, the footer grows + scrolls.
+  const shareFormTakeover = $derived(
+    pintaFormOpen && footerShown && !app.viewingImportedId,
+  );
+  // Rendered footer height — the chat FAB sits just above it.
+  let footerHeight = $state(0);
+  // Module tab strip — scrolls sideways on its own. Only the NAV scrolls
+  // to reveal a tab (manual math, so no ancestor is ever scrolled).
+  let tabNav: HTMLElement | null = $state(null);
+  function revealTab(btn: HTMLElement | null | undefined) {
+    const nav = btn?.parentElement;
+    if (!btn || !nav || nav !== tabNav) return;
+    const left = btn.offsetLeft;
+    const right = left + btn.offsetWidth;
+    if (left < nav.scrollLeft + 16) nav.scrollLeft = left - 16;
+    else if (right > nav.scrollLeft + nav.clientWidth - 16)
+      nav.scrollLeft = right - nav.clientWidth + 16;
+  }
+  $effect(() => {
+    void activeTab;
+    const nav = tabNav;
+    if (!nav) return;
+    // Active tab = the one wearing the pink underline.
+    revealTab(nav.querySelector<HTMLElement>(":scope > button.border-brand-pink"));
+  });
+  // Imported footer's collapsed "Submit options" chips — only the options
+  // that apply to a shared file (Auto-apply + GitLab Issues).
+  const importedActiveSummary = $derived.by(() => {
+    const parts: string[] = [];
+    if (submitOptions.autoApply) parts.push("Auto-apply");
+    if (importGitlabTicked) {
+      parts.push(
+        app.allModuleSpecs().find((m) => m.id === "gitlab-issues")?.name ??
+          "GitLab Issues",
+      );
+    }
+    return parts;
+  });
+  // Filing started from "Send to agent" outlives the viewer (Send closes
+  // it), so report the outcome in the global notice once it settles.
+  let filingPendingSeen: string | null = null;
+  $effect(() => {
+    const pending = app.importedFilePending;
+    const failed = !!app.importedFileError;
+    const viewing = app.viewingImportedId;
+    const prev = filingPendingSeen;
+    filingPendingSeen = pending;
+    if (prev && !pending && !failed && viewing !== prev) {
+      const msg = "GitLab issues filed from the shared file — reopen it from History to see the Filed marks.";
+      const cur = untrack(() => app.importNotice);
+      app.importNotice = cur ? `${cur} ${msg}` : msg;
+    }
+  });
 
   // Routing ambiguity: when more than one running companion claims the
   // current tab URL, the auto-pick policy is non-deterministic — the
@@ -2380,7 +2512,10 @@
   </button>
 {/snippet}
 
-<div class="flex flex-col h-full overflow-hidden">
+<!-- overflow-clip, not -hidden: a hidden box can still be scrolled by
+     focus/scrollIntoView, which shoves the header off-screen and leaves a
+     dead area below. Only <main> may scroll. -->
+<div class="flex flex-col h-full overflow-clip">
   <header
     class="shrink-0 px-4 py-3 border-b border-ink-200 bg-white dark:border-night-line dark:bg-night-card flex items-center justify-between"
   >
@@ -2631,7 +2766,18 @@
        this flex column. -->
   <div class="flex-1 relative flex flex-col min-h-0">
 
-  <main class="flex-1 min-h-0 overflow-y-auto p-4 space-y-4">
+  <!-- overflow-x-clip: nothing may widen <main> sideways (the tab nav
+       scrolls itself). With overflow-y:auto the browser computes clip as
+       hidden, which script/focus could still scroll — the onscroll guard
+       pins scrollLeft at 0. pb-20 lets the last row clear the chat FAB. -->
+  <main
+    class="flex-1 min-h-0 overflow-y-auto overflow-x-clip p-4 space-y-4"
+    class:pb-20={app.moduleReady("chat")}
+    class:hidden={shareFormTakeover}
+    onscroll={(e) => {
+      if (e.currentTarget.scrollLeft) e.currentTarget.scrollLeft = 0;
+    }}
+  >
     <!-- Soft "still waiting for an agent" notice (Phase 18a). A long queue
          isn't a failure, so it's an amber warning, not a red error —
          dismissible like every banner. Shown across tabs since the waiting
@@ -2806,10 +2952,18 @@
     {/if}
 
     {#if !app.viewingSettings && !app.viewingImportedId && !showAssociatePrompt && (app.moduleReady("test-pilot") || app.moduleReady("audit-flow") || app.moduleReady("report") || app.moduleReady("design-variants") || app.moduleReady("code-review") || app.moduleReady("devices") || app.interactiveTabSpecs().length > 0)}
-      <nav class="sticky -top-4 z-20 bg-ink-50 dark:bg-night-bg flex items-center gap-1 border-b border-ink-200 dark:border-night-line -mx-4 px-4 pt-4 mb-1">
+      <!-- Tabs scroll sideways INSIDE the nav (never widening <main>). The
+           bottom rule is an inset shadow, not a border, so the active
+           tab's underline still covers it without -mb-px overflowing the
+           scroll box. The focused / active tab is scrolled into view. -->
+      <nav
+        bind:this={tabNav}
+        class="sticky -top-4 z-20 bg-ink-50 dark:bg-night-bg flex items-center gap-1 overflow-x-auto overflow-y-hidden [scrollbar-width:thin] shadow-[inset_0_-1px_0_theme(colors.ink.200)] dark:shadow-[inset_0_-1px_0_theme(colors.night.line)] -mx-4 px-4 pt-4 mb-1"
+        onfocusin={(e) => revealTab(e.target as HTMLElement)}
+      >
         <button
           type="button"
-          class="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium border-b-2 -mb-px transition-colors"
+          class="inline-flex shrink-0 items-center gap-1.5 whitespace-nowrap px-3 py-1.5 text-xs font-medium border-b-2 transition-colors"
           class:border-brand-pink={activeTab === "annotate"}
           class:text-brand-pink={activeTab === "annotate"}
           class:dark:text-brand-pink-light={activeTab === "annotate"}
@@ -2839,7 +2993,7 @@
         {#if app.moduleReady("test-pilot")}
         <button
           type="button"
-          class="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium border-b-2 -mb-px transition-colors"
+          class="inline-flex shrink-0 items-center gap-1.5 whitespace-nowrap px-3 py-1.5 text-xs font-medium border-b-2 transition-colors"
           class:border-brand-pink={activeTab === "test-pilot"}
           class:text-brand-pink={activeTab === "test-pilot"}
           class:dark:text-brand-pink-light={activeTab === "test-pilot"}
@@ -2873,7 +3027,7 @@
         {#if app.moduleReady("audit-flow")}
           <button
             type="button"
-            class="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium border-b-2 -mb-px transition-colors"
+            class="inline-flex shrink-0 items-center gap-1.5 whitespace-nowrap px-3 py-1.5 text-xs font-medium border-b-2 transition-colors"
             class:border-brand-pink={activeTab === "audit-flow"}
             class:text-brand-pink={activeTab === "audit-flow"}
             class:dark:text-brand-pink-light={activeTab === "audit-flow"}
@@ -2905,7 +3059,7 @@
         {#if app.moduleReady("report")}
           <button
             type="button"
-            class="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium border-b-2 -mb-px transition-colors"
+            class="inline-flex shrink-0 items-center gap-1.5 whitespace-nowrap px-3 py-1.5 text-xs font-medium border-b-2 transition-colors"
             class:border-brand-pink={activeTab === "report"}
             class:text-brand-pink={activeTab === "report"}
             class:dark:text-brand-pink-light={activeTab === "report"}
@@ -2936,7 +3090,7 @@
         {#if app.moduleReady("design-variants")}
           <button
             type="button"
-            class="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium border-b-2 -mb-px transition-colors"
+            class="inline-flex shrink-0 items-center gap-1.5 whitespace-nowrap px-3 py-1.5 text-xs font-medium border-b-2 transition-colors"
             class:border-brand-pink={activeTab === "design-variants"}
             class:text-brand-pink={activeTab === "design-variants"}
             class:dark:text-brand-pink-light={activeTab === "design-variants"}
@@ -2966,7 +3120,7 @@
         {#if app.moduleReady("code-review")}
           <button
             type="button"
-            class="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium border-b-2 -mb-px transition-colors"
+            class="inline-flex shrink-0 items-center gap-1.5 whitespace-nowrap px-3 py-1.5 text-xs font-medium border-b-2 transition-colors"
             class:border-brand-pink={activeTab === "code-review"}
             class:text-brand-pink={activeTab === "code-review"}
             class:dark:text-brand-pink-light={activeTab === "code-review"}
@@ -2996,7 +3150,7 @@
         {#if app.moduleReady("devices")}
           <button
             type="button"
-            class="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium border-b-2 -mb-px transition-colors"
+            class="inline-flex shrink-0 items-center gap-1.5 whitespace-nowrap px-3 py-1.5 text-xs font-medium border-b-2 transition-colors"
             class:border-brand-pink={activeTab === "devices"}
             class:text-brand-pink={activeTab === "devices"}
             class:dark:text-brand-pink-light={activeTab === "devices"}
@@ -3024,7 +3178,7 @@
         {#each app.interactiveTabSpecs() as s (s.id)}
           <button
             type="button"
-            class="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium border-b-2 -mb-px transition-colors"
+            class="inline-flex shrink-0 items-center gap-1.5 whitespace-nowrap px-3 py-1.5 text-xs font-medium border-b-2 transition-colors"
             class:border-brand-pink={activeTab === s.id}
             class:text-brand-pink={activeTab === s.id}
             class:dark:text-brand-pink-light={activeTab === s.id}
@@ -3152,7 +3306,7 @@
               <h3 class="text-xs uppercase tracking-wide text-ink-500 dark:text-night-mute font-medium">
                 Annotations ({imp.session.annotations.length})
               </h3>
-              {#if app.appMode === "connected" && impSelectable.length > 0}
+              {#if importGitlabTicked && impSelectable.length > 0}
                 <!-- WS3 — all/none toggle for the GitLab-filing checkboxes -->
                 <button
                   type="button"
@@ -3215,7 +3369,7 @@
               {#each imp.session.annotations as a, i (`${a.id}:${i}`)}
                 {@const filed = imp.filedIssues?.[a.id]}
                 <li class="flex items-start gap-2">
-                  {#if app.appMode === "connected" && isShareableAnnotation(a)}
+                  {#if importGitlabTicked && isShareableAnnotation(a)}
                     <!-- WS3 — per-annotation selection for GitLab filing.
                          Filed rows lose their checkbox (the chip takes
                          its place) so they can't be re-filed. -->
@@ -3911,47 +4065,187 @@
       </div>
     {/if}
 
+    <!-- Filing started in the imported viewer outlives it (Send to agent
+         closes the viewer) — keep progress + failure visible here. The
+         success message lands in importNotice (see filingPendingSeen). -->
+    {#if !app.viewingImportedId && app.importedFilePending}
+      <div
+        class="flex items-center gap-2 text-xs text-amber-800 border border-amber-200 bg-amber-50 dark:text-amber-200 dark:border-amber-900/40 dark:bg-amber-950/40 rounded-md p-2"
+        role="status"
+      >
+        <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="animate-spin shrink-0" aria-hidden="true">
+          <path d="M21 12a9 9 0 1 1-6.219-8.56" />
+        </svg>
+        <p class="flex-1 min-w-0 break-words">Filing GitLab issues from the shared file…</p>
+      </div>
+    {:else if !app.viewingImportedId && app.importedFileError}
+      <div
+        class="flex items-start gap-2 text-xs text-red-600 border border-red-200 bg-red-50 dark:text-red-300 dark:border-red-900/40 dark:bg-red-950/40 rounded-md p-2"
+        role="alert"
+      >
+        <p class="flex-1 min-w-0 break-words">{app.importedFileError}</p>
+        <button
+          type="button"
+          class="shrink-0 text-red-500 hover:text-red-700 dark:text-red-400 dark:hover:text-red-200 leading-none px-1"
+          onclick={() => (app.importedFileError = null)}
+          aria-label="Dismiss error"
+          title="Dismiss"
+        >
+          ✕
+        </button>
+      </div>
+    {/if}
+
   </main>
 
+  <!-- Normally a non-scrolling shrink-0 strip under <main>. While the
+       share-.pinta form is open it takes over the body instead (main is
+       hidden) and becomes the single scroll surface. -->
   <footer
-    class="shrink-0 border-t border-ink-200 p-3 bg-white dark:border-night-line dark:bg-night-card space-y-2"
-    class:hidden={showAssociatePrompt ||
-      app.viewingSettings ||
-      (activeTab !== "annotate" && !app.viewingImportedId)}
+    bind:offsetHeight={footerHeight}
+    class="border-t border-ink-200 p-3 bg-white dark:border-night-line dark:bg-night-card space-y-2"
+    class:shrink-0={!shareFormTakeover}
+    class:flex-1={shareFormTakeover}
+    class:min-h-0={shareFormTakeover}
+    class:overflow-y-auto={shareFormTakeover}
+    class:overscroll-contain={shareFormTakeover}
+    class:hidden={!footerShown}
   >
-    {#if app.viewingImportedId}
-      {@const impFooter = app.importedSessions.find((s) => s.id === app.viewingImportedId)}
-      {#if impFooter}
-        {@const impFileCount = impFooter.session.annotations.filter(
-          (a) => isShareableAnnotation(a) && !impFooter.filedIssues?.[a.id] && importedSelected.has(a.id),
-        ).length}
-        {#if app.appMode === "connected"}
+    <!-- Per-submit module checkboxes (e.g. "Create GitLab issues") —
+         shared by the draft footer and the imported viewer so both action
+         areas look and behave the same. Only ready modules render; `only`
+         narrows to one module id (the imported footer: GitLab Issues). -->
+    {#snippet perSubmitModuleToggles(only: string | null = null)}
+      {#each app.allModuleSpecs().filter((m) => m.mode === "per-submit" && (only === null || m.id === only)) as moduleSpec (moduleSpec.id)}
+        {@const moduleReady = app.moduleReady(moduleSpec.id)}
+        {@const ticked = !!app.tickedModules[moduleSpec.id]}
+        {#if moduleReady}
           <label
             class="flex items-start gap-2 text-[12px] text-ink-700 dark:text-night-dim cursor-pointer select-none"
           >
             <input
               type="checkbox"
               class="mt-0.5 accent-brand-pink"
-              bind:checked={submitOptions.autoApply}
-              onchange={() => app.saveSubmitOptions()}
+              checked={ticked}
+              onchange={(e) =>
+                app.setModuleTicked(
+                  moduleSpec.id,
+                  (e.currentTarget as HTMLInputElement).checked,
+                )}
             />
             <span class="flex-1 leading-snug">
-              Auto-apply (no agent confirmation)
-              <span class="block text-[11px] text-ink-500 dark:text-night-mute">
-                Skip the agent's "reply 'go' to apply" step. Plan is still shown
-                briefly. Off by default — turn on for fast iteration.
+              <span class="inline-flex items-center gap-1.5 flex-wrap">
+                {moduleSpec.sessionCheckboxLabel}
+                {@render infoTip(moduleSpec.sessionCheckboxHint)}
+                {#if ticked}
+                  <span class="inline-flex items-center text-[10px] uppercase tracking-wide font-semibold text-emerald-700 dark:text-emerald-300 bg-emerald-100 dark:bg-emerald-950/50 border border-emerald-300 dark:border-emerald-800/50 rounded-full px-1.5 py-0.5" title="This module will run on the next submit">
+                    Will run
+                  </span>
+                {/if}
               </span>
             </span>
           </label>
         {/if}
-        <div class="flex items-center gap-2 flex-wrap">
+      {/each}
+    {/snippet}
+
+    <!-- Collapsible "Submit options" header — shared by the draft and the
+         imported footer. Chevron rotates; collapsed shows chips for the
+         options currently set. Collapse state persists (chrome.storage). -->
+    {#snippet submitOptionsHeader(summary: string[])}
+      <button
+        type="button"
+        class="w-full flex items-center gap-2 text-[11px] uppercase tracking-wider font-semibold text-ink-500 dark:text-night-mute hover:text-ink-900 dark:hover:text-night-text transition-colors px-0.5 py-1"
+        onclick={toggleFooterOptions}
+        aria-expanded={!footerOptionsCollapsed}
+      >
+        <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" class="transition-transform shrink-0" class:rotate-90={!footerOptionsCollapsed} aria-hidden="true"><polyline points="9 18 15 12 9 6"/></svg>
+        <span class="shrink-0">Submit options</span>
+        {#if footerOptionsCollapsed && summary.length > 0}
+          <span class="flex items-center gap-1 flex-wrap normal-case tracking-normal font-normal text-[10px] text-ink-600 dark:text-night-dim">
+            {#each summary as part, i (i)}
+              <span class="inline-flex items-center px-1.5 py-0.5 rounded-full bg-brand-pink/10 dark:bg-brand-pink/20 text-brand-pink dark:text-brand-pink-light border border-brand-pink/30">
+                {part}
+              </span>
+            {/each}
+          </span>
+        {:else if footerOptionsCollapsed}
+          <span class="normal-case tracking-normal font-normal text-[10px] text-ink-400 dark:text-night-mute italic">none set</span>
+        {/if}
+      </button>
+    {/snippet}
+
+    {#snippet autoApplyRow()}
+      <label
+        class="flex items-start gap-2 text-[12px] text-ink-700 dark:text-night-dim cursor-pointer select-none"
+      >
+        <input
+          type="checkbox"
+          class="mt-0.5 accent-brand-pink"
+          bind:checked={submitOptions.autoApply}
+          onchange={() => app.saveSubmitOptions()}
+        />
+        <span class="flex-1 leading-snug inline-flex items-center gap-1.5">
+          Auto-apply (no agent confirmation)
+          {@render infoTip("Skip the agent's \"reply 'go' to apply\" step. Plan is still shown briefly. Off by default — turn on for fast iteration.")}
+        </span>
+      </label>
+    {/snippet}
+
+    {#if app.viewingImportedId}
+      {@const impFooter = app.importedSessions.find((s) => s.id === app.viewingImportedId)}
+      {#if impFooter}
+        {@const impSelectableCount = impFooter.session.annotations.filter(
+          (a) => isShareableAnnotation(a) && !impFooter.filedIssues?.[a.id],
+        ).length}
+        {@const impFileCount = impFooter.session.annotations.filter(
+          (a) => isShareableAnnotation(a) && !impFooter.filedIssues?.[a.id] && importedSelected.has(a.id),
+        ).length}
+        {#if app.appMode === "connected"}
+          <!-- Same action area as the draft footer; only the options that
+               apply to a shared file (Auto-apply + GitLab Issues). -->
+          {@render submitOptionsHeader(importedActiveSummary)}
+          {#if !footerOptionsCollapsed}
+            {@render autoApplyRow()}
+            {@render perSubmitModuleToggles("gitlab-issues")}
+          {/if}
+        {/if}
+        {@const impFileOnly = importGitlabTicked && !submitOptions.autoApply}
+        <div class="flex gap-2">
+          {#if impFileOnly}
+            <!-- Same "File issues" primary as the draft footer's file-only
+                 mode — files the ticked annotations, no source edits. -->
+            <button
+              type="button"
+              class="flex-1 rounded-md bg-brand-pink text-white text-sm font-medium py-2 hover:bg-brand-magenta dark:hover:bg-brand-pink-light disabled:opacity-50 inline-flex items-center justify-center gap-1.5"
+              disabled={impFileCount === 0 || app.importedFilePending !== null}
+              title="Files one GitLab issue per ticked annotation via the glab CLI (needs /pinta running)."
+              onclick={() => void app.fileImportedToGitLab(impFooter.id, [...importedSelected])}
+            >
+              {#if app.importedFilePending === impFooter.id}
+                <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="animate-spin" aria-hidden="true">
+                  <path d="M21 12a9 9 0 1 1-6.219-8.56" />
+                </svg>
+                Filing…
+              {:else}
+                File issues
+              {/if}
+            </button>
+          {:else}
+          <!-- Disabled while a filing is in flight: a second filing would be
+               skipped silently (fileImportedToGitLab allows one at a time). -->
           <button
             type="button"
-            class="flex-1 min-w-[140px] rounded-md bg-brand-pink text-white text-sm font-medium py-2 hover:bg-brand-magenta dark:hover:bg-brand-pink-light disabled:opacity-50 inline-flex items-center justify-center gap-1.5"
-            disabled={app.appMode !== "connected" || impFooter.session.annotations.length === 0 || importedSendBusy}
+            class="flex-1 rounded-md bg-brand-pink text-white text-sm font-medium py-2 hover:bg-brand-magenta dark:hover:bg-brand-pink-light disabled:opacity-50"
+            disabled={app.appMode !== "connected" || impFooter.session.annotations.length === 0 || importedSendBusy || app.importedFilePending !== null}
             title={app.appMode === "connected" ? "Submit these annotations to your agent as a new session — your active draft is left alone" : "Connect to a companion to send to an agent"}
             onclick={async () => {
               if (app.appMode !== "connected") return;
+              // GitLab ticked + Auto-apply = patch the code AND file the
+              // ticked annotations, same as the draft footer.
+              if (importGitlabTicked && impFileCount > 0) {
+                void app.fileImportedToGitLab(impFooter.id, [...importedSelected]);
+              }
               importedSendBusy = true;
               const newId = await app.sendImportedToAgent(impFooter.id, {
                 autoApply: submitOptions.autoApply,
@@ -3970,37 +4264,15 @@
               }
             }}
           >
-            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><line x1="22" y1="2" x2="11" y2="13"/><polygon points="22 2 15 22 11 13 2 9 22 2"/></svg>
             {importedSendBusy ? "Sending…" : "Send to agent"}
           </button>
-          <!-- WS3 — file the ticked annotations as tracker issues via the
-               agent's import-file-issues writing op. -->
+          {/if}
           <button
             type="button"
-            class="flex-1 min-w-[150px] rounded-md border border-brand-pink dark:border-brand-pink-light text-brand-pink dark:text-brand-pink-light text-sm font-medium py-2 hover:bg-brand-pink/10 dark:hover:bg-brand-pink-light/10 disabled:opacity-50 inline-flex items-center justify-center gap-1.5"
-            disabled={app.appMode !== "connected" || impFileCount === 0 || app.importedFilePending !== null}
-            title={app.appMode === "connected"
-              ? "Files one GitLab issue per ticked annotation via the glab CLI (needs /pinta running). Falls back to .pinta/tasks.md when the GitLab Issues module is off or glab isn't set up."
-              : "Connect to a companion to file issues from this share"}
-            onclick={() => {
-              if (app.appMode !== "connected" || impFileCount === 0) return;
-              void app.fileImportedToGitLab(impFooter.id, [...importedSelected]);
-            }}
-          >
-            {#if app.importedFilePending === impFooter.id}
-              <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="animate-spin" aria-hidden="true">
-                <path d="M21 12a9 9 0 1 1-6.219-8.56" />
-              </svg>
-              Filing…
-            {:else}
-              File selected to GitLab ({impFileCount})
-            {/if}
-          </button>
-          <button
-            type="button"
-            class="rounded-md border border-ink-300 bg-white text-ink-700 text-sm font-medium px-3 py-2 hover:bg-ink-50 dark:border-night-line dark:bg-night-alt dark:text-night-dim dark:hover:bg-night-line dark:hover:text-night-text disabled:opacity-50"
+            class="rounded-md border border-ink-300 bg-white text-ink-700 text-sm font-medium px-3 hover:bg-ink-50 dark:border-night-line dark:bg-night-alt dark:text-night-dim dark:hover:bg-night-line dark:hover:text-night-text disabled:opacity-50"
             disabled={impFooter.session.annotations.length === 0}
             title="Copy these annotations as markdown — paste into claude.ai web, ChatGPT, or another agent"
+            aria-label="Copy to clipboard"
             onclick={async () => {
               try {
                 const text = formatSessionAsClipboard({
@@ -4019,11 +4291,13 @@
           >
             {copiedAt ? "✓" : "Copy"}
           </button>
+          {#if app.appMode === "standalone"}
+          <!-- Fork is a standalone-only action — hidden (not disabled) when
+               connected, where Send to agent covers it. -->
           <button
             type="button"
-            class="rounded-md border border-ink-300 bg-white text-ink-700 text-sm font-medium px-3 py-2 hover:bg-ink-50 dark:border-night-line dark:bg-night-alt dark:text-night-dim dark:hover:bg-night-line dark:hover:text-night-text disabled:opacity-50"
-            disabled={app.appMode !== "standalone"}
-            title={app.appMode === "standalone" ? "Clone these annotations into your editable session for this URL (replaces current draft)" : "Forking is only available in standalone mode — use Send to agent instead"}
+            class="rounded-md border border-ink-300 bg-white text-ink-700 text-sm font-medium px-3 hover:bg-ink-50 dark:border-night-line dark:bg-night-alt dark:text-night-dim dark:hover:bg-night-line dark:hover:text-night-text disabled:opacity-50"
+            title="Clone these annotations into your editable session for this URL (replaces current draft)"
             onclick={async () => {
               const result = await app.forkImportedToLocal(impFooter.id);
               if (result === "would-overwrite") {
@@ -4041,9 +4315,23 @@
           >
             Fork
           </button>
+          {/if}
         </div>
+        {#if impFileOnly}
+          <p class="text-[11px] text-ink-500 dark:text-night-mute text-center leading-snug">
+            {#if impFileCount === 0 && app.importedFilePending === null}
+              Select at least one annotation to file.
+            {:else}
+              {impFileCount} of {impSelectableCount} selected · Issues only — source code stays untouched. Tick <strong>Auto-apply</strong> to also patch the code. Untick <strong>Create GitLab issues</strong> to send to the agent instead.
+            {/if}
+          </p>
+        {/if}
       {/if}
     {:else if pintaFormOpen}
+      <!-- The sign-off + email blocks make this form taller than the
+           panel on most screens. While it's open the footer takes over the
+           panel body and is the ONE scroll surface (see shareFormTakeover),
+           so the form itself never scrolls. -->
       <div class="rounded-md border border-ink-300 bg-ink-50 dark:border-night-line dark:bg-night-alt p-3 space-y-2">
         <div class="flex items-center justify-between">
           <span class="text-xs font-medium text-ink-700 dark:text-night-text">Share session as .pinta</span>
@@ -4113,29 +4401,41 @@
              lets the tester send annotations only. -->
         {#if app.testPilotHasMarks}
           <div class="rounded border border-brand-pink/40 dark:border-brand-pink-light/40 bg-brand-pink/5 p-2 space-y-1.5">
-            <label class="flex items-center gap-1.5 text-[11px] font-medium text-ink-700 dark:text-night-text cursor-pointer">
-              <input type="checkbox" bind:checked={pintaIncludeResults} class="accent-brand-pink" />
-              Include test results (Test Pilot marks + sign-off)
+            <label class="block text-[11px] font-medium text-ink-700 dark:text-night-text">
+              <span class="block text-[10px] font-medium text-ink-500 dark:text-night-mute mb-0.5">Contents</span>
+              <select
+                bind:value={pintaIncludeResults}
+                class="w-full rounded border border-ink-300 bg-white text-ink-900 px-2 py-1 text-xs focus:outline-none focus:ring-2 focus:ring-brand-pink dark:border-night-line dark:bg-night-card dark:text-night-text"
+                title="Annotations alone, or annotations plus your Test Pilot marks + sign-off in the same file"
+              >
+                <option value={false}>Annotations only</option>
+                <option value={true}>Annotations + test results</option>
+              </select>
             </label>
             {#if pintaIncludeResults}
               <!-- Same field set + order as TestPilotTab's sign-off form
                    (name → email → date → environment → run type → notes)
                    so testers see one sign-off shape everywhere; only the
                    container styling differs per surface. -->
-              <input
-                type="text"
-                bind:value={app.testerInfo.name}
-                class="w-full rounded border border-ink-300 bg-white text-ink-900 px-2 py-1 text-xs focus:outline-none focus:ring-2 focus:ring-brand-pink dark:border-night-line dark:bg-night-card dark:text-night-text"
-                placeholder="Tester name (blank = results without sign-off)"
-                aria-label="Tester name"
-              />
-              <input
-                type="email"
-                bind:value={app.testerInfo.email}
-                class="w-full rounded border border-ink-300 bg-white text-ink-900 px-2 py-1 text-xs focus:outline-none focus:ring-2 focus:ring-brand-pink dark:border-night-line dark:bg-night-card dark:text-night-text"
-                placeholder="Email (optional)"
-                aria-label="Tester email"
-              />
+              <label class="block text-[11px] text-ink-600 dark:text-night-dim">
+                <span class="block text-[10px] font-medium text-ink-500 dark:text-night-mute mb-0.5">Tester name (blank = no sign-off)</span>
+                <input
+                  type="text"
+                  bind:value={app.testerInfo.name}
+                  class="w-full rounded border border-ink-300 bg-white text-ink-900 px-2 py-1 text-xs focus:outline-none focus:ring-2 focus:ring-brand-pink dark:border-night-line dark:bg-night-card dark:text-night-text"
+                  placeholder="Your name"
+                  aria-label="Tester name"
+                />
+              </label>
+              <label class="block text-[11px] text-ink-600 dark:text-night-dim">
+                <span class="block text-[10px] font-medium text-ink-500 dark:text-night-mute mb-0.5">Your email (optional)</span>
+                <input
+                  type="email"
+                  bind:value={app.testerInfo.email}
+                  class="w-full rounded border border-ink-300 bg-white text-ink-900 px-2 py-1 text-xs focus:outline-none focus:ring-2 focus:ring-brand-pink dark:border-night-line dark:bg-night-card dark:text-night-text"
+                  placeholder="you@example.com"
+                />
+              </label>
               <div class="grid grid-cols-2 gap-1.5">
                 <label class="block min-w-0 text-[11px] text-ink-600 dark:text-night-dim">
                   <span class="block text-[10px] font-medium text-ink-500 dark:text-night-mute mb-0.5">Run date</span>
@@ -4188,55 +4488,73 @@
         <button
           type="button"
           class="w-full rounded-md bg-brand-pink text-white text-sm font-medium py-1.5 hover:bg-brand-magenta dark:hover:bg-brand-pink-light disabled:opacity-50"
-          disabled={!pintaTitle.trim() || !pintaAuthor.trim()}
-          onclick={exportAsPinta}
+          disabled={!pintaFormValid}
+          onclick={() => exportAsPinta()}
         >
           Download .pinta
         </button>
+
+        <!-- Email back to the developer — the other half of the
+             round-trip, same shape as Test Pilot's "Email tester sheet"
+             (shared draft helper; the bundle downloads and the sender
+             drags it in, since no compose URL takes attachments). -->
+        <div class="pt-2 border-t border-ink-300 dark:border-night-line">
+          <div class="text-[12px] font-semibold text-ink-900 dark:text-night-text">Email</div>
+          <div class="text-[10.5px] text-ink-500 dark:text-night-mute leading-snug mt-0.5 mb-1.5">Downloads the .pinta and opens a prefilled draft to the developer — attach the file and send.</div>
+          <input
+            type="email"
+            bind:value={app.testerInfo.devEmail}
+            class="w-full rounded border border-ink-300 bg-white text-ink-900 px-2 py-1 text-xs focus:outline-none focus:ring-2 focus:ring-brand-pink dark:border-night-line dark:bg-night-card dark:text-night-text"
+            placeholder="developer@example.com"
+            aria-label="Developer email address"
+            onchange={() => app.saveTesterInfo()}
+            onkeydown={(e) => {
+              if (e.key === "Enter" && pintaEmailReady) void emailPintaBundle("gmail");
+            }}
+          />
+          <!-- Inline, not tooltip-only — disabled buttons leave the tab
+               order, so the blocker has to be readable on the page. -->
+          {#if !pintaEmailReady}
+            <div class="mt-1 text-[10.5px] text-ink-500 dark:text-night-mute">
+              {!pintaFormValid
+                ? "Fill in title and author first."
+                : app.testerInfo.devEmail.trim()
+                  ? "That doesn't look like an email address."
+                  : "Enter the developer's email to send."}
+            </div>
+          {/if}
+          {#if pintaEmailedNote}
+            <div class="mt-1 text-[10.5px] text-emerald-600 dark:text-emerald-400 leading-snug">{pintaEmailedNote}</div>
+          {/if}
+          <button
+            type="button"
+            class="mt-1.5 w-full inline-flex items-center justify-center gap-1.5 rounded-md bg-brand-pink text-white text-sm font-medium py-1.5 hover:bg-brand-magenta dark:hover:bg-brand-pink-light disabled:opacity-50 disabled:cursor-not-allowed disabled:hover:bg-brand-pink"
+            disabled={!pintaEmailReady}
+            onclick={() => void emailPintaBundle("gmail")}
+            title="Downloads the .pinta and opens a prefilled Gmail draft — attach the downloaded file and send"
+          >
+            <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="2" y="4" width="20" height="16" rx="2"/><polyline points="22,6 12,13 2,6"/></svg>
+            Open Gmail draft
+          </button>
+          <button
+            type="button"
+            class="mt-1 w-full text-[11px] text-ink-600 dark:text-night-dim hover:text-brand-pink dark:hover:text-brand-pink-light underline underline-offset-2 disabled:opacity-60 disabled:cursor-not-allowed disabled:no-underline disabled:hover:text-ink-600 dark:disabled:hover:text-night-dim"
+            disabled={!pintaEmailReady}
+            onclick={() => void emailPintaBundle("mailto")}
+            title="Open the draft in your default mail app instead (Outlook, Mail, Thunderbird…)"
+          >
+            or use my default mail app
+          </button>
+        </div>
       </div>
     {/if}
-    {#if !app.viewingImportedId}
+    <!-- Draft submit controls — hidden while the share form owns the
+         footer (shareFormTakeover); the form has its own ✕ to go back. -->
+    {#if !app.viewingImportedId && !shareFormTakeover}
     {#if app.appMode === "connected" && !allDone && app.session?.status === "drafting"}
-      <!-- Collapsible "Submit options" header. Toggle button rotates a
-           chevron and (when collapsed) renders summary chips for the
-           options that are currently set. State persists to
-           chrome.storage so the user's "I'm done configuring these"
-           preference sticks across panel reopens. -->
-      <button
-        type="button"
-        class="w-full flex items-center gap-2 text-[11px] uppercase tracking-wider font-semibold text-ink-500 dark:text-night-mute hover:text-ink-900 dark:hover:text-night-text transition-colors px-0.5 py-1"
-        onclick={toggleFooterOptions}
-        aria-expanded={!footerOptionsCollapsed}
-      >
-        <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" class="transition-transform shrink-0" class:rotate-90={!footerOptionsCollapsed} aria-hidden="true"><polyline points="9 18 15 12 9 6"/></svg>
-        <span class="shrink-0">Submit options</span>
-        {#if footerOptionsCollapsed && footerActiveSummary.length > 0}
-          <span class="flex items-center gap-1 flex-wrap normal-case tracking-normal font-normal text-[10px] text-ink-600 dark:text-night-dim">
-            {#each footerActiveSummary as part, i (i)}
-              <span class="inline-flex items-center px-1.5 py-0.5 rounded-full bg-brand-pink/10 dark:bg-brand-pink/20 text-brand-pink dark:text-brand-pink-light border border-brand-pink/30">
-                {part}
-              </span>
-            {/each}
-          </span>
-        {:else if footerOptionsCollapsed}
-          <span class="normal-case tracking-normal font-normal text-[10px] text-ink-400 dark:text-night-mute italic">none set</span>
-        {/if}
-      </button>
+      {@render submitOptionsHeader(footerActiveSummary)}
       {#if !footerOptionsCollapsed}
-      <label
-        class="flex items-start gap-2 text-[12px] text-ink-700 dark:text-night-dim cursor-pointer select-none"
-      >
-        <input
-          type="checkbox"
-          class="mt-0.5 accent-brand-pink"
-          bind:checked={submitOptions.autoApply}
-          onchange={() => app.saveSubmitOptions()}
-        />
-        <span class="flex-1 leading-snug inline-flex items-center gap-1.5">
-          Auto-apply (no agent confirmation)
-          {@render infoTip("Skip the agent's \"reply 'go' to apply\" step. Plan is still shown briefly. Off by default — turn on for fast iteration.")}
-        </span>
-      </label>
+      {@render autoApplyRow()}
       <label
         class="flex items-start gap-2 text-[12px] text-ink-700 dark:text-night-dim select-none"
         class:cursor-pointer={!screenshotLocked}
@@ -4289,37 +4607,7 @@
           </span>
         </label>
       {/if}
-      {#each app.allModuleSpecs().filter((m) => m.mode === "per-submit") as moduleSpec (moduleSpec.id)}
-        {@const moduleReady = app.moduleReady(moduleSpec.id)}
-        {@const ticked = !!app.tickedModules[moduleSpec.id]}
-        {#if moduleReady}
-          <label
-            class="flex items-start gap-2 text-[12px] text-ink-700 dark:text-night-dim cursor-pointer select-none"
-          >
-            <input
-              type="checkbox"
-              class="mt-0.5 accent-brand-pink"
-              checked={ticked}
-              onchange={(e) =>
-                app.setModuleTicked(
-                  moduleSpec.id,
-                  (e.currentTarget as HTMLInputElement).checked,
-                )}
-            />
-            <span class="flex-1 leading-snug">
-              <span class="inline-flex items-center gap-1.5 flex-wrap">
-                {moduleSpec.sessionCheckboxLabel}
-                {@render infoTip(moduleSpec.sessionCheckboxHint)}
-                {#if ticked}
-                  <span class="inline-flex items-center text-[10px] uppercase tracking-wide font-semibold text-emerald-700 dark:text-emerald-300 bg-emerald-100 dark:bg-emerald-950/50 border border-emerald-300 dark:border-emerald-800/50 rounded-full px-1.5 py-0.5" title="This module will run on the next submit">
-                    Will run
-                  </span>
-                {/if}
-              </span>
-            </span>
-          </label>
-        {/if}
-      {/each}
+      {@render perSubmitModuleToggles()}
       {/if}
     {/if}
 
@@ -4586,17 +4874,15 @@
     <!-- Global "Ask Pinta" FAB — floats bottom-right of the panel body so
          the agent Q&A is reachable from every module/tab instead of being
          buried in the header ⋮ menu. Hidden while the global sheet is open
-         (the sheet covers this corner). When the Annotate footer is visible
-         it sits higher (bottom-20) so it clears the pinned "Send to agent"
-         button; otherwise it drops to the panel's bottom-right corner. -->
-    {#if app.moduleReady("chat") && !globalChatOpen}
-      {@const footerVisible =
-        !showAssociatePrompt &&
-        !app.viewingSettings &&
-        (activeTab === "annotate" || !!app.viewingImportedId)}
+         (the sheet covers this corner) and while the share form owns the
+         body. It floats 12px above the footer's MEASURED height so it never
+         covers footer controls (the footer grows with options); with no
+         footer it sits in the corner and <main>'s pb-20 lets rows clear it. -->
+    {#if app.moduleReady("chat") && !globalChatOpen && !shareFormTakeover}
       <button
         type="button"
-        class="absolute {footerVisible ? 'bottom-20' : 'bottom-5'} right-5 z-20 w-12 h-12 inline-flex items-center justify-center rounded-full bg-brand-pink text-white shadow-lg hover:bg-brand-magenta dark:bg-brand-pink-light dark:text-night-bg dark:hover:bg-brand-pink transition-colors"
+        class="absolute right-5 z-20 w-12 h-12 inline-flex items-center justify-center rounded-full bg-brand-pink text-white shadow-lg hover:bg-brand-magenta dark:bg-brand-pink-light dark:text-night-bg dark:hover:bg-brand-pink transition-colors"
+        style="bottom: {footerShown && footerHeight > 0 ? footerHeight + 12 : 20}px"
         onclick={() => (globalChatOpen = true)}
         aria-label="Ask Pinta"
         title="Ask Pinta"

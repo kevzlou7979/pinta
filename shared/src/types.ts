@@ -704,8 +704,8 @@ export type ImportedSession = {
   session: Session;
   importedAt: number;
   /**
-   * WS3 — tracker issues filed FROM this import ("File selected to
-   * GitLab" in the imported viewer), keyed by the source annotation id.
+   * WS3 — tracker issues filed FROM this import ("File issues" with
+   * GitLab ticked in the imported viewer), keyed by the source annotation id.
    * Additive + optional (no IDB migration); lives only in the local
    * IndexedDB record and is NEVER included in a `.pinta` export.
    */

@@ -26,6 +26,7 @@ import {
   getModuleSpec,
   manifestToSpec,
   moduleIsConfigured,
+  sanitizeStoredModules,
   type ModuleSpec,
 } from "./modules.js";
 import {
@@ -101,10 +102,13 @@ import {
   scanCapturedContextForInjection,
 } from "./chat-guards.js";
 import {
+  appendRevision,
   composeTestDocMarkdown as composeTestDocMarkdownPure,
   composeTesterSheetMarkdown,
   composeTesterSheetDocx,
   composeResultsDocx,
+  diffCatalogs,
+  isEmptyDiff,
   nextUserTestId as nextUserTestIdPure,
   parseTestDocMarkdown,
   selectUnfiledFailures,
@@ -245,6 +249,32 @@ export type TestPilotTest = {
    * the user hasn't asked anything yet.
    */
   chat?: ChatMessage[];
+  /** Phase 21 — provenance. The catalog revision this id first appeared
+   *  in, and the last revision whose wording changed. Absent on rows
+   *  that predate versioning; those read as revision 1. Stamped by
+   *  `applyCatalogResult` from a locally computed diff (no agent
+   *  tokens) and round-tripped through the on-disk `Rev` column. */
+  firstSeenRev?: number;
+  lastChangedRev?: number;
+};
+
+/** One regeneration of the catalog, recorded so the tester can ask for
+ *  "what's new since v2". Ids only — the text lives in the catalog. */
+export type CatalogRevision = {
+  rev: number;
+  at: number;
+  added: string[];
+  changed: string[];
+  removed: string[];
+};
+
+/** A tester-saved selection of test ids ("Sprint 12 regression").
+ *  Stored outside the catalog so a regenerate can never destroy it. */
+export type TestPlan = {
+  id: string;
+  name: string;
+  testIds: string[];
+  createdAt: number;
 };
 
 /** A heading group within the catalog (e.g. "1.1 Authentication"). */
@@ -274,6 +304,11 @@ export type TestPilotCatalog = {
   title?: string;
   author?: string;
   description?: string;
+  /** Phase 21 — current revision, bumped only when a regenerate
+   *  actually adds, rewords or removes a row. Absent = revision 1. */
+  rev?: number;
+  /** Newest last, capped at REVISION_LOG_LIMIT entries. */
+  revisions?: CatalogRevision[];
 };
 
 /**
@@ -301,6 +336,10 @@ export type TestPilotImportedRun = {
   priorStatuses: Record<string, TestPilotStatus>;
   applied: number;
   unknownIds: string[];
+  /** Phase 21 — the export's `scope:` token when the run covered only
+   *  part of the catalog ("since-v2", "failed", "plan:Sprint 12").
+   *  Absent for a full run. */
+  scope?: string;
 };
 
 /** In-flight query metadata so we can route the eventual session.synced
@@ -581,7 +620,7 @@ class ExtensionState {
    *  imported session instead of the regular drafting UI. Closing the
    *  viewer (or forking it) clears this back to null. */
   viewingImportedId = $state<string | null>(null);
-  /** WS3 — the imported-session id whose "File selected to GitLab" run
+  /** WS3 — the imported-session id whose "File issues" run
    *  is in flight (one at a time). Drives the footer spinner. */
   importedFilePending = $state<string | null>(null);
   /** Dismissible error for the imported-viewer filing flow. */
@@ -729,7 +768,24 @@ class ExtensionState {
      *  testPilot block ("applied to Test Pilot" / mismatch guidance).
      *  Transient, dismissible in the imported-session viewer. */
     bundleNotice: string | null;
-  }>({ catalog: null, pending: null, pendingDetails: {}, pendingChats: {}, pendingSectionSuggest: {}, sectionSuggestions: {}, pendingSectionChats: {}, error: null, editingActive: false, pendingFileIssues: false, filedIssues: {}, importedRun: null, pendingImportConflict: null, bundleNotice: null });
+    /** Phase 21 — which slice of the catalog the tester is working on.
+     *  A pure view filter: every row stays in the catalog, keeps its
+     *  marks and still rides the `.pinta` bundle. `plan:<id>` points at
+     *  a saved selection; `since:<rev>` is "new & changed since vN". */
+    scope:
+      | { kind: "all" }
+      | { kind: "since"; rev: number }
+      /** Status scopes carry a frozen id list. Deriving them live would
+       *  eject each row from its own scope the moment it's marked —
+       *  the list shrinks under the cursor and the progress bar can
+       *  never move off 0% (or starts pinned at 100%). */
+      | { kind: "failed"; ids: string[] }
+      | { kind: "untested"; ids: string[] }
+      | { kind: "plan"; id: string };
+    /** Saved named selections, persisted under `${key}:plans` — kept
+     *  out of the catalog so a regenerate can never destroy them. */
+    plans: TestPlan[];
+  }>({ catalog: null, pending: null, pendingDetails: {}, pendingChats: {}, pendingSectionSuggest: {}, sectionSuggestions: {}, pendingSectionChats: {}, error: null, editingActive: false, pendingFileIssues: false, filedIssues: {}, importedRun: null, pendingImportConflict: null, bundleNotice: null, scope: { kind: "all" }, plans: [] });
 
   /**
    * Phase 14 — cross-cutting chat state for the two non-Test-Pilot
@@ -1151,6 +1207,8 @@ class ExtensionState {
     this.testPilot.pendingImportConflict = null;
     this.testPilot.bundleNotice = null;
     this.testPilot.error = null;
+    this.testPilot.scope = { kind: "all" };
+    this.testPilot.plans = [];
   }
 
   /** Storage key for the catalog in the current mode — per-project when
@@ -1200,6 +1258,22 @@ class ExtensionState {
   async loadTestPilot(companion: Companion | null): Promise<void> {
     this.resetTestPilotState();
     void this.loadTestPilotFiled(companion);
+    await this.loadTestPilotCatalog(companion);
+    // Plans + scope load AFTER the catalog settles: a standalone claim
+    // (in loadTestPilotCatalog) moves their `:plans` / `:scope` sidecars
+    // under the project key, and a load kicked off before that ran
+    // against the still-empty project key — `plans = []`, scope "all" —
+    // so the tester's saved plans were orphaned in memory and the next
+    // save clobbered the claimed copies for good.
+    await this.loadTestPlans();
+    await this.loadTestPilotScope();
+  }
+
+  /** Catalog half of `loadTestPilot` — every early return here is
+   *  followed by the plans + scope hydration in the caller. */
+  private async loadTestPilotCatalog(
+    companion: Companion | null,
+  ): Promise<void> {
     if (!companion) {
       // Standalone (tester persona): hydrate the standalone slot so an
       // imported tester sheet and its Pass/Fail marks survive side-panel
@@ -1276,6 +1350,11 @@ class ExtensionState {
           await chrome.storage?.local?.remove(
             `${ExtensionState.STANDALONE_TEST_PILOT_KEY}:run`,
           );
+          // Saved plans + the working scope belong to the catalog they
+          // were built against — move them with it, or the tester's
+          // plans are orphaned in the standalone slot.
+          await this.claimStandaloneSidecar("plans", key);
+          await this.claimStandaloneSidecar("scope", key);
           if (this.testPilot.importedRun) {
             await chrome.storage?.local?.set({
               [`${key}:run`]: $state.snapshot(this.testPilot.importedRun),
@@ -1337,12 +1416,25 @@ class ExtensionState {
     environment: string;
     /** Developer side — where "Email to tester" drafts go. */
     recipient: string;
-  }>({ name: "", email: "", environment: "", recipient: "" });
+    /** Tester side — where the finished .pinta bundle is emailed back. */
+    devEmail: string;
+    /** Export popover: generate steps for rows that have none before a
+     *  tester sheet downloads / is emailed. Off = export as-is. */
+    generateSteps: boolean;
+  }>({ name: "", email: "", environment: "", recipient: "", devEmail: "", generateSteps: true });
 
   private testerInfoLoaded = false;
+  /** Guards the one-shot standalone Test Pilot hydrate (see
+   *  hydrateStandalone) — reset when a companion takes over. */
+  private standaloneTestPilotHydrated = false;
 
   /** Lazy, idempotent hydrate — called when the sign-off form or the
    *  email-to-tester affordance opens. */
+  /** Set when the stored record could not be read. A save while this is
+   *  true would snapshot empty fields over a perfectly good record, so
+   *  saveTesterInfo() merges instead of replacing. */
+  private testerInfoReadFailed = false;
+
   async loadTesterInfo(): Promise<void> {
     if (this.testerInfoLoaded) return;
     this.testerInfoLoaded = true;
@@ -1354,23 +1446,65 @@ class ExtensionState {
         | Partial<typeof this.testerInfo>
         | undefined;
       if (raw && typeof raw === "object") {
-        this.testerInfo.name = typeof raw.name === "string" ? raw.name : "";
-        this.testerInfo.email = typeof raw.email === "string" ? raw.email : "";
-        this.testerInfo.environment =
-          typeof raw.environment === "string" ? raw.environment : "";
-        this.testerInfo.recipient =
-          typeof raw.recipient === "string" ? raw.recipient : "";
+        // Callers fire this without awaiting while their form is already
+        // on screen, so never clobber a field the user has begun typing
+        // into — only fill the ones still empty.
+        const fill = (
+          key: "name" | "email" | "environment" | "recipient" | "devEmail",
+        ) => {
+          const value = raw[key];
+          if (typeof value === "string" && !this.testerInfo[key]) {
+            this.testerInfo[key] = value;
+          }
+        };
+        fill("name");
+        fill("email");
+        fill("environment");
+        fill("recipient");
+        fill("devEmail");
+        if (typeof raw.generateSteps === "boolean") {
+          this.testerInfo.generateSteps = raw.generateSteps;
+        }
       }
     } catch {
-      // storage missing (test env) — defaults are fine
+      // storage missing (test env) — defaults are fine, but a later save
+      // must not treat those defaults as the user's answer
+      this.testerInfoReadFailed = true;
     }
   }
 
   saveTesterInfo(): void {
     try {
-      void chrome.storage?.local?.set({
-        [ExtensionState.TESTER_INFO_KEY]: $state.snapshot(this.testerInfo),
-      });
+      const next = $state.snapshot(this.testerInfo);
+      if (!this.testerInfoReadFailed) {
+        void chrome.storage?.local?.set({
+          [ExtensionState.TESTER_INFO_KEY]: next,
+        });
+        return;
+      }
+      // Read failed earlier: keep whatever is on disk for the fields the
+      // user hasn't filled in, rather than wiping them with blanks.
+      void chrome.storage?.local
+        ?.get(ExtensionState.TESTER_INFO_KEY)
+        .then((stored) => {
+          const prev = (stored?.[ExtensionState.TESTER_INFO_KEY] ?? {}) as Record<
+            string,
+            unknown
+          >;
+          const merged = { ...prev } as Record<string, unknown>;
+          for (const [key, value] of Object.entries(next)) {
+            // Booleans are a real answer either way; only blank strings
+            // are "not filled in yet".
+            if (value || typeof value === "boolean") merged[key] = value;
+          }
+          this.testerInfoReadFailed = false;
+          return chrome.storage?.local?.set({
+            [ExtensionState.TESTER_INFO_KEY]: merged,
+          });
+        })
+        .catch(() => {
+          // still unreadable — nothing safe to do
+        });
     } catch {
       // best-effort convenience — the export still works without it
     }
@@ -1488,13 +1622,13 @@ class ExtensionState {
   private tryImportPintaMd(filename: string, content: string): boolean {
     const parsed = parsePintaResultsMarkdown(filename, content);
     if (!parsed) return false;
-    const { catalog: run, signoff } = parsed;
+    const { catalog: run, signoff, scope } = parsed;
     const current = this.testPilot.catalog;
     const hasMarks =
       signoff !== null ||
       run.sections.some((s) => s.tests.some((t) => t.status !== "untested"));
     if (current && hasMarks && current.docId === run.docId) {
-      this.applyRunOverlay(run, signoff);
+      this.applyRunOverlay(run, signoff, scope);
       return true;
     }
     if (current && hasMarks && current.docId !== run.docId) {
@@ -1527,6 +1661,8 @@ class ExtensionState {
     run: TestPilotCatalog,
     signoff: TestPilotSignoff | null,
   ): void {
+    // Adopt whatever revision head the file's Rev column implies.
+    ExtensionState.normalizeRevisions(run);
     this.testPilot.catalog = run;
     this.testPilot.pending = null;
     this.testPilot.error = null;
@@ -1549,6 +1685,7 @@ class ExtensionState {
   private applyRunOverlay(
     run: TestPilotCatalog,
     signoff: TestPilotSignoff | null,
+    scope?: string,
   ): void {
     const catalog = this.testPilot.catalog;
     if (!catalog) return;
@@ -1560,6 +1697,7 @@ class ExtensionState {
       priorStatuses,
       applied,
       unknownIds,
+      ...(scope ? { scope } : {}),
     };
     this.testPilot.pending = null;
     this.testPilot.error = null;
@@ -1582,6 +1720,270 @@ class ExtensionState {
   }
 
   // ── WS2b — ONE .pinta bundle (testPilot block) ────────────────────
+
+  // ─── Phase 21: scope ("Work on") + saved plans ─────────────────────
+
+  /** Storage key for saved plans, alongside the catalog's own key. */
+  private testPlansStorageKey(): string {
+    return `${this.testPilotStorageKey()}:plans`;
+  }
+
+  /** The set of test ids the current scope covers, or null for "all"
+   *  (null means "don't filter" — cheaper than materialising every id).
+   *  Pure read of catalog + plans; every caller treats it as a filter,
+   *  never as the catalog itself. */
+  get scopedTestIds(): Set<string> | null {
+    const catalog = this.testPilot.catalog;
+    const scope = this.testPilot.scope;
+    if (!catalog || scope.kind === "all") return null;
+    if (scope.kind === "plan") {
+      const plan = this.testPilot.plans.find((p) => p.id === scope.id);
+      // A plan whose id vanished shows everything rather than an empty
+      // list the tester can't explain — `scopeLabel` agrees.
+      return plan ? new Set(plan.testIds) : null;
+    }
+    if (scope.kind === "failed" || scope.kind === "untested") {
+      return new Set(scope.ids);
+    }
+    const ids = new Set<string>();
+    for (const section of catalog.sections) {
+      for (const test of section.tests) {
+        const changedAt = test.lastChangedRev ?? test.firstSeenRev ?? 1;
+        if (changedAt > scope.rev) ids.add(test.id);
+      }
+    }
+    return ids;
+  }
+
+  /** Rows currently matching a status, used to freeze a status scope. */
+  private testIdsWithStatus(status: TestPilotStatus): string[] {
+    const ids: string[] = [];
+    for (const section of this.testPilot.catalog?.sections ?? []) {
+      for (const test of section.tests) {
+        if (test.status === status) ids.push(test.id);
+      }
+    }
+    return ids;
+  }
+
+  /** Ids in the active plan that no longer exist in the catalog — the
+   *  tester is told rather than silently shown a short list. */
+  get scopeMissingIds(): string[] {
+    const scope = this.testPilot.scope;
+    const catalog = this.testPilot.catalog;
+    if (!catalog) return [];
+    const wanted =
+      scope.kind === "plan"
+        ? (this.testPilot.plans.find((p) => p.id === scope.id)?.testIds ?? [])
+        : scope.kind === "failed" || scope.kind === "untested"
+          ? scope.ids
+          : [];
+    if (wanted.length === 0) return [];
+    const live = new Set<string>();
+    for (const section of catalog.sections) {
+      for (const test of section.tests) live.add(test.id);
+    }
+    return wanted.filter((id) => !live.has(id));
+  }
+
+  /** Short human label for the active scope — used in the selector, the
+   *  scoped-export frontmatter and the bundle notice. */
+  get scopeLabel(): string {
+    const scope = this.testPilot.scope;
+    switch (scope.kind) {
+      case "all":
+        return "Everything";
+      case "since":
+        return `New in v${scope.rev + 1}`;
+      case "failed":
+        return "Failed last run";
+      case "untested":
+        return "Untested when picked";
+      case "plan":
+        // Matches scopedTestIds' fallback: a vanished plan filters
+        // nothing, so it must not claim to be filtering either.
+        return (
+          this.testPilot.plans.find((p) => p.id === scope.id)?.name ??
+          "Everything"
+        );
+    }
+  }
+
+  /** Machine-readable scope token for export frontmatter, so a sheet
+   *  that only carries part of the catalog says so. */
+  get scopeToken(): string {
+    const scope = this.testPilot.scope;
+    return scope.kind === "since"
+      ? `since-v${scope.rev}`
+      : scope.kind === "plan"
+        ? `plan:${this.scopeLabel}`
+        : scope.kind;
+  }
+
+  /** Switch the working scope. Status scopes are frozen here: the id
+   *  set is snapshotted once so marking a row doesn't remove it from
+   *  the very list the tester is working through. */
+  setTestPilotScope(
+    scope:
+      | { kind: "all" }
+      | { kind: "since"; rev: number }
+      | { kind: "failed"; ids?: string[] }
+      | { kind: "untested"; ids?: string[] }
+      | { kind: "plan"; id: string },
+  ): void {
+    this.testPilot.scope =
+      scope.kind === "failed"
+        ? { kind: "failed", ids: scope.ids ?? this.testIdsWithStatus("fail") }
+        : scope.kind === "untested"
+          ? {
+              kind: "untested",
+              ids: scope.ids ?? this.testIdsWithStatus("untested"),
+            }
+          : scope;
+    void this.saveTestPilotScope();
+  }
+
+  /** Save the rows the current scope covers as a named plan and switch
+   *  to it. An "all" scope saves the whole catalog, which is a
+   *  legitimate starting point for hand-editing later. */
+  saveCurrentScopeAsPlan(name: string): TestPlan | null {
+    const catalog = this.testPilot.catalog;
+    // Cap the name so it can't clip unrecoverably in the 288px panel's
+    // <option>, and keep names unique so two plans are tellable apart.
+    const trimmed = name.trim().slice(0, 60);
+    if (!catalog || !trimmed) return null;
+    if (
+      this.testPilot.plans.some(
+        (p) => p.name.toLowerCase() === trimmed.toLowerCase(),
+      )
+    ) {
+      this.testPilot.error = `A plan called “${trimmed}” already exists — pick another name.`;
+      return null;
+    }
+    const scoped = this.scopedTestIds;
+    const testIds: string[] = [];
+    for (const section of catalog.sections) {
+      for (const test of section.tests) {
+        if (!scoped || scoped.has(test.id)) testIds.push(test.id);
+      }
+    }
+    if (testIds.length === 0) return null;
+    const plan: TestPlan = {
+      id: uid(),
+      name: trimmed,
+      testIds,
+      createdAt: Date.now(),
+    };
+    this.testPilot.plans = [...this.testPilot.plans, plan];
+    this.testPilot.scope = { kind: "plan", id: plan.id };
+    void this.saveTestPlans();
+    return plan;
+  }
+
+  deleteTestPlan(id: string): void {
+    this.testPilot.plans = this.testPilot.plans.filter((p) => p.id !== id);
+    if (this.testPilot.scope.kind === "plan" && this.testPilot.scope.id === id) {
+      this.testPilot.scope = { kind: "all" };
+      // Persist the reset too — otherwise the next panel load restores
+      // a scope pointing at a plan that no longer exists.
+      void this.saveTestPilotScope();
+    }
+    void this.saveTestPlans();
+  }
+
+  private testScopeStorageKey(): string {
+    return `${this.testPilotStorageKey()}:scope`;
+  }
+
+  private async saveTestPilotScope(): Promise<void> {
+    const key = this.testScopeStorageKey();
+    try {
+      if (this.testPilot.scope.kind === "all") {
+        await chrome.storage?.local?.remove(key);
+      } else {
+        await chrome.storage?.local?.set({
+          [key]: $state.snapshot(this.testPilot.scope),
+        });
+      }
+    } catch {
+      // best-effort — the scope is a view preference
+    }
+  }
+
+  private async loadTestPilotScope(): Promise<void> {
+    const key = this.testScopeStorageKey();
+    try {
+      const stored = await chrome.storage?.local?.get(key);
+      const raw = stored?.[key] as
+        | ExtensionState["testPilot"]["scope"]
+        | undefined;
+      if (!raw || typeof raw !== "object") return;
+      if (
+        raw.kind === "all" ||
+        (raw.kind === "since" && typeof raw.rev === "number") ||
+        ((raw.kind === "failed" || raw.kind === "untested") &&
+          Array.isArray(raw.ids)) ||
+        (raw.kind === "plan" && typeof raw.id === "string")
+      ) {
+        this.testPilot.scope = raw;
+      }
+    } catch {
+      // defaults to "all"
+    }
+  }
+
+  /** Move one `${standalone}:<name>` sidecar under the project key. */
+  private async claimStandaloneSidecar(
+    name: "plans" | "scope",
+    projectKey: string,
+  ): Promise<void> {
+    const from = `${ExtensionState.STANDALONE_TEST_PILOT_KEY}:${name}`;
+    try {
+      const stored = await chrome.storage?.local?.get(from);
+      const value = stored?.[from];
+      if (value !== undefined) {
+        await chrome.storage?.local?.set({ [`${projectKey}:${name}`]: value });
+        await chrome.storage?.local?.remove(from);
+      }
+    } catch {
+      // best-effort — the catalog claim is the important half
+    }
+  }
+
+  private async saveTestPlans(): Promise<void> {
+    const key = this.testPlansStorageKey();
+    try {
+      if (this.testPilot.plans.length > 0) {
+        await chrome.storage?.local?.set({
+          [key]: $state.snapshot(this.testPilot.plans),
+        });
+      } else {
+        await chrome.storage?.local?.remove(key);
+      }
+    } catch {
+      // best-effort — plans are a convenience, never the source of truth
+    }
+  }
+
+  private async loadTestPlans(): Promise<void> {
+    const key = this.testPlansStorageKey();
+    try {
+      const stored = await chrome.storage?.local?.get(key);
+      const raw = stored?.[key];
+      this.testPilot.plans = Array.isArray(raw)
+        ? (raw as TestPlan[]).filter(
+            (p) =>
+              p &&
+              typeof p.id === "string" &&
+              typeof p.name === "string" &&
+              p.name.trim().length > 0 &&
+              Array.isArray(p.testIds),
+          )
+        : [];
+    } catch {
+      this.testPilot.plans = [];
+    }
+  }
 
   /** True when a catalog is loaded AND the tester marked at least one
    *  row — the gate for showing the .pinta export's sign-off fields
@@ -1677,6 +2079,7 @@ class ExtensionState {
       // Reuse the existing catalog's docId on re-import so any per-doc
       // disk artifacts stay anchored.
       if (this.testPilot.catalog?.docId) parsed.docId = this.testPilot.catalog.docId;
+      ExtensionState.normalizeRevisions(parsed);
       this.testPilot.catalog = parsed;
       this.testPilot.pending = null;
       this.testPilot.error = null;
@@ -3623,12 +4026,19 @@ class ExtensionState {
     const found = this.findSection(sectionTitle);
     if (!found) return null;
     const id = input.id ?? this.nextUserTestId();
+    const rev = this.testPilot.catalog?.rev ?? 1;
     found.section.tests.push({
       id,
       test: input.test ?? "",
       expected: input.expected ?? "",
       status: "untested",
+      // Stamp hand-added rows with the current revision — otherwise the
+      // next regenerate's `??= 1` normaliser files brand-new content as
+      // the oldest in the catalog, and "New in vN" never shows it.
+      firstSeenRev: rev,
+      lastChangedRev: rev,
     });
+    this.clearScopeForNewRows();
     this.commitCatalogEdit();
     return id;
   }
@@ -3653,6 +4063,7 @@ class ExtensionState {
     // Mint ids by walking the catalog after each push so collisions
     // are impossible even within the batch (nextUserTestId reads the
     // current catalog state).
+    const rev = this.testPilot.catalog?.rev ?? 1;
     for (const input of inputs) {
       const test = input.test.trim();
       if (!test) continue;
@@ -3662,10 +4073,13 @@ class ExtensionState {
         test,
         expected: (input.expected ?? "").trim(),
         status: "untested",
+        firstSeenRev: rev,
+        lastChangedRev: rev,
       });
       ids.push(id);
     }
     if (ids.length === 0) return ids;
+    this.clearScopeForNewRows();
     this.commitCatalogEdit();
     return ids;
   }
@@ -3816,8 +4230,14 @@ class ExtensionState {
   ): void {
     const found = this.findTest(testId);
     if (!found) return;
+    const reworded =
+      (patch.test !== undefined && patch.test !== found.test.test) ||
+      (patch.expected !== undefined && patch.expected !== found.test.expected);
     if (patch.test !== undefined) found.test.test = patch.test;
     if (patch.expected !== undefined) found.test.expected = patch.expected;
+    // An inline reword is a change like any other — record it so the
+    // row shows up under "New in v{current}".
+    if (reworded) found.test.lastChangedRev = this.testPilot.catalog?.rev ?? 1;
     this.commitCatalogEdit();
   }
 
@@ -9408,13 +9828,29 @@ class ExtensionState {
     return this.renderChatMarkdown(`Pinta Test Pilot chat — ${testId}`, null, []);
   }
 
+  /** The catalog as the active scope sees it — same object when the
+   *  scope is "all", otherwise a copy with out-of-scope rows (and any
+   *  section left empty) dropped. Exports run through this so a scoped
+   *  tester sheet carries only what the tester is being asked to run.
+   *  The stored catalog is never touched. */
+  scopedCatalogView(): TestPilotCatalog | null {
+    const c = this.testPilot.catalog;
+    if (!c) return null;
+    const ids = this.scopedTestIds;
+    if (!ids) return c;
+    const sections = c.sections
+      .map((s) => ({ ...s, tests: s.tests.filter((t) => ids.has(t.id)) }))
+      .filter((s) => s.tests.length > 0);
+    return { ...c, sections };
+  }
+
   /** Render a markdown report from the current catalog. The optional
    *  sign-off (tester name / email / date / environment / notes) rides
    *  in the frontmatter for the importer and as a readable block for
    *  humans; without one, the envelope still carries the doc-id so the
    *  file overlays cleanly on re-import. */
   exportResults(signoff?: TestPilotSignoff): string {
-    const c = this.testPilot.catalog;
+    const c = this.scopedCatalogView();
     if (!c) return "# Test Pilot — no catalog loaded\n";
     let pass = 0,
       fail = 0,
@@ -9429,7 +9865,7 @@ class ExtensionState {
     const total = pass + fail + untested;
     const today = new Date().toISOString().slice(0, 10);
     const heading = c.title?.trim() || c.filename;
-    let out = composeFrontmatter(c.docId, signoff);
+    let out = composeFrontmatter(c.docId, signoff, this.scopeToken);
     out += `# Test Pilot results — ${heading}\n`;
     const metaBits: string[] = [`Run on ${signoff?.date || today}`];
     if (signoff?.tester.trim()) metaBits.push(`by ${signoff.tester.trim()}`);
@@ -9437,6 +9873,19 @@ class ExtensionState {
     metaBits.push(
       `${pass}/${total} passed, ${fail} failed, ${untested} untested`,
     );
+    // A scoped export covers part of the catalog — say so in the
+    // artifact itself, not only in the frontmatter, so a partial run
+    // can't be mistaken for a clean full pass on a ticket.
+    const fullTotal =
+      this.testPilot.catalog?.sections.reduce(
+        (n, s) => n + s.tests.length,
+        0,
+      ) ?? total;
+    if (this.testPilot.scope.kind !== "all") {
+      metaBits.push(
+        `PARTIAL RUN — “${this.scopeLabel}” only (${total} of ${fullTotal} tests in the catalog)`,
+      );
+    }
     out += `_${metaBits.join(", ")}_\n\n`;
     if (signoff) out += renderSignoffBlock(signoff);
     if (c.description?.trim()) out += `${c.description.trim()}\n\n`;
@@ -9497,12 +9946,15 @@ class ExtensionState {
    * companion export) walk through and fill in marks themselves.
    */
   exportTesterSheetMarkdown(): string {
-    const c = this.testPilot.catalog;
+    const c = this.scopedCatalogView();
     if (!c) return "# Test Pilot — no catalog loaded\n";
     // The frontmatter carries the doc-id out to the tester so their
     // returned results file overlays onto this catalog instead of
     // minting a fresh identity (see tryImportPintaMd).
-    return composeFrontmatter(c.docId) + composeTesterSheetMarkdown(c);
+    return (
+      composeFrontmatter(c.docId, undefined, this.scopeToken) +
+      composeTesterSheetMarkdown(c)
+    );
   }
 
   /**
@@ -9511,7 +9963,7 @@ class ExtensionState {
    * UI can skip the download dance.
    */
   async exportTesterSheetDocx(): Promise<Uint8Array | null> {
-    const c = this.testPilot.catalog;
+    const c = this.scopedCatalogView();
     if (!c) return null;
     return composeTesterSheetDocx(c);
   }
@@ -9525,7 +9977,7 @@ class ExtensionState {
   async exportResultsDocx(
     signoff?: TestPilotSignoff,
   ): Promise<Uint8Array | null> {
-    const c = this.testPilot.catalog;
+    const c = this.scopedCatalogView();
     if (!c) return null;
     const today = signoff?.date || new Date().toISOString().slice(0, 10);
     return composeResultsDocx(
@@ -9537,6 +9989,13 @@ class ExtensionState {
 
   clearTestPilot(): void {
     this.clearTestPilotTimeout();
+    // Drop in-flight per-row asks with the catalog they belong to —
+    // otherwise a bulk loop keeps waiting on rows that no longer exist
+    // and a late reply has nothing to land on.
+    for (const id of Object.keys(this.testPilot.pendingDetails)) {
+      this.clearDetailTimer(id);
+    }
+    this.testPilot.pendingDetails = {};
     this.testPilot.catalog = null;
     this.testPilot.pending = null;
     this.testPilot.error = null;
@@ -9570,12 +10029,8 @@ class ExtensionState {
       const stored = await chrome.storage?.local?.get(
         ExtensionState.MODULES_KEY,
       );
-      const raw = stored?.[ExtensionState.MODULES_KEY] as
-        | typeof this.modules
-        | undefined;
-      if (raw && typeof raw === "object") {
-        this.modules = raw;
-      }
+      const clean = sanitizeStoredModules(stored?.[ExtensionState.MODULES_KEY]);
+      if (clean) this.modules = clean;
     } catch {
       // storage missing (test env) — defaults are fine
     }
@@ -9660,7 +10115,16 @@ class ExtensionState {
 
   /** Initialize a missing module entry with defaults from its spec. */
   private ensureModuleEntry(spec: ModuleSpec): void {
-    if (this.modules[spec.id]) return;
+    const existing = this.modules[spec.id];
+    if (existing) {
+      // Defensive: an entry restored from storage can lack `settings`
+      // (see sanitizeStoredModules) — writing a setting into it would
+      // throw. Backfill so both write paths below stay safe.
+      if (!existing.settings || typeof existing.settings !== "object") {
+        existing.settings = {};
+      }
+      return;
+    }
     const settings: Record<string, string | boolean> = {};
     for (const field of spec.settings) {
       if (field.default !== undefined) settings[field.key] = field.default;
@@ -10001,7 +10465,12 @@ class ExtensionState {
       // No `modules`: the companion strips per-submit modules from shared
       // sessions, so ticked ones are surfaced as a notice instead.
     };
-    const tickedCount = this.buildSessionModules()?.length ?? 0;
+    // GitLab Issues is handled by the imported viewer itself (it files the
+    // ticked annotations alongside this send), so only OTHER ticked
+    // per-submit modules are actually skipped.
+    const tickedCount =
+      this.buildSessionModules()?.filter((m) => m.id !== "gitlab-issues")
+        .length ?? 0;
     try {
       const res = await ExtensionState.fetchWithTimeout(`${base}/v1/sessions`, {
         method: "POST",
@@ -10015,7 +10484,7 @@ class ExtensionState {
       }
       this.importNotice =
         tickedCount > 0
-          ? "Sent without your ticked modules — per-submit modules don't apply to shared files. To file GitLab issues from this share, use \"File selected to GitLab\" in the imported viewer."
+          ? "Sent without your other ticked modules — per-submit modules other than GitLab Issues don't apply to shared files."
           : null;
       return payload.id;
     } catch (err) {
@@ -10032,9 +10501,11 @@ class ExtensionState {
   /**
    * WS3 — file the ticked annotations of an imported `.pinta` session as
    * tracker issues via the trusted-extension writing query op
-   * `import-file-issues` (moduleId `gitlab-issues`). Mirrors
-   * `fileFailedTestsToGitLab`: GitLab via `glab` when the module is
-   * enabled, `.pinta/tasks.md` fallback otherwise. Token-lean payload —
+   * `import-file-issues` (moduleId `gitlab-issues`). The UI only offers
+   * filing while the GitLab Issues module is ready AND ticked (connected
+   * mode) — the imported footer mirrors the draft footer. The agent files
+   * via `glab`; its `.pinta/tasks.md` fallback (`fallbackToLocal`) stays
+   * agent-side, for when glab is missing or fails. Token-lean payload —
    * no base64 rides the query comment; the bundle's page screenshot goes
    * on `module.query.submit`'s `screenshot` field so the companion
    * extracts it to disk.
@@ -10396,6 +10867,14 @@ class ExtensionState {
    * for the current origin. Called from rescan when no companions exist.
    */
   private async hydrateStandalone(activeTabUrl: string | null): Promise<void> {
+    // Pure standalone never reaches connectTo(), so this is the only
+    // place the tester's catalog, saved plans and scope get hydrated.
+    // Once per panel session, and only while nothing is loaded, so a
+    // rescan can't wipe work in progress.
+    if (!this.standaloneTestPilotHydrated && !this.testPilot.catalog) {
+      this.standaloneTestPilotHydrated = true;
+      void this.loadTestPilot(null);
+    }
     const origin = originOf(activeTabUrl);
     if (!origin) {
       // Unsupported URL (chrome://, about:, etc.) — keep state cleared.
@@ -10481,6 +10960,9 @@ class ExtensionState {
     // companion); connected loads the per-project key and may claim
     // the standalone slot when its own is empty. loadTestPilot
     // handles both branches.
+    // A companion takes over hydration; re-arm the standalone one-shot
+    // so going companion-less later still restores the tester's slot.
+    this.standaloneTestPilotHydrated = !companion;
     void this.loadTestPilot(companion);
     // Imported modules live in the companion's `.pinta/modules/` — refresh
     // them on every (re)connect, clear them when going companion-less.
@@ -11110,7 +11592,7 @@ class ExtensionState {
           this.handleAuditSync(msg.session);
           return;
         }
-        // WS3 — "File selected to GitLab" from the imported-`.pinta`
+        // WS3 — "File issues" from the imported-`.pinta`
         // viewer rides moduleId "gitlab-issues" with op
         // "import-file-issues". Op-gated: regular annotation batches can
         // also carry gitlab-issues as a per-submit module and MUST keep
@@ -11665,6 +12147,37 @@ class ExtensionState {
     }
   }
 
+  /** Highest revision stamped on any row, floor 1. Used to recover the
+   *  catalog revision from a file whose rows carry `Rev` values. */
+  private static highestRev(catalog: TestPilotCatalog): number {
+    let highest = 1;
+    for (const section of catalog.sections) {
+      for (const test of section.tests) {
+        const rev = Math.max(test.lastChangedRev ?? 0, test.firstSeenRev ?? 0);
+        if (rev > highest) highest = rev;
+      }
+    }
+    return highest;
+  }
+
+  /** Give an imported catalog a coherent revision head: parsed row
+   *  stamps win, everything else reads as revision 1. Without this an
+   *  import of a v7 sheet reads as v1 and the next regenerate offers
+   *  "New in v2" — which matches the entire old catalog. */
+  private static normalizeRevisions(catalog: TestPilotCatalog): void {
+    const highest = ExtensionState.highestRev(catalog);
+    catalog.rev ??= highest;
+    catalog.revisions ??= [
+      { rev: highest, at: Date.now(), added: [], changed: [], removed: [] },
+    ];
+    for (const section of catalog.sections) {
+      for (const test of section.tests) {
+        test.firstSeenRev ??= 1;
+        test.lastChangedRev ??= test.firstSeenRev;
+      }
+    }
+  }
+
   private applyCatalogResult(payload: { [k: string]: unknown }): void {
     // Phase 13 — bail if the user is mid-edit. An incoming catalog
     // payload would otherwise clobber the in-progress text they just
@@ -11749,6 +12262,14 @@ class ExtensionState {
                   payloadStatus ??
                   carriedOver?.status ??
                   ("untested" as TestPilotStatus),
+                // Provenance carries over untouched here; the diff pass
+                // below re-stamps whatever this regenerate changed.
+                firstSeenRev:
+                  carriedOver?.firstSeenRev ??
+                  (typeof t?.rev === "number" ? t.rev : undefined),
+                lastChangedRev:
+                  carriedOver?.lastChangedRev ??
+                  (typeof t?.rev === "number" ? t.rev : undefined),
                 detail: carriedOver?.detail,
                 // Preserve the tester's chat thread across re-imports
                 // of the same doc — same policy as status / detail.
@@ -11762,9 +12283,101 @@ class ExtensionState {
       })),
       ...carry,
     };
+    // Phase 21 — stamp the revision. Only a regenerate that actually
+    // changed the row set mints a new one, so clicking Generate twice
+    // in a row doesn't inflate the counter. Computed locally: the
+    // agent is never asked to describe its own diff.
+    const priorRev = sameDoc ? (prior.rev ?? 1) : 0;
+    const diff = sameDoc
+      ? diffCatalogs(prior, catalog)
+      : {
+          added: catalog.sections.flatMap((s) => s.tests.map((t) => t.id)),
+          changed: [],
+          removed: [],
+        };
+    if (!sameDoc) {
+      // A different doc — but not necessarily a new history. The rows
+      // may carry `Rev` values read off disk (the recovery path after a
+      // chrome.storage wipe), so adopt the highest one as the current
+      // revision instead of resetting a v6 catalog to v1.
+      const highest = ExtensionState.highestRev(catalog);
+      catalog.rev = highest;
+      catalog.revisions = [
+        {
+          rev: highest,
+          at: Date.now(),
+          added: diff.added,
+          changed: [],
+          removed: [],
+        },
+      ];
+    } else if (isEmptyDiff(diff)) {
+      catalog.rev = priorRev;
+      // Copy, never alias — two catalog objects sharing one array means
+      // a later append mutates history the other one is showing.
+      catalog.revisions = [...(prior.revisions ?? [])];
+    } else {
+      const rev = priorRev + 1;
+      catalog.rev = rev;
+      catalog.revisions = appendRevision(prior.revisions, {
+        rev,
+        at: Date.now(),
+        ...diff,
+      });
+      const addedIds = new Set(diff.added);
+      const touched = new Set([...diff.added, ...diff.changed]);
+      for (const section of catalog.sections) {
+        for (const test of section.tests) {
+          if (!touched.has(test.id)) continue;
+          test.lastChangedRev = rev;
+          if (addedIds.has(test.id)) test.firstSeenRev = rev;
+        }
+      }
+    }
+    // Rows that predate versioning (no stamp anywhere) read as rev 1,
+    // and no row may claim a revision the catalog itself never reached
+    // — a stamp above the head would match every "New in vN" forever.
+    const head = catalog.rev ?? 1;
+    for (const section of catalog.sections) {
+      for (const test of section.tests) {
+        test.firstSeenRev = Math.min(test.firstSeenRev ?? 1, head);
+        test.lastChangedRev = Math.min(
+          test.lastChangedRev ?? test.firstSeenRev,
+          head,
+        );
+      }
+    }
     this.testPilot.catalog = catalog;
+    this.reconcileScopeWithCatalog();
     this.testPilot.error = null;
     void this.saveTestPilot();
+  }
+
+  /** Drop ids a frozen status scope names that the catalog no longer
+   *  has. Without this a regenerate leaves the scope pointing at dead
+   *  rows and the tester sees a silently short list. New rows are NOT
+   *  added — the whole point of freezing is a stable worklist. */
+  /** A row added by hand is never in the active scope, so it would be
+   *  filtered straight back out — and "Add test below" then drops the
+   *  user into an inline editor that never renders, wedging
+   *  `editingActive` for the session. Adding always widens the view. */
+  private clearScopeForNewRows(): void {
+    if (this.testPilot.scope.kind === "all") return;
+    this.testPilot.scope = { kind: "all" };
+    void this.saveTestPilotScope();
+  }
+
+  private reconcileScopeWithCatalog(): void {
+    const scope = this.testPilot.scope;
+    if (scope.kind !== "failed" && scope.kind !== "untested") return;
+    const live = new Set<string>();
+    for (const section of this.testPilot.catalog?.sections ?? []) {
+      for (const test of section.tests) live.add(test.id);
+    }
+    const kept = scope.ids.filter((id) => live.has(id));
+    if (kept.length === scope.ids.length) return;
+    this.testPilot.scope = { kind: scope.kind, ids: kept };
+    void this.saveTestPilotScope();
   }
 
   /** Reset every test row in the active catalog to `untested` and drop

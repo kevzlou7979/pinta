@@ -4,6 +4,22 @@ Notable changes shipped on top of the original V1 pipeline. Newest first.
 For the architectural design behind each item, see
 [`spec/SPEC.md`](spec/SPEC.md).
 
+## Unreleased
+
+### Changed
+
+- **Test Pilot: tester sheets always ship with steps.** Exporting the
+  tester sheet (.md / .docx) or emailing it now generates the agent's
+  per-row steps for every in-scope test that has none *before* the file
+  downloads — one agent call at a time, same queue as the section-level
+  "Ask for steps", with progress + Cancel in the Export popover. Rows
+  that already have steps are never re-asked. Without a companion, or
+  after a cancel / agent error, the popover says how many rows are still
+  empty and offers "download anyway" (the sheet then keeps the
+  "(no steps generated yet)" placeholder for those rows). The Gmail
+  draft now opens through the tabs API so it still appears after the
+  wait.
+
 ## 0.9.0 — 2026-09-17
 
 ### Added

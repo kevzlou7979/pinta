@@ -139,8 +139,9 @@ Recent additions on top of the original V1 pipeline:
 - **Tester sheet export (.md + .docx) with offline import** *(post-v0.3.1)*.
   Test Pilot **Export** is now a 3-item menu: results MD (sign-off
   artifact with marks + per-row chat threads), tester sheet MD (steps
-  embedded per row, Result blank), or tester sheet **.docx** (opens
-  directly in Word — no `pandoc` step). Standalone testers (no
+  embedded per row — any row still missing them is generated
+  automatically before the download — Result blank), or tester sheet
+  **.docx** (opens directly in Word — no `pandoc` step). Standalone testers (no
   companion / no agent) can import the .md file via the empty-state
   picker and walk through it offline; their results export back to MD
   for the developer to re-import. See `spec/SPEC.md` §8 Phase 13b.

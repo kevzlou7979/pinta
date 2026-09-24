@@ -7,7 +7,7 @@
     "dev": "vite",
     "build": "vite build",
     "check": "svelte-check --tsconfig ./tsconfig.json",
-    "test": "vitest run",
+    "test": "vitest run && vitest run --config vitest.repro.config.ts",
     "test:watch": "vitest"
   },
   "dependencies": {

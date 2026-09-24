@@ -148,7 +148,7 @@
   );
 
   function settingValue(spec: ModuleSpec, field: ModuleSettingSpec): string | boolean {
-    const stored = app.modules[spec.id]?.settings[field.key];
+    const stored = app.modules[spec.id]?.settings?.[field.key];
     if (stored !== undefined) return stored;
     return field.default ?? (field.type === "boolean" ? false : "");
   }
@@ -474,16 +474,17 @@
               session. Off by default.
             </p>
           </div>
-          <label class="shrink-0 inline-flex items-center cursor-pointer">
+          <label class="relative shrink-0 inline-flex items-center cursor-pointer">
             <input
               type="checkbox"
               class="sr-only peer"
+              aria-label="Processing pulse"
               checked={app.pulseSettings.enabled}
               onchange={(e) =>
                 app.setPulseEnabled((e.currentTarget as HTMLInputElement).checked)}
             />
             <span
-              class="relative w-9 h-5 bg-ink-300 dark:bg-night-line rounded-full peer-checked:bg-brand-pink dark:peer-checked:bg-brand-pink-light transition-colors"
+              class="relative w-9 h-5 bg-ink-300 dark:bg-night-line rounded-full peer-checked:bg-brand-pink dark:peer-checked:bg-brand-pink-light transition-colors peer-focus-visible:ring-2 peer-focus-visible:ring-brand-pink peer-focus-visible:ring-offset-2 dark:peer-focus-visible:ring-offset-night-card"
               aria-hidden="true"
             >
               <span
@@ -550,6 +551,10 @@
       </div>
     {/if}
 
+    <!-- Boundary: one broken module card (bad stored entry, bad imported
+         manifest) must degrade to an inline error, not blank Settings and
+         everything below it. -->
+    <svelte:boundary>
     {#each specs as spec (spec.id)}
       {@const entry = app.modules[spec.id]}
       {@const enabled = entry?.enabled ?? false}
@@ -563,14 +568,15 @@
         class:border-amber-400={enabled && !ready}
         class:dark:border-amber-700={enabled && !ready}
       >
-        <!-- Compact header — icon + name + status, always one tidy line.
+        <!-- Compact header — icon + name + status, always one tidy line
+             (fixed h-5, so a READY / NEEDS SETUP pill can't grow the card).
              The chevron expands the description + settings on demand so the
              list stays scannable. Toggle stays outside the expander button
              (nested interactive controls aren't allowed). -->
         <div class="flex items-center gap-2 p-3">
           <button
             type="button"
-            class="min-w-0 flex-1 flex items-center gap-1.5 text-left group"
+            class="min-w-0 flex-1 h-5 flex items-center gap-1.5 text-left group"
             onclick={() => toggleModule(spec, open)}
             aria-expanded={open}
             aria-label={open ? `Collapse ${spec.name}` : `Expand ${spec.name}`}
@@ -637,16 +643,21 @@
               </span>
             {/if}
           </button>
-          <label class="shrink-0 inline-flex items-center cursor-pointer">
+          <!-- `relative` keeps the sr-only (absolute) checkbox inside the
+               scrolling list; without it the input escapes <main>, lands
+               below the fold on short panels, and focusing it scrolls the
+               whole panel off-screen. Same on every sr-only toggle here. -->
+          <label class="relative shrink-0 inline-flex items-center cursor-pointer">
             <input
               type="checkbox"
               class="sr-only peer"
+              aria-label={`Enable ${spec.name}`}
               checked={enabled}
               onchange={(e) =>
                 app.setModuleEnabled(spec.id, (e.currentTarget as HTMLInputElement).checked)}
             />
             <span
-              class="relative w-9 h-5 bg-ink-300 dark:bg-night-line rounded-full peer-checked:bg-brand-pink dark:peer-checked:bg-brand-pink-light transition-colors"
+              class="relative w-9 h-5 bg-ink-300 dark:bg-night-line rounded-full peer-checked:bg-brand-pink dark:peer-checked:bg-brand-pink-light transition-colors peer-focus-visible:ring-2 peer-focus-visible:ring-brand-pink peer-focus-visible:ring-offset-2 dark:peer-focus-visible:ring-offset-night-card"
               aria-hidden="true"
             >
               <span
@@ -830,6 +841,25 @@
       </div>
     {/each}
 
+    {#snippet failed(error, reset)}
+      <div
+        class="flex items-start gap-2 rounded-md border border-red-300 dark:border-red-800/60 bg-red-50 dark:bg-red-950/40 px-2.5 py-2 text-[11px] text-red-700 dark:text-red-300"
+        role="alert"
+      >
+        <span class="min-w-0 flex-1 leading-snug">
+          Couldn't render the module list: {error instanceof Error ? error.message : String(error)}
+        </span>
+        <button
+          type="button"
+          class="shrink-0 font-medium text-red-700 dark:text-red-300 underline"
+          onclick={reset}
+        >
+          Retry
+        </button>
+      </div>
+    {/snippet}
+    </svelte:boundary>
+
     <!-- Import a third-party module (Phase 19). A module is a single
          `.pinta-module.json` (manifest + agent instructions); the consent
          dialog below shows exactly what it can do before anything lands. -->
@@ -956,16 +986,17 @@
             agent applies a batch.
           </p>
         </div>
-        <label class="shrink-0 inline-flex items-center cursor-pointer">
+        <label class="relative shrink-0 inline-flex items-center cursor-pointer">
           <input
             type="checkbox"
             class="sr-only peer"
+            aria-label="Auto-reload after changes"
             checked={app.autoReload}
             onchange={(e) =>
               app.setAutoReload((e.currentTarget as HTMLInputElement).checked)}
           />
           <span
-            class="relative w-9 h-5 bg-ink-300 dark:bg-night-line rounded-full peer-checked:bg-brand-pink dark:peer-checked:bg-brand-pink-light transition-colors"
+            class="relative w-9 h-5 bg-ink-300 dark:bg-night-line rounded-full peer-checked:bg-brand-pink dark:peer-checked:bg-brand-pink-light transition-colors peer-focus-visible:ring-2 peer-focus-visible:ring-brand-pink peer-focus-visible:ring-offset-2 dark:peer-focus-visible:ring-offset-night-card"
             aria-hidden="true"
           >
             <span

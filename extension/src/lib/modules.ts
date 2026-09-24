@@ -398,6 +398,36 @@ export function manifestToSpec(m: ModuleManifest): ModuleSpec {
 }
 
 /**
+ * Defensively normalize the raw `pinta-modules` storage payload before it
+ * replaces in-memory state. Storage can hold entries without a `settings`
+ * object (hand-edited, corrupted, or written by a foreign build); rendering
+ * such an entry used to throw inside the Settings module list and blank
+ * everything below it. Returns null when the payload isn't usable at all.
+ */
+export function sanitizeStoredModules(
+  raw: unknown,
+): Record<
+  string,
+  { enabled: boolean; settings: Record<string, string | boolean> }
+> | null {
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) return null;
+  const out: Record<
+    string,
+    { enabled: boolean; settings: Record<string, string | boolean> }
+  > = {};
+  for (const [id, entry] of Object.entries(raw as Record<string, unknown>)) {
+    if (!entry || typeof entry !== "object" || Array.isArray(entry)) continue;
+    const e = entry as { enabled?: unknown; settings?: unknown };
+    const settings =
+      e.settings && typeof e.settings === "object" && !Array.isArray(e.settings)
+        ? (e.settings as Record<string, string | boolean>)
+        : {};
+    out[id] = { enabled: e.enabled === true, settings };
+  }
+  return out;
+}
+
+/**
  * A module is "configured" when every required setting has a non-empty
  * value. The Settings panel uses this to mark the module ready; the
  * footer uses it to gate the per-session checkbox.

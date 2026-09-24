@@ -1,5 +1,9 @@
 import { describe, expect, it } from "vitest";
-import { manifestToSpec, BUILTIN_MODULES } from "./modules.js";
+import {
+  manifestToSpec,
+  BUILTIN_MODULES,
+  sanitizeStoredModules,
+} from "./modules.js";
 import type { ModuleManifest } from "@pinta/shared";
 
 /**
@@ -45,5 +49,50 @@ describe("manifestToSpec", () => {
     const builtinIds = BUILTIN_MODULES.map((m) => m.id);
     expect(builtinIds).not.toContain(manifest.id);
     expect(manifest.id).toContain(".");
+  });
+});
+
+/**
+ * Regression — 2026-09-24 tester report: a `pinta-modules` entry without a
+ * `settings` object crashed the Settings module list (`settings[key]` on
+ * undefined) and blanked everything below the Modules accordion. Storage
+ * is normalized on load so every entry always carries a settings object.
+ */
+describe("sanitizeStoredModules", () => {
+  it("passes well-formed entries through", () => {
+    const clean = sanitizeStoredModules({
+      "test-pilot": { enabled: true, settings: { detailed_steps: false } },
+    });
+    expect(clean).toEqual({
+      "test-pilot": { enabled: true, settings: { detailed_steps: false } },
+    });
+  });
+
+  it("backfills a missing settings object", () => {
+    const clean = sanitizeStoredModules({
+      "test-pilot": { enabled: true },
+      "gitlab-issues": { enabled: false, settings: null },
+    });
+    expect(clean).toEqual({
+      "test-pilot": { enabled: true, settings: {} },
+      "gitlab-issues": { enabled: false, settings: {} },
+    });
+  });
+
+  it("coerces a non-boolean enabled to false and drops junk entries", () => {
+    const clean = sanitizeStoredModules({
+      chat: { enabled: "yes", settings: {} },
+      report: "broken",
+      devices: null,
+      "audit-flow": [1, 2],
+    });
+    expect(clean).toEqual({ chat: { enabled: false, settings: {} } });
+  });
+
+  it("returns null for unusable payloads", () => {
+    expect(sanitizeStoredModules(undefined)).toBeNull();
+    expect(sanitizeStoredModules(null)).toBeNull();
+    expect(sanitizeStoredModules("nope")).toBeNull();
+    expect(sanitizeStoredModules([{ enabled: true }])).toBeNull();
   });
 });

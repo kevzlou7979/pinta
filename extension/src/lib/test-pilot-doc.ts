@@ -7,6 +7,7 @@
 // disk-sync side effects.
 
 import type {
+  CatalogRevision,
   TestPilotCatalog,
   TestPilotSection,
   TestPilotTest,
@@ -26,6 +27,70 @@ import type { TestPilotSignoff } from "./test-pilot-md.js";
  * in test text / expected text collapse to spaces so each row stays
  * one markdown table row.
  */
+/** Rows-by-id, flattened across sections. */
+function testsById(catalog: TestPilotCatalog | null | undefined) {
+  const map = new Map<string, TestPilotTest>();
+  for (const section of catalog?.sections ?? []) {
+    for (const test of section.tests) map.set(test.id, test);
+  }
+  return map;
+}
+
+/** Wording key for change detection — whitespace-insensitive so a
+ *  reflowed cell doesn't read as a rewrite. */
+function wordingOf(test: TestPilotTest): string {
+  return `${test.test} ${test.expected}`.replace(/\s+/g, " ").trim();
+}
+
+/**
+ * Phase 21 — what a regenerate actually did to the catalog, computed
+ * locally from the two id-keyed row sets. The agent spends no tokens
+ * on this: it already returns the whole catalog, and ids are its
+ * primary keys (SKILL 7.10.1b).
+ */
+export function diffCatalogs(
+  prior: TestPilotCatalog | null | undefined,
+  next: TestPilotCatalog,
+): { added: string[]; changed: string[]; removed: string[] } {
+  const before = testsById(prior);
+  const after = testsById(next);
+  const added: string[] = [];
+  const changed: string[] = [];
+  const removed: string[] = [];
+  for (const [id, test] of after) {
+    const was = before.get(id);
+    if (!was) added.push(id);
+    else if (wordingOf(was) !== wordingOf(test)) changed.push(id);
+  }
+  for (const id of before.keys()) {
+    if (!after.has(id)) removed.push(id);
+  }
+  return { added, changed, removed };
+}
+
+/** True when a diff is worth minting a new revision for. */
+export function isEmptyDiff(diff: {
+  added: string[];
+  changed: string[];
+  removed: string[];
+}): boolean {
+  return (
+    diff.added.length === 0 &&
+    diff.changed.length === 0 &&
+    diff.removed.length === 0
+  );
+}
+
+/** Newest-last revision log, capped so chrome.storage stays small. */
+export const REVISION_LOG_LIMIT = 20;
+
+export function appendRevision(
+  log: CatalogRevision[] | undefined,
+  entry: CatalogRevision,
+): CatalogRevision[] {
+  return [...(log ?? []), entry].slice(-REVISION_LOG_LIMIT);
+}
+
 export function composeTestDocMarkdown(catalog: TestPilotCatalog): string {
   const heading = catalog.title?.trim() || catalog.filename;
   let out = `# ${heading}\n\n`;
@@ -39,8 +104,11 @@ export function composeTestDocMarkdown(catalog: TestPilotCatalog): string {
     // because the disk file IS the recovery path. On re-import, the
     // agent's doc-parse handler (SKILL.md §7.10.1) reads the Result
     // column and restores Pass/Fail marks alongside the structure.
-    out += `| ID | Test | Expected Result | Result |\n`;
-    out += `|----|------|-----------------|--------|\n`;
+    // Phase 21 — the Rev column carries provenance through the same
+    // disk-is-the-recovery-path route as Result. The agent is told to
+    // copy it verbatim on rows it leaves alone (SKILL 7.10.1b).
+    out += `| ID | Test | Expected Result | Result | Rev |\n`;
+    out += `|----|------|-----------------|--------|-----|\n`;
     for (const t of section.tests) {
       const id = t.id.replace(/\|/g, "\\|");
       const test = t.test.replace(/\|/g, "\\|").replace(/\n/g, " ");
@@ -56,7 +124,8 @@ export function composeTestDocMarkdown(catalog: TestPilotCatalog): string {
           : t.status === "fail"
             ? "✗ Fail"
             : "";
-      out += `| ${id} | ${test} | ${expected} | ${result} |\n`;
+      const rev = t.lastChangedRev ?? t.firstSeenRev ?? "";
+      out += `| ${id} | ${test} | ${expected} | ${result} | ${rev} |\n`;
     }
     out += `\n`;
   }
@@ -692,7 +761,7 @@ export function parseTestDocMarkdown(
         .split(/(?<!\\)\|/)
         .map((c) => c.replace(/\\\|/g, "|").trim());
       if (cells.length >= 3) {
-        const [id, test, expected, result] = cells;
+        const [id, test, expected, result, rev] = cells;
         // Skip the header row (matches the literal column names we emit)
         if (
           id?.toLowerCase() === "id" &&
@@ -708,11 +777,18 @@ export function parseTestDocMarkdown(
           const r = (result ?? "").trim().toLowerCase();
           if (r.includes("✓") || /\bpass\b/.test(r)) status = "pass";
           else if (r.includes("✗") || /\bfail\b/.test(r)) status = "fail";
+          // Rev is optional — files written before Phase 21 (and
+          // hand-edited ones) have no column, and those rows read as
+          // revision 1.
+          const revNum = Number.parseInt((rev ?? "").trim(), 10);
           current.tests.push({
             id,
             test,
             expected: expected ?? "",
             status,
+            ...(Number.isFinite(revNum) && revNum > 0
+              ? { firstSeenRev: revNum, lastChangedRev: revNum }
+              : {}),
           });
         }
       }

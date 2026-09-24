@@ -48,10 +48,15 @@ function flat(s: string): string {
 export function composeFrontmatter(
   docId: string,
   signoff?: TestPilotSignoff,
+  /** Phase 21 — set when the export covers only part of the catalog
+   *  ("new-since-v2", a saved plan…), so the file says what it is and
+   *  the developer's import banner can repeat it. */
+  scope?: string,
 ): string {
   let out = `---\n`;
   out += `pinta-test-pilot: ${PINTA_TEST_PILOT_MD_VERSION}\n`;
   out += `doc-id: ${flat(docId)}\n`;
+  if (scope && scope !== "all") out += `scope: ${flat(scope)}\n`;
   if (signoff) {
     if (signoff.tester.trim()) out += `tester: ${flat(signoff.tester)}\n`;
     if (signoff.email?.trim()) out += `email: ${flat(signoff.email)}\n`;
@@ -113,12 +118,18 @@ function signoffFromMeta(
  * The crucial difference from a bare `parseTestDocMarkdown` call: the
  * `doc-id` from the frontmatter replaces the freshly-minted UUID, so
  * a results file can be matched back to the developer's catalog and
- * overlaid instead of replacing it.
+ * overlaid instead of replacing it. The Phase 21 `scope:` token (set
+ * only for partial exports) rides along so the import banner can say
+ * the run covered part of the catalog.
  */
 export function parsePintaResultsMarkdown(
   filename: string,
   content: string,
-): { catalog: TestPilotCatalog; signoff: TestPilotSignoff | null } | null {
+): {
+  catalog: TestPilotCatalog;
+  signoff: TestPilotSignoff | null;
+  scope?: string;
+} | null {
   const { meta, body } = parseFrontmatter(content);
   if (!meta || meta["pinta-test-pilot"] !== PINTA_TEST_PILOT_MD_VERSION) {
     return null;
@@ -128,7 +139,12 @@ export function parsePintaResultsMarkdown(
   const catalog = parseTestDocMarkdown(filename, body);
   if (!catalog) return null;
   if (meta["doc-id"]) catalog.docId = meta["doc-id"];
-  return { catalog, signoff: signoffFromMeta(meta) };
+  const scope = meta["scope"]?.trim();
+  return {
+    catalog,
+    signoff: signoffFromMeta(meta),
+    ...(scope && scope !== "all" ? { scope } : {}),
+  };
 }
 
 /**

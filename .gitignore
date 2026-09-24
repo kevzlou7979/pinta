@@ -17,3 +17,6 @@ build/
 
 # /work-task pipeline state (local only)
 .claude/work-task/
+
+# local extension build zips (release zips go to dist/)
+extension/*.zip

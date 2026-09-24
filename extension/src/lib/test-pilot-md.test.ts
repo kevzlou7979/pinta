@@ -513,3 +513,171 @@ describe("overlayResultsSidecar", () => {
     expect(base.sections[0]!.tests[0]!.status).toBe("pass");
   });
 });
+
+// ─────────────────────────────────────────────────────────────────────
+// Phase 21 — the `scope:` envelope line. A partial export has to say so
+// on the file itself, and the developer's importer has to keep working
+// on files that carry it (and on every file written before it existed).
+// ─────────────────────────────────────────────────────────────────────
+
+describe("composeFrontmatter — scope line", () => {
+  const scopeLine = (fm: string) =>
+    fm.split("\n").find((l) => l.startsWith("scope:")) ?? null;
+
+  it("omits scope entirely for the default 'all' scope", () => {
+    expect(scopeLine(composeFrontmatter("doc-1", undefined, "all"))).toBeNull();
+  });
+
+  it("omits scope when the caller passes nothing", () => {
+    expect(scopeLine(composeFrontmatter("doc-1"))).toBeNull();
+    expect(scopeLine(composeFrontmatter("doc-1", undefined, ""))).toBeNull();
+  });
+
+  it("emits scope for every non-'all' token", () => {
+    for (const token of ["since-v2", "failed", "untested", "plan:Sprint 12"]) {
+      expect(scopeLine(composeFrontmatter("doc-1", undefined, token))).toBe(
+        `scope: ${token}`,
+      );
+    }
+  });
+
+  it("keeps scope on one line even if the plan name had a newline", () => {
+    const fm = composeFrontmatter("doc-1", undefined, "plan:Sprint\n12");
+    expect(scopeLine(fm)).toBe("scope: plan:Sprint 12");
+    // Still a well-formed envelope: exactly two fences.
+    expect(fm.match(/^---$/gm)).toHaveLength(2);
+  });
+
+  it("sits between doc-id and the sign-off block", () => {
+    const fm = composeFrontmatter(
+      "doc-1",
+      {
+        tester: "Tess",
+        date: "2026-09-24",
+        environment: "UAT",
+        runType: "Smoke",
+      },
+      "since-v3",
+    );
+    const keys = fm
+      .split("\n")
+      .filter((l) => /^[a-z-]+:/.test(l))
+      .map((l) => l.split(":")[0]);
+    expect(keys).toEqual([
+      "pinta-test-pilot",
+      "doc-id",
+      "scope",
+      "tester",
+      "date",
+      "environment",
+      "run-type",
+    ]);
+  });
+
+  it("parseFrontmatter reads the scope back", () => {
+    const { meta, body } = parseFrontmatter(
+      composeFrontmatter("doc-9", undefined, "since-v2") + "# Doc\n",
+    );
+    expect(meta?.["scope"]).toBe("since-v2");
+    expect(meta?.["doc-id"]).toBe("doc-9");
+    expect(body).toBe("# Doc\n");
+  });
+
+  it("a scope-less file reads back with no scope key at all", () => {
+    const { meta } = parseFrontmatter(
+      composeFrontmatter("doc-9", undefined, "all") + "# Doc\n",
+    );
+    expect(meta).not.toBeNull();
+    expect("scope" in meta!).toBe(false);
+  });
+
+  it("round-trips a scope carrying a colon (plan:Name) without truncating", () => {
+    const { meta } = parseFrontmatter(
+      composeFrontmatter("doc-9", undefined, "plan:Sprint 12: hotfix") + "#\n",
+    );
+    expect(meta?.["scope"]).toBe("plan:Sprint 12: hotfix");
+  });
+});
+
+describe("parsePintaResultsMarkdown on a scoped file", () => {
+  const body = [
+    "# Test Pilot results — UAT",
+    "_Run on 2026-09-24, by Tess, 1/2 passed, 1 failed, 0 untested_",
+    "",
+    "## 1.1 Auth",
+    "",
+    "| ID | Test | Expected | Result |",
+    "|----|------|----------|--------|",
+    "| AUTH-01 | login | dashboard | ✓ Pass |",
+    "| AUTH-02 | logout | login page | ✗ Fail |",
+    "",
+  ].join("\n");
+
+  it("parses marks + sign-off with a scope line present", () => {
+    const parsed = parsePintaResultsMarkdown(
+      "results.md",
+      composeFrontmatter(
+        "doc-42",
+        {
+          tester: "Tess",
+          date: "2026-09-24",
+          environment: "UAT",
+          runType: "Smoke",
+        },
+        "since-v2",
+      ) + body,
+    );
+    expect(parsed).not.toBeNull();
+    expect(parsed!.catalog.docId).toBe("doc-42");
+    expect(parsed!.signoff?.tester).toBe("Tess");
+    expect(parsed!.signoff?.runType).toBe("Smoke");
+    const rows = parsed!.catalog.sections[0]!.tests;
+    expect(rows.map((t) => t.status)).toEqual(["pass", "fail"]);
+  });
+
+  it("the scope line never leaks into the parsed title or description", () => {
+    const parsed = parsePintaResultsMarkdown(
+      "results.md",
+      composeFrontmatter("doc-42", undefined, "plan:Sprint 12") + body,
+    )!;
+    expect(parsed.catalog.title).toBe("Test Pilot results — UAT");
+    expect(parsed.catalog.description ?? "").not.toContain("scope");
+  });
+
+  it("a scoped run overlays onto the full catalog, touching only its rows", () => {
+    const base: TestPilotCatalog = {
+      docId: "doc-42",
+      filename: "uat.md",
+      importedAt: 0,
+      sections: [
+        {
+          title: "1.1 Auth",
+          tests: [
+            { id: "AUTH-01", test: "login", expected: "d", status: "untested" },
+            { id: "AUTH-02", test: "logout", expected: "l", status: "untested" },
+            { id: "AUTH-03", test: "sso", expected: "s", status: "pass" },
+          ],
+        },
+      ],
+    };
+    const run = parsePintaResultsMarkdown(
+      "results.md",
+      composeFrontmatter("doc-42", undefined, "since-v2") + body,
+    )!.catalog;
+    const { applied, unknownIds } = overlayResults(base, run);
+    expect({ applied, unknownIds }).toEqual({ applied: 2, unknownIds: [] });
+    // AUTH-03 was out of scope, so the scoped sheet never mentioned it
+    // and the developer's own mark is left alone.
+    expect(base.sections[0]!.tests.map((t) => t.status)).toEqual([
+      "pass",
+      "fail",
+      "pass",
+    ]);
+  });
+
+  it("still returns null for a file with no pinta-test-pilot marker, scope or not", () => {
+    expect(
+      parsePintaResultsMarkdown("x.md", "---\nscope: failed\n---\n\n" + body),
+    ).toBeNull();
+  });
+});
