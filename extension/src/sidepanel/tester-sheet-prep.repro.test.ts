@@ -344,13 +344,16 @@ describe("Tester sheet export — auto-generate missing steps", () => {
     expect(mailto.disabled).toBe(true);
     expect(t.target.textContent).toContain("Waiting for the tester-sheet steps to finish generating");
     const trigger = t.target.querySelector<HTMLButtonElement>('button[aria-label="Export catalog"]')!;
-    expect(trigger.querySelector("svg.animate-spin")).not.toBeNull();
+    // Fixer F1: the in-button fan is decorative (the trigger's title + the
+    // prepStatus live region carry the wait) — assert the fan itself.
+    expect(trigger.querySelector(".pinta-paint-loader")).not.toBeNull();
+    expect(trigger.querySelector('[role="status"]')).toBeNull();
     expect(trigger.title).toMatch(/Generating tester-sheet steps \(1 of 2\)/);
 
     t.answer("AUTH-02"); await sleep(120); await t.settle();
     t.answer("BILL-01"); await sleep(120); await t.settle();
     expect(gmail.disabled).toBe(false);
-    expect(trigger.querySelector("svg.animate-spin")).toBeNull();
+    expect(trigger.querySelector(".pinta-paint-loader")).toBeNull();
   }, 30000);
 
   it("keeps the outcome note when the popover is closed and reopened, and Retry asks again", async () => {

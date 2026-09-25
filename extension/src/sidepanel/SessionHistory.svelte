@@ -3,6 +3,7 @@
   import { app } from "../lib/state.svelte.js";
   import { companionFetch } from "../lib/companion-http.js";
   import { confirmDialog } from "../lib/confirm.svelte.js";
+  import EmptyState from "../lib/EmptyState.svelte";
 
   // `open` is $bindable so the popover can be driven from outside (the
   // header's ⋮ menu) while keeping its own trigger for standalone use.
@@ -373,7 +374,7 @@
         {#if error && app.importedSessions.length === 0}
           <p class="text-[11px] text-red-600 dark:text-red-300 px-1">{error}</p>
         {:else if summaries.length === 0 && app.importedSessions.length === 0}
-          <p class="text-[11px] text-ink-500 dark:text-night-mute italic px-1">No sessions yet.</p>
+          <EmptyState compact title="No sessions yet" hint="Submitted annotation sessions and imported files will show up here." />
         {:else if summaries.length > 0}
           {#each summaries as s (s.id)}
             {@const badge = statusBadge(s.status)}

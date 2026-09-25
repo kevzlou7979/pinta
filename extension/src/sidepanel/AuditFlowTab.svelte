@@ -29,6 +29,9 @@
   import { parseAuditCatalog } from "../lib/audit-catalog-doc.js";
   import ChatSheet from "./ChatSheet.svelte";
   import MicButton from "../lib/voice/MicButton.svelte";
+  import PaintLoader from "../lib/PaintLoader.svelte";
+  import LoadingState from "../lib/LoadingState.svelte";
+  import EmptyState from "../lib/EmptyState.svelte";
 
   // AuditFlow takes no props — Fix now happens IN PLACE (no Annotate
   // handoff): the agent edits the code directly and the row shows a
@@ -594,7 +597,7 @@
           aria-label="Re-run the audit"
         >
           {#if running}
-            <svg class="animate-spin" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21 12a9 9 0 1 1-6.219-8.56"/></svg>
+            <PaintLoader size="xs" label="Audit running" />
           {:else}
             <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="23 4 23 10 17 10"/><polyline points="1 20 1 14 7 14"/><path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"/></svg>
           {/if}
@@ -660,9 +663,17 @@
           onclick={() => toggleCheck(check.id)}
           aria-expanded={checkOpen}
         >
+          {#if fixing}
+            <!-- Fan as the row badge while the agent edits — the card's
+                 pinta-loading-card tint is static, this is the motion. -->
+            <span class="shrink-0 mt-0.5 inline-flex items-center justify-center w-5 h-5">
+              <PaintLoader size="xs" label="Fixing" />
+            </span>
+          {:else}
           <span class="shrink-0 mt-0.5 inline-flex items-center justify-center w-5 h-5 rounded border text-[10px] font-bold {statusBadgeClass(check.status)}" aria-label={check.status}>
             {statusGlyph(check.status)}
           </span>
+          {/if}
           <div class="min-w-0 flex-1">
             <div class="flex items-start gap-1.5">
               <div class="text-[12.5px] font-semibold text-ink-900 dark:text-night-text leading-snug">{check.label}</div>
@@ -724,7 +735,7 @@
                   title="Fix with the agent — applies the change to your code in place"
                 >
                   {#if fixing}
-                    <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="animate-spin" aria-hidden="true"><path d="M21 12a9 9 0 1 1-6.219-8.56"/></svg>
+                    <PaintLoader size="xs" label="Fixing" />
                     Fixing…
                   {:else if fixed}
                     <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="20 6 9 17 4 12"/></svg>
@@ -760,7 +771,7 @@
                     : "File issue — opens a GitLab issue via glab, or adds to .pinta/tasks.md"}
                 >
                   {#if issuePending}
-                    <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="animate-spin" aria-hidden="true"><path d="M21 12a9 9 0 1 1-6.219-8.56"/></svg>
+                    <PaintLoader size="xs" label="Filing" />
                     Filing…
                   {:else if filed}
                     <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="20 6 9 17 4 12"/></svg>
@@ -919,7 +930,7 @@
                       : "Fix with the agent — applies the change to your code in place"}
                 >
                   {#if fixing}
-                    <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" class="animate-spin" aria-hidden="true"><path d="M21 12a9 9 0 1 1-6.219-8.56"/></svg>
+                    <PaintLoader size="xs" tone="mono" />
                     Fixing…
                   {:else if fixed}
                     <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="20 6 9 17 4 12"/></svg>
@@ -943,7 +954,7 @@
                   title="Discuss — ask the agent about this finding"
                 >
                   {#if chatPending}
-                    <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" class="animate-spin" aria-hidden="true"><path d="M21 12a9 9 0 1 1-6.219-8.56"/></svg>
+                    <PaintLoader size="xs" label="Discuss pending" />
                   {:else}
                     <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg>
                   {/if}
@@ -966,7 +977,7 @@
                     : "File issue — opens a GitLab issue via glab, or adds to .pinta/tasks.md (needs a running /pinta agent)"}
                 >
                   {#if issuePending}
-                    <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" class="animate-spin" aria-hidden="true"><path d="M21 12a9 9 0 1 1-6.219-8.56"/></svg>
+                    <PaintLoader size="xs" label="Filing" />
                     Filing…
                   {:else if filed}
                     <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="20 6 9 17 4 12"/></svg>
@@ -1001,48 +1012,43 @@
          the previous results visible and spin the score donuts instead
          (see the RESULTS block), so this only fires when there's nothing
          to show yet. The full results land at once via mark_session_done. -->
-    <div class="rounded-lg border border-brand-pink/30 bg-brand-pink/5 dark:bg-brand-pink/10 p-4 space-y-2">
-      <div class="flex items-center gap-2">
-        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="animate-spin text-brand-pink dark:text-brand-pink-light" aria-hidden="true">
-          <path d="M21 12a9 9 0 1 1-6.219-8.56"/>
-        </svg>
-        <span class="text-[12.5px] font-semibold text-ink-900 dark:text-night-text">Starting audit…</span>
-      </div>
-      <p class="text-[11.5px] text-ink-600 dark:text-night-dim leading-snug">
-        The agent is inspecting your project. This typically takes 30s-2min for the Security category.
-      </p>
-      <button
-        type="button"
-        class="text-[11px] text-ink-600 dark:text-night-dim hover:text-red-600 dark:hover:text-red-400 underline"
-        onclick={cancelAudit}
-      >
-        Cancel
-      </button>
-    </div>
+    <LoadingState
+      title="Starting audit…"
+      hint="The agent is inspecting your project. This typically takes 30s-2min for the Security category."
+    >
+      {#snippet action()}
+        <button
+          type="button"
+          class="text-[11px] text-ink-600 dark:text-night-dim hover:text-red-600 dark:hover:text-red-400 underline"
+          onclick={cancelAudit}
+        >
+          Cancel
+        </button>
+      {/snippet}
+    </LoadingState>
   {:else if !hasRun}
     {@const pickedCount = app.audit.selectedCategories.length}
-    <div class="rounded-lg border border-ink-200 dark:border-night-line bg-white dark:bg-night-card p-4 space-y-3">
-      <div>
-        <h3 class="text-[13px] font-bold text-ink-900 dark:text-night-text">
-          Run your first audit
-        </h3>
-        <p class="text-[12px] text-ink-600 dark:text-night-dim leading-snug mt-1">
-          Pick the categories you want the agent to inspect. Each one runs
-          independently — turn on what's relevant to skip the rest.
-        </p>
-      </div>
-      {#snippet catIcon(id: AuditCategoryId)}
-        {#if id === "security"}
-          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/></svg>
-        {:else if id === "performance"}
-          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2"/></svg>
-        {:else if id === "accessibility"}
-          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="4" r="1.6"/><path d="M5 8h14"/><path d="M12 8v6"/><path d="m9 21 3-7 3 7"/></svg>
-        {:else if id === "mobile"}
-          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="6" y="2" width="12" height="20" rx="2"/><path d="M11 18h2"/></svg>
-        {:else}
-          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="10"/><path d="M2 12h20"/><path d="M12 2a15.3 15.3 0 0 1 4 10 15.3 15.3 0 0 1-4 10 15.3 15.3 0 0 1-4-10 15.3 15.3 0 0 1 4-10z"/></svg>
-        {/if}
+    {#snippet catIcon(id: AuditCategoryId)}
+      {#if id === "security"}
+        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/></svg>
+      {:else if id === "performance"}
+        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2"/></svg>
+      {:else if id === "accessibility"}
+        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="4" r="1.6"/><path d="M5 8h14"/><path d="M12 8v6"/><path d="m9 21 3-7 3 7"/></svg>
+      {:else if id === "mobile"}
+        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="6" y="2" width="12" height="20" rx="2"/><path d="M11 18h2"/></svg>
+      {:else}
+        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="10"/><path d="M2 12h20"/><path d="M12 2a15.3 15.3 0 0 1 4 10 15.3 15.3 0 0 1-4 10 15.3 15.3 0 0 1-4-10 15.3 15.3 0 0 1 4-10z"/></svg>
+      {/if}
+    {/snippet}
+    <EmptyState
+      title="Run your first audit"
+      heading="h3"
+      hint="Pick the categories you want the agent to inspect. Each one runs independently — turn on what's relevant to skip the rest."
+      class="rounded-lg border border-ink-200 dark:border-night-line bg-white dark:bg-night-card !px-4 !py-6"
+    >
+      {#snippet icon()}
+        <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/><path d="m9 12 2 2 4-4"/></svg>
       {/snippet}
       <div class="divide-y divide-ink-100 dark:divide-night-line -mx-1">
         {#each PICKER_CATEGORIES as cat (cat.id)}
@@ -1090,6 +1096,7 @@
           </div>
         {/each}
       </div>
+      {#snippet action()}
       <button
         type="button"
         class="w-full rounded-md bg-brand-pink text-white text-sm font-medium py-2 hover:bg-brand-magenta dark:hover:bg-brand-pink-light disabled:opacity-50 inline-flex items-center justify-center gap-2"
@@ -1112,7 +1119,8 @@
           Companion disconnected. Run <code class="font-mono text-[10.5px] bg-red-100 dark:bg-red-950/40 px-1 rounded">pinta-companion .</code> in your project root and reconnect.
         </p>
       {/if}
-    </div>
+      {/snippet}
+    </EmptyState>
   {/if}
 
   {#if app.audit.error}
@@ -1141,28 +1149,11 @@
       <div class="rounded-lg border border-ink-200 dark:border-night-line bg-white dark:bg-night-card p-4 flex items-center gap-4">
         <div class="relative shrink-0">
           {#if running}
-            <svg width="64" height="64" viewBox="0 0 64 64" class="animate-spin" aria-hidden="true">
-              <circle
-                cx="32"
-                cy="32"
-                r="27"
-                fill="none"
-                class="stroke-ink-200 dark:stroke-night-line"
-                stroke-width="6"
-              />
-              <circle
-                cx="32"
-                cy="32"
-                r="27"
-                fill="none"
-                stroke-width="6"
-                stroke-linecap="round"
-                class="stroke-brand-pink dark:stroke-brand-pink-light"
-                stroke-dasharray="42 169.6"
-                transform="rotate(-90 32 32)"
-              />
-            </svg>
-            <span class="sr-only">Re-running audit…</span>
+            <!-- Re-run: the score donut gives way to the paint fan, same
+                 64px footprint so the card doesn't reflow. -->
+            <span class="w-16 h-16 inline-flex items-center justify-center">
+              <PaintLoader size="md" label="Re-running audit…" />
+            </span>
           {:else}
             <svg width="64" height="64" viewBox="0 0 64 64" aria-hidden="true">
               <circle
@@ -1294,30 +1285,11 @@
             <div class="relative shrink-0">
               {#if catBusy}
                 <!-- Re-running (this category or a full re-run): the score
-                     donut becomes an indeterminate spinning progress ring
-                     until fresh results land. -->
-                <svg width="36" height="36" viewBox="0 0 36 36" class="animate-spin" aria-hidden="true">
-                  <circle
-                    cx="18"
-                    cy="18"
-                    r="15"
-                    fill="none"
-                    class="stroke-ink-200 dark:stroke-night-line"
-                    stroke-width="3.5"
-                  />
-                  <circle
-                    cx="18"
-                    cy="18"
-                    r="15"
-                    fill="none"
-                    stroke-width="3.5"
-                    stroke-linecap="round"
-                    class="stroke-brand-pink dark:stroke-brand-pink-light"
-                    stroke-dasharray="24 94.25"
-                    transform="rotate(-90 18 18)"
-                  />
-                </svg>
-                <span class="sr-only">Re-running this category…</span>
+                     donut gives way to the paint fan until fresh results
+                     land — same 36px footprint. -->
+                <span class="w-9 h-9 inline-flex items-center justify-center">
+                  <PaintLoader size="sm" label="Re-running this category…" />
+                </span>
               {:else}
                 <svg width="36" height="36" viewBox="0 0 36 36" aria-hidden="true">
                   <circle
@@ -1353,7 +1325,7 @@
                 {/if}
                 {#if fixingInCategory(category) > 0}
                   <span class="shrink-0 inline-flex items-center gap-1 rounded-full bg-brand-pink/10 text-brand-pink dark:text-brand-pink-light text-[9px] font-semibold px-1.5 py-px" title="Fix in progress">
-                    <svg width="9" height="9" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" class="animate-spin" aria-hidden="true"><path d="M21 12a9 9 0 1 1-6.219-8.56"/></svg>
+                    <PaintLoader size="xs" label="Fixing" />
                     Fixing {fixingInCategory(category)}
                   </span>
                 {/if}
@@ -1404,7 +1376,7 @@
             {#if suggesting}
               <!-- Spinner only for "Suggest checks" — a re-run already shows
                    its progress on the score donut, so no second loader here. -->
-              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="animate-spin" aria-hidden="true"><path d="M21 12a9 9 0 1 1-6.219-8.56"/></svg>
+              <PaintLoader size="xs" label="Suggesting checks" />
             {:else}
               <svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
                 <circle cx="12" cy="5" r="1.6" />

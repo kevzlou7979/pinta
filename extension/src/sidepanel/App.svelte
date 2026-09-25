@@ -40,6 +40,8 @@
   import { scrubUrl } from "../content/capture.js";
   import type { Companion } from "../lib/companions.js";
   import AnnotationCard from "./AnnotationCard.svelte";
+  import PaintLoader from "../lib/PaintLoader.svelte";
+  import EmptyState from "../lib/EmptyState.svelte";
   import ConfirmModal from "./ConfirmModal.svelte";
   import { confirmDialog } from "../lib/confirm.svelte.js";
   import NoteComposer from "./NoteComposer.svelte";
@@ -2547,7 +2549,10 @@
             <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="6 9 12 15 18 9"/></svg>
           </button>
         {:else if app.appMode === "discovering"}
-          <p class="text-xs text-ink-500 dark:text-night-dim">scanning…</p>
+          <p class="text-xs text-ink-500 dark:text-night-dim inline-flex items-center gap-1.5">
+            <PaintLoader size="xs" />
+            scanning…
+          </p>
         {:else}
           <!-- Standalone: maybe alone, maybe with companions registered but
                none matching this URL. Pill is primary; project picker is
@@ -2885,7 +2890,7 @@
           disabled={associating || !!associatedAt}
         >
           {#if associating}
-            <svg class="animate-spin" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" aria-hidden="true"><path d="M21 12a9 9 0 1 1-6.219-8.56"/></svg>
+            <PaintLoader size="xs" tone="mono" />
             Saving…
           {:else if associatedAt}
             <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="20 6 9 17 4 12"/></svg>
@@ -2974,13 +2979,14 @@
             activeTab = "annotate";
             void chrome.storage?.local?.set({ "pinta-active-tab": "annotate" });
           }}
+          title={annotateBusy ? "Working on submitted session…" : undefined}
         >
           {#if annotateBusy}
-            <!-- Spinner replaces the pencil while the agent is
-                 processing a submitted/applying session. -->
-            <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="animate-spin" aria-label="Working on submitted session">
-              <path d="M21 12a9 9 0 1 1-6.219-8.56" />
-            </svg>
+            <!-- Fan replaces the pencil while the agent is processing a
+                 submitted/applying session. Decorative (the button's
+                 title carries the wait); the 13px slot keeps the tab's
+                 width identical to the idle glyph. -->
+            <PaintLoader size="xs" class="w-[13px] justify-center" />
           {:else}
             <!-- Pencil/edit glyph — matches the "mark up the page" mode -->
             <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
@@ -3004,13 +3010,12 @@
             activeTab = "test-pilot";
             void chrome.storage?.local?.set({ "pinta-active-tab": "test-pilot" });
           }}
+          title={testPilotBusy ? "Test Pilot working…" : undefined}
         >
           {#if testPilotBusy}
-            <!-- Spinner replaces the flask while a doc-parse,
-                 doc-generate, or per-row Ask is in flight. -->
-            <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="animate-spin" aria-label="Test Pilot working">
-              <path d="M21 12a9 9 0 1 1-6.219-8.56" />
-            </svg>
+            <!-- Fan replaces the flask while a doc-parse, doc-generate,
+                 or per-row Ask is in flight. -->
+            <PaintLoader size="xs" class="w-[13px] justify-center" />
           {:else}
             <!-- Flask glyph — same visual identity as the Test Pilot
                  section headers, so the tab reads as "the chemistry-set
@@ -3038,12 +3043,11 @@
               activeTab = "audit-flow";
               void chrome.storage?.local?.set({ "pinta-active-tab": "audit-flow" });
             }}
+            title={auditFlowBusy ? "AuditFlow running…" : undefined}
           >
             {#if auditFlowBusy}
-              <!-- Spinner while an audit run is in flight. -->
-              <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="animate-spin" aria-label="AuditFlow running">
-                <path d="M21 12a9 9 0 1 1-6.219-8.56" />
-              </svg>
+              <!-- Fan while an audit run is in flight. -->
+              <PaintLoader size="xs" class="w-[13px] justify-center" />
             {:else}
               <!-- Shield-check glyph — reads as "audit / security check"
                    at a glance. Matches the icon style used elsewhere in
@@ -3070,11 +3074,10 @@
               activeTab = "report";
               void chrome.storage?.local?.set({ "pinta-active-tab": "report" });
             }}
+            title={reportBusy ? "Report generating…" : undefined}
           >
             {#if reportBusy}
-              <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="animate-spin" aria-label="Report generating">
-                <path d="M21 12a9 9 0 1 1-6.219-8.56" />
-              </svg>
+              <PaintLoader size="xs" class="w-[13px] justify-center" />
             {:else}
               <!-- Document-with-lines glyph — reads as "report / summary". -->
               <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
@@ -3101,11 +3104,10 @@
               activeTab = "design-variants";
               void chrome.storage?.local?.set({ "pinta-active-tab": "design-variants" });
             }}
+            title={designVariantsBusy ? "Design Variants working…" : undefined}
           >
             {#if designVariantsBusy}
-              <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="animate-spin" aria-label="Design Variants working">
-                <path d="M21 12a9 9 0 1 1-6.219-8.56" />
-              </svg>
+              <PaintLoader size="xs" class="w-[13px] justify-center" />
             {:else}
               <!-- Layers glyph — reads as "stacked design options". -->
               <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
@@ -3131,11 +3133,10 @@
               activeTab = "code-review";
               void chrome.storage?.local?.set({ "pinta-active-tab": "code-review" });
             }}
+            title={codeReviewBusy ? "Code Review working…" : undefined}
           >
             {#if codeReviewBusy}
-              <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="animate-spin" aria-label="Code Review working">
-                <path d="M21 12a9 9 0 1 1-6.219-8.56" />
-              </svg>
+              <PaintLoader size="xs" class="w-[13px] justify-center" />
             {:else}
               <!-- Stacked-cards glyph — reads as "a deck to play". -->
               <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
@@ -3190,12 +3191,10 @@
               app.clearNewTasks(s.id);
               void chrome.storage?.local?.set({ "pinta-active-tab": s.id });
             }}
-            title={s.tab?.name}
+            title={app.moduleBoards[s.id]?.pending ? `${s.tab?.name} working…` : s.tab?.name}
           >
             {#if app.moduleBoards[s.id]?.pending}
-              <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="animate-spin" aria-label={`${s.tab?.name} working`}>
-                <path d="M21 12a9 9 0 1 1-6.219-8.56" />
-              </svg>
+              <PaintLoader size="xs" class="w-[13px] justify-center" />
             {:else if s.tab?.icon}
               <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
                 <path d={s.tab.icon} />
@@ -3361,9 +3360,7 @@
             </div>
           {/if}
           {#if imp.session.annotations.length === 0}
-            <p class="text-xs text-ink-500 dark:text-night-dim italic">
-              This session has no annotations.
-            </p>
+            <EmptyState compact title="This session has no annotations" hint="Nothing was annotated when this file was shared." />
           {:else}
             <ul class="space-y-2">
               {#each imp.session.annotations as a, i (`${a.id}:${i}`)}
@@ -3440,16 +3437,17 @@
           {/if}
         </section>
       {:else}
-        <p class="text-xs text-ink-500 dark:text-night-dim italic">
-          Imported session not found.
+        <EmptyState compact title="Imported session not found.">
+          {#snippet action()}
           <button
             type="button"
-            class="ml-1 underline underline-offset-2"
+            class="text-xs text-ink-500 dark:text-night-dim underline underline-offset-2"
             onclick={() => app.closeImportedViewer()}
           >
             close
           </button>
-        </p>
+          {/snippet}
+        </EmptyState>
       {/if}
     {:else if !showAssociatePrompt}
     <!-- Undo / Redo / Import behind one ⋮ kebab. Rendered in the Annotations
@@ -3466,7 +3464,7 @@
             title="Actions"
           >
             {#if importBusy}
-              <svg class="animate-spin" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21 12a9 9 0 1 1-6.219-8.56"/></svg>
+              <PaintLoader size="xs" label="Importing" />
             {:else}
               <svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><circle cx="12" cy="5" r="1.6"/><circle cx="12" cy="12" r="1.6"/><circle cx="12" cy="19" r="1.6"/></svg>
             {/if}
@@ -3507,7 +3505,7 @@
                 title="Import a .pinta or .md file shared by a teammate"
               >
                 {#if importBusy}
-                  <svg class="animate-spin" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21 12a9 9 0 1 1-6.219-8.56"/></svg>
+                  <PaintLoader size="xs" label="Importing" />
                 {:else}
                   <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" y1="3" x2="12" y2="15"/></svg>
                 {/if}
@@ -3818,25 +3816,25 @@
       {/if}
       {#if annotationsHere.length === 0}
         {#if annotations.length === 0}
-          <!-- Home empty state — centered icon + heading + hint. -->
-          <div class="flex flex-col items-center text-center gap-3 px-6 py-12">
-            <div class="w-14 h-14 rounded-full bg-brand-pink/10 dark:bg-brand-pink-light/10 flex items-center justify-center">
-              <svg class="text-brand-pink dark:text-brand-pink-light" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+          <!-- Home empty state — the shared EmptyState shell (this was
+               its reference pattern). -->
+          <EmptyState
+            title="Start annotating"
+            hint="Hover the page, click an element, and leave a comment. Your notes will appear here."
+          >
+            {#snippet icon()}
+              <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
                 <path d="M17 3a2.828 2.828 0 1 1 4 4L7.5 20.5 2 22l1.5-5.5L17 3z" />
                 <path d="M6 4v4M4 6h4" />
               </svg>
-            </div>
-            <div class="space-y-1">
-              <p class="text-sm font-semibold text-ink-900 dark:text-night-text">Start annotating</p>
-              <p class="text-[12px] text-ink-500 dark:text-night-mute leading-snug max-w-[240px] mx-auto">
-                Hover the page, click an element, and leave a comment. Your notes will appear here.
-              </p>
-            </div>
-          </div>
+            {/snippet}
+          </EmptyState>
         {:else}
-          <p class="text-xs text-ink-500 dark:text-night-dim italic">
-            No annotations on this page. Use the chip above to jump to siblings, or annotate something here.
-          </p>
+          <EmptyState
+            compact
+            title="No annotations on this page"
+            hint="Use the chip above to jump to siblings, or annotate something here."
+          />
         {/if}
       {:else}
         <ul class="space-y-2">
@@ -3882,7 +3880,7 @@
                 title="Actions"
               >
                 {#if app.commit.pending}
-                  <svg class="animate-spin" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21 12a9 9 0 1 1-6.219-8.56"/></svg>
+                  <PaintLoader size="xs" label="Committing" />
                 {:else}
                   <svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><circle cx="12" cy="5" r="1.6"/><circle cx="12" cy="12" r="1.6"/><circle cx="12" cy="19" r="1.6"/></svg>
                 {/if}
@@ -3966,7 +3964,7 @@
         </div>
         {#if app.commit.pending}
           <p class="text-[11px] text-ink-500 dark:text-night-mute inline-flex items-center gap-1.5">
-            <svg class="animate-spin" width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21 12a9 9 0 1 1-6.219-8.56"/></svg>
+            <PaintLoader size="xs" label="Committing" />
             {app.commit.pending === "commit-push" ? "Committing & pushing applied changes…" : "Committing applied changes…"}
           </p>
         {:else if app.commit.result}
@@ -3984,7 +3982,7 @@
         <!-- Drift Check status + resubmit affordance. -->
         {#if app.drift.pending}
           <p class="text-[11px] text-ink-500 dark:text-night-mute inline-flex items-center gap-1.5">
-            <svg class="animate-spin" width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21 12a9 9 0 1 1-6.219-8.56"/></svg>
+            <PaintLoader size="xs" label="Drift Check running" />
             Drift Check — re-reading the source to verify each change…
           </p>
         {:else if app.drift.error}
@@ -4073,9 +4071,7 @@
         class="flex items-center gap-2 text-xs text-amber-800 border border-amber-200 bg-amber-50 dark:text-amber-200 dark:border-amber-900/40 dark:bg-amber-950/40 rounded-md p-2"
         role="status"
       >
-        <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="animate-spin shrink-0" aria-hidden="true">
-          <path d="M21 12a9 9 0 1 1-6.219-8.56" />
-        </svg>
+        <PaintLoader size="xs" />
         <p class="flex-1 min-w-0 break-words">Filing GitLab issues from the shared file…</p>
       </div>
     {:else if !app.viewingImportedId && app.importedFileError}
@@ -4223,9 +4219,7 @@
               onclick={() => void app.fileImportedToGitLab(impFooter.id, [...importedSelected])}
             >
               {#if app.importedFilePending === impFooter.id}
-                <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="animate-spin" aria-hidden="true">
-                  <path d="M21 12a9 9 0 1 1-6.219-8.56" />
-                </svg>
+                <PaintLoader size="xs" tone="mono" />
                 Filing…
               {:else}
                 File issues
@@ -4695,10 +4689,7 @@
           class="w-full rounded-md bg-brand-pink/85 text-white text-sm font-medium py-2 inline-flex items-center justify-center gap-1.5 cursor-default select-none"
           role="status"
         >
-          <span
-            class="inline-block w-3 h-3 rounded-full border-2 border-white/70 border-t-transparent animate-spin"
-            aria-hidden="true"
-          ></span>
+          <PaintLoader size="xs" tone="mono" class="drop-shadow-sm" />
           {#if capturing}
             Capturing screenshot…
           {:else if app.session?.status === "submitted"}

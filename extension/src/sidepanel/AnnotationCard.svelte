@@ -3,6 +3,7 @@
   import { deviceClassForWidth, viewportLabel } from "@pinta/shared";
   import { app } from "../lib/state.svelte.js";
   import MicButton from "../lib/voice/MicButton.svelte";
+  import PaintLoader from "../lib/PaintLoader.svelte";
 
   type Props = {
     annotation: Annotation;
@@ -169,13 +170,15 @@
           !
         </span>
       {:else if annotation.status === "applying" || pending}
-        <span
-          class="inline-block w-3 h-3 rounded-full border-2 border-brand-pink border-t-transparent animate-spin"
+        <!-- Fan as the card badge — pinta-loading-card tints the border,
+             this is the motion. -->
+        <PaintLoader
+          size="xs"
           title={annotation.status === "applying"
             ? "Agent is applying this change"
             : "Waiting for agent"}
-          aria-label={annotation.status === "applying" ? "applying" : "waiting"}
-        ></span>
+          label={annotation.status === "applying" ? "applying" : "waiting"}
+        />
       {:else}
         <span
           class="inline-block w-3 h-3 rounded-full border border-ink-300 bg-white dark:bg-night-alt dark:border-night-line2"

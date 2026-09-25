@@ -484,7 +484,7 @@ describe("scope labels + export token", () => {
     ]);
     app.setTestPilotScope({ kind: "untested" });
     expect([app.scopeLabel, app.scopeToken]).toEqual([
-      "Untested when picked",
+      "Not run yet",
       "untested",
     ]);
     const plan = app.saveCurrentScopeAsPlan("Sprint 12");

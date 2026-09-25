@@ -10,6 +10,9 @@
   import { app } from "../lib/state.svelte.js";
   import MicButton from "../lib/voice/MicButton.svelte";
   import StepList from "./StepList.svelte";
+  import PaintLoader from "../lib/PaintLoader.svelte";
+  import LoadingState from "../lib/LoadingState.svelte";
+  import EmptyState from "../lib/EmptyState.svelte";
   import {
     categoryLabel,
     dedupeReportDays,
@@ -592,9 +595,7 @@
           : "Capture a screenshot of this entry — the agent opens the page and frames the change"}
       >
         {#if capturing}
-          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" class="animate-spin">
-            <path d="M21 12a9 9 0 1 1-6.219-8.56" />
-          </svg>
+          <PaintLoader size="xs" label="Capturing screenshot" />
         {:else}
           <svg width="14" height="14" viewBox="0 0 24 24" fill={hasShot ? "currentColor" : "none"} stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
             <path d="M23 19a2 2 0 0 1-2 2H3a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h4l2-3h6l2 3h4a2 2 0 0 1 2 2z" />
@@ -620,9 +621,7 @@
           : "How to test — the agent writes step-by-step QA steps for this entry"}
       >
         {#if howToBusy}
-          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" class="animate-spin">
-            <path d="M21 12a9 9 0 1 1-6.219-8.56" />
-          </svg>
+          <PaintLoader size="xs" label="Writing test steps" />
         {:else}
           <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
             <path d="M9 11l3 3L22 4" />
@@ -817,7 +816,7 @@
         aria-label={run ? "Regenerate report" : "Generate report"}
       >
         {#if pending}
-          <svg class="animate-spin" width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21 12a9 9 0 1 1-6.219-8.56" /></svg>
+          <PaintLoader size="xs" label="Generating report" />
         {:else}
           <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M23 4v6h-6" /><path d="M1 20v-6h6" /><path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15" /></svg>
         {/if}
@@ -865,18 +864,17 @@
   {/if}
 
   {#if pending}
-    <div class="rounded-md border border-ink-200 dark:border-night-line p-4 text-center space-y-2">
-      <p class="text-xs text-ink-600 dark:text-night-dim">
-        Gathering your tasks from git, GitHub/GitLab, and Pinta…
-      </p>
-      <button
-        type="button"
-        class="text-[11px] text-ink-500 dark:text-night-mute underline hover:text-ink-800 dark:hover:text-night-text"
-        onclick={() => app.cancelReport()}
-      >
-        Cancel
-      </button>
-    </div>
+    <LoadingState title="Generating report…" hint="Gathering your tasks from git, GitHub/GitLab, and Pinta…">
+      {#snippet action()}
+        <button
+          type="button"
+          class="text-[11px] text-ink-500 dark:text-night-mute underline hover:text-ink-800 dark:hover:text-night-text"
+          onclick={() => app.cancelReport()}
+        >
+          Cancel
+        </button>
+      {/snippet}
+    </LoadingState>
   {:else if days.length > 0}
     <p class="text-[11px] uppercase tracking-wide text-ink-500 dark:text-night-mute font-medium">
       {rangeLabel}
@@ -906,7 +904,7 @@
                 aria-label={`Fetch more commits for ${formatDayHeading(day.date)}`}
               >
                 {#if app.report.expandingDate === day.date}
-                  <svg class="animate-spin" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21 12a9 9 0 1 1-6.219-8.56" /></svg>
+                  <PaintLoader size="xs" label="Fetching more commits" />
                 {:else}
                   <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M23 4v6h-6" /><path d="M1 20v-6h6" /><path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15" /></svg>
                 {/if}
@@ -951,18 +949,21 @@
     {/each}
     {@render globalAdder()}
   {:else if run}
-    <p class="text-xs text-ink-500 dark:text-night-mute italic">
-      No tasks found for {rangeLabel}. Try a wider range from the filter.
-    </p>
+    <EmptyState compact title={`No tasks found for ${rangeLabel}.`} hint="Try a wider range from the filter." />
     {@render globalAdder()}
   {:else}
-    <p class="text-xs text-ink-500 dark:text-night-mute italic leading-snug">
-      No report yet. Pick a range from the filter <span class="font-medium">▾</span>, optionally add
-      repos via the projects <span class="font-medium">⚙</span>, then hit the
-      refresh icon to generate — the agent gathers your bug fixes, polishes,
-      tests, annotations, and merges, grouped by day. Export any day or the
-      whole range as clean markdown.
-    </p>
+    <EmptyState title="No report yet">
+      {#snippet icon()}
+        <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/><line x1="16" y1="13" x2="8" y2="13"/><line x1="16" y1="17" x2="8" y2="17"/></svg>
+      {/snippet}
+      {#snippet richHint()}
+        Pick a range from the filter <span class="font-medium">▾</span>, optionally add
+        repos via the projects <span class="font-medium">⚙</span>, then hit the
+        refresh icon to generate — the agent gathers your bug fixes, polishes,
+        tests, annotations, and merges, grouped by day. Export any day or the
+        whole range as clean markdown.
+      {/snippet}
+    </EmptyState>
     {@render globalAdder()}
   {/if}
 </section>
@@ -1089,9 +1090,7 @@
       {/if}
       {#if recapturing}
         <div class="absolute inset-0 flex items-center justify-center bg-white/70 dark:bg-night-card/70">
-          <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" class="animate-spin text-brand-pink dark:text-brand-pink-light">
-            <path d="M21 12a9 9 0 1 1-6.219-8.56" />
-          </svg>
+          <PaintLoader size="md" label="Re-capturing screenshot" />
         </div>
       {/if}
     </div>
@@ -1183,9 +1182,7 @@
       {#if howToSteps.length}
         <StepList steps={howToSteps} />
       {:else}
-        <p class="text-[12px] text-ink-500 dark:text-night-mute italic">
-          No steps yet.
-        </p>
+        <EmptyState compact title="No steps yet." />
       {/if}
     </div>
 
@@ -1198,7 +1195,7 @@
         title="Re-generate the test steps"
       >
         {#if howToGenerating}
-          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" class="animate-spin"><path d="M21 12a9 9 0 1 1-6.219-8.56" /></svg>
+          <PaintLoader size="xs" label="Generating" />
           Generating…
         {:else}
           <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="23 4 23 10 17 10" /><path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10" /></svg>

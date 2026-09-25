@@ -15,6 +15,8 @@
   import { parseStep, parseTestSuggestions } from "../lib/step-md.js";
   import { highlight } from "../lib/prism-setup.js";
   import MicButton from "../lib/voice/MicButton.svelte";
+  import PaintLoader from "../lib/PaintLoader.svelte";
+  import EmptyState from "../lib/EmptyState.svelte";
 
   type Props = {
     open: boolean;
@@ -581,9 +583,11 @@
             </div>
           </div>
         {:else}
-          <p class="text-[12px] text-ink-500 dark:text-night-mute italic leading-snug">
-            {emptyHint || "Ask the agent anything. Inline `code`, fenced blocks, and `> Note:` callouts all render in replies."}
-          </p>
+          <EmptyState
+            compact
+            title="Start a conversation"
+            hint={emptyHint || "Ask the agent anything. Inline `code`, fenced blocks, and `> Note:` callouts all render in replies."}
+          />
         {/if}
       {:else}
         {#each messages as msg, mi (msg.id)}
@@ -849,8 +853,8 @@
         {#if pending}
           <!-- Agent-thinking indicator. Avatar + bubble matches the
                agent-reply layout so the user reads it as "the agent
-               is mid-composing this exact slot". Three pulsing dots
-               animate via the pinta-chat-dot keyframe in app.css. -->
+               is mid-composing this exact slot". The paint fan is the
+               one loader everywhere, chat included. -->
           <div class="flex items-start gap-2">
             <div class="shrink-0 w-7 h-7 rounded-md bg-gradient-to-br from-brand-pink to-brand-magenta inline-flex items-center justify-center shadow-sm mt-0.5">
               <svg width="14" height="14" viewBox="0 0 24 24" fill="white" aria-hidden="true">
@@ -859,11 +863,15 @@
                 <path d="M5 15l.6 1.8L7.4 17.4l-1.8.6L5 19.8l-.6-1.8L2.6 17.4l1.8-.6L5 15z" opacity="0.7" />
               </svg>
             </div>
-            <div class="rounded-lg rounded-tl-sm bg-ink-100 dark:bg-night-alt text-ink-600 dark:text-night-mute text-[12px] px-3 py-2.5 inline-flex items-center gap-1" title="Agent is composing a reply…">
-              <span class="pinta-chat-dot w-1.5 h-1.5 rounded-full bg-brand-pink" style="animation-delay: 0ms"></span>
-              <span class="pinta-chat-dot w-1.5 h-1.5 rounded-full bg-brand-pink" style="animation-delay: 150ms"></span>
-              <span class="pinta-chat-dot w-1.5 h-1.5 rounded-full bg-brand-pink" style="animation-delay: 300ms"></span>
-              <span class="ml-1.5">Thinking…</span>
+            <div
+              class="rounded-lg rounded-tl-sm bg-ink-100 dark:bg-night-alt text-ink-600 dark:text-night-mute text-[12px] px-3 py-2 inline-flex items-center gap-2"
+              title="Agent is composing a reply…"
+              role="status"
+              aria-live="polite"
+              aria-label="Agent is composing a reply"
+            >
+              <PaintLoader size="sm" />
+              <span>Thinking…</span>
             </div>
           </div>
         {/if}
@@ -976,7 +984,7 @@
             aria-label="Send message"
           >
             {#if pending}
-              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" class="animate-spin"><path d="M21 12a9 9 0 1 1-6.219-8.56" /></svg>
+              <PaintLoader size="xs" tone="mono" />
             {:else}
               <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><line x1="22" y1="2" x2="11" y2="13"/><polygon points="22 2 15 22 11 13 2 9 22 2"/></svg>
             {/if}

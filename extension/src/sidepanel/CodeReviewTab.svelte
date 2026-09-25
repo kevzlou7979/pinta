@@ -7,6 +7,9 @@
   import { app } from "../lib/state.svelte.js";
   import ChatSheet from "./ChatSheet.svelte";
   import MicButton from "../lib/voice/MicButton.svelte";
+  import PaintLoader from "../lib/PaintLoader.svelte";
+  import LoadingState from "../lib/LoadingState.svelte";
+  import EmptyState from "../lib/EmptyState.svelte";
   import {
     gradeBlurb,
     gradeFor,
@@ -189,46 +192,46 @@
   {/if}
 
   {#if pending}
-    <div class="rounded-md border border-ink-200 dark:border-night-line p-4 text-center space-y-2">
-      <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" class="animate-spin text-brand-pink dark:text-brand-pink-light mx-auto">
-        <path d="M21 12a9 9 0 1 1-6.219-8.56" />
-      </svg>
-      <p class="text-xs text-ink-600 dark:text-night-dim">
-        {pending?.topic
-          ? `Finding the "${pending.topic}" code to review…`
-          : "Dealing the cards from your change set…"}
-      </p>
-      <button
-        type="button"
-        class="text-[11px] text-ink-500 dark:text-night-mute underline hover:text-ink-800 dark:hover:text-night-text"
-        onclick={() => app.cancelReviewPending()}
-      >
-        Cancel
-      </button>
-    </div>
+    <LoadingState
+      title={pending?.topic
+        ? `Finding the "${pending.topic}" code to review…`
+        : "Dealing the cards from your change set…"}
+    >
+      {#snippet action()}
+        <button
+          type="button"
+          class="text-[11px] text-ink-500 dark:text-night-mute underline hover:text-ink-800 dark:hover:text-night-text"
+          onclick={() => app.cancelReviewPending()}
+        >
+          Cancel
+        </button>
+      {/snippet}
+    </LoadingState>
   {:else if !run}
-    <div class="rounded-md border border-dashed border-ink-300 dark:border-night-line p-4 text-center space-y-3">
-      <p class="text-[11.5px] text-ink-500 dark:text-night-mute leading-snug">
-        Play your changes as a review deck — one card per logical change,
-        in plain words. Reviews your uncommitted changes (or the last
-        commit when the tree is clean) — or type a focus above, like
-        "MFA authentication", to review that code instead.
-      </p>
-      <button
-        type="button"
-        class="px-4 py-1.5 rounded-md text-[12px] font-semibold bg-brand-pink text-white hover:bg-brand-pink/90 disabled:opacity-50"
-        disabled={!connected}
-        onclick={deal}
-      >
-        {topicText.trim() !== "" ? "Review this topic" : "Deal the cards"}
-      </button>
-      {#if app.review.stats.totalReviewed > 0}
-        <p class="text-[10.5px] text-ink-400 dark:text-night-mute">
-          {app.review.stats.totalReviewed} cards reviewed all-time · best
-          streak {app.review.stats.bestStreak}
-        </p>
-      {/if}
-    </div>
+    <EmptyState
+      title="Play your changes as a review deck"
+      hint="One card per logical change, in plain words. Reviews your uncommitted changes (or the last commit when the tree is clean) — or type a focus above, like &quot;MFA authentication&quot;, to review that code instead."
+    >
+      {#snippet icon()}
+        <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="7" y="3" width="14" height="14" rx="2"/><path d="M17 17v2a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V9a2 2 0 0 1 2-2h2"/></svg>
+      {/snippet}
+      {#snippet action()}
+        <button
+          type="button"
+          class="px-4 py-1.5 rounded-md text-[12px] font-semibold bg-brand-pink text-white hover:bg-brand-pink/90 disabled:opacity-50"
+          disabled={!connected}
+          onclick={deal}
+        >
+          {topicText.trim() !== "" ? "Review this topic" : "Deal the cards"}
+        </button>
+        {#if app.review.stats.totalReviewed > 0}
+          <p class="text-[10.5px] text-ink-400 dark:text-night-mute">
+            {app.review.stats.totalReviewed} cards reviewed all-time · best
+            streak {app.review.stats.bestStreak}
+          </p>
+        {/if}
+      {/snippet}
+    </EmptyState>
   {:else if deckDone && score}
     <!-- End card — the grade moment. -->
     <div class="rounded-md border border-ink-200 dark:border-night-line p-4 text-center space-y-2">
@@ -293,7 +296,7 @@
               onclick={() => void app.sendReviewFix(c.id)}
             >
               {#if fixing}
-                <svg class="animate-spin" width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21 12a9 9 0 1 1-6.219-8.56" /></svg>
+                <PaintLoader size="xs" tone="mono" />
                 Fixing…
               {:else}
                 Fix with agent
@@ -466,7 +469,7 @@
               onclick={() => void app.sendReviewFix(currentCard.id)}
             >
               {#if app.review.pendingFix[currentCard.id]}
-                <svg class="animate-spin" width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21 12a9 9 0 1 1-6.219-8.56" /></svg>
+                <PaintLoader size="xs" tone="mono" />
               {/if}
               Fix
             </button>

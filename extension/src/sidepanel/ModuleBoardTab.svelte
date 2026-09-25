@@ -14,6 +14,9 @@
   import { app } from "../lib/state.svelte.js";
   import { confirmDialog } from "../lib/confirm.svelte.js";
   import StepList from "./StepList.svelte";
+  import PaintLoader from "../lib/PaintLoader.svelte";
+  import LoadingState from "../lib/LoadingState.svelte";
+  import EmptyState from "../lib/EmptyState.svelte";
 
   type Props = {
     spec: ModuleSpec;
@@ -523,7 +526,7 @@
       onclick={() => runCardAction(c, a)}
     >
       {#if pending && pendingCardId === c.id && pendingActionId === a.id}
-        <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" class="animate-spin" aria-hidden="true"><path d="M21 12a9 9 0 1 1-6.219-8.56" /></svg>
+        <PaintLoader size="xs" tone={a.style === "primary" ? "mono" : "paint"} />
       {/if}
       {a.label}
     </button>
@@ -587,7 +590,7 @@
           <div class="mt-1.5 flex items-center gap-1.5 flex-wrap">
             {#if bstat === "starting"}
               <span class="inline-flex items-center gap-1 text-[10px] font-semibold px-2 py-0.5 rounded-full bg-brand-pink text-white">
-                <svg width="9" height="9" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" class="animate-spin" aria-hidden="true"><path d="M21 12a9 9 0 1 1-6.219-8.56" /></svg>
+                <PaintLoader size="xs" tone="mono" />
                 Starting…
               </span>
             {:else if bstat === "queued"}
@@ -597,7 +600,7 @@
               </span>
             {:else if c.working}
               <span class="inline-flex items-center gap-1 text-[10px] font-semibold px-2 py-0.5 rounded-full bg-brand-pink text-white">
-                <svg width="9" height="9" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" class="animate-spin" aria-hidden="true"><path d="M21 12a9 9 0 1 1-6.219-8.56" /></svg>
+                <PaintLoader size="xs" tone="mono" />
                 Agent working
               </span>
             {/if}
@@ -638,7 +641,7 @@
             aria-label={tab.cardStepsLabel ?? "How to test"}
           >
             {#if cardStepsPending[c.id]}
-              <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round" class="animate-spin" aria-hidden="true"><path d="M21 12a9 9 0 1 1-6.219-8.56" /></svg>
+              <PaintLoader size="xs" label="Working out how to test" />
             {:else}
               <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M9 3h6M10 3v6.5L5 18a2 2 0 0 0 1.7 3h10.6A2 2 0 0 0 19 18l-5-8.5V3" /></svg>
             {/if}
@@ -654,7 +657,7 @@
             aria-label={start.label}
           >
             {#if pending && pendingCardId === c.id && pendingActionId === start.id}
-              <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round" class="animate-spin" aria-hidden="true"><path d="M21 12a9 9 0 1 1-6.219-8.56" /></svg>
+              <PaintLoader size="xs" tone="mono" />
             {:else if start.id === "triage" || /triage/i.test(start.label)}
               <!-- Triage (new task) → clipboard-check, not the ▶ play glyph -->
               <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M16 4h2a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2h2" /><rect x="8" y="2" width="8" height="4" rx="1" /><path d="m9 14 2 2 4-4" /></svg>
@@ -683,7 +686,7 @@
       <div class="px-3 pb-3 pt-2 border-t border-ink-100 dark:border-night-line">
         {#if cardStepsPending[c.id]}
           <div class="flex items-center gap-2 text-[12px] text-ink-500 dark:text-night-mute">
-            <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" class="animate-spin" aria-hidden="true"><path d="M21 12a9 9 0 1 1-6.219-8.56" /></svg>
+            <PaintLoader size="xs" label="Working out how to test" />
             Working out how to test this…
             <button type="button" class="underline ml-auto" onclick={() => app.cancelModuleCardSteps(spec.id, c.id)}>Cancel</button>
           </div>
@@ -695,7 +698,7 @@
             <div class="mt-2 pt-2 border-t border-ink-100 dark:border-night-line space-y-2">
               {#if cardShotsPending[c.id]}
                 <div class="flex items-center gap-2 text-[12px] text-ink-500 dark:text-night-mute">
-                  <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" class="animate-spin" aria-hidden="true"><path d="M21 12a9 9 0 1 1-6.219-8.56" /></svg>
+                  <PaintLoader size="xs" label="Capturing each step" />
                   Driving the app and capturing each step…
                   <button type="button" class="underline ml-auto" onclick={() => app.cancelModuleCardShots(spec.id, c.id)}>Cancel</button>
                 </div>
@@ -792,54 +795,40 @@
   {#if pending && !pendingCardId && !pendingBoardActionId && !batchActive}
     <!-- Running — board-level refresh only. A per-card action (pendingCardId
          set) spinners its own button instead, leaving the board visible. -->
-    <div
-      class="rounded-lg border border-brand-pink/30 bg-brand-pink/5 dark:bg-brand-pink/10 p-4 flex items-center gap-3"
-    >
-      <svg
-        width="18"
-        height="18"
-        viewBox="0 0 24 24"
-        fill="none"
-        stroke="currentColor"
-        stroke-width="2"
-        class="animate-spin text-brand-pink"
-        ><path d="M21 12a9 9 0 1 1-6.219-8.56" /></svg
-      >
-      <div class="flex-1 text-[13px] text-ink-700 dark:text-night-text">
-        Running {tab.name}… the agent is gathering your tasks.
-      </div>
-      <button
-        type="button"
-        class="text-[12px] text-ink-500 dark:text-night-mute underline"
-        onclick={() => app.cancelModuleOp(spec.id)}>Cancel</button
-      >
-    </div>
+    <LoadingState title={`Running ${tab.name}…`} hint="The agent is gathering your tasks." heading="h2">
+      {#snippet action()}
+        <button
+          type="button"
+          class="text-[12px] text-ink-500 dark:text-night-mute underline"
+          onclick={() => app.cancelModuleOp(spec.id)}>Cancel</button
+        >
+      {/snippet}
+    </LoadingState>
   {:else if !board}
     <!-- Empty state: the manifest-declared primary action -->
-    <div
-      class="rounded-xl border border-ink-200 dark:border-night-line bg-white dark:bg-night-alt px-5 py-10 flex flex-col items-center text-center gap-3"
-    >
-      <h2 class="text-base font-semibold text-ink-900 dark:text-night-text">
-        {tab.name}
-      </h2>
-      {#if spec.description}
-        <p class="text-[12px] text-ink-500 dark:text-night-mute max-w-[42ch]">
-          {spec.description}
-        </p>
-      {/if}
-      <button
-        type="button"
-        class="mt-1 inline-flex items-center gap-2 rounded-xl bg-brand-pink hover:bg-brand-magenta dark:hover:bg-brand-pink-light text-white text-sm font-semibold px-5 py-3"
-        onclick={run}
-      >
-        {tab.actionLabel ?? `Run ${tab.name}`} &#8594;
-      </button>
-      {#if tab.actionHint}
-        <p class="text-[11px] text-ink-400 dark:text-night-mute">
-          {tab.actionHint}
-        </p>
-      {/if}
-    </div>
+    <EmptyState title={tab.name} hint={spec.description} heading="h2">
+      {#snippet icon()}
+        {#if tab.icon}
+          <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d={tab.icon} /></svg>
+        {:else}
+          <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="3" y="3" width="7" height="7" rx="1.5"/><rect x="14" y="3" width="7" height="7" rx="1.5"/><rect x="3" y="14" width="7" height="7" rx="1.5"/><rect x="14" y="14" width="7" height="7" rx="1.5"/></svg>
+        {/if}
+      {/snippet}
+      {#snippet action()}
+        <button
+          type="button"
+          class="mt-1 inline-flex items-center gap-2 rounded-xl bg-brand-pink hover:bg-brand-magenta dark:hover:bg-brand-pink-light text-white text-sm font-semibold px-5 py-3"
+          onclick={run}
+        >
+          {tab.actionLabel ?? `Run ${tab.name}`} &#8594;
+        </button>
+        {#if tab.actionHint}
+          <p class="text-[11px] text-ink-400 dark:text-night-mute">
+            {tab.actionHint}
+          </p>
+        {/if}
+      {/snippet}
+    </EmptyState>
   {:else}
     <!-- Board header -->
     <header class="space-y-1.5">
@@ -868,7 +857,7 @@
             onclick={() => (boardMenuOpen = !boardMenuOpen)}
           >
             {#if pending && pendingBoardActionId}
-              <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" class="animate-spin" aria-hidden="true"><path d="M21 12a9 9 0 1 1-6.219-8.56" /></svg>
+              <PaintLoader size="xs" label="Running action" />
             {/if}
             Actions
             <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m6 9 6 6 6-6" /></svg>
@@ -934,7 +923,7 @@
                     onclick={() => { boardMenuOpen = false; runBoardAction(a); }}
                   >
                     {#if pending && pendingBoardActionId === a.id}
-                      <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" class="animate-spin shrink-0" aria-hidden="true"><path d="M21 12a9 9 0 1 1-6.219-8.56" /></svg>
+                      <PaintLoader size="xs" label="Running action" />
                     {:else}
                       {@render actionMenuIcon(a.label, a.id)}
                     {/if}
@@ -966,7 +955,7 @@
         class="sticky top-0 z-10 flex items-center gap-2 rounded-lg border border-brand-pink/40 bg-brand-pink/5 dark:bg-brand-pink/10 px-3 py-2"
       >
         {#if batchActive}
-          <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" class="animate-spin text-brand-pink dark:text-brand-pink-light shrink-0" aria-hidden="true"><path d="M21 12a9 9 0 1 1-6.219-8.56" /></svg>
+          <PaintLoader size="xs" label="Running batch" />
           <span class="flex-1 text-[12px] font-medium text-ink-700 dark:text-night-text">
             Running {batchTotal - batchLeft + 1} of {batchTotal}…
           </span>
@@ -1039,18 +1028,10 @@
             {/each}
           </div>
         {:else}
-          <div
-            class="rounded-lg border border-dashed border-ink-200 dark:border-night-line text-[12px] text-ink-400 dark:text-night-mute text-center py-7"
-          >
-            Nothing in {activeTabName()}.
-          </div>
+          <EmptyState compact title={`Nothing in ${activeTabName()}.`} />
         {/if}
       {:else}
-        <div
-          class="rounded-lg border border-dashed border-ink-200 dark:border-night-line text-[12px] text-ink-400 dark:text-night-mute text-center py-7"
-        >
-          Nothing to pick up right now. Nice and clear.
-        </div>
+        <EmptyState compact title="Nothing to pick up right now." hint="Nice and clear." />
       {/if}
     {:else}
       <div class="flex gap-3 overflow-x-auto pb-2">

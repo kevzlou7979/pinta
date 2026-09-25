@@ -48,6 +48,9 @@
   import { confirmDialog } from "../lib/confirm.svelte.js";
   import type { TestPilotSignoff } from "../lib/test-pilot-md.js";
   import MicButton from "../lib/voice/MicButton.svelte";
+  import PaintLoader from "../lib/PaintLoader.svelte";
+  import LoadingState from "../lib/LoadingState.svelte";
+  import EmptyState from "../lib/EmptyState.svelte";
   import { parseStep } from "../lib/step-md.js";
   import { escapeHtml, loadChatSheet, loadPrism } from "../lib/lazy-ui.js";
   import { safeExternalUrl } from "../content/capture.js";
@@ -83,6 +86,52 @@
   // surfaced as a small menu off the Export button. Closes on outside
   // click via the existing onDocClick handler below.
   let exportMenuOpen = $state(false);
+  /** Scope dropdown at the end of the search box (Phase 21 UI). */
+  let scopeMenuOpen = $state(false);
+  let scopeBtnEl = $state<HTMLButtonElement | null>(null);
+  /** Menu height = space left under the trigger, so it never runs past
+   *  the panel bottom (which would stack a menu scrollbar on <main>'s). */
+  let scopeMenuMaxH = $state(320);
+  /** Opens upward when the panel is short and there is more room above. */
+  let scopeMenuUp = $state(false);
+  function openScopeMenu(): void {
+    const r = scopeBtnEl?.getBoundingClientRect();
+    const below = r ? window.innerHeight - r.bottom - 12 : 320;
+    const above = r ? r.top - 12 : 0;
+    scopeMenuUp = below < 220 && above > below;
+    scopeMenuMaxH = Math.max(120, Math.floor(scopeMenuUp ? above : below));
+    scopeMenuOpen = true;
+  }
+  /** Every way out of the scope menu goes through here so the inline
+   *  plan-name row never leaks stale state into the next open. */
+  function closeScopeMenu(restoreFocus = false): void {
+    scopeMenuOpen = false;
+    planNameOpen = false;
+    planName = "";
+    planError = null;
+    if (restoreFocus) scopeBtnEl?.focus();
+  }
+  /** Arrow / Home / End move focus between the menu's items — the old
+   *  <select> was fully keyboard-driven, so the popover must be too. */
+  function scopeMenuKeydown(e: KeyboardEvent): void {
+    if (e.key === "Escape") {
+      e.stopPropagation();
+      closeScopeMenu(true);
+      return;
+    }
+    if (!["ArrowDown", "ArrowUp", "Home", "End"].includes(e.key)) return;
+    if ((e.target as HTMLElement).tagName === "INPUT") return;
+    const items = [...(e.currentTarget as HTMLElement).querySelectorAll<HTMLElement>('[role^="menuitem"]:not([disabled])')];
+    if (items.length === 0) return;
+    e.preventDefault();
+    const i = items.indexOf(document.activeElement as HTMLElement);
+    const next =
+      e.key === "Home" ? 0
+      : e.key === "End" ? items.length - 1
+      : e.key === "ArrowDown" ? (i + 1) % items.length
+      : (i - 1 + items.length) % items.length;
+    items[next]?.focus();
+  }
   /** Export trigger — Escape inside the popover hands focus back here. */
   let exportBtnEl = $state<HTMLButtonElement | null>(null);
   /** Email section: in-flight flag + the "it downloaded" confirmation,
@@ -750,6 +799,7 @@
         target.closest("[data-pinta-kebab-trigger]") ||
         target.closest("[data-pinta-kebab-menu]");
       const inExport = target.closest("[data-pinta-export-menu]");
+      if (!target.closest("[data-pinta-scope-menu]") && scopeMenuOpen) closeScopeMenu();
       if (!inStatus) dropdownTestId = null;
       if (!inKebab) {
         sectionKebabOpen = null;
@@ -1572,23 +1622,23 @@
 
 {#if app.testPilot.pending?.kind === "doc-parse"}
   <!-- PARSING state ------------------------------------------------- -->
-  <section class="space-y-3 p-3">
-    <div class="flex items-center gap-2 text-sm text-ink-700 dark:text-night-dim">
-      <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="animate-spin text-brand-pink dark:text-brand-pink-light"><path d="M21 12a9 9 0 1 1-6.219-8.56"/></svg>
-      <span>Parsing {app.testPilot.pending.filename}…</span>
-    </div>
-    <p class="text-[11px] text-ink-500 dark:text-night-mute leading-snug">
-      The agent is extracting the test catalog from your markdown spec.
-      This needs <code class="font-mono text-[10px] bg-ink-100 dark:bg-night-alt px-1 rounded">/pinta</code>
-      running in a Claude Code terminal for this project.
-    </p>
-    <button
-      type="button"
-      class="text-[11px] text-ink-600 dark:text-night-dim hover:text-red-600 dark:hover:text-red-400 underline"
-      onclick={() => app.cancelTestPilotPending()}
-    >
-      Cancel
-    </button>
+  <section class="p-3">
+    <LoadingState title={`Parsing ${app.testPilot.pending.filename}…`}>
+      {#snippet richHint()}
+        The agent is extracting the test catalog from your markdown spec.
+        This needs <code class="font-mono text-[10px] bg-ink-100 dark:bg-night-alt px-1 rounded">/pinta</code>
+        running in a Claude Code terminal for this project.
+      {/snippet}
+      {#snippet action()}
+        <button
+          type="button"
+          class="text-[11px] text-ink-600 dark:text-night-dim hover:text-red-600 dark:hover:text-red-400 underline"
+          onclick={() => app.cancelTestPilotPending()}
+        >
+          Cancel
+        </button>
+      {/snippet}
+    </LoadingState>
   </section>
 {:else if app.testPilot.error && !app.testPilot.catalog}
   <!-- ERROR state (no catalog yet) ---------------------------------- -->
@@ -1615,24 +1665,24 @@
   </section>
 {:else if app.testPilot.pending?.kind === "doc-generate"}
   <!-- GENERATING state ----------------------------------------------- -->
-  <section class="space-y-3 p-3">
-    <div class="flex items-center gap-2 text-sm text-ink-700 dark:text-night-dim">
-      <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="animate-spin text-brand-pink dark:text-brand-pink-light"><path d="M21 12a9 9 0 1 1-6.219-8.56"/></svg>
-      <span>Generating tests for your app…</span>
-    </div>
-    <p class="text-[11px] text-ink-500 dark:text-night-mute leading-snug">
-      The agent is scanning your project (routes, components, auth flow) and writing a UAT-style markdown spec.
-      This usually takes a few minutes — needs
-      <code class="font-mono text-[10px] bg-ink-100 dark:bg-night-alt px-1 rounded">/pinta</code>
-      running in a Claude Code terminal for this project.
-    </p>
-    <button
-      type="button"
-      class="text-[11px] text-ink-600 dark:text-night-dim hover:text-red-600 dark:hover:text-red-400 underline"
-      onclick={() => app.cancelTestPilotPending()}
-    >
-      Cancel
-    </button>
+  <section class="p-3">
+    <LoadingState title="Generating tests for your app…">
+      {#snippet richHint()}
+        The agent is scanning your project (routes, components, auth flow) and writing a UAT-style markdown spec.
+        This usually takes a few minutes — needs
+        <code class="font-mono text-[10px] bg-ink-100 dark:bg-night-alt px-1 rounded">/pinta</code>
+        running in a Claude Code terminal for this project.
+      {/snippet}
+      {#snippet action()}
+        <button
+          type="button"
+          class="text-[11px] text-ink-600 dark:text-night-dim hover:text-red-600 dark:hover:text-red-400 underline"
+          onclick={() => app.cancelTestPilotPending()}
+        >
+          Cancel
+        </button>
+      {/snippet}
+    </LoadingState>
   </section>
 {:else if !app.testPilot.catalog && app.appMode === "standalone"}
   <!-- STANDALONE empty state — testers without a companion can still
@@ -1640,21 +1690,33 @@
        it offline. Pass/Fail starts blank for them to fill in; results
        export back to .md for the developer to re-import. -->
   <section class="space-y-3 p-3">
-    <div class="flex items-center gap-2">
-      <span class="text-base">🛫</span>
-      <h2 class="text-sm font-semibold text-ink-900 dark:text-night-text">Test Pilot</h2>
-    </div>
-    <p class="text-[12px] text-ink-700 dark:text-night-dim leading-snug">
-      Got a tester sheet from the developer? Import it and start walking through the tests. Pass/Fail marks save locally; export your results back as markdown when you're done — or, if you also annotate bugs on the page, share one <code class="font-mono text-[10px] bg-ink-100 dark:bg-night-alt px-1 rounded">.pinta</code> bundle with Contents set to “Annotations + test results” so your annotations and marks travel together.
-    </p>
-    <button
-      type="button"
-      class="w-full inline-flex items-center justify-center gap-1.5 rounded-md bg-brand-pink text-white text-sm font-medium px-3 py-2.5 hover:bg-brand-magenta dark:hover:bg-brand-pink-light"
-      onclick={onPickFile}
+    <EmptyState
+      title="Walk through a tester sheet"
+      heading="h2"
+      hint="Got a tester sheet from the developer? Import it and start walking through the tests."
+      class="!py-6"
     >
-      <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" y1="3" x2="12" y2="15"/></svg>
-      Import tester sheet
-    </button>
+      {#snippet icon()}
+        <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+          <path d="M9 3h6" />
+          <path d="M10 3v6.5L4.4 18.7A1.6 1.6 0 0 0 5.8 21h12.4a1.6 1.6 0 0 0 1.4-2.3L14 9.5V3" />
+          <path d="M7.5 14.5h9" opacity="0.55" />
+        </svg>
+      {/snippet}
+      <p class="text-[12px] text-ink-700 dark:text-night-dim leading-snug">
+        Pass/Fail marks save locally; export your results back as markdown when you're done — or, if you also annotate bugs on the page, share one <code class="font-mono text-[10px] bg-ink-100 dark:bg-night-alt px-1 rounded">.pinta</code> bundle with Contents set to “Annotations + test results” so your annotations and marks travel together.
+      </p>
+      {#snippet action()}
+        <button
+          type="button"
+          class="w-full inline-flex items-center justify-center gap-1.5 rounded-md bg-brand-pink text-white text-sm font-medium px-3 py-2.5 hover:bg-brand-magenta dark:hover:bg-brand-pink-light"
+          onclick={onPickFile}
+        >
+          <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" y1="3" x2="12" y2="15"/></svg>
+          Import tester sheet
+        </button>
+      {/snippet}
+    </EmptyState>
     <div class="rounded-md border border-ink-200 dark:border-night-line bg-ink-50 dark:bg-night-alt p-3 text-[11px] text-ink-700 dark:text-night-dim leading-snug space-y-1.5">
       <p>Need to generate a new catalog instead? Ask the developer for their project's <code class="font-mono text-[10px] bg-ink-100 dark:bg-night-alt px-1 rounded">pinta-companion</code> command and connect above.</p>
     </div>
@@ -1662,14 +1724,19 @@
 {:else if !app.testPilot.catalog}
   <!-- EMPTY state (connected) ---------------------------------------- -->
   <section class="space-y-3 p-3">
-    <div class="flex items-center gap-2">
-      <span class="text-base">🛫</span>
-      <h2 class="text-sm font-semibold text-ink-900 dark:text-night-text">Test Pilot</h2>
-    </div>
-    <p class="text-[12px] text-ink-700 dark:text-night-dim leading-snug">
-      Get a UAT-style test catalog for your app. Let the agent generate one from project context,
-      or import a hand-written markdown spec.
-    </p>
+    <EmptyState
+      title="Build your test catalog"
+      heading="h2"
+      hint="Get a UAT-style test catalog for your app. Let the agent generate one from project context, or import a hand-written markdown spec."
+      class="!py-6"
+    >
+    {#snippet icon()}
+      <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+        <path d="M9 3h6" />
+        <path d="M10 3v6.5L4.4 18.7A1.6 1.6 0 0 0 5.8 21h12.4a1.6 1.6 0 0 0 1.4-2.3L14 9.5V3" />
+        <path d="M7.5 14.5h9" opacity="0.55" />
+      </svg>
+    {/snippet}
     <!-- Depth — Smoke (quick happy paths) vs Thorough (every feature,
          edge + negative cases). Persists as the thorough_tests setting. -->
     <div class="rounded-md border border-ink-200 dark:border-night-line bg-white dark:bg-night-card p-2.5 space-y-1.5">
@@ -1715,6 +1782,7 @@
           : "Smoke: a quick happy-path catalog of the core flows. Fast and cheap."}
       </p>
     </div>
+    {#snippet action()}
     <button
       type="button"
       class="w-full inline-flex items-center justify-center gap-1.5 rounded-md bg-brand-pink text-white text-sm font-medium px-3 py-2.5 hover:bg-brand-magenta dark:hover:bg-brand-pink-light"
@@ -1731,6 +1799,8 @@
       <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" y1="3" x2="12" y2="15"/></svg>
       Import Test Script
     </button>
+    {/snippet}
+    </EmptyState>
     <div class="rounded-md border border-amber-300/50 dark:border-amber-700/40 bg-amber-50 dark:bg-amber-950/20 p-2.5 text-[11px] text-amber-900 dark:text-amber-200 leading-snug">
       <strong class="font-semibold">Heads up:</strong> the spec is written to
       <code class="font-mono text-[10px] bg-amber-100 dark:bg-amber-900/40 px-1 rounded">.pinta/test-docs/</code>
@@ -1818,8 +1888,8 @@
       <!-- Steps body -->
       {#if app.testPilot.pendingDetails[test.id]}
         <div class="space-y-2">
-          <div class="flex items-center gap-2 text-[12px] text-ink-700 dark:text-night-dim">
-            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="animate-spin text-brand-pink dark:text-brand-pink-light"><path d="M21 12a9 9 0 1 1-6.219-8.56"/></svg>
+          <div class="flex items-center gap-2 text-[12px] text-ink-700 dark:text-night-dim" role="status" aria-live="polite">
+            <PaintLoader size="sm" />
             <span>Asking the agent…</span>
           </div>
           <p class="text-[11px] text-ink-500 dark:text-night-mute leading-snug">
@@ -2001,9 +2071,7 @@
           {/each}
         </ol>
       {:else}
-        <p class="text-[11px] text-ink-500 dark:text-night-mute italic">
-          No steps yet. Click Re-ask above.
-        </p>
+        <EmptyState compact title="No steps yet." hint="Click Re-ask above." />
       {/if}
 
       <!-- Pass (green filled) / Fail (ghost) -->
@@ -2222,7 +2290,7 @@
           aria-label="File failed tests as issues"
         >
           {#if app.testPilot.pendingFileIssues}
-            <svg class="animate-spin" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21 12a9 9 0 1 1-6.219-8.56" /></svg>
+            <PaintLoader size="xs" label="Filing issues" />
           {:else}
             <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M20.59 13.41 13.42 20.58a2 2 0 0 1-2.83 0L2 12V2h10l8.59 8.59a2 2 0 0 1 0 2.82z"/><line x1="7" y1="7" x2="7.01" y2="7"/></svg>
           {/if}
@@ -2255,7 +2323,7 @@
             }}
           >
             {#if stepPrep}
-              <svg class="animate-spin text-brand-pink dark:text-brand-pink-light" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21 12a9 9 0 1 1-6.219-8.56" /></svg>
+              <PaintLoader size="xs" label="Generating tester-sheet steps" />
             {:else}
               <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
             {/if}
@@ -2312,7 +2380,7 @@
               <div role="status" aria-live="polite">
                 {#if stepPrep && stepPrepTarget && targets.includes(stepPrepTarget)}
                   <div class="mt-1.5 flex items-center gap-1.5 text-[10.5px] text-ink-600 dark:text-night-dim leading-snug" data-pinta-step-prep>
-                    <svg class="animate-spin shrink-0 text-brand-pink dark:text-brand-pink-light" width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21 12a9 9 0 1 1-6.219-8.56"/></svg>
+                    <PaintLoader size="xs" label="Generating tester-sheet steps" />
                     <span class="flex-1">
                       {stepPrep.cancel
                         ? "Stopping after the current test…"
@@ -2435,7 +2503,7 @@
                   title={app.testerInfo.generateSteps ? "Generates any missing steps, downloads the .md and opens a prefilled Gmail draft — attach the downloaded file and send" : "Downloads the .md as it stands and opens a prefilled Gmail draft — attach the downloaded file and send"}
                 >
                   {#if emailBusy}
-                    <svg class="animate-spin" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21 12a9 9 0 1 1-6.219-8.56"/></svg>
+                    <PaintLoader size="xs" tone="mono" />
                   {:else}
                     <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="2" y="4" width="20" height="16" rx="2"/><polyline points="22,6 12,13 2,6"/></svg>
                   {/if}
@@ -2645,38 +2713,216 @@
       </div>
     {/if}
 
-    <!-- SEARCH — filters the catalog by id (AUTH-1), category (section
-         title), or content (test title / expected). While active, all
-         sections render expanded so matches aren't hidden. -->
+    <!-- SEARCH + SCOPE — one joined control. The input filters by id
+         (AUTH-1), category (section title) or content; the dropdown at
+         its end picks WHICH slice of the catalog is in view (Phase 21
+         scope: everything / new in a revision / failed / not run / a
+         saved plan). Scope is a view filter only — rows keep their marks
+         and still ride the .pinta bundle; exports and the tester sheet
+         carry the rows in view. -->
     <div class="space-y-1">
-      <div class="relative">
-        <span class="absolute left-2.5 top-1/2 -translate-y-1/2 text-ink-400 dark:text-night-mute pointer-events-none" aria-hidden="true">
-          <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="7"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg>
-        </span>
-        <input
-          type="search"
-          bind:this={searchEl}
-          bind:value={searchQuery}
-          placeholder="Search id, category, or content (e.g. AUTH-1)"
-          aria-label="Search tests"
-          class="w-full pl-8 {app.voiceReady ? 'pr-14' : 'pr-8'} py-1.5 text-[12px] rounded-md border border-ink-200 dark:border-night-line bg-white dark:bg-night-card text-ink-900 dark:text-night-text placeholder:text-ink-400 dark:placeholder:text-night-mute outline-none focus:border-brand-pink dark:focus:border-brand-pink-light [&::-webkit-search-cancel-button]:appearance-none"
-        />
-        {#if searchActive}
+      <div class="flex items-stretch">
+        <div class="relative flex-1 min-w-0">
+          <span class="absolute left-2.5 top-1/2 -translate-y-1/2 text-ink-400 dark:text-night-mute pointer-events-none" aria-hidden="true">
+            <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="7"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg>
+          </span>
+          <input
+            type="search"
+            bind:this={searchEl}
+            bind:value={searchQuery}
+            placeholder="Search tests"
+            aria-label="Search tests"
+            class="w-full h-full pl-8 {app.voiceReady ? 'pr-14' : 'pr-8'} py-1.5 text-[12px] rounded-l-md border border-ink-200 dark:border-night-line bg-white dark:bg-night-card text-ink-900 dark:text-night-text placeholder:text-ink-400 dark:placeholder:text-night-mute outline-none focus:border-brand-pink dark:focus:border-brand-pink-light focus:relative focus:z-10 [&::-webkit-search-cancel-button]:appearance-none"
+          />
+          {#if searchActive}
+            <button
+              type="button"
+              class="absolute {app.voiceReady ? 'right-8' : 'right-2'} top-1/2 -translate-y-1/2 z-10 text-ink-400 dark:text-night-mute hover:text-ink-700 dark:hover:text-night-text leading-none"
+              onclick={() => (searchQuery = "")}
+              aria-label="Clear search"
+              title="Clear search"
+            >
+              <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
+            </button>
+          {/if}
+          {#if app.voiceReady}
+            <span class="absolute right-1 top-1/2 -translate-y-1/2 z-10">
+              <MicButton el={searchEl} lang={app.voiceLang} />
+            </span>
+          {/if}
+        </div>
+        <div class="relative shrink-0" data-pinta-scope-menu>
           <button
             type="button"
-            class="absolute {app.voiceReady ? 'right-8' : 'right-2'} top-1/2 -translate-y-1/2 text-ink-400 dark:text-night-mute hover:text-ink-700 dark:hover:text-night-text leading-none"
-            onclick={() => (searchQuery = "")}
-            aria-label="Clear search"
-            title="Clear search"
+            class="h-full max-w-[42%] inline-flex items-center gap-1 pl-2 pr-1.5 text-[11.5px] font-medium rounded-r-md border border-l-0 border-ink-200 dark:border-night-line bg-ink-50 dark:bg-night-alt hover:bg-ink-100 dark:hover:bg-night-line transition-colors {scopeActive ? 'text-brand-pink dark:text-brand-pink-light' : 'text-ink-700 dark:text-night-dim'}"
+            onclick={() => {
+              if (scopeMenuOpen) closeScopeMenu();
+              else openScopeMenu();
+            }}
+            bind:this={scopeBtnEl}
+            aria-haspopup="menu"
+            aria-expanded={scopeMenuOpen}
+            aria-label="Choose which tests to work on (currently {app.scopeLabel})"
+            title="Which slice of the catalog to work on — everything, what changed in a revision, what failed, what hasn't run, or a saved plan"
+            onkeydown={(e) => {
+              if (e.key !== "Escape" || !scopeMenuOpen) return;
+              e.stopPropagation();
+              closeScopeMenu();
+            }}
           >
-            <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
+            <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" class="shrink-0"><polygon points="22 3 2 3 10 12.46 10 19 14 21 14 12.46 22 3"/></svg>
+            <!-- Below ~380px the name would leave the search box no room;
+                 the funnel + chevron stay, the name lives in aria-label/title
+                 and on the in-view line. -->
+            <span class="truncate hidden min-[380px]:inline">{app.scopeLabel}</span>
+            <svg width="9" height="9" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" class="shrink-0 transition-transform {scopeMenuOpen ? 'rotate-180' : ''}"><polyline points="6 9 12 15 18 9"/></svg>
           </button>
-        {/if}
-        {#if app.voiceReady}
-          <span class="absolute right-1 top-1/2 -translate-y-1/2">
-            <MicButton el={searchEl} lang={app.voiceLang} />
-          </span>
-        {/if}
+          {#if scopeMenuOpen}
+            {@const total = app.testPilot.catalog?.sections.reduce((n, sec) => n + sec.tests.length, 0) ?? 0}
+            {@const token = scopeToToken(app.testPilot.scope)}
+            {#snippet scopeItem(value: string, label: string, hint: string = "", count: number | null = null)}
+              <button
+                type="button"
+                role="menuitemradio"
+                aria-checked={token === value}
+                class="w-full flex items-center gap-2 px-3 py-1.5 text-left text-[12px] hover:bg-ink-50 dark:hover:bg-night-alt {token === value ? 'text-brand-pink dark:text-brand-pink-light font-medium' : 'text-ink-700 dark:text-night-dim'}"
+                onclick={() => {
+                  applyScopeToken(value);
+                  closeScopeMenu(true);
+                }}
+              >
+                <span class="w-3.5 shrink-0 inline-flex justify-center" aria-hidden="true">
+                  {#if token === value}
+                    <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"/></svg>
+                  {/if}
+                </span>
+                <span class="min-w-0 flex-1">
+                  <span class="block truncate">{label}</span>
+                  {#if hint}
+                    <span class="block text-[10.5px] text-ink-500 dark:text-night-mute leading-tight">{hint}</span>
+                  {/if}
+                </span>
+                {#if count !== null}
+                  <span class="shrink-0 text-[10.5px] tabular-nums text-ink-500 dark:text-night-mute">{count}</span>
+                {/if}
+              </button>
+            {/snippet}
+            <div
+              class="absolute right-0 {scopeMenuUp ? 'bottom-full mb-1' : 'top-full mt-1'} z-40 w-64 max-w-[calc(100vw-1rem)] overflow-y-auto rounded-md border border-ink-200 dark:border-night-line bg-white dark:bg-night-card shadow-lg py-1"
+              style:max-height="{scopeMenuMaxH}px"
+              role="menu"
+              aria-label="Work on"
+              tabindex="-1"
+              onkeydown={scopeMenuKeydown}
+            >
+              <div class="px-3 pt-2 pb-0.5 text-[10px] font-bold uppercase tracking-wider text-ink-400 dark:text-night-mute">Work on</div>
+              {@render scopeItem("all", "Everything", "", total)}
+              {#each scopeBaseRevs as base (base)}
+                {@render scopeItem(`since:${base}`, `New in v${base + 1}`, "Added or reworded in that revision")}
+              {/each}
+              {#if app.testPilot.scope.kind === "since" && !scopeBaseRevs.includes(app.testPilot.scope.rev)}
+                <!-- A scope restored from storage that predates the last five
+                     revisions still needs an entry, or the menu would show
+                     nothing checked while the list stays filtered. -->
+                {@render scopeItem(`since:${app.testPilot.scope.rev}`, `New in v${app.testPilot.scope.rev + 1}`, "Added or reworded in that revision")}
+              {/if}
+              {#if !hasRevisionHistory}
+                <div class="px-3 py-1 pl-8 text-[10.5px] text-ink-400 dark:text-night-mute leading-tight">“New in …” appears once the catalog is regenerated (it is at v{catalogRev}).</div>
+              {/if}
+              {@render scopeItem("failed", "Failed last run", "Frozen when picked")}
+              {@render scopeItem("untested", "Not run yet", "Frozen when picked")}
+
+              <div class="my-1 border-t border-ink-100 dark:border-night-line"></div>
+              <div class="px-3 pt-2 pb-0.5 text-[10px] font-bold uppercase tracking-wider text-ink-400 dark:text-night-mute">Saved plans</div>
+              {#each app.testPilot.plans as plan (plan.id)}
+                <div class="flex items-center">
+                  <div class="min-w-0 flex-1">
+                    {@render scopeItem(`plan:${plan.id}`, plan.name, "", plan.testIds.length)}
+                  </div>
+                  <button
+                    type="button"
+                    class="shrink-0 w-7 h-7 mr-1 inline-flex items-center justify-center rounded-md text-ink-400 dark:text-night-mute hover:text-red-600 dark:hover:text-red-400 hover:bg-ink-50 dark:hover:bg-night-alt"
+                    onclick={async () => {
+                      closeScopeMenu();
+                      await removePlan(plan.id);
+                      scopeBtnEl?.focus();
+                    }}
+                    role="menuitem"
+                    title="Delete this plan (the tests themselves stay)"
+                    aria-label="Delete plan {plan.name}"
+                  >
+                    <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><polyline points="3 6 5 6 21 6"/><path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6"/><path d="M10 11v6M14 11v6"/><path d="M9 6V4a1 1 0 0 1 1-1h4a1 1 0 0 1 1 1v2"/></svg>
+                  </button>
+                </div>
+              {:else}
+                <div class="px-3 py-1 text-[10.5px] text-ink-400 dark:text-night-mute leading-tight">None yet — save the rows in view as a plan below.</div>
+              {/each}
+
+              <div class="my-1 border-t border-ink-100 dark:border-night-line"></div>
+              {#if planNameOpen}
+                <div class="px-2 py-1.5 space-y-1">
+                  <div class="flex items-center gap-1.5">
+                    <input
+                      type="text"
+                      id="pinta-plan-name"
+                      bind:this={planNameEl}
+                      bind:value={planName}
+                      maxlength="60"
+                      placeholder="Plan name"
+                      aria-label="Plan name"
+                      class="flex-1 min-w-0 px-2 py-1 text-[11.5px] rounded-md border border-ink-200 dark:border-night-line bg-white dark:bg-night-card text-ink-900 dark:text-night-text placeholder:text-ink-400 dark:placeholder:text-night-mute outline-none focus:border-brand-pink dark:focus:border-brand-pink-light"
+                      oninput={() => (planError = null)}
+                      onkeydown={(e) => {
+                        if (e.key === "Enter") {
+                          // Without this the same Enter activates the trigger
+                          // we focus below and reopens the menu.
+                          e.preventDefault();
+                          saveScopeAsPlan();
+                          if (!planNameOpen) closeScopeMenu(true);
+                        }
+                        if (e.key === "Escape") {
+                          // Cancel the name row only; hand focus back to the
+                          // trigger so a second Escape closes the menu.
+                          e.stopPropagation();
+                          planName = "";
+                          planError = null;
+                          planNameOpen = false;
+                          scopeBtnEl?.focus();
+                        }
+                      }}
+                    />
+                    <button
+                      type="button"
+                      class="shrink-0 rounded-md bg-brand-pink px-2 py-1 text-[11.5px] font-semibold text-white hover:bg-brand-magenta dark:hover:bg-brand-pink-light disabled:opacity-50 disabled:cursor-not-allowed disabled:hover:bg-brand-pink"
+                      disabled={!planName.trim()}
+                      onclick={() => {
+                        saveScopeAsPlan();
+                        if (!planNameOpen) closeScopeMenu(true);
+                      }}
+                    >
+                      Save
+                    </button>
+                  </div>
+                  {#if planError}
+                    <div class="text-[10.5px] text-red-600 dark:text-red-400 px-0.5">{planError}</div>
+                  {/if}
+                </div>
+              {:else}
+                <button
+                  type="button"
+                  role="menuitem"
+                  class="w-full flex items-center gap-2 px-3 py-1.5 text-left text-[12px] text-ink-700 dark:text-night-dim hover:bg-ink-50 dark:hover:bg-night-alt disabled:opacity-50 disabled:cursor-not-allowed"
+                  disabled={!app.testPilot.catalog}
+                  onclick={() => void openPlanNameRow()}
+                  title="Save the rows currently in view as a named plan"
+                >
+                  <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" class="w-3.5 shrink-0"><path d="M19 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11l5 5v11a2 2 0 0 1-2 2z"/><polyline points="17 21 17 13 7 13 7 21"/><polyline points="7 3 7 8 15 8"/></svg>
+                  Save rows in view as a plan…
+                </button>
+              {/if}
+            </div>
+          {/if}
+        </div>
       </div>
       {#if searchActive}
         {@const n = matchCount()}
@@ -2684,112 +2930,35 @@
           {n} {n === 1 ? "match" : "matches"} for “{searchQuery.trim()}”
         </div>
       {/if}
-    </div>
-
-    <!-- WORK ON — scope selector (Phase 21). Filters the list, the
-         counters and the exports; never touches stored marks, and the
-         .pinta bundle still carries every row. -->
-    <div class="flex items-center gap-1.5">
-      <label class="shrink-0 text-[11px] font-medium text-ink-500 dark:text-night-mute" for="pinta-scope">Work on</label>
-      <select
-        id="pinta-scope"
-        class="flex-1 min-w-0 px-2 py-1 text-[11.5px] rounded-md border border-ink-200 dark:border-night-line bg-white dark:bg-night-card text-ink-900 dark:text-night-text outline-none focus:border-brand-pink dark:focus:border-brand-pink-light"
-        value={scopeToToken(app.testPilot.scope)}
-        onchange={(e) => applyScopeToken(e.currentTarget.value)}
-        title="Which slice of the catalog to run — everything, only what changed in the latest revision, what failed, or a saved plan"
-      >
-        <option value="all">Everything ({app.testPilot.catalog?.sections.reduce((n, s) => n + s.tests.length, 0) ?? 0})</option>
-        {#each scopeBaseRevs as base (base)}
-          <option value="since:{base}">New in v{base + 1} (added or reworded)</option>
-        {/each}
-        {#if app.testPilot.scope.kind === "since" && !scopeBaseRevs.includes(app.testPilot.scope.rev)}
-          <!-- A scope restored from storage that predates the last five
-               revisions still needs an option, or the control would read
-               "Everything" while the list stays filtered. -->
-          <option value="since:{app.testPilot.scope.rev}">New in v{app.testPilot.scope.rev + 1} (added or reworded)</option>
-        {/if}
-        <option value="failed">Failed right now</option>
-        <option value="untested">Not run yet</option>
-        {#each app.testPilot.plans as plan (plan.id)}
-          <option value="plan:{plan.id}" title={plan.name}>{plan.name}</option>
-        {/each}
-      </select>
-      {#if app.testPilot.scope.kind === "plan"}
-        <button
-          type="button"
-          class="shrink-0 w-7 h-7 inline-flex items-center justify-center rounded-md text-ink-500 dark:text-night-mute hover:text-red-600 dark:hover:text-red-400 hover:bg-ink-50 dark:hover:bg-night-alt"
-          onclick={() => {
-            const scope = app.testPilot.scope;
-            if (scope.kind === "plan") void removePlan(scope.id);
-          }}
-          title="Delete this saved plan (the tests themselves stay)"
-          aria-label="Delete saved plan"
+      {#if scopeActive}
+        {@const missing = app.scopeMissingIds}
+        {@const inView = app.scopedCatalogView()?.sections.reduce((n, sec) => n + sec.tests.length, 0) ?? 0}
+        {@const total = app.testPilot.catalog?.sections.reduce((n, sec) => n + sec.tests.length, 0) ?? 0}
+        <!-- One quiet line instead of a paragraph: what's in view, and
+             the one thing a tester must know (exports follow the view).
+             The full rule lives in the tooltip. -->
+        <div
+          class="flex items-center gap-1.5 text-[11px] text-ink-500 dark:text-night-mute px-0.5"
+          title="Marks still belong to the whole catalog{readOnlyRun ? '' : ' — but exports and the tester sheet carry only the rows in view'}. Catalog is at v{catalogRev}."
         >
-          <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><polyline points="3 6 5 6 21 6"/><path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6"/><path d="M10 11v6M14 11v6"/><path d="M9 6V4a1 1 0 0 1 1-1h4a1 1 0 0 1 1 1v2"/></svg>
-        </button>
-      {:else}
-        <button
-          type="button"
-          class="shrink-0 w-7 h-7 inline-flex items-center justify-center rounded-md text-ink-500 dark:text-night-mute hover:text-brand-pink dark:hover:text-brand-pink-light hover:bg-ink-50 dark:hover:bg-night-alt disabled:opacity-50 disabled:cursor-not-allowed disabled:hover:text-ink-500"
-          onclick={() => void openPlanNameRow()}
-          disabled={!app.testPilot.catalog}
-          title="Save the tests currently in scope as a named plan"
-          aria-label="Save current scope as a plan"
-          aria-expanded={planNameOpen}
-          aria-controls="pinta-plan-name"
-        >
-          <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M19 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11l5 5v11a2 2 0 0 1-2 2z"/><polyline points="17 21 17 13 7 13 7 21"/><polyline points="7 3 7 8 15 8"/></svg>
-        </button>
+          <span class="tabular-nums min-w-0 leading-snug">
+            <span class="font-medium text-ink-700 dark:text-night-dim">{inView}</span> of {total} in view · exports follow this view
+            {#if missing.length > 0}
+              <span class="text-amber-600 dark:text-amber-400">· {missing.length} no longer exist</span>
+            {/if}
+          </span>
+          <button
+            type="button"
+            class="ml-auto shrink-0 inline-flex items-center gap-0.5 rounded px-1 py-0.5 text-[10.5px] font-medium text-brand-pink dark:text-brand-pink-light hover:bg-brand-pink/10"
+            onclick={() => applyScopeToken("all")}
+            title="Back to the whole catalog"
+          >
+            Show all
+            <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
+          </button>
+        </div>
       {/if}
     </div>
-    {#if planNameOpen}
-      <div class="flex items-center gap-1.5">
-        <input
-          type="text"
-          id="pinta-plan-name"
-          bind:this={planNameEl}
-          bind:value={planName}
-          maxlength="60"
-          placeholder="Plan name (e.g. Sprint 12 regression)"
-          aria-label="Plan name"
-          class="flex-1 min-w-0 px-2 py-1 text-[11.5px] rounded-md border border-ink-200 dark:border-night-line bg-white dark:bg-night-card text-ink-900 dark:text-night-text placeholder:text-ink-400 dark:placeholder:text-night-mute outline-none focus:border-brand-pink dark:focus:border-brand-pink-light"
-          oninput={() => (planError = null)}
-          onkeydown={(e) => {
-            if (e.key === "Enter") saveScopeAsPlan();
-            if (e.key === "Escape") {
-              planName = "";
-              planError = null;
-              planNameOpen = false;
-            }
-          }}
-        />
-        <button
-          type="button"
-          class="shrink-0 rounded-md bg-brand-pink px-2 py-1 text-[11.5px] font-semibold text-white hover:bg-brand-magenta dark:hover:bg-brand-pink-light disabled:opacity-50 disabled:cursor-not-allowed disabled:hover:bg-brand-pink"
-          disabled={!planName.trim()}
-          onclick={saveScopeAsPlan}
-        >
-          Save
-        </button>
-      </div>
-      {#if planError}
-        <div class="text-[10.5px] text-red-600 dark:text-red-400 px-0.5">{planError}</div>
-      {/if}
-    {/if}
-    {#if scopeActive}
-      {@const missing = app.scopeMissingIds}
-      <div class="text-[11px] text-ink-500 dark:text-night-mute leading-snug px-0.5">
-        Filtered view: <span class="font-semibold text-ink-700 dark:text-night-dim">{app.scopeLabel}</span> (catalog is at v{catalogRev}).
-        {#if !readOnlyRun}
-          Marks still belong to the whole catalog — but <span class="font-semibold text-ink-700 dark:text-night-dim">exports and the tester sheet carry only these rows</span>.
-        {:else}
-          Exports and the tester sheet carry only these rows.
-        {/if}
-        {#if missing.length > 0}
-          <span class="text-amber-600 dark:text-amber-400">{missing.length} test{missing.length === 1 ? "" : "s"} in this selection no longer exist.</span>
-        {/if}
-      </div>
-    {/if}
 
     <!-- STATS line — pass/fail/untested on the left, % complete on the
          right (matches the reference design). Progress bar runs the
@@ -2812,8 +2981,22 @@
         <div class="h-full bg-emerald-500" style:width="{passPct}%"></div>
         <div class="h-full bg-red-500" style:width="{failPct}%"></div>
       </div>
-      <div class="text-[11px] text-ink-500 dark:text-night-mute tabular-nums">
-        {t.pass + t.fail} of {t.total} tests run
+      <div class="flex items-center justify-between gap-2 text-[11px] text-ink-500 dark:text-night-mute tabular-nums">
+        <span>{t.pass + t.fail} of {t.total} tests run</span>
+        <!-- Same action as the dashed "Add section" at the list's end —
+             reachable without scrolling past a long catalog. Hidden
+             under the same conditions. -->
+        {#if !searchActive && !scopeActive && !readOnlyRun}
+          <button
+            type="button"
+            class="inline-flex items-center gap-1 rounded px-1 py-0.5 font-medium text-ink-500 dark:text-night-mute hover:text-brand-pink dark:hover:text-brand-pink-light hover:bg-brand-pink/10"
+            onclick={onAddSection}
+            title="Add an empty section at the end of the catalog"
+          >
+            <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>
+            Add section
+          </button>
+        {/if}
       </div>
       <!-- Tester-sheet prep progress while the Export popover is closed —
            a prep can take minutes and the spinner on the Export trigger
@@ -3033,7 +3216,7 @@
                   aria-label={`Ask for steps on every test in ${section.title}`}
                 >
                   {#if secBulkFetching}
-                    <svg width="19" height="19" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="animate-spin" aria-hidden="true"><path d="M21 12a9 9 0 1 1-6.219-8.56"/></svg>
+                    <PaintLoader size="xs" />
                   {:else}
                     <svg width="19" height="19" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="10"/><path d="M9.09 9a3 3 0 0 1 5.83 1c0 2-3 3-3 3"/><line x1="12" y1="17" x2="12.01" y2="17"/></svg>
                   {/if}
@@ -3066,7 +3249,7 @@
                     : "Section actions"}
                 >
                   {#if app.testPilot.pendingSectionSuggest[section.title]}
-                    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="animate-spin" aria-hidden="true"><path d="M21 12a9 9 0 1 1-6.219-8.56"/></svg>
+                    <PaintLoader size="xs" label="Suggesting tests" />
                   {:else}
                     <svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
                       <circle cx="12" cy="5" r="1.6" />
@@ -3408,9 +3591,7 @@
                                  user can ask another row while this one
                                  is still computing, then come back —
                                  same UX as the `?` (Help) icon. -->
-                            <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="animate-spin" aria-hidden="true">
-                              <path d="M21 12a9 9 0 1 1-6.219-8.56" />
-                            </svg>
+                            <PaintLoader size="xs" />
                           {:else}
                             <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
                               <path d="M7.9 20A9 9 0 1 0 4 16.1L2 22Z" fill={hasChat ? "currentColor" : "none"} />
@@ -3472,7 +3653,7 @@
                           : `Ask for steps for ${test.id}`}
                       >
                         {#if detailLoading}
-                          <svg width="19" height="19" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="animate-spin text-brand-pink dark:text-brand-pink-light" aria-hidden="true"><path d="M21 12a9 9 0 1 1-6.219-8.56"/></svg>
+                          <PaintLoader size="xs" />
                         {:else}
                           <svg width="19" height="19" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><path d="M9.09 9a3 3 0 0 1 5.83 1c0 2-3 3-3 3"/><line x1="12" y1="17" x2="12.01" y2="17"/></svg>
                         {/if}
@@ -3616,27 +3797,27 @@
            matched. The search box above stays put so the user can edit
            or clear the query. -->
       {#if (searchActive || scopeActive) && matchCount() === 0}
-        <div class="rounded-lg border border-dashed border-ink-300 dark:border-night-line bg-ink-50 dark:bg-night-alt px-3 py-6 text-center space-y-2">
-          <p class="text-[12px] text-ink-600 dark:text-night-dim">
-            {#if searchActive && scopeActive}
-              No tests in “{app.scopeLabel}” match “{searchQuery.trim()}”.
-            {:else if searchActive}
-              No tests match “{searchQuery.trim()}”.
-            {:else}
-              Nothing in “{app.scopeLabel}” right now.
-            {/if}
-          </p>
-          <button
-            type="button"
-            class="text-[11px] font-medium text-brand-pink dark:text-brand-pink-light hover:underline"
-            onclick={() => {
-              searchQuery = "";
-              app.setTestPilotScope({ kind: "all" });
-            }}
-          >
-            {searchActive && !scopeActive ? "Clear search" : "Show everything"}
-          </button>
-        </div>
+        <EmptyState
+          compact
+          title={searchActive && scopeActive
+            ? `No tests in “${app.scopeLabel}” match “${searchQuery.trim()}”.`
+            : searchActive
+              ? `No tests match “${searchQuery.trim()}”.`
+              : `Nothing in “${app.scopeLabel}” right now.`}
+        >
+          {#snippet action()}
+            <button
+              type="button"
+              class="text-[11px] font-medium text-brand-pink dark:text-brand-pink-light hover:underline"
+              onclick={() => {
+                searchQuery = "";
+                app.setTestPilotScope({ kind: "all" });
+              }}
+            >
+              {searchActive && !scopeActive ? "Clear search" : "Show everything"}
+            </button>
+          {/snippet}
+        </EmptyState>
       {/if}
 
       <!-- Add-section affordance — appends an empty section + drops

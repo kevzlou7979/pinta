@@ -16,6 +16,8 @@
   import { urlOrigin } from "../lib/devices.js";
   import { downscaleImage } from "../lib/downscale-image.js";
   import { loadChatSheet } from "../lib/lazy-ui.js";
+  import PaintLoader from "../lib/PaintLoader.svelte";
+  import LoadingState from "../lib/LoadingState.svelte";
   import {
     buildSrcdoc,
     elementRenderWidth,
@@ -177,7 +179,9 @@
   /** Once results exist the compose form collapses to a summary row;
    *  "Edit" reopens it for THIS run only (a new run collapses again). */
   let composeOpenForRun = $state<string | null>(null);
-  const showCompose = $derived(!hasResults || composeOpenForRun === run?.runId);
+  /** While a run is pending the card collapses entirely (neither the form
+   *  nor the brief row) so the LoadingState sits in view at 360×640. */
+  const showCompose = $derived(!pending && (!hasResults || composeOpenForRun === run?.runId));
   const scopeSummary = $derived.by(() => {
     if (app.variants.scopeKind === "page") return "Whole page";
     const runSel = run?.scope.kind === "element" ? run.scope.target.selector : "";
@@ -429,7 +433,7 @@
       {#if app.variants.scopeKind === "element"}
         {#if app.variants.picking}
           <div class="flex items-center gap-2 rounded-lg border border-dashed border-brand-pink/50 bg-brand-pink/5 dark:bg-brand-pink/10 px-2 py-1.5">
-            <svg class="animate-spin shrink-0 text-brand-pink" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21 12a9 9 0 1 1-6.219-8.56" /></svg>
+            <PaintLoader size="xs" label="Picking an element" />
             <span class="flex-1 text-[11px] text-ink-500 dark:text-night-mute">
               Click an element on the page… (Esc cancels)
             </span>
@@ -581,7 +585,7 @@
       </p>
     {/if}
   </div>
-  {:else}
+  {:else if !pending}
     <!-- Collapsed brief — results take the space; Edit reopens the form. -->
     <div class="flex items-center gap-2 rounded-xl border border-ink-200 dark:border-night-line bg-white dark:bg-night-card pl-3 pr-2 py-2">
       <div class="flex-1 min-w-0">
@@ -610,19 +614,17 @@
   {/if}
 
   {#if pending}
-    <div class="rounded-xl border border-ink-200 dark:border-night-line p-4 text-center space-y-2">
-      <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" class="animate-spin text-brand-pink dark:text-brand-pink-light mx-auto">
-        <path d="M21 12a9 9 0 1 1-6.219-8.56" />
-      </svg>
-      <p class="text-xs text-ink-600 dark:text-night-dim">{pendingLabel}</p>
-      <button
-        type="button"
-        class="text-[11px] text-ink-500 dark:text-night-mute underline hover:text-ink-800 dark:hover:text-night-text"
-        onclick={() => app.cancelVariants()}
-      >
-        Cancel
-      </button>
-    </div>
+    <LoadingState title={pendingLabel}>
+      {#snippet action()}
+        <button
+          type="button"
+          class="text-[11px] text-ink-500 dark:text-night-mute underline hover:text-ink-800 dark:hover:text-night-text"
+          onclick={() => app.cancelVariants()}
+        >
+          Cancel
+        </button>
+      {/snippet}
+    </LoadingState>
   {/if}
 
   <!-- Results -->
@@ -801,7 +803,7 @@
               onclick={() => app.openVariantDiscuss(v.id)}
             >
               {#if app.variants.pendingDiscuss[v.id]}
-                <svg class="animate-spin" width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21 12a9 9 0 1 1-6.219-8.56" /></svg>
+                <PaintLoader size="xs" label="Refining" />
               {/if}
               Refine
             </button>
@@ -834,10 +836,10 @@
               {#if run.scope.kind === "element"}
                 <div class="flex items-center gap-2 min-w-0 min-h-7">
                   {#if fixing}
-                    <svg class="animate-spin shrink-0 text-brand-pink" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21 12a9 9 0 1 1-6.219-8.56" /></svg>
+                    <PaintLoader size="xs" label="Fixing the differences" />
                     <p class="flex-1 text-[11px] text-ink-600 dark:text-night-dim">Fixing the differences…</p>
                   {:else if match?.status === "checking"}
-                    <svg class="animate-spin shrink-0 text-ink-400" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21 12a9 9 0 1 1-6.219-8.56" /></svg>
+                    <PaintLoader size="xs" label="Checking the page" />
                     <p class="flex-1 text-[11px] text-ink-600 dark:text-night-dim">Checking the page against this card…</p>
                   {:else if match?.status === "done" && diffCount === 0}
                     <span class="shrink-0 w-4 h-4 inline-flex items-center justify-center rounded-full bg-emerald-600 text-white" aria-hidden="true">

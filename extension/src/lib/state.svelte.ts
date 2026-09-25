@@ -1809,7 +1809,7 @@ class ExtensionState {
       case "failed":
         return "Failed last run";
       case "untested":
-        return "Untested when picked";
+        return "Not run yet";
       case "plan":
         // Matches scopedTestIds' fallback: a vanished plan filters
         // nothing, so it must not claim to be filtering either.
