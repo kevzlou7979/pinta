@@ -13,9 +13,11 @@ For the architectural design behind each item, see
   the moment one row's ask errored (or when any unrelated Test Pilot
   error landed mid-run), leaving every later row empty and reporting
   "finished". Now a row the agent errors on is skipped, the run carries
-  on with the rest, and each errored row gets exactly one retry at the
-  end; only a give-up timeout (the agent stopped answering) stops the
-  run, and the note names the row. Steps that already landed are kept
+  on with the rest, and every errored row is re-asked again and again
+  in retry rounds (1s → 30s backoff) until it lands; only Cancel, a
+  give-up timeout (the agent stopped answering) or the runaway cap
+  (12 failed rounds on one row) stops the retries, and the note names
+  the row and how many retries ran. Steps that already landed are kept
   and never re-asked — Retry / a second Ask-all only asks for what is
   still missing — and a cancelled export keeps everything generated so
   far, with "download anyway" still available.

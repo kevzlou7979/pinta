@@ -8,7 +8,13 @@
   export type TesterSheetTarget = "md" | "docx" | "gmail" | "mailto";
   /** Live tester-sheet prep: `cancel` = stop after the in-flight row,
    *  `inFlight` = the row currently asked (for "Stop now"). */
-  let stepPrep = $state<{ done: number; total: number; cancel: boolean; inFlight: string | null; retrying: boolean } | null>(null);
+  let stepPrep = $state<{ done: number; total: number; cancel: boolean; inFlight: string | null; retrying: number } | null>(null);
+  /** Retry-round tuning for the bulk step loops (section Ask-all and
+   *  the tester-sheet prep). Errored rows are re-asked round after round
+   *  until they land: `rounds` is only a runaway guard for a permanently
+   *  broken row, `baseMs`/`maxMs` bound the backoff between rounds.
+   *  Exported so tests can shrink the waits. */
+  export const bulkRetry = { rounds: 12, baseMs: 1_000, maxMs: 30_000 };
   /** Outcome line when a prep could not complete (standalone, cancelled,
    *  agent error, scope changed) — offers Retry / download anyway. */
   let stepPrepNote = $state<string | null>(null);
@@ -965,17 +971,19 @@
     return !!t.detail && t.detail.steps.length > 0;
   }
 
-  /** What a bulk step run could not finish. `failed` = rows the agent
-   *  errored on twice (first pass + the retry pass); `timedOut` = the
-   *  row the agent stopped answering on (the run stops there). */
-  type BulkStepsOutcome = { failed: string[]; timedOut: string | null };
+  /** What a bulk step run could not finish. `failed` = rows still
+   *  empty after the retry rounds; `retries` = how many retry rounds
+   *  ran; `timedOut` = the row the agent stopped answering on (the run
+   *  stops there). */
+  type BulkStepsOutcome = { failed: string[]; retries: number; timedOut: string | null };
 
   /** Fetch steps for every row in `tests` that has none, strictly one
    *  at a time. FAIL-SAFE: a row the agent errors on is skipped, the
-   *  run carries on with the rest, and every errored row gets ONE
-   *  retry at the end — a single bad row must never strand the whole
-   *  section / sheet, and rows that already have steps are never
-   *  re-asked (no regeneration, no wasted tokens). The run stops early
+   *  run carries on with the rest, and every errored row is re-asked
+   *  again and again in retry rounds until it lands — a single bad row
+   *  must never strand the whole section / sheet, and rows that already
+   *  have steps are never re-asked (no regeneration, no wasted tokens).
+   *  The run stops early
    *  only when the agent stops answering altogether (a give-up timeout
    *  — piling 12-minute waits on a wedged agent helps nobody), when the
    *  catalog disappears (Clear catalog / companion switch), or when
@@ -990,14 +998,15 @@
       shouldStop?: () => boolean;
       /** Rows to pass over without asking (e.g. scoped out mid-run). */
       skip?: (test: TestPilotTest) => boolean;
-      /** `retry` is true on the second ask of a row that errored. */
-      onAsk?: (test: TestPilotTest, retry: boolean) => void;
+      /** `retry` is 0 on the first pass, then the retry round (1, 2, …)
+       *  on every re-ask of a row that errored. */
+      onAsk?: (test: TestPilotTest, retry: number) => void;
       /** Once per row on the first pass only (progress counting). */
       onRow?: (test: TestPilotTest) => void;
     } = {},
   ): Promise<BulkStepsOutcome> {
-    const outcome: BulkStepsOutcome = { failed: [], timedOut: null };
-    const askOne = async (test: TestPilotTest, retry: boolean) => {
+    const outcome: BulkStepsOutcome = { failed: [], retries: 0, timedOut: null };
+    const askOne = async (test: TestPilotTest, retry: number) => {
       // If another caller has it in flight already (per-row Ask),
       // just wait for that one to clear before moving on.
       if (!app.testPilot.pendingDetails[test.id]) {
@@ -1027,7 +1036,7 @@
         opts.onRow?.(test);
         continue;
       }
-      await askOne(test, false);
+      await askOne(test, 0);
       opts.onRow?.(test);
       if (hasSteps(test)) continue;
       const kind = kindOf(test);
@@ -1042,22 +1051,56 @@
       if (kind !== "cancelled") errored.push(test);
     }
 
-    // Retry pass — one more ask per errored row. Transient failures
-    // (a busy terminal, a multi-agent race) usually clear on the second
-    // try; a row that errors twice is reported, never looped on.
-    for (let i = 0; i < errored.length; i++) {
-      const test = errored[i]!;
+    // Retry rounds — errored rows are re-asked again and again until
+    // every one lands. A failed generation must never be left for the
+    // user to chase: each round re-asks only the rows still empty,
+    // waits a little longer between rounds (1s → 30s) so a busy agent
+    // gets breathing room, and stops ONLY when the user cancels, the
+    // agent stops answering (give-up timeout), the catalog goes away,
+    // or the runaway cap trips (a row that errors that many times in a
+    // row is a real bug to report, not a blip to keep hammering).
+    let pending = errored;
+    for (let round = 1; pending.length > 0; round++) {
       if (outcome.timedOut || opts.shouldStop?.() || !app.testPilot.catalog) {
-        outcome.failed.push(...errored.slice(i).map((t) => t.id));
+        outcome.failed.push(...pending.map((t) => t.id));
         break;
       }
-      if (hasSteps(test) || opts.skip?.(test)) continue;
-      await askOne(test, true);
-      if (hasSteps(test)) continue;
-      if (kindOf(test) === "timeout") outcome.timedOut = test.id;
-      outcome.failed.push(test.id);
+      if (round > bulkRetry.rounds) {
+        outcome.failed.push(...pending.map((t) => t.id));
+        break;
+      }
+      await sleep(Math.min(bulkRetry.baseMs * 2 ** (round - 1), bulkRetry.maxMs), () => opts.shouldStop?.() ?? false);
+      if (opts.shouldStop?.()) {
+        outcome.failed.push(...pending.map((t) => t.id));
+        break;
+      }
+      outcome.retries = round;
+      const stillErrored: TestPilotTest[] = [];
+      for (const test of pending) {
+        if (outcome.timedOut || opts.shouldStop?.() || !app.testPilot.catalog) {
+          stillErrored.push(test);
+          continue;
+        }
+        if (hasSteps(test) || opts.skip?.(test)) continue;
+        await askOne(test, round);
+        if (hasSteps(test)) continue;
+        const kind = kindOf(test);
+        if (kind === "timeout") outcome.timedOut = test.id;
+        if (kind !== "cancelled") stillErrored.push(test);
+      }
+      pending = stillErrored;
     }
     return outcome;
+  }
+
+  /** Wait `ms`, waking early (50ms granularity) when `stop()` turns
+   *  true so a Cancel during the backoff is honoured at once. */
+  async function sleep(ms: number, stop: () => boolean): Promise<void> {
+    const until = Date.now() + ms;
+    while (Date.now() < until) {
+      if (stop()) return;
+      await new Promise((r) => setTimeout(r, Math.min(50, until - Date.now())));
+    }
   }
 
   /** One line for the popover note / the section banner: which rows
@@ -1065,7 +1108,9 @@
   function describeBulkOutcome(outcome: BulkStepsOutcome): string {
     const parts: string[] = [];
     if (outcome.failed.length) {
-      parts.push(`the agent errored on ${outcome.failed.join(", ")} even after a retry`);
+      const n = outcome.retries;
+      const after = n === 0 ? "" : ` even after ${n} ${n === 1 ? "retry" : "retries"}`;
+      parts.push(`the agent errored on ${outcome.failed.join(", ")}${after}`);
     }
     if (outcome.timedOut) {
       parts.push(`the agent timed out on ${outcome.timedOut} — is \`/pinta\` running?`);
@@ -1140,7 +1185,7 @@
       stepPrepNote = `${nTests(missing.length)} ${missing.length === 1 ? "has" : "have"} no steps yet and there is no companion to generate them. Start pinta-companion + /pinta, then`;
       return false;
     }
-    stepPrep = { done: 0, total: missing.length, cancel: false, inFlight: null, retrying: false };
+    stepPrep = { done: 0, total: missing.length, cancel: false, inFlight: null, retrying: 0 };
     // Light the section-level spinner on every section we'll touch that
     // a queued Ask-all isn't already lighting (that job owns its flag),
     // so progress shows on collapsed sections too; clear each of ours
@@ -1148,7 +1193,7 @@
     const mine = [...new Set(missing.map((m) => m.section))].filter((s) => !bulkFetchingSections[s]);
     for (const s of mine) bulkFetchingSections[s] = true;
     let cancelled = false;
-    let outcome: BulkStepsOutcome = { failed: [], timedOut: null };
+    let outcome: BulkStepsOutcome = { failed: [], retries: 0, timedOut: null };
     try {
       await enqueueBulk(async () => {
         outcome = await fetchStepsSequentially(
@@ -2385,7 +2430,7 @@
                       {stepPrep.cancel
                         ? "Stopping after the current test…"
                         : stepPrep.retrying
-                          ? `Retrying ${stepPrep.inFlight ?? "a test"} that errored…`
+                          ? `Retrying ${stepPrep.inFlight ?? "a test"} that errored (try ${stepPrep.retrying + 1})…`
                           : `Generating steps ${Math.min(stepPrep.done + 1, stepPrep.total)} of ${stepPrep.total}…`}
                     </span>
                     {#if !stepPrep.cancel}
@@ -3005,7 +3050,7 @@
       {#if stepPrep && !exportMenuOpen}
         <div role="status" class="text-[11px] text-ink-500 dark:text-night-mute flex items-center gap-1.5" data-pinta-step-prep-inline>
           <span>{stepPrep.retrying
-            ? `Retrying tester-sheet steps for ${stepPrep.inFlight ?? "a test"}…`
+            ? `Retrying tester-sheet steps for ${stepPrep.inFlight ?? "a test"} (try ${stepPrep.retrying + 1})…`
             : `Generating tester-sheet steps ${Math.min(stepPrep.done + 1, stepPrep.total)} of ${stepPrep.total}…`}</span>
           <button
             type="button"

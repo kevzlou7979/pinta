@@ -67,7 +67,12 @@ function catalog() {
 async function mountTab() {
   const { mount, flushSync, tick } = await import("svelte");
   const { app } = await import("../lib/state.svelte.js");
-  const { default: TestPilotTab } = await import("./TestPilotTab.svelte");
+  const { default: TestPilotTab, bulkRetry } = await import("./TestPilotTab.svelte");
+  // Retry rounds keep going by design; shrink the backoff and the
+  // runaway cap so the persistent-failure cases finish in milliseconds.
+  bulkRetry.baseMs = 10;
+  bulkRetry.maxMs = 20;
+  bulkRetry.rounds = 2;
   const target = document.createElement("div");
   document.body.appendChild(target);
   mount(TestPilotTab, { target });
@@ -209,7 +214,7 @@ describe("Tester sheet export — auto-generate missing steps", () => {
     expect(t.row("AUTH-02").detail?.steps[0]).toBe("step for AUTH-02");
   }, 30000);
 
-  it("connected: an agent error skips the row, finishes the rest, retries it once, then holds the download", async () => {
+  it("connected: an agent error skips the row, finishes the rest, then keeps retrying it round after round until the runaway cap", async () => {
     const t = await mountTab();
     const send = vi.fn();
     (t.app as any).client = { send };
@@ -225,22 +230,51 @@ describe("Tester sheet export — auto-generate missing steps", () => {
     expect(JSON.parse(send.mock.calls[1]![0].queryComment).testId).toBe("BILL-01");
     expect(t.progress()?.textContent).toMatch(/Generating steps 2 of 2/);
 
-    // The rest lands, then the errored row gets exactly one more ask.
+    // The rest lands, then retry round 1 re-asks the errored row.
     t.answer("BILL-01");
-    await sleep(120); await t.settle();
+    await sleep(160); await t.settle();
     expect(send).toHaveBeenCalledTimes(3);
     expect(JSON.parse(send.mock.calls[2]![0].queryComment).testId).toBe("AUTH-02");
-    expect(t.progress()?.textContent).toMatch(/Retrying AUTH-02/);
+    expect(t.progress()?.textContent).toMatch(/Retrying AUTH-02 that errored \(try 2\)/);
 
-    // Second failure: reported, not looped on; the download is held.
+    // Still failing → round 2 asks AGAIN (no giving up after one try).
     t.fail("AUTH-02");
-    await sleep(120); await t.settle();
-    expect(send).toHaveBeenCalledTimes(3);
+    await sleep(160); await t.settle();
+    expect(send).toHaveBeenCalledTimes(4);
+    expect(JSON.parse(send.mock.calls[3]![0].queryComment).testId).toBe("AUTH-02");
+    expect(t.progress()?.textContent).toMatch(/try 3/);
+
+    // Runaway cap (2 rounds in this test): reported, download held.
+    t.fail("AUTH-02");
+    await sleep(160); await t.settle();
+    expect(send).toHaveBeenCalledTimes(4);
     expect(createObjectURL).not.toHaveBeenCalled();
     expect(t.note()?.textContent).toMatch(/1 test still has no steps/);
-    expect(t.note()?.textContent).toMatch(/errored on AUTH-02 even after a retry/);
+    expect(t.note()?.textContent).toMatch(/errored on AUTH-02 even after 2 retries/);
     // What landed stays landed.
     expect(t.row("BILL-01").detail?.steps[0]).toBe("step for BILL-01");
+  }, 30000);
+
+  it("connected: Cancel during the retry backoff stops the rounds at once", async () => {
+    const t = await mountTab();
+    const send = vi.fn();
+    (t.app as any).client = { send };
+    t.app.connectionStatus = "connected";
+    await t.openExport();
+    t.fmtBtn(".md", "Tester sheet").click();
+    await sleep(80); await t.settle();
+    t.fail("AUTH-02");
+    await sleep(120); await t.settle();
+    t.answer("BILL-01");
+    await sleep(160); await t.settle();
+    expect(send).toHaveBeenCalledTimes(3); // retry round 1 in flight
+    [...t.progress()!.querySelectorAll("button")].find((b) => b.textContent === "Cancel")!.click();
+    await t.settle();
+    t.fail("AUTH-02");
+    await sleep(160); await t.settle();
+    // No round 2 after a cancel.
+    expect(send).toHaveBeenCalledTimes(3);
+    expect(t.note()?.textContent).toMatch(/Stopped — 1 test still has no steps/);
   }, 30000);
 
   it("connected: a row that errors once and succeeds on the retry still yields a complete sheet", async () => {
@@ -257,7 +291,7 @@ describe("Tester sheet export — auto-generate missing steps", () => {
     t.fail("AUTH-02");
     await sleep(120); await t.settle();
     t.answer("BILL-01");
-    await sleep(120); await t.settle();
+    await sleep(160); await t.settle();
     expect(send).toHaveBeenCalledTimes(3);
     t.answer("AUTH-02"); // the retry lands
     await sleep(120); await t.settle();
@@ -364,14 +398,17 @@ describe("Tester sheet export — auto-generate missing steps", () => {
     await t.openExport();
     t.fmtBtn(".md", "Tester sheet").click();
     await sleep(80); await t.settle();
-    // AUTH-02 errors twice (first pass + retry); BILL-01 lands in between.
+    // AUTH-02 errors on the first pass and on both retry rounds (the
+    // test cap is 2); BILL-01 lands in between.
     t.fail("AUTH-02");
     await sleep(120); await t.settle();
     t.answer("BILL-01");
-    await sleep(120); await t.settle();
+    await sleep(160); await t.settle();
     t.fail("AUTH-02");
-    await sleep(120); await t.settle();
-    expect(send).toHaveBeenCalledTimes(3);
+    await sleep(160); await t.settle();
+    t.fail("AUTH-02");
+    await sleep(160); await t.settle();
+    expect(send).toHaveBeenCalledTimes(4);
     expect(t.note()).not.toBeNull();
     // Close (outside click) and reopen — the note must survive.
     document.body.click();
@@ -383,8 +420,8 @@ describe("Tester sheet export — auto-generate missing steps", () => {
     // kept, never regenerated) and is not a forced download.
     [...t.note()!.querySelectorAll("button")].find((b) => b.textContent === "Retry")!.click();
     await sleep(80); await t.settle();
-    expect(send).toHaveBeenCalledTimes(4);
-    expect(JSON.parse(send.mock.calls[3]![0].queryComment).testId).toBe("AUTH-02");
+    expect(send).toHaveBeenCalledTimes(5);
+    expect(JSON.parse(send.mock.calls[4]![0].queryComment).testId).toBe("AUTH-02");
     expect(createObjectURL).not.toHaveBeenCalled();
     expect(t.progress()?.textContent).toMatch(/Generating steps 1 of 1/);
   }, 30000);
