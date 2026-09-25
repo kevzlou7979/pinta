@@ -96,7 +96,12 @@ async function mountTab() {
     row(id).detail = { steps: [`step for ${id}`, "verify it"], askedAt: Date.now() };
     app.cancelDetailFetch(id);
   };
-  return { app, target, settle, openExport, fmtBtn, note, progress, row, answer };
+  /** Play the agent failing: the companion syncs the row's session as
+   *  `error` (the real path — records the per-row outcome). */
+  const fail = (id: string, message = `Test Pilot query failed for ${id}.`) => {
+    (app as any).handleDetailSync({ status: "error", errorMessage: message }, id);
+  };
+  return { app, target, settle, openExport, fmtBtn, note, progress, row, answer, fail };
 }
 
 /** Module-scoped prep state persists across tests in this file; make
@@ -204,7 +209,7 @@ describe("Tester sheet export — auto-generate missing steps", () => {
     expect(t.row("AUTH-02").detail?.steps[0]).toBe("step for AUTH-02");
   }, 30000);
 
-  it("connected: an agent error halts the prep and holds the download", async () => {
+  it("connected: an agent error skips the row, finishes the rest, retries it once, then holds the download", async () => {
     const t = await mountTab();
     const send = vi.fn();
     (t.app as any).client = { send };
@@ -213,14 +218,74 @@ describe("Tester sheet export — auto-generate missing steps", () => {
     t.fmtBtn(".md", "Tester sheet").click();
     await sleep(80); await t.settle();
 
-    // Agent failed on the first row.
-    t.app.testPilot.error = "Test Pilot query failed for AUTH-02.";
+    // Agent failed on the first row — the run must NOT stop there.
+    t.fail("AUTH-02");
+    await sleep(120); await t.settle();
+    expect(send).toHaveBeenCalledTimes(2);
+    expect(JSON.parse(send.mock.calls[1]![0].queryComment).testId).toBe("BILL-01");
+    expect(t.progress()?.textContent).toMatch(/Generating steps 2 of 2/);
+
+    // The rest lands, then the errored row gets exactly one more ask.
+    t.answer("BILL-01");
+    await sleep(120); await t.settle();
+    expect(send).toHaveBeenCalledTimes(3);
+    expect(JSON.parse(send.mock.calls[2]![0].queryComment).testId).toBe("AUTH-02");
+    expect(t.progress()?.textContent).toMatch(/Retrying AUTH-02/);
+
+    // Second failure: reported, not looped on; the download is held.
+    t.fail("AUTH-02");
+    await sleep(120); await t.settle();
+    expect(send).toHaveBeenCalledTimes(3);
+    expect(createObjectURL).not.toHaveBeenCalled();
+    expect(t.note()?.textContent).toMatch(/1 test still has no steps/);
+    expect(t.note()?.textContent).toMatch(/errored on AUTH-02 even after a retry/);
+    // What landed stays landed.
+    expect(t.row("BILL-01").detail?.steps[0]).toBe("step for BILL-01");
+  }, 30000);
+
+  it("connected: a row that errors once and succeeds on the retry still yields a complete sheet", async () => {
+    const t = await mountTab();
+    const send = vi.fn();
+    (t.app as any).client = { send };
+    t.app.connectionStatus = "connected";
+    const md = vi.spyOn(t.app, "exportTesterSheetMarkdown");
+    md.mockClear();
+    await t.openExport();
+    t.fmtBtn(".md", "Tester sheet").click();
+    await sleep(80); await t.settle();
+
+    t.fail("AUTH-02");
+    await sleep(120); await t.settle();
+    t.answer("BILL-01");
+    await sleep(120); await t.settle();
+    expect(send).toHaveBeenCalledTimes(3);
+    t.answer("AUTH-02"); // the retry lands
+    await sleep(120); await t.settle();
+    expect(createObjectURL).toHaveBeenCalledTimes(1);
+    const out = md.mock.results.at(-1)!.value as string;
+    expect(out).not.toContain("no steps generated yet");
+    expect(out).toContain("1. step for AUTH-02");
+    expect(t.note()).toBeNull();
+    expect(t.progress()).toBeNull();
+  }, 30000);
+
+  it("connected: a give-up timeout stops the run (wedged agent) and names the row", async () => {
+    const t = await mountTab();
+    const send = vi.fn();
+    (t.app as any).client = { send };
+    t.app.connectionStatus = "connected";
+    await t.openExport();
+    t.fmtBtn(".md", "Tester sheet").click();
+    await sleep(80); await t.settle();
+
+    // Play the 120 s + grace give-up for the in-flight row.
+    t.app.testPilot.detailOutcomes["AUTH-02"] = { kind: "timeout", at: Date.now() };
     t.app.cancelDetailFetch("AUTH-02");
     await sleep(120); await t.settle();
     expect(send).toHaveBeenCalledTimes(1);
     expect(createObjectURL).not.toHaveBeenCalled();
     expect(t.note()?.textContent).toMatch(/2 tests still have no steps/);
-    expect(t.note()?.textContent).toMatch(/errored or timed out/);
+    expect(t.note()?.textContent).toMatch(/timed out on AUTH-02/);
   }, 30000);
 
   it("email: generates first, then downloads and opens the draft via the tabs API", async () => {
@@ -296,23 +361,29 @@ describe("Tester sheet export — auto-generate missing steps", () => {
     await t.openExport();
     t.fmtBtn(".md", "Tester sheet").click();
     await sleep(80); await t.settle();
-    t.app.testPilot.error = "Test Pilot query failed for AUTH-02.";
-    t.app.cancelDetailFetch("AUTH-02");
+    // AUTH-02 errors twice (first pass + retry); BILL-01 lands in between.
+    t.fail("AUTH-02");
     await sleep(120); await t.settle();
+    t.answer("BILL-01");
+    await sleep(120); await t.settle();
+    t.fail("AUTH-02");
+    await sleep(120); await t.settle();
+    expect(send).toHaveBeenCalledTimes(3);
     expect(t.note()).not.toBeNull();
     // Close (outside click) and reopen — the note must survive.
     document.body.click();
     await t.settle();
     expect(t.target.querySelector('[aria-label="Export options"]')).toBeNull();
     await t.openExport();
-    expect(t.note()?.textContent).toMatch(/2 tests still have no steps/);
-    // Retry re-asks for what is still missing (not a forced download).
+    expect(t.note()?.textContent).toMatch(/1 test still has no steps/);
+    // Retry re-asks ONLY what is still missing (BILL-01's steps are
+    // kept, never regenerated) and is not a forced download.
     [...t.note()!.querySelectorAll("button")].find((b) => b.textContent === "Retry")!.click();
     await sleep(80); await t.settle();
-    expect(send).toHaveBeenCalledTimes(2);
-    expect(JSON.parse(send.mock.calls[1]![0].queryComment).testId).toBe("AUTH-02");
+    expect(send).toHaveBeenCalledTimes(4);
+    expect(JSON.parse(send.mock.calls[3]![0].queryComment).testId).toBe("AUTH-02");
     expect(createObjectURL).not.toHaveBeenCalled();
-    expect(t.progress()?.textContent).toMatch(/Generating steps 1 of 2/);
+    expect(t.progress()?.textContent).toMatch(/Generating steps 1 of 1/);
   }, 30000);
   it("re-asks a row whose cached detail has zero steps (the sheet would still show the placeholder)", async () => {
     const t = await mountTab();

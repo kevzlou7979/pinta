@@ -6,6 +6,20 @@ For the architectural design behind each item, see
 
 ## Unreleased
 
+### Fixed
+
+- **Test Pilot: bulk step generation is fail-safe.** The section-level
+  "Ask for steps" and the tester-sheet prep used to abort the whole run
+  the moment one row's ask errored (or when any unrelated Test Pilot
+  error landed mid-run), leaving every later row empty and reporting
+  "finished". Now a row the agent errors on is skipped, the run carries
+  on with the rest, and each errored row gets exactly one retry at the
+  end; only a give-up timeout (the agent stopped answering) stops the
+  run, and the note names the row. Steps that already landed are kept
+  and never re-asked — Retry / a second Ask-all only asks for what is
+  still missing — and a cancelled export keeps everything generated so
+  far, with "download anyway" still available.
+
 ### Changed
 
 - **Test Pilot: tester sheets always ship with steps.** Exporting the

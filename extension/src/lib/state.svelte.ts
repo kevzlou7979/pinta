@@ -737,6 +737,16 @@ class ExtensionState {
     // Mirrors `pendingChats` (per-row) so a section's send button can
     // spin independently.
     pendingSectionChats: Record<string, { askedAt: number }>;
+    /** How the last detail-steps ask for each row ended. Lets the bulk
+     *  loops (section Ask-all, tester-sheet prep) tell an agent error
+     *  (skip the row, retry it once at the end) from a give-up timeout
+     *  (the agent is wedged — stop) or a user cancel, WITHOUT reading
+     *  the shared `error` string, which any Test Pilot flow can set.
+     *  Transient — not persisted; cleared per row on the next ask. */
+    detailOutcomes: Record<
+      string,
+      { kind: "done" | "error" | "timeout" | "cancelled"; message?: string; at: number }
+    >;
     error: string | null;
     /** True while the user has an inline edit (section rename, test
      *  title / expected, catalog meta) in flight. Set by the side
@@ -785,7 +795,7 @@ class ExtensionState {
     /** Saved named selections, persisted under `${key}:plans` — kept
      *  out of the catalog so a regenerate can never destroy them. */
     plans: TestPlan[];
-  }>({ catalog: null, pending: null, pendingDetails: {}, pendingChats: {}, pendingSectionSuggest: {}, sectionSuggestions: {}, pendingSectionChats: {}, error: null, editingActive: false, pendingFileIssues: false, filedIssues: {}, importedRun: null, pendingImportConflict: null, bundleNotice: null, scope: { kind: "all" }, plans: [] });
+  }>({ catalog: null, pending: null, pendingDetails: {}, pendingChats: {}, pendingSectionSuggest: {}, sectionSuggestions: {}, pendingSectionChats: {}, detailOutcomes: {}, error: null, editingActive: false, pendingFileIssues: false, filedIssues: {}, importedRun: null, pendingImportConflict: null, bundleNotice: null, scope: { kind: "all" }, plans: [] });
 
   /**
    * Phase 14 — cross-cutting chat state for the two non-Test-Pilot
@@ -1201,6 +1211,7 @@ class ExtensionState {
     this.testPilot.catalog = null;
     this.testPilot.pending = null;
     this.testPilot.pendingDetails = {};
+    this.testPilot.detailOutcomes = {};
     this.testPilot.pendingChats = {};
     this.testPilot.pendingFileIssues = false;
     this.testPilot.importedRun = null;
@@ -2145,6 +2156,7 @@ class ExtensionState {
     if (!section) return;
     const url = this.queryUrl;
     this.testPilot.error = null;
+    delete this.testPilot.detailOutcomes[testId];
     this.testPilot.pendingDetails[testId] = { askedAt: Date.now() };
     this.armDetailTimeout(testId);
     // Compute the effective verbosity for this specific call. Overrides
@@ -2185,6 +2197,11 @@ class ExtensionState {
     if (!this.testPilot.pendingDetails[testId]) return;
     this.clearDetailTimer(testId);
     delete this.testPilot.pendingDetails[testId];
+    // A cancel after an error / timeout already recorded keeps that
+    // record — the bulk loops key their retry / stop decision on it.
+    if (!this.testPilot.detailOutcomes[testId]) {
+      this.testPilot.detailOutcomes[testId] = { kind: "cancelled", at: Date.now() };
+    }
   }
 
   private armDetailTimeout(testId: string): void {
@@ -2197,6 +2214,7 @@ class ExtensionState {
       giveUp: () => {
         delete this.testPilot.pendingDetails[testId];
         this.detailTimers.delete(testId);
+        this.testPilot.detailOutcomes[testId] = { kind: "timeout", at: Date.now() };
         this.testPilot.error = ExtensionState.slowWaitGiveUp(
           `get steps for ${testId}`,
         );
@@ -9996,6 +10014,7 @@ class ExtensionState {
       this.clearDetailTimer(id);
     }
     this.testPilot.pendingDetails = {};
+    this.testPilot.detailOutcomes = {};
     this.testPilot.catalog = null;
     this.testPilot.pending = null;
     this.testPilot.error = null;
@@ -12087,18 +12106,31 @@ class ExtensionState {
         };
         if (payload.type === "test-pilot-detail") {
           this.applyDetailResult(payload);
+          this.testPilot.detailOutcomes[testId] = { kind: "done", at: Date.now() };
         } else {
           this.testPilot.error =
             "Agent returned an unrecognized response. Check the skill version.";
+          this.testPilot.detailOutcomes[testId] = {
+            kind: "error",
+            message: this.testPilot.error,
+            at: Date.now(),
+          };
         }
       } catch (err) {
         this.testPilot.error = `Couldn't parse agent response: ${(err as Error).message}`;
+        this.testPilot.detailOutcomes[testId] = {
+          kind: "error",
+          message: this.testPilot.error,
+          at: Date.now(),
+        };
       }
       delete this.testPilot.pendingDetails[testId];
     } else if (session.status === "error") {
       this.clearDetailTimer(testId);
-      this.testPilot.error =
+      const message =
         session.errorMessage ?? `Test Pilot query failed for ${testId}.`;
+      this.testPilot.error = message;
+      this.testPilot.detailOutcomes[testId] = { kind: "error", message, at: Date.now() };
       delete this.testPilot.pendingDetails[testId];
     }
   }
