@@ -237,10 +237,13 @@ If yes:
 cd companion && npm publish --access public
 ```
 
-The automation token in `~/.npmrc` handles auth and bypasses 2FA. If
-publish fails with E403/E404/EOTP, check `~/.npmrc` has a current
-automation token (Settings → Tokens → Generate New Token → Classic →
-type: Automation).
+Auth needs a **granular** token in `~/.npmrc` with **Bypass two-factor
+authentication** ticked (Read and write on `pinta-companion`). E403 = no
+2FA/bypass; EOTP = the token lacks the bypass box (the account's 2FA is a
+phone passkey, so there is no OTP to pass). The user sets it in their own
+terminal: `npm config set //registry.npmjs.org/:_authToken <token>` — never
+in chat. Also confirm `gh auth status` shows kevzlou7979 as the ACTIVE
+account before Step 8 (`gh auth switch -u kevzlou7979`).
 
 Verify success:
 
