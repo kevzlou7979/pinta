@@ -1377,11 +1377,18 @@
   <section id="features">
     <div class="container">
       <div class="section-head">
-        <span class="eyebrow">What Pinta includes &middot; v0.9.0</span>
+        <span class="eyebrow">What Pinta includes &middot; v0.10.0</span>
         <h2>The whole loop, shipped.</h2>
         <p class="sub">The core annotate → submit → edit loop plus the polish phases (inline editing, protocol, standalone, share files) — and eight built-in modules: GitLab Issues, Test Pilot, AuditFlow, Chat, Report, Design Variants, Code Review, and Devices (plus opt-in Voice Command dictation). See <a href="https://github.com/kevzlou7979/pinta/blob/main/spec/SPEC.md">the spec</a> for the phase-by-phase breakdown.</p>
       </div>
       <div class="features">
+        <div class="feature">
+          <div class="ico">
+            <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M9 11l3 3L22 4"/><path d="M21 12v7a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11"/></svg>
+          </div>
+          <h3>Tester round-trip</h3>
+          <p>Email a tester sheet that writes its own steps, let a tester run it in Pinta with no companion, and get ONE file back — signed-off Pass/Fail marks overlay your catalog, and annotated bugs file straight to GitLab with your assignee and labels. <span class="pill">v0.10</span></p>
+        </div>
         <div class="feature">
           <div class="ico">
             <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="4" width="13" height="10" rx="1.5"/><rect x="17" y="8" width="5" height="12" rx="1.2"/><path d="M6 18h5"/></svg>
@@ -1570,6 +1577,8 @@
             <li>Inline <strong>Details</strong> checkbox — short tester-friendly steps or deep technical context per Re-ask</li>
             <li>Steps render with inline <code>code</code>, fenced blocks (Prism syntax-highlighted), and <code>&gt; Note:</code> callouts</li>
             <li>Smoke or Thorough generation depth; file failed tests as GitLab issues in one click</li>
+            <li>Tester sheets (.md / .docx) generate any missing steps before they download, and can be emailed to the tester</li>
+            <li>Tester round-trip: signed-off results or one <code>.pinta</code> bundle come back and overlay your catalog read-only</li>
             <li>Export the catalog as markdown for sharing or <code>pandoc</code> → PDF</li>
           </ul>
         </article>
@@ -1893,7 +1902,7 @@
 npx pinta-companion .
 
 # 3. Install the /pinta skill, then fully restart Claude Code
-npx pinta-companion@0.9.0 install-skill
+npx pinta-companion@0.10.0 install-skill
 
 # 4. Open Pinta in your browser, annotate, hit Submit
 #    Then in Claude Code:  /pinta

@@ -4,37 +4,72 @@ Notable changes shipped on top of the original V1 pipeline. Newest first.
 For the architectural design behind each item, see
 [`spec/SPEC.md`](spec/SPEC.md).
 
-## Unreleased
+## 0.10.0 — 2026-09-29
 
-### Fixed
+### Added
 
-- **Test Pilot: bulk step generation is fail-safe.** The section-level
-  "Ask for steps" and the tester-sheet prep used to abort the whole run
-  the moment one row's ask errored (or when any unrelated Test Pilot
-  error landed mid-run), leaving every later row empty and reporting
-  "finished". Now a row the agent errors on is skipped, the run carries
-  on with the rest, and every errored row is re-asked again and again
-  in retry rounds (1s → 30s backoff) until it lands; only Cancel, a
-  give-up timeout (the agent stopped answering) or the runaway cap
-  (12 failed rounds on one row) stops the retries, and the note names
-  the row and how many retries ran. Steps that already landed are kept
-  and never re-asked — Retry / a second Ask-all only asks for what is
-  still missing — and a cancelled export keeps everything generated so
-  far, with "download anyway" still available.
+- **Test Pilot: tester round-trip.** A human tester can run a tester
+  sheet without a companion and send ONE file back. Standalone Test
+  Pilot keeps the catalog and Pass/Fail marks across side-panel
+  reloads; results and tester sheets carry a sign-off envelope (tester,
+  email, date, environment, run type Smoke / Thorough / Regression,
+  notes); importing a returned run overlays its marks read-only on the
+  developer's catalog ("N of M results applied", partial-run scope
+  shown) and Clear restores the developer's own marks. A `.pinta`
+  bundle can carry annotations **and** test results together
+  ("Annotations + test results").
+- **Tester sheets generate their own steps.** Exporting the tester sheet
+  (.md / .docx) or emailing it first asks the agent for steps on every
+  in-scope test that has none — one call at a time, with progress,
+  Cancel / Stop now, Retry and "download anyway" in the Export popover.
+  A "Generate missing steps first" checkbox (on by default) exports the
+  sheet as-is instead. Rows that already have steps are never re-asked.
+- **Email the tester sheet.** The Export popover downloads the sheet and
+  opens a prefilled Gmail draft (or your default mail app) addressed to
+  the tester; the recipient is remembered.
+- **GitLab filing from imported batches.** Tick annotations in an
+  imported `.pinta` and File issues — one issue per annotation with the
+  screenshot, de-dupe markers, and a `.pinta/tasks.md` fallback. Failed
+  Test Pilot tests get a checkbox selection sheet before filing.
+- **GitLab assignee + labels gear.** A gear next to "Create GitLab
+  issues" sets the assignee and labels (default `domain:client, bug`)
+  for every filed issue; the agent files straight away instead of
+  asking for batch metadata in the terminal.
+- **Issue template.** Every Pinta-filed issue (per-submit, imports,
+  failed tests) gets a real title and a summary / Root cause / Fix
+  direction / Repro body, with source reads fenced to one in-project
+  file.
 
 ### Changed
 
-- **Test Pilot: tester sheets always ship with steps.** Exporting the
-  tester sheet (.md / .docx) or emailing it now generates the agent's
-  per-row steps for every in-scope test that has none *before* the file
-  downloads — one agent call at a time, same queue as the section-level
-  "Ask for steps", with progress + Cancel in the Export popover. Rows
-  that already have steps are never re-asked. Without a companion, or
-  after a cancel / agent error, the popover says how many rows are still
-  empty and offers "download anyway" (the sheet then keeps the
-  "(no steps generated yet)" placeholder for those rows). The Gmail
-  draft now opens through the tabs API so it still appears after the
-  wait.
+- **Test Pilot start screen redesigned.** Coverage cards (Smoke /
+  Thorough) drive the Generate button, the import card accepts a dropped
+  `.md`, and the footer explains the .docx / PDF export.
+- **One loader and one empty state everywhere.** A paint-fan loader and
+  shared empty / loading states replace every spinner across Annotate,
+  Test Pilot, AuditFlow, Report, Variants, Code Review, Devices and chat.
+- **Test Pilot "Work on" scope** folds into one dropdown at the end of
+  the search box (Everything / New in vN / Failed last run / Not run
+  yet / saved plans).
+- **`/pinta` keeps listening for the whole working session.** It re-arms
+  its stream every 30 minutes instead of stopping, and pauses only on
+  "stop", a dead companion, or 8 hours with no submissions.
+
+### Fixed
+
+- **Bulk step generation is fail-safe.** Section "Ask for steps" and the
+  tester-sheet prep no longer abort on one bad row; errored rows are
+  retried round after round (1 s → 30 s backoff) until they land, and
+  steps already generated are kept.
+- **"Open Gmail draft" always said "blocked".** `window.open` with
+  `noopener` returns null by spec; the opener is now nulled instead and
+  drafts open through the tabs API.
+- The Export popover no longer closes on the download click, so the
+  email confirmation is visible.
+- Standalone plans and scope are no longer orphaned the first time a
+  companion connects.
+- 73 pre-existing svelte-check type errors fixed; the check gate is at
+  0 errors.
 
 ## 0.9.0 — 2026-09-17
 

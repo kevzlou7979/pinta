@@ -154,21 +154,29 @@ shipped. This is hand-edited marketing copy — there's no codegen.
   update the matching section. (Version strings are already pinned by
   `pin-docs-version.mjs`.)
 
-### `README.md`
+### `README.md` — keep it minimal
 
-- **What's new**: prepend a bullet (or small group) for the new version,
-  3–6 headline items mirroring the CHANGELOG `### Added` highlights,
-  tagged `*(vX.Y.Z)*`. Keep older entries.
-- **Modules included** (`## Modules included`): add/adjust the subsection
-  if a module was added or materially changed.
-- **Roadmap** (`## Roadmap`): mark shipped items, prune completed ones.
+The GitHub README is deliberately short (since v0.10.0): tagline, links,
+a 3-step quick start, compliance + development + license, and a link to
+the docs site (`https://pinta-companion.vercel.app/docs.html`). **Do not
+add "What's new", module lists or a roadmap back** — that content lives
+on the Vercel site (`docs/`) and in `CHANGELOG.md`. Only touch the README
+when the quick-start commands change (`pin-docs-version.mjs` already
+pins the `install-skill` version).
 
 ### Consistency gate
 
-Before moving on, three sources must name the SAME version and the SAME
-headline features: `CHANGELOG.md`'s newest section, the README "What's
-new" top entry, and the landing page's hero pill + features eyebrow. If
-they disagree, the page is still stale — fix it now, not next release.
+Before moving on, two sources must name the SAME version and the SAME
+headline features: `CHANGELOG.md`'s newest section and the landing
+page's features eyebrow + newest feature card. If they disagree, the
+page is still stale — fix it now, not next release.
+
+### Vercel deploy
+
+The site is `docs/` on Vercel (`pinta-companion.vercel.app`), deployed
+automatically on push to `main` whenever `docs/` changed
+(`scripts/vercel-ignore.sh`). After Step 6's push, curl the live site
+until the new version string appears (a deploy takes ~1 minute).
 
 > These files are already in the Step 6 `git add` list
 > (`README.md docs/index.html docs/docs.html`), so the refresh ships in

@@ -538,8 +538,7 @@ node ~/.claude/skills/pinta/start-companion.js .</code></pre>
         Code</strong> (skills load at startup; <code>/clear</code> is not
         enough):
       </p>
-      <pre><code>npx pinta-companion@0.9.0 install-skill</code></pre>
-      <p class="note"><strong>v0.9.0 is not on npm yet</strong> (npm account recovery in progress). Until then run it from the release tarball: <code>npx https://github.com/kevzlou7979/pinta/releases/download/v0.9.0/pinta-companion-0.9.0.tgz install-skill</code> — or <code>npx https://github.com/kevzlou7979/pinta/releases/download/v0.9.0/pinta-companion-0.9.0.tgz .</code> to start the companion. <code>npx pinta-companion .</code> still installs 0.8.2.</p>
+      <pre><code>npx pinta-companion@0.10.0 install-skill</code></pre>
       <p>
         The <code>@0.5.0</code> is deliberate — <code>npx</code> may have an
         older <code>pinta-companion</code> cached, and the
@@ -647,9 +646,12 @@ changed, and hit Submit. I'll wait."</code></pre>
         Each issue carries the annotation's selector, source-file pointer,
         page URL, the full-page screenshot (uploaded to your project's
         <code>uploads</code> endpoint), and a footer linking back to the
-        Pinta session. Before filing, the agent prompts in chat for batch
-        metadata (domain label, extra tags, assignees, or <code>later</code>
-        to defer entirely).
+        Pinta session, with a summary / Root cause / Fix direction / Repro
+        body. The <strong>gear</strong> next to <strong>Create GitLab
+        issues</strong> sets the <strong>Assignee</strong> and
+        <strong>Labels</strong> (default <code>domain:client, bug</code>)
+        applied to every issue — the agent files straight away, no chat
+        prompt. Blank labels means no labels.
       </p>
       <div class="callout warn">
         <strong>If you only tick GitLab Issues without Auto-apply</strong>
@@ -688,6 +690,19 @@ changed, and hit Submit. I'll wait."</code></pre>
         on-disk markdown — so if browser storage gets wiped, re-importing
         the same spec restores your marks. Catalog structure is the source
         of truth.
+      </p>
+      <h4>Tester round-trip <span class="chip shipped">v0.10.0</span></h4>
+      <p>
+        <strong>Export → Tester sheet</strong> (.md / .docx) or
+        <strong>Email</strong> hands the catalog to a human tester. Any test
+        without steps gets them generated first (untick <strong>Generate
+        missing steps first</strong> to export as-is). The tester imports the
+        sheet in Pinta with no companion, marks Pass / Fail, and sends ONE
+        file back: <strong>Results (.md)</strong> with a sign-off, or a
+        <code>.pinta</code> bundle with Contents set to
+        <strong>Annotations + test results</strong>. Importing it overlays
+        their marks read-only on your catalog; <strong>Clear</strong>
+        restores your own.
       </p>
       <h4>Smoke vs Thorough</h4>
       <p>

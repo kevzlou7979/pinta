@@ -190,7 +190,7 @@
     <ul>
       <li><strong>No credential proxying or sharing.</strong> There is no central Pinta account, no shared key, no relay server. Your Anthropic credentials never reach Pinta.</li>
       <li><strong>No &ldquo;Login with Claude.ai&rdquo; / subscription OAuth.</strong> Pinta does not authenticate to Anthropic on your behalf in any form.</li>
-      <li><strong>No headless or automated agent.</strong> The <code>/pinta</code> skill is event-driven, runs in an interactive terminal, and pauses itself after ~30 minutes idle. It is not an always-on bot, not Agent-SDK, not <code>claude -p</code>, not a cron job.</li>
+      <li><strong>No headless or automated agent.</strong> The <code>/pinta</code> skill is event-driven, runs in an interactive terminal, and pauses itself after 8 hours with no submissions. It is not an always-on bot, not Agent-SDK, not <code>claude -p</code>, not a cron job.</li>
       <li><strong>No multi-user fan-out through one subscription.</strong> One user = their own Claude account/key.</li>
     </ul>
 
