@@ -122,7 +122,8 @@ shipped. This is hand-edited marketing copy — there's no codegen.
 
 ### `docs/index.html` (the GitHub Pages landing page)
 
-- **Hero version pill** (`<span class="pill"><span class="pulse">…`):
+- **Hero version chip** (`<span class="version-chip">` above the H1 —
+  grep `version-chip`, it is easy to miss):
   bump to the new version + a one-line headline of the release, e.g.
   `v0.6.0 — Report module + in-place AuditFlow fixes`.
 - **Features eyebrow** (`<span class="eyebrow">What … includes · vX`):
