@@ -63,12 +63,19 @@ export type ModuleSpec = {
  * keyring / config (set up once via `glab auth login`). **No tokens are
  * stored in Pinta, transmitted over the wire, or written to disk.**
  *
- * The two settings below are optional power-user overrides:
+ * Settings (also editable from the gear next to "Create GitLab issues"
+ * in the submit footer):
  *   - `project_id` overrides the project auto-detected from the current
  *     git repo's GitLab remote.
- *   - `labels` apply to every issue Pinta files.
- * Leave both blank for the common case — `glab` figures it out.
+ *   - `assignee` — GitLab username(s) every filed issue is assigned to.
+ *   - `labels` apply to every issue Pinta files (default
+ *     `domain:client, bug`; clear it for no labels).
+ * With `assignee` / `labels` set the agent files straight away instead
+ * of asking for batch metadata in the terminal.
  */
+/** Labels every Pinta-filed GitLab issue gets until the user edits them. */
+export const GITLAB_DEFAULT_LABELS = "domain:client, bug";
+
 const GITLAB_ISSUES: ModuleSpec = {
   id: "gitlab-issues",
   name: "GitLab Issues",
@@ -88,11 +95,19 @@ const GITLAB_ISSUES: ModuleSpec = {
       placeholder: "12345 or my-group/my-app",
     },
     {
+      key: "assignee",
+      type: "string",
+      label: "Assignee (optional)",
+      hint: "GitLab username, or several comma-separated. Every filed issue is assigned to them.",
+      placeholder: "@username",
+    },
+    {
       key: "labels",
       type: "string",
-      label: "Default labels (optional)",
-      hint: "Comma-separated. Applied to every issue created.",
-      placeholder: "bug, ui",
+      label: "Labels",
+      hint: "Comma-separated. Applied to every issue created. Clear it for no labels.",
+      placeholder: "domain:client, bug",
+      default: GITLAB_DEFAULT_LABELS,
     },
   ],
 };

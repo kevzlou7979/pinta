@@ -45,6 +45,8 @@ type TabCase = {
   mountText?: string;
   /** Tab-level titles keep the heading level the old markup had (F5). */
   heading?: "h2" | "h3";
+  /** Bespoke onboarding layout (left-aligned, no centred icon chip). */
+  noIconChip?: boolean;
   /** Substring expected in the LoadingState while pending. */
   loadingTitle?: string;
   pend?: (app: any) => void;
@@ -53,7 +55,7 @@ type TabCase = {
 
 const TABS: TabCase[] = [
   {
-    id: "test-pilot", label: "Test Pilot", emptyTitle: "Build your test catalog", heading: "h2", loadingTitle: "Generating tests",
+    id: "test-pilot", label: "Test Pilot", emptyTitle: "Build your test catalog", heading: "h2", noIconChip: true, loadingTitle: "Generating tests",
     pend: (app) => { app.testPilot.pending = { kind: "doc-generate", sessionId: "s1", startedAt: Date.now() }; },
     reset: (app) => { app.testPilot.pending = null; },
   },
@@ -145,7 +147,7 @@ describe("every tab: shared EmptyState when empty, shared LoadingState when pend
         if (empties.length) failures.push(`${t.id} empty: unexpected EmptyState(s): ${empties.map((e) => norm(e.textContent).slice(0, 40)).join(" | ")}`);
       } else if (!hit) failures.push(`${t.id} empty: no EmptyState titled "${t.emptyTitle}" (found: ${empties.map((e) => norm(e.querySelector("h2, h3, p")?.textContent)).join(" | ") || "none"})`);
       else {
-        if (!hit.querySelector('[aria-hidden="true"].rounded-full')) failures.push(`${t.id} empty: EmptyState has no icon chip`);
+        if (!t.noIconChip && !hit.querySelector('[aria-hidden="true"].rounded-full')) failures.push(`${t.id} empty: EmptyState has no icon chip`);
         const titleEl = hit.querySelector("h2, h3, p");
         const want = t.heading ?? "p";
         if (titleEl?.tagName.toLowerCase() !== want) failures.push(`${t.id} empty: title is <${titleEl?.tagName.toLowerCase()}>, expected <${want}> (F5)`);

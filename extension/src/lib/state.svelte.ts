@@ -2347,13 +2347,7 @@ class ExtensionState {
       ? selectUnfiledFailures(catalog, this.testPilot.filedIssues, selectedIds)
       : allUnfiled;
     if (unfiled.length === 0) return; // nothing ticked — no-op
-    const gl = this.modules["gitlab-issues"];
-    const gitlab = gl?.enabled
-      ? {
-          projectId: (gl.settings?.project_id as string) || undefined,
-          labels: (gl.settings?.labels as string) || undefined,
-        }
-      : null;
+    const gitlab = this.gitlabTarget();
     const queryComment = JSON.stringify({
       op: "test-file-issues",
       runId: crypto.randomUUID(),
@@ -6703,13 +6697,7 @@ class ExtensionState {
         "No companion connected. Start `pinta-companion .` in your project to file an issue.";
       return;
     }
-    const gl = this.modules["gitlab-issues"];
-    const gitlab = gl?.enabled
-      ? {
-          projectId: (gl.settings?.project_id as string) || undefined,
-          labels: (gl.settings?.labels as string) || undefined,
-        }
-      : null;
+    const gitlab = this.gitlabTarget();
     const queryComment = JSON.stringify({
       op: "audit-file-issue",
       runId: this.audit.currentRun?.runId,
@@ -10225,18 +10213,41 @@ class ExtensionState {
     for (const spec of this.allModuleSpecs()) {
       if (!this.tickedModules[spec.id]) continue;
       if (!this.moduleReady(spec.id)) continue;
-      const settings = this.modules[spec.id]?.settings ?? {};
-      out.push({
-        id: spec.id,
-        // Snapshot strips Svelte 5 reactive proxies before crossing the
-        // structuredClone boundary on chrome.runtime / fetch().
-        settings: $state.snapshot(settings) as Record<
-          string,
-          string | boolean
-        >,
-      });
+      out.push({ id: spec.id, settings: this.effectiveModuleSettings(spec.id) });
     }
     return out.length > 0 ? out : undefined;
+  }
+
+  /** Stored settings over spec defaults. A key the user never touched
+   *  (e.g. a setting added after they enabled the module) reads as its
+   *  default; an explicit value — including "" — wins. Plain object
+   *  (snapshot strips Svelte 5 proxies before structuredClone). */
+  effectiveModuleSettings(id: string): Record<string, string | boolean> {
+    const spec = this.specFor(id);
+    const out: Record<string, string | boolean> = {};
+    for (const field of spec?.settings ?? []) {
+      if (field.default !== undefined) out[field.key] = field.default;
+    }
+    const stored = this.modules[id]?.settings ?? {};
+    return {
+      ...out,
+      ...($state.snapshot(stored) as Record<string, string | boolean>),
+    };
+  }
+
+  /** GitLab filing target for the interactive "file issues" ops (Test
+   *  Pilot failures, AuditFlow checks, imported annotations). Null when
+   *  the GitLab Issues module is off — callers then fall back to
+   *  `.pinta/tasks.md`. */
+  gitlabTarget(): { projectId?: string; labels?: string; assignee?: string } | null {
+    if (!this.modules["gitlab-issues"]?.enabled) return null;
+    const s = this.effectiveModuleSettings("gitlab-issues");
+    const str = (v: unknown) => (typeof v === "string" && v.trim() ? v.trim() : undefined);
+    return {
+      projectId: str(s.project_id),
+      labels: str(s.labels),
+      assignee: str(s.assignee),
+    };
   }
 
   /** Drop every per-submit tick (used when the user clears module state;
@@ -10557,13 +10568,7 @@ class ExtensionState {
     // Pure payload shaping (incl. the comment/nearby-text token caps)
     // lives in import-issues.ts — unit-tested directly.
     const items = buildImportFileIssueItems(selected, imported.session.url);
-    const gl = this.modules["gitlab-issues"];
-    const gitlab = gl?.enabled
-      ? {
-          projectId: (gl.settings?.project_id as string) || undefined,
-          labels: (gl.settings?.labels as string) || undefined,
-        }
-      : null;
+    const gitlab = this.gitlabTarget();
     const queryComment = JSON.stringify({
       op: "import-file-issues",
       importedId,
@@ -10584,7 +10589,7 @@ class ExtensionState {
       type: "module.query.submit",
       url: this.queryUrl,
       moduleId: "gitlab-issues",
-      moduleSettings: gl?.settings ?? {},
+      moduleSettings: this.effectiveModuleSettings("gitlab-issues"),
       queryComment,
       screenshot: imported.session.fullPageScreenshot || undefined,
     });

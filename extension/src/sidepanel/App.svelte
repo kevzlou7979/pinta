@@ -25,6 +25,7 @@
     PintaFileError,
   } from "../lib/pinta-file.js";
   import type { TestPilotSignoff } from "../lib/test-pilot-md.js";
+  import { GITLAB_DEFAULT_LABELS } from "../lib/modules.js";
   import { isEmailish, openMailDraftTab, type MailVia } from "../lib/mail.js";
   import { theme, toggleTheme } from "../lib/theme.svelte.js";
   // Tool defs (id / label / icon / shortcut) are shared with the on-page
@@ -547,6 +548,25 @@
   // element that wraps BOTH the trigger and the panel, so clicking the
   // trigger (to toggle) isn't treated as an outside press. Capture-phase
   // pointerdown so it fires before the item buttons' own click handlers.
+  /** Which per-submit module's settings popover is open (the gear next
+   *  to "Create GitLab issues"). */
+  let gitlabPrefsFor = $state<string | null>(null);
+  /** Close the gear popover; `refocus` hands focus back to the gear
+   *  (keyboard / Done / Escape), not on an outside click. */
+  function closeGitlabPrefs(refocus: boolean): void {
+    if (!gitlabPrefsFor) return;
+    gitlabPrefsFor = null;
+    if (refocus) {
+      queueMicrotask(() =>
+        document.querySelector<HTMLElement>("[data-pinta-gitlab-gear]")?.focus(),
+      );
+    }
+  }
+  /** Put focus in the first field when the popover opens. */
+  function focusFirstField(node: HTMLElement) {
+    queueMicrotask(() => node.querySelector<HTMLInputElement>("input")?.focus());
+  }
+
   function clickOutside(node: HTMLElement, onOutside: () => void) {
     function handle(e: PointerEvent) {
       if (!node.contains(e.target as Node)) onOutside();
@@ -4116,31 +4136,103 @@
         {@const moduleReady = app.moduleReady(moduleSpec.id)}
         {@const ticked = !!app.tickedModules[moduleSpec.id]}
         {#if moduleReady}
-          <label
-            class="flex items-start gap-2 text-[12px] text-ink-700 dark:text-night-dim cursor-pointer select-none"
-          >
-            <input
-              type="checkbox"
-              class="mt-0.5 accent-brand-pink"
-              checked={ticked}
-              onchange={(e) =>
-                app.setModuleTicked(
-                  moduleSpec.id,
-                  (e.currentTarget as HTMLInputElement).checked,
-                )}
-            />
-            <span class="flex-1 leading-snug">
-              <span class="inline-flex items-center gap-1.5 flex-wrap">
-                {moduleSpec.sessionCheckboxLabel}
-                {@render infoTip(moduleSpec.sessionCheckboxHint)}
-                {#if ticked}
-                  <span class="inline-flex items-center text-[10px] uppercase tracking-wide font-semibold text-emerald-700 dark:text-emerald-300 bg-emerald-100 dark:bg-emerald-950/50 border border-emerald-300 dark:border-emerald-800/50 rounded-full px-1.5 py-0.5" title="This module will run on the next submit">
-                    Will run
-                  </span>
-                {/if}
+          <div class="relative flex items-start gap-1.5" use:clickOutside={() => { if (gitlabPrefsFor === moduleSpec.id) closeGitlabPrefs(false); }}>
+            <label
+              class="flex items-start gap-2 text-[12px] text-ink-700 dark:text-night-dim cursor-pointer select-none"
+            >
+              <input
+                type="checkbox"
+                class="mt-0.5 accent-brand-pink"
+                checked={ticked}
+                onchange={(e) =>
+                  app.setModuleTicked(
+                    moduleSpec.id,
+                    (e.currentTarget as HTMLInputElement).checked,
+                  )}
+              />
+              <span class="leading-snug">
+                <span class="inline-flex items-center gap-1.5 flex-wrap">
+                  {moduleSpec.sessionCheckboxLabel}
+                  {@render infoTip(moduleSpec.sessionCheckboxHint)}
+                </span>
               </span>
-            </span>
-          </label>
+            </label>
+            {#if moduleSpec.id === "gitlab-issues"}
+              {@const glSettings = app.effectiveModuleSettings("gitlab-issues")}
+              <button
+                type="button"
+                class="-mt-0.5 w-6 h-6 inline-flex items-center justify-center rounded-md hover:text-brand-pink dark:hover:text-brand-pink-light hover:bg-ink-100 dark:hover:bg-night-alt focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand-pink/40 {gitlabPrefsFor === moduleSpec.id
+                  ? 'text-brand-pink dark:text-brand-pink-light'
+                  : 'text-ink-500 dark:text-night-mute'}"
+                aria-label="GitLab issue settings"
+                aria-haspopup="dialog"
+                aria-expanded={gitlabPrefsFor === moduleSpec.id}
+                title="Assignee and labels for filed issues"
+                onclick={() => (gitlabPrefsFor = gitlabPrefsFor === moduleSpec.id ? null : moduleSpec.id)}
+                data-pinta-gitlab-gear
+              >
+                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12.22 2h-.44a2 2 0 0 0-2 2v.18a2 2 0 0 1-1 1.73l-.43.25a2 2 0 0 1-2 0l-.15-.08a2 2 0 0 0-2.73.73l-.22.38a2 2 0 0 0 .73 2.73l.15.1a2 2 0 0 1 1 1.72v.51a2 2 0 0 1-1 1.74l-.15.09a2 2 0 0 0-.73 2.73l.22.38a2 2 0 0 0 2.73.73l.15-.08a2 2 0 0 1 2 0l.43.25a2 2 0 0 1 1 1.73V20a2 2 0 0 0 2 2h.44a2 2 0 0 0 2-2v-.18a2 2 0 0 1 1-1.73l.43-.25a2 2 0 0 1 2 0l.15.08a2 2 0 0 0 2.73-.73l.22-.39a2 2 0 0 0-.73-2.73l-.15-.08a2 2 0 0 1-1-1.74v-.5a2 2 0 0 1 1-1.74l.15-.09a2 2 0 0 0 .73-2.73l-.22-.38a2 2 0 0 0-2.73-.73l-.15.08a2 2 0 0 1-2 0l-.43-.25a2 2 0 0 1-1-1.73V4a2 2 0 0 0-2-2z"/><circle cx="12" cy="12" r="3"/></svg>
+              </button>
+              {#if gitlabPrefsFor === moduleSpec.id}
+                <div
+                  class="absolute bottom-full left-0 mb-1.5 z-40 w-64 max-w-[calc(100vw-2rem)] rounded-lg border border-ink-200 dark:border-night-line bg-white dark:bg-night-card shadow-lg p-3 space-y-2.5"
+                  role="dialog"
+                  aria-label="GitLab issue settings"
+                  tabindex="-1"
+                  onkeydown={(e) => {
+                    if (e.key === "Escape") {
+                      e.stopPropagation();
+                      closeGitlabPrefs(true);
+                    }
+                  }}
+                  use:focusFirstField
+                  data-pinta-gitlab-prefs
+                >
+                  <div class="text-[10.5px] font-semibold uppercase tracking-wider text-ink-500 dark:text-night-mute">GitLab issues</div>
+                  <label class="block">
+                    <span class="block text-[11px] font-medium text-ink-700 dark:text-night-dim mb-0.5">Assignee</span>
+                    <input
+                      type="text"
+                      class="w-full px-2 py-1 text-[12px] rounded-md border border-ink-200 dark:border-night-line bg-white dark:bg-night-alt text-ink-900 dark:text-night-text placeholder:text-ink-400 dark:placeholder:text-night-mute outline-none focus:border-brand-pink dark:focus:border-brand-pink-light"
+                      placeholder="@username"
+                      value={(glSettings.assignee as string) ?? ""}
+                      oninput={(e) => app.setModuleSetting("gitlab-issues", "assignee", (e.currentTarget as HTMLInputElement).value)}
+                      autocomplete="off"
+                      spellcheck="false"
+                      data-pinta-gitlab-assignee
+                    />
+                    <span class="block mt-0.5 text-[10.5px] text-ink-500 dark:text-night-dim">GitLab username; comma-separate several. Blank = unassigned.</span>
+                  </label>
+                  <label class="block">
+                    <span class="block text-[11px] font-medium text-ink-700 dark:text-night-dim mb-0.5">Labels</span>
+                    <input
+                      type="text"
+                      class="w-full px-2 py-1 text-[12px] rounded-md border border-ink-200 dark:border-night-line bg-white dark:bg-night-alt text-ink-900 dark:text-night-text placeholder:text-ink-400 dark:placeholder:text-night-mute outline-none focus:border-brand-pink dark:focus:border-brand-pink-light"
+                      placeholder={GITLAB_DEFAULT_LABELS}
+                      value={(glSettings.labels as string) ?? ""}
+                      oninput={(e) => app.setModuleSetting("gitlab-issues", "labels", (e.currentTarget as HTMLInputElement).value)}
+                      autocomplete="off"
+                      spellcheck="false"
+                      data-pinta-gitlab-labels
+                    />
+                    <span class="block mt-0.5 text-[10.5px] text-ink-500 dark:text-night-dim">Comma-separated, added to every issue. Blank = no labels.</span>
+                  </label>
+                  <div class="flex items-center justify-between pt-0.5">
+                    <button
+                      type="button"
+                      class="text-[11px] text-ink-500 dark:text-night-dim hover:text-brand-pink dark:hover:text-brand-pink-light underline underline-offset-2"
+                      onclick={() => app.setModuleSetting("gitlab-issues", "labels", GITLAB_DEFAULT_LABELS)}
+                    >Reset labels</button>
+                    <button
+                      type="button"
+                      class="rounded-md bg-brand-pink px-2.5 py-1 text-[11.5px] font-semibold text-white hover:bg-brand-magenta dark:hover:bg-brand-pink-light"
+                      onclick={() => closeGitlabPrefs(true)}
+                    >Done</button>
+                  </div>
+                </div>
+              {/if}
+            {/if}
+          </div>
         {/if}
       {/each}
     {/snippet}

@@ -326,6 +326,49 @@
   function setThorough(on: boolean): void {
     app.setModuleSetting("test-pilot", "thorough_tests", on);
   }
+  /** Coverage cards on the empty state. */
+  const DEPTHS = [
+    {
+      id: "smoke",
+      thorough: false,
+      title: "Smoke test",
+      hint: "Critical paths only — confirms the app loads and core flows work.",
+      chips: ["Faster", "Fewer tokens"],
+    },
+    {
+      id: "thorough",
+      thorough: true,
+      title: "Thorough test",
+      hint: "Exhaustive — every feature, edge cases and negative paths.",
+      chips: ["Slower", "More tokens"],
+    },
+  ] as const;
+  /** Empty-state import card: drag-over highlight + a note when the
+   *  dropped file isn't markdown. Footer "How?" disclosure. */
+  let specDragOver = $state(false);
+  let specDropNote = $state<string | null>(null);
+  let pandocHowOpen = $state(false);
+  function onSpecDragOver(e: DragEvent) {
+    if (!e.dataTransfer?.types.includes("Files")) return;
+    // Without preventDefault Chrome would navigate the panel to the file.
+    e.preventDefault();
+    e.dataTransfer.dropEffect = "copy";
+    specDragOver = true;
+    specDropNote = null;
+  }
+  async function onSpecDrop(e: DragEvent) {
+    e.preventDefault();
+    specDragOver = false;
+    const files = [...(e.dataTransfer?.files ?? [])];
+    if (files.length === 0) return;
+    const file = files.find((f) => /\.(md|markdown)$/i.test(f.name));
+    if (!file) {
+      specDropNote = `${files[0]!.name} isn't a markdown file — drop a .md spec.`;
+      return;
+    }
+    specDropNote = null;
+    await importSpecFile(file);
+  }
   // True while the chat-bound row has a chat ask in flight.
   // Drives the send-button spinner.
   const chatPending = $derived(
@@ -865,7 +908,23 @@
       }
     }
     window.addEventListener("dragover", onWindowDragOver);
-    return () => window.removeEventListener("dragover", onWindowDragOver);
+    // A file dragged over the panel but dropped outside a real drop
+    // target would make Chrome open it and replace the side panel.
+    // Element handlers run first (bubbling), so only unclaimed file
+    // drags reach here.
+    function guardStrayFileDrag(e: DragEvent) {
+      if (e.defaultPrevented || !e.dataTransfer?.types.includes("Files")) return;
+      e.preventDefault();
+      e.dataTransfer.dropEffect = "none";
+      if (e.type === "drop") specDragOver = false;
+    }
+    window.addEventListener("dragover", guardStrayFileDrag);
+    window.addEventListener("drop", guardStrayFileDrag);
+    return () => {
+      window.removeEventListener("dragover", onWindowDragOver);
+      window.removeEventListener("dragover", guardStrayFileDrag);
+      window.removeEventListener("drop", guardStrayFileDrag);
+    };
   });
 
   function onPickFile() {
@@ -905,6 +964,11 @@
     const file = input.files?.[0];
     input.value = ""; // reset so the same file can be re-picked
     if (!file) return;
+    await importSpecFile(file);
+  }
+
+  /** Shared by the file picker and the empty-state drop card. */
+  async function importSpecFile(file: File) {
     const text = await file.text();
     await app.importTestDoc(file.name, text);
     // A results file for a DIFFERENT catalog — or an unmarked sheet
@@ -1660,7 +1724,7 @@
 <input
   bind:this={fileInput}
   type="file"
-  accept=".md,text/markdown"
+  accept=".md,.markdown,text/markdown"
   class="hidden"
   onchange={onFileChange}
 />
@@ -1767,94 +1831,150 @@
     </div>
   </section>
 {:else if !app.testPilot.catalog}
-  <!-- EMPTY state (connected) ---------------------------------------- -->
-  <section class="space-y-3 p-3">
-    <EmptyState
-      title="Build your test catalog"
-      heading="h2"
-      hint="Get a UAT-style test catalog for your app. Let the agent generate one from project context, or import a hand-written markdown spec."
-      class="!py-6"
-    >
-    {#snippet icon()}
-      <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
-        <path d="M9 3h6" />
-        <path d="M10 3v6.5L4.4 18.7A1.6 1.6 0 0 0 5.8 21h12.4a1.6 1.6 0 0 0 1.4-2.3L14 9.5V3" />
-        <path d="M7.5 14.5h9" opacity="0.55" />
-      </svg>
-    {/snippet}
-    <!-- Depth — Smoke (quick happy paths) vs Thorough (every feature,
-         edge + negative cases). Persists as the thorough_tests setting. -->
-    <div class="rounded-md border border-ink-200 dark:border-night-line bg-white dark:bg-night-card p-2.5 space-y-1.5">
-      <div class="flex rounded-full bg-ink-100 dark:bg-night-alt p-0.5">
-        <button
-          type="button"
-          class="flex-1 py-1 rounded-full text-[11.5px] font-medium transition-colors"
-          class:bg-white={!thoroughOn}
-          class:dark:bg-night-card={!thoroughOn}
-          class:text-brand-pink={!thoroughOn}
-          class:dark:text-brand-pink-light={!thoroughOn}
-          class:shadow-sm={!thoroughOn}
-          class:ring-1={!thoroughOn}
-          class:ring-brand-pink={!thoroughOn}
-          class:text-ink-500={thoroughOn}
-          class:dark:text-night-mute={thoroughOn}
-          aria-pressed={!thoroughOn}
-          onclick={() => setThorough(false)}
-        >
-          Smoke test
-        </button>
-        <button
-          type="button"
-          class="flex-1 py-1 rounded-full text-[11.5px] font-medium transition-colors"
-          class:bg-white={thoroughOn}
-          class:dark:bg-night-card={thoroughOn}
-          class:text-brand-pink={thoroughOn}
-          class:dark:text-brand-pink-light={thoroughOn}
-          class:shadow-sm={thoroughOn}
-          class:ring-1={thoroughOn}
-          class:ring-brand-pink={thoroughOn}
-          class:text-ink-500={!thoroughOn}
-          class:dark:text-night-mute={!thoroughOn}
-          aria-pressed={thoroughOn}
-          onclick={() => setThorough(true)}
-        >
-          Thorough test
-        </button>
-      </div>
-      <p class="text-[10.5px] text-ink-500 dark:text-night-mute leading-snug">
-        {thoroughOn
-          ? "Thorough: exhaustive coverage — every feature, edge cases, negative paths. Slower, more tokens."
-          : "Smoke: a quick happy-path catalog of the core flows. Fast and cheap."}
+  <!-- EMPTY state (connected) ----------------------------------------
+       Left-aligned onboarding: title + hint, a Coverage radio group
+       (Smoke / Thorough, persisted as the thorough_tests setting), the
+       Generate CTA that names the chosen depth, a drag-and-drop import
+       card, the data-handling notice, and the export footer. -->
+  <section class="pinta-empty-state p-3 pt-4 space-y-4">
+    <div class="space-y-1.5">
+      <h2 class="text-[22px] font-bold tracking-tight leading-tight text-ink-900 dark:text-night-text">Build your test catalog</h2>
+      <p class="text-[13px] leading-relaxed text-ink-500 dark:text-night-mute">
+        A UAT-style catalog of features, scenarios and expected results — generated from project context, or imported from your own spec.
       </p>
     </div>
-    {#snippet action()}
+
+    <fieldset class="space-y-2">
+      <legend class="mb-2 text-[10.5px] font-semibold uppercase tracking-[0.12em] text-ink-500 dark:text-night-mute">Coverage</legend>
+      {#each DEPTHS as depth (depth.id)}
+        {@const selected = depth.thorough === thoroughOn}
+        <label
+          class="flex gap-3 rounded-xl border p-3.5 cursor-pointer transition-colors has-[:focus-visible]:ring-2 has-[:focus-visible]:ring-brand-pink/40 {selected
+            ? 'border-brand-pink dark:border-brand-pink-light bg-brand-pink/5 dark:bg-brand-pink-light/10'
+            : 'border-ink-200 dark:border-night-line bg-white dark:bg-night-card hover:border-ink-300 dark:hover:border-night-line2'}"
+          data-pinta-depth={depth.id}
+          data-selected={selected ? "true" : undefined}
+        >
+          <input
+            type="radio"
+            name="pinta-test-depth"
+            class="sr-only"
+            value={depth.id}
+            checked={selected}
+            onchange={() => setThorough(depth.thorough)}
+            aria-labelledby="pinta-depth-title-{depth.id}"
+            aria-describedby="pinta-depth-hint-{depth.id} pinta-depth-chips-{depth.id}"
+          />
+          <span
+            class="mt-0.5 w-[18px] h-[18px] rounded-full border-2 flex items-center justify-center shrink-0 transition-colors"
+            class:border-brand-pink={selected}
+            class:dark:border-brand-pink-light={selected}
+            class:border-ink-300={!selected}
+            class:dark:border-night-line2={!selected}
+            aria-hidden="true"
+          >
+            {#if selected}<span class="w-2 h-2 rounded-full bg-brand-pink dark:bg-brand-pink-light"></span>{/if}
+          </span>
+          <span class="min-w-0">
+            <span id="pinta-depth-title-{depth.id}" class="block text-[13.5px] font-semibold text-ink-900 dark:text-night-text">{depth.title}</span>
+            <span id="pinta-depth-hint-{depth.id}" class="block mt-0.5 text-[12px] leading-snug text-ink-600 dark:text-night-dim">{depth.hint}</span>
+            <span id="pinta-depth-chips-{depth.id}" class="mt-2 flex flex-wrap gap-1.5">
+              {#each depth.chips as chip}
+                <span class="rounded-md bg-ink-100 dark:bg-night-alt px-2 py-0.5 text-[10.5px] font-medium text-ink-600 dark:text-night-dim">{chip}</span>
+              {/each}
+            </span>
+          </span>
+        </label>
+      {/each}
+    </fieldset>
+
     <button
       type="button"
-      class="w-full inline-flex items-center justify-center gap-1.5 rounded-md bg-brand-pink text-white text-sm font-medium px-3 py-2.5 hover:bg-brand-magenta dark:hover:bg-brand-pink-light"
+      class="w-full inline-flex items-center justify-center gap-2 rounded-xl bg-brand-pink px-4 py-3 text-[14px] font-semibold text-white shadow-md shadow-brand-pink/25 hover:bg-brand-magenta dark:hover:bg-brand-pink-light focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand-pink/40 focus-visible:ring-offset-2 dark:focus-visible:ring-offset-night-bg transition-colors"
       onclick={() => app.generateTestDoc()}
     >
-      <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 2v4"/><path d="M12 18v4"/><path d="m4.93 4.93 2.83 2.83"/><path d="m16.24 16.24 2.83 2.83"/><path d="M2 12h4"/><path d="M18 12h4"/><path d="m4.93 19.07 2.83-2.83"/><path d="m16.24 7.76 2.83-2.83"/></svg>
-      Generate Test Script
+      <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 3l1.9 5.1L19 10l-5.1 1.9L12 17l-1.9-5.1L5 10l5.1-1.9z"/><path d="M19 15l.8 2.2L22 18l-2.2.8L19 21l-.8-2.2L16 18l2.2-.8z"/></svg>
+      Generate {thoroughOn ? "thorough" : "smoke"} catalog
     </button>
-    <button
-      type="button"
-      class="w-full inline-flex items-center justify-center gap-1.5 rounded-md border border-ink-300 dark:border-night-line bg-transparent text-ink-700 dark:text-night-dim hover:bg-ink-50 dark:hover:bg-night-alt text-[13px] font-medium px-3 py-2"
-      onclick={onPickFile}
-    >
-      <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" y1="3" x2="12" y2="15"/></svg>
-      Import Test Script
-    </button>
-    {/snippet}
-    </EmptyState>
-    <div class="rounded-md border border-amber-300/50 dark:border-amber-700/40 bg-amber-50 dark:bg-amber-950/20 p-2.5 text-[11px] text-amber-900 dark:text-amber-200 leading-snug">
-      <strong class="font-semibold">Heads up:</strong> the spec is written to
-      <code class="font-mono text-[10px] bg-amber-100 dark:bg-amber-900/40 px-1 rounded">.pinta/test-docs/</code>
-      and read by Claude Code (sent to Anthropic's API). Don't include real passwords
-      or production secrets in any spec you import — use placeholders or test-tenant credentials.
+
+    <div class="flex items-center gap-3 text-[11.5px] text-ink-500 dark:text-night-mute" aria-hidden="true">
+      <span class="h-px flex-1 bg-ink-200 dark:bg-night-line"></span>
+      or
+      <span class="h-px flex-1 bg-ink-200 dark:bg-night-line"></span>
     </div>
-    <p class="text-[11px] text-ink-500 dark:text-night-mute italic leading-snug">
-      Tip: export Results or the Tester sheet as <code>.docx</code> to open straight in Word — or run the <code>.md</code> through <code>pandoc results.md -o results.pdf</code> for a PDF.
-    </p>
+
+    <div>
+      <button
+        type="button"
+        class="w-full flex items-center gap-3 rounded-xl border border-dashed p-3.5 text-left transition-colors [&_*]:pointer-events-none focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand-pink/40 {specDragOver
+          ? 'border-brand-pink dark:border-brand-pink-light bg-brand-pink/5 dark:bg-brand-pink-light/10'
+          : 'border-ink-300 dark:border-night-line2 bg-white dark:bg-night-card hover:border-ink-400 dark:hover:border-night-mute'}"
+        onclick={onPickFile}
+        ondragenter={onSpecDragOver}
+        ondragover={onSpecDragOver}
+        ondragleave={(e) => {
+          if (!(e.currentTarget as HTMLElement).contains(e.relatedTarget as Node | null)) specDragOver = false;
+        }}
+        ondrop={onSpecDrop}
+        data-pinta-spec-drop
+      >
+        <span class="w-10 h-10 rounded-lg bg-ink-100 dark:bg-night-alt flex items-center justify-center shrink-0 text-ink-700 dark:text-night-dim" aria-hidden="true">
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" y1="3" x2="12" y2="15"/></svg>
+        </span>
+        <span class="min-w-0">
+          <span class="block text-[13.5px] font-semibold text-ink-900 dark:text-night-text">{specDragOver ? "Drop to import" : "Import a markdown spec"}</span>
+          <span class="block text-[12px] text-ink-600 dark:text-night-dim">
+            Drop a <code class="font-mono text-[11px]">.md</code> file here, or <span class="underline underline-offset-2">browse</span>
+          </span>
+        </span>
+      </button>
+      <div role="status" aria-live="polite">
+        {#if specDropNote}
+          <p class="mt-1.5 flex items-start gap-1.5 text-[11px] text-amber-700 dark:text-amber-400">
+            <span class="flex-1">{specDropNote}</span>
+            <button
+              type="button"
+              class="shrink-0 -mt-0.5 w-5 h-5 inline-flex items-center justify-center rounded hover:bg-amber-100 dark:hover:bg-amber-900/40"
+              aria-label="Dismiss"
+              onclick={() => (specDropNote = null)}
+            >
+              <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.6" stroke-linecap="round" aria-hidden="true"><path d="M18 6 6 18M6 6l12 12"/></svg>
+            </button>
+          </p>
+        {/if}
+      </div>
+    </div>
+
+    <div class="flex gap-2.5 rounded-xl border border-amber-300/60 dark:border-amber-700/40 bg-amber-50 dark:bg-amber-950/20 p-3 text-[11.5px] leading-relaxed text-amber-900 dark:text-amber-200">
+      <svg class="mt-0.5 shrink-0" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/><path d="M12 8v4"/><path d="M12 16h.01"/></svg>
+      <p>
+        Specs are saved to
+        <code class="font-mono text-[10.5px] rounded bg-amber-100 dark:bg-amber-900/40 px-1 py-px">.pinta/test-docs/</code>
+        and sent to Anthropic's API via Claude Code. Use placeholders or test-tenant credentials — never real passwords or production secrets.
+      </p>
+    </div>
+
+    <div class="border-t border-ink-200 dark:border-night-line pt-3">
+      <div class="flex items-center gap-2 text-[11.5px] text-ink-500 dark:text-night-mute">
+        <svg class="shrink-0" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/></svg>
+        <span class="flex-1">Results export to <strong class="font-semibold text-ink-700 dark:text-night-dim">.docx</strong>, or <strong class="font-semibold text-ink-700 dark:text-night-dim">PDF</strong> via pandoc</span>
+        <button
+          type="button"
+          class="shrink-0 font-semibold text-brand-pink dark:text-brand-pink-light hover:underline underline-offset-2"
+          aria-expanded={pandocHowOpen}
+          aria-controls="pinta-pandoc-how"
+          aria-label="{pandocHowOpen ? 'Hide' : 'How?'} Export instructions"
+          onclick={() => (pandocHowOpen = !pandocHowOpen)}
+        >{pandocHowOpen ? "Hide" : "How?"}</button>
+      </div>
+      {#if pandocHowOpen}
+        <div id="pinta-pandoc-how" class="mt-2 space-y-1.5 text-[11.5px] leading-snug text-ink-600 dark:text-night-dim">
+          <p><strong class="font-semibold">.docx</strong> — pick it in Export; it opens straight in Word, no pandoc needed.</p>
+          <p><strong class="font-semibold">PDF</strong> — export Results as <code class="font-mono text-[10.5px]">.md</code>, then run:</p>
+          <pre class="rounded-md bg-ink-100 dark:bg-night-alt px-2 py-1.5 font-mono text-[10.5px] text-ink-800 dark:text-night-text overflow-x-auto">pandoc results.md -o results.pdf</pre>
+        </div>
+      {/if}
+    </div>
   </section>
 {:else if viewing}
   <!-- DETAIL state --------------------------------------------------- -->
