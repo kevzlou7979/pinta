@@ -735,6 +735,23 @@ export type PintaFileTestPilot = {
     notes?: string;
   } | null;
   statuses: Record<string, "untested" | "pass" | "fail">;
+  /**
+   * The tester's notes on failed rows, keyed by test id — description,
+   * steps to reproduce (one per line) and screenshots as inline
+   * PNG/JPEG data URLs. Structurally the extension's `FailureNote`
+   * (extension/src/lib/failure-notes.ts); keep the two in lockstep.
+   * Additive + optional: older bundles simply have none.
+   */
+  failNotes?: Record<
+    string,
+    {
+      id: string;
+      at: number;
+      description: string;
+      steps?: string;
+      images?: { dataUrl: string; mediaType: string; name?: string }[];
+    }[]
+  >;
 };
 
 /**

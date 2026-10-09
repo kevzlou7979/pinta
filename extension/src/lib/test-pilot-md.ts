@@ -14,6 +14,7 @@ import type {
   TestPilotStatus,
 } from "./state.svelte.js";
 import { parseTestDocMarkdown } from "./test-pilot-doc.js";
+import { sanitizeFailureNotes, type FailureNote } from "./failure-notes.js";
 
 /** Version marker in the frontmatter. Bump only on a breaking envelope
  *  change; the importer rejects files without it (they're plain test
@@ -254,11 +255,13 @@ export function restoreStatuses(
 }
 
 /** One row's slice of the per-author `.results.{author}.json` disk
- *  sidecar (status + chat thread + cached detail steps). */
+ *  sidecar (status + chat thread + cached detail steps + failure
+ *  notes). */
 export type ResultsSidecarEntry = {
   status?: TestPilotStatus;
   chat?: ChatMessage[];
   detail?: { steps: string[]; askedAt: number };
+  failNotes?: FailureNote[];
 };
 
 /**
@@ -291,6 +294,12 @@ export function overlayResultsSidecar(
       }
       if (r.chat) t.chat = r.chat;
       if (r.detail) t.detail = r.detail;
+      // Failure notes belong to the marks: under an imported run the
+      // tester's notes are on screen, so a stale sidecar stays out.
+      if (!opts.skipStatuses && r.failNotes) {
+        const notes = sanitizeFailureNotes(r.failNotes);
+        if (notes.length > 0) t.failNotes = notes;
+      }
     }
   }
   return { statusesApplied };

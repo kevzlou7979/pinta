@@ -182,6 +182,12 @@
   /** While a run is pending the card collapses entirely (neither the form
    *  nor the brief row) so the LoadingState sits in view at 360×640. */
   const showCompose = $derived(!pending && (!hasResults || composeOpenForRun === run?.runId));
+  // While variants are generating or being applied the loader is the whole
+  // story — the old cards under it are stale (or about to change on disk),
+  // so hide them and bring them back when the op settles.
+  const hideResults = $derived(
+    pending?.op === "variants-generate" || pending?.op === "variants-apply",
+  );
   const scopeSummary = $derived.by(() => {
     if (app.variants.scopeKind === "page") return "Whole page";
     const runSel = run?.scope.kind === "element" ? run.scope.target.selector : "";
@@ -628,7 +634,7 @@
   {/if}
 
   <!-- Results -->
-  {#if run && run.variants.length > 0}
+  {#if run && run.variants.length > 0 && !hideResults}
     <div class="pt-1 space-y-2">
       <div class="flex items-center justify-between gap-2 flex-wrap">
         <p class="text-[11px] uppercase tracking-wide text-ink-500 dark:text-night-mute font-medium">

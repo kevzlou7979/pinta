@@ -43,6 +43,7 @@
   import AnnotationCard from "./AnnotationCard.svelte";
   import PaintLoader from "../lib/PaintLoader.svelte";
   import EmptyState from "../lib/EmptyState.svelte";
+  import LoadingState from "../lib/LoadingState.svelte";
   import ConfirmModal from "./ConfirmModal.svelte";
   import { confirmDialog } from "../lib/confirm.svelte.js";
   import NoteComposer from "./NoteComposer.svelte";
@@ -657,6 +658,11 @@
     pintaFormValid && isEmailish(app.testerInfo.devEmail),
   );
 
+  // Failure notes typed in Test Pilot but never saved — they would
+  // silently miss the bundle, so the form says so. Counted when the
+  // form opens.
+  let pintaUnsavedNotes = $state(0);
+
   function openPintaExportForm() {
     if (!annotations.length) return;
     downloadMenuOpen = false;
@@ -675,6 +681,7 @@
     // lives there too, so this runs with or without Test Pilot marks.
     void app.loadTesterInfo();
     pintaEmailedNote = null;
+    pintaUnsavedNotes = app.unsavedFailureNoteCount();
     if (app.testPilotHasMarks) {
       pintaSignDate = new Date().toISOString().slice(0, 10);
       pintaSignNotes = "";
@@ -3239,23 +3246,45 @@
       </nav>
     {/if}
 
+    <!-- Lazy tabs never render blank: a spinner while the chunk loads,
+         and a visible error if it doesn't. The usual failure is an
+         extension rebuild while this panel was open — the page still
+         asks for the old chunk file names, which no longer exist. -->
+    {#snippet tabLoading()}
+      <LoadingState compact title="Loading…" />
+    {/snippet}
+    {#snippet tabLoadError()}
+      <EmptyState title="This tab didn't load" hint="Pinta was probably updated while this panel was open. Reload the panel to pick up the new version." heading="h2">
+        {#snippet action()}
+          <button
+            type="button"
+            class="rounded-md bg-brand-pink px-3 py-1.5 text-[12px] font-semibold text-white hover:bg-brand-magenta dark:hover:bg-brand-pink-light"
+            onclick={() => location.reload()}
+          >
+            Reload panel
+          </button>
+        {/snippet}
+      </EmptyState>
+    {/snippet}
     {#if app.viewingSettings}
       <SettingsPanel />
     {:else if !app.viewingImportedId && !showAssociatePrompt && activeTab === "test-pilot" && app.moduleReady("test-pilot")}
-      {#await lazyTab("test-pilot", () => import("./TestPilotTab.svelte")) then m}<m.default />{/await}
+      {#await lazyTab("test-pilot", () => import("./TestPilotTab.svelte"))}{@render tabLoading()}{:then m}<m.default />{:catch}{@render tabLoadError()}{/await}
     {:else if !app.viewingImportedId && !showAssociatePrompt && activeTab === "audit-flow" && app.moduleReady("audit-flow")}
-      {#await lazyTab("audit-flow", () => import("./AuditFlowTab.svelte")) then m}<m.default />{/await}
+      {#await lazyTab("audit-flow", () => import("./AuditFlowTab.svelte"))}{@render tabLoading()}{:then m}<m.default />{:catch}{@render tabLoadError()}{/await}
     {:else if !app.viewingImportedId && !showAssociatePrompt && activeTab === "report" && app.moduleReady("report")}
-      {#await lazyTab("report", () => import("./ReportTab.svelte")) then m}<m.default />{/await}
+      {#await lazyTab("report", () => import("./ReportTab.svelte"))}{@render tabLoading()}{:then m}<m.default />{:catch}{@render tabLoadError()}{/await}
     {:else if !app.viewingImportedId && !showAssociatePrompt && activeTab === "design-variants" && app.moduleReady("design-variants")}
-      {#await lazyTab("design-variants", () => import("./DesignVariantsTab.svelte")) then m}<m.default />{/await}
+      {#await lazyTab("design-variants", () => import("./DesignVariantsTab.svelte"))}{@render tabLoading()}{:then m}<m.default />{:catch}{@render tabLoadError()}{/await}
     {:else if !app.viewingImportedId && !showAssociatePrompt && activeTab === "code-review" && app.moduleReady("code-review")}
-      {#await lazyTab("code-review", () => import("./CodeReviewTab.svelte")) then m}<m.default />{/await}
+      {#await lazyTab("code-review", () => import("./CodeReviewTab.svelte"))}{@render tabLoading()}{:then m}<m.default />{:catch}{@render tabLoadError()}{/await}
     {:else if !app.viewingImportedId && !showAssociatePrompt && activeTab === "devices" && app.moduleReady("devices")}
-      {#await lazyTab("devices", () => import("./DevicesTab.svelte")) then m}<m.default />{/await}
+      {#await lazyTab("devices", () => import("./DevicesTab.svelte"))}{@render tabLoading()}{:then m}<m.default />{:catch}{@render tabLoadError()}{/await}
     {:else if !app.viewingImportedId && !showAssociatePrompt && app.interactiveTabSpecs().some((s) => s.id === activeTab)}
       <!-- Phase 19 — generic renderer for an imported interactive tab. -->
-      {#await lazyTab("module-board", () => import("./ModuleBoardTab.svelte")) then m}
+      {#await lazyTab("module-board", () => import("./ModuleBoardTab.svelte"))}
+        {@render tabLoading()}
+      {:then m}
         <m.default
           spec={app.interactiveTabSpecs().find((s) => s.id === activeTab)!}
           onOpenTestPilot={() => {
@@ -3263,6 +3292,8 @@
             void chrome.storage?.local?.set({ "pinta-active-tab": "test-pilot" });
           }}
         />
+      {:catch}
+        {@render tabLoadError()}
       {/await}
     {:else if app.viewingImportedId}
       {@const imp = app.importedSessions.find((s) => s.id === app.viewingImportedId)}
@@ -4498,6 +4529,22 @@
                 <option value={true}>Annotations + test results</option>
               </select>
             </label>
+            {#if pintaIncludeResults && pintaUnsavedNotes > 0}
+              <div class="flex items-start gap-2 rounded border border-amber-300 bg-amber-50 dark:border-amber-800/50 dark:bg-amber-950/30 px-2 py-1 text-[11px] text-amber-800 dark:text-amber-300 leading-snug" role="status" data-pinta-unsaved-notes>
+                <span class="flex-1 min-w-0">
+                  {pintaUnsavedNotes} failure note{pintaUnsavedNotes === 1 ? " is" : "s are"} written but not saved in Test Pilot — click “Save note” there first, or {pintaUnsavedNotes === 1 ? "it" : "they"} won't be in this file.
+                </span>
+                <button
+                  type="button"
+                  class="shrink-0 leading-none px-0.5 hover:text-amber-950 dark:hover:text-amber-100"
+                  onclick={() => (pintaUnsavedNotes = 0)}
+                  aria-label="Dismiss"
+                  title="Dismiss"
+                >
+                  ✕
+                </button>
+              </div>
+            {/if}
             {#if pintaIncludeResults}
               <!-- Same field set + order as TestPilotTab's sign-off form
                    (name → email → date → environment → run type → notes)

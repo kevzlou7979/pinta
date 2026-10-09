@@ -16,5 +16,7 @@ export default defineConfig({
     // Each file cold-imports state.svelte.ts + Svelte components; with the
     // files running in parallel that alone can pass 5s. Seen 2026-09-24.
     testTimeout: 30000,
+    // The first beforeEach in a file pays the same cold import.
+    hookTimeout: 30000,
   },
 });

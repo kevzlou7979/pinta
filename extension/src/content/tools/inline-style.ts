@@ -103,3 +103,30 @@ export function rebuildInline(
     }
   }
 }
+
+/**
+ * The `transform` an inline cssText already carries ("" when none).
+ * `transform` is ONE property, so a tool that sets it outright overwrites
+ * an earlier tool's transform (Scale's `scale()` vs Free transform's
+ * `translate()`). Tools read the base's transform with this and compose
+ * their own on top via {@link composeTransform}.
+ */
+export function inlineTransformOf(
+  cssText: string,
+  makeProbe: () => Styleable = () => document.createElement("div"),
+): string {
+  const probe = makeProbe();
+  probe.style.cssText = cssText;
+  const t = probe.style.getPropertyValue("transform").trim();
+  return t === "none" ? "" : t;
+}
+
+/** Join transform functions, dropping empty / `none` parts. CSS applies
+ *  the list right-to-left to the element, so pass the screen-space move
+ *  first and the element-space scale last: `translate(...) scale(...)`. */
+export function composeTransform(...parts: string[]): string {
+  return parts
+    .map((p) => p.trim())
+    .filter((p) => p && p !== "none")
+    .join(" ");
+}

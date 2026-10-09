@@ -176,15 +176,80 @@
 
   const POPUP_W = 360;
   const POPUP_H = 320;
+  /** `.popup` is content-box: 10px padding + 1px border per side on top
+   *  of POPUP_W. Used until the real box has been measured. */
+  const POPUP_CHROME = 22;
+  const EDGE = 8;
 
-  let top = $derived(
-    anchor.top + anchor.height + 8 + POPUP_H < window.innerHeight
-      ? anchor.top + anchor.height + 8
-      : Math.max(8, anchor.top - POPUP_H - 8),
+  // ── Placement ──────────────────────────────────────────────────────
+  // Below the element when it fits, else above; then clamped so the
+  // whole box stays inside the viewport. Clamps on the MEASURED box (the
+  // editor grows with its tab) against the layout viewport
+  // (documentElement.clientWidth — excludes the scrollbar, unlike
+  // innerWidth), and re-runs on resize. The user can also drag the popup
+  // by its header; the drag is an offset from the automatic spot, kept
+  // for the current element and dropped when a new one is picked.
+  let winW = $state(0);
+  let winH = $state(0);
+  let boxW = $state(0);
+  let boxH = $state(0);
+  let drag = $state<{ dx: number; dy: number } | null>(null);
+  let dragging = $state(false);
+  const vw = $derived(
+    winW ? document.documentElement.clientWidth || winW : window.innerWidth,
   );
-  let left = $derived(
-    Math.max(8, Math.min(window.innerWidth - POPUP_W - 8, anchor.left)),
+  const vh = $derived(
+    winH ? document.documentElement.clientHeight || winH : window.innerHeight,
   );
+  const w = $derived(boxW || POPUP_W + POPUP_CHROME);
+  const h = $derived(boxH || POPUP_H);
+  const clamp = (v: number, lo: number, hi: number) =>
+    Math.min(Math.max(v, lo), Math.max(lo, hi));
+  const autoTop = $derived.by(() => {
+    const below = anchor.top + anchor.height + EDGE;
+    return below + h <= vh - EDGE ? below : anchor.top - h - EDGE;
+  });
+  const autoLeft = $derived(anchor.left);
+  const maxTop = $derived(vh - h - EDGE);
+  const maxLeft = $derived(vw - w - EDGE);
+  let top = $derived(clamp(autoTop + (drag?.dy ?? 0), EDGE, maxTop));
+  let left = $derived(clamp(autoLeft + (drag?.dx ?? 0), EDGE, maxLeft));
+
+  // A new element (different title) gets the automatic spot again.
+  let dragTitle: string | undefined;
+  $effect(() => {
+    if (dragTitle !== undefined && title !== dragTitle) drag = null;
+    dragTitle = title;
+  });
+
+  function onHeadPointerDown(e: PointerEvent) {
+    if (e.button !== 0) return;
+    if ((e.target as HTMLElement).closest("button, input, select, textarea, a")) return;
+    const head = e.currentTarget as HTMLElement;
+    const startX = e.clientX;
+    const startY = e.clientY;
+    const fromLeft = left;
+    const fromTop = top;
+    head.setPointerCapture?.(e.pointerId);
+    dragging = true;
+    const move = (ev: PointerEvent) => {
+      // Store the offset of the CLAMPED spot so dragging past an edge
+      // doesn't bank distance the popup has to "pay back" on the way in.
+      const l = clamp(fromLeft + ev.clientX - startX, EDGE, maxLeft);
+      const t = clamp(fromTop + ev.clientY - startY, EDGE, maxTop);
+      drag = { dx: l - autoLeft, dy: t - autoTop };
+    };
+    const up = () => {
+      dragging = false;
+      head.removeEventListener("pointermove", move);
+      head.removeEventListener("pointerup", up);
+      head.removeEventListener("pointercancel", up);
+    };
+    head.addEventListener("pointermove", move);
+    head.addEventListener("pointerup", up);
+    head.addEventListener("pointercancel", up);
+    e.preventDefault();
+  }
 
   // ── Units ──────────────────────────────────────────────────────────
   // Computed styles arrive in px; emitting px bakes fixed pixels into the
@@ -570,19 +635,24 @@
   </div>
 {/snippet}
 
+<svelte:window bind:innerWidth={winW} bind:innerHeight={winH} />
+
 <div
   class="popup popup--editor"
   class:popup--drop={dropActive}
+  class:popup--dragging={dragging}
   style:top="{top}px"
   style:left="{left}px"
   style:width="{POPUP_W}px"
+  bind:offsetWidth={boxW}
+  bind:offsetHeight={boxH}
   ondragover={onDragOver}
   ondragleave={onDragLeave}
   ondrop={onDrop}
   role="region"
   aria-label="Element editor"
 >
-  <div class="popup__head">
+  <div class="popup__head" onpointerdown={onHeadPointerDown} title="Drag to move">
     <span>{title}</span>
     {#if extraCount > 0}
       <span class="popup__extra-pill" title="Comment will apply to all {extraCount + 1} picked elements. Ctrl/Cmd+click on the page to add or remove.">

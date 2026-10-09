@@ -214,6 +214,16 @@
 }
 .popup--editor .popup__head {
   margin-bottom: 8px;
+  cursor: grab;
+  user-select: none;
+  touch-action: none;
+}
+.popup--editor.popup--dragging .popup__head {
+  cursor: grabbing;
+}
+.popup--editor.popup--dragging {
+  /* No transition fights while the pointer is moving the box. */
+  transition: none;
 }
 .tabs {
   display: flex;

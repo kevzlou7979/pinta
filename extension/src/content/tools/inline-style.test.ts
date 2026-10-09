@@ -4,6 +4,8 @@ import {
   applyPreview,
   diffAppliedProps,
   rebuildInline,
+  inlineTransformOf,
+  composeTransform,
 } from "./inline-style.js";
 
 // These tests reproduce the tool-mixing bug: combining Resize → Text →
@@ -207,5 +209,40 @@ describe("end-to-end mixing: combine three, remove the middle one", () => {
     expect(node.style.getPropertyValue("background-color")).toBe("rgb(16, 42, 87)");
     expect(node.style.getPropertyValue("font-weight")).toBe("");
     expect(b.applied["font-weight"]).toBe("700"); // the removed delta was captured
+  });
+});
+
+// Free transform + Scale both preview through `transform`. It's a single
+// property, so the tool that wrote last used to erase the other: scale
+// then move → the element snapped back to 100%. They must compose.
+describe("transform composition (Scale + Free transform move)", () => {
+  it("reads the base transform, treating none as empty", () => {
+    expect(inlineTransformOf("")).toBe("");
+    expect(inlineTransformOf("transform: none")).toBe("");
+    expect(inlineTransformOf("color: red; transform: scale(1.25)")).toBe("scale(1.25)");
+  });
+
+  it("composeTransform drops empties and keeps order", () => {
+    expect(composeTransform("", "scale(1.5)")).toBe("scale(1.5)");
+    expect(composeTransform("translate(10px, 5px)", "scale(1.25)")).toBe("translate(10px, 5px) scale(1.25)");
+    expect(composeTransform("none", "", " ")).toBe("");
+  });
+
+  it("scale then move keeps the scale", () => {
+    const node = document.createElement("div");
+    // Scale session: base has no transform → scale only.
+    applyPreview(node, "", { transform: composeTransform(inlineTransformOf(""), "scale(1.25)") });
+    // Free transform session starts from the scaled element.
+    const base = node.style.cssText;
+    applyPreview(node, base, { transform: composeTransform("translate(40px, 12px)", inlineTransformOf(base)) });
+    expect(node.style.transform).toBe("translate(40px, 12px) scale(1.25)");
+  });
+
+  it("move then scale keeps the move", () => {
+    const node = document.createElement("div");
+    applyPreview(node, "", { transform: composeTransform("translate(40px, 12px)", inlineTransformOf("")) });
+    const base = node.style.cssText;
+    applyPreview(node, base, { transform: composeTransform(inlineTransformOf(base), "scale(1.5)") });
+    expect(node.style.transform).toBe("translate(40px, 12px) scale(1.5)");
   });
 });

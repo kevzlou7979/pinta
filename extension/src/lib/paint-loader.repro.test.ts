@@ -45,10 +45,10 @@ describe("PaintLoader", () => {
       const svg = root.querySelector("svg")!;
       expect(svg.getAttribute("aria-hidden")).toBe("true");
       expect(svg.getAttribute("focusable")).toBe("false");
-      expect(svg.classList.contains("overflow-visible"), "held pose never clipped (F8)").toBe(true);
-      expect(svg.getAttribute("viewBox")).toBe("4 20 132 90");
+      expect(svg.getAttribute("viewBox")).toBe("0 0 48 48");
+      // Square ring — width === height === the size's diameter.
       expect(Number(svg.getAttribute("height"))).toBe(HEIGHT[size]);
-      expect(Number(svg.getAttribute("width"))).toBe(Math.round(HEIGHT[size] * (132 / 90)));
+      expect(Number(svg.getAttribute("width"))).toBe(HEIGHT[size]);
       dispose();
     });
   }
@@ -62,46 +62,45 @@ describe("PaintLoader", () => {
     dispose();
   });
 
-  it("xs rests at a ±6° fan pose (F10) and sm/md/lg rest flat", () => {
-    for (const size of SIZES) {
+  it("small rings get a thicker stroke so the segments stay readable", () => {
+    const widths = SIZES.map((size) => {
       const { target, dispose } = mountIn(PaintLoader, { size });
-      const rests = [...target.querySelectorAll("svg rect.sw")].map((r) => Number(/--r:\s*(-?\d+)deg/.exec(r.getAttribute("style") ?? "")?.[1]));
-      expect(rests, `rest angles at ${size}`).toEqual(size === "xs" ? [-6, 0, 6] : [0, 0, 0, 0, 0]);
+      const w = Number(target.querySelector("svg circle.seg")!.getAttribute("stroke-width"));
       dispose();
-    }
+      return w;
+    });
+    for (let i = 1; i < widths.length; i++) expect(widths[i]).toBeLessThanOrEqual(widths[i - 1]);
   });
 
   it('tone="mono" paints every swatch in currentColor at stepped opacity (F2)', () => {
     const { target, dispose } = mountIn(PaintLoader, { size: "xs", tone: "mono" });
     const root = target.querySelector(".pinta-paint-loader")!;
     expect(root.getAttribute("data-tone")).toBe("mono");
-    const rects = [...target.querySelectorAll("svg rect.sw")];
-    expect(rects.map((r) => r.getAttribute("fill"))).toEqual(["currentColor", "currentColor", "currentColor"]);
-    expect(rects.map((r) => Number(r.getAttribute("opacity")))).toEqual([0.45, 0.7, 1]);
+    const segs = [...target.querySelectorAll("svg circle.seg")];
+    expect(segs.length).toBe(5);
+    for (const c of segs) expect(c.getAttribute("stroke")).toBe("currentColor");
     dispose();
     const five = mountIn(PaintLoader, { size: "lg", tone: "mono" });
-    const ops = [...five.target.querySelectorAll("svg rect.sw")].map((r) => Number(r.getAttribute("opacity")));
+    const ops = [...five.target.querySelectorAll("svg circle.seg")].map((r) => Number(r.getAttribute("stroke-opacity")));
     expect(ops.length).toBe(5);
     for (let i = 1; i < ops.length; i++) expect(ops[i]).toBeGreaterThan(ops[i - 1]);
     expect(ops[ops.length - 1]).toBe(1);
     // Paint tone never sets opacity — the hex palette carries the contrast.
     const paint = mountIn(PaintLoader, { size: "lg" });
-    for (const r of paint.target.querySelectorAll("svg rect.sw")) expect(r.getAttribute("opacity")).toBeNull();
+    for (const r of paint.target.querySelectorAll("svg circle.seg")) expect(r.getAttribute("stroke-opacity")).toBeNull();
     five.dispose(); paint.dispose();
   });
 
-  it("xs renders 3 swatches; sm/md/lg render 5 — each with its own angle + stagger", () => {
+  it("every size renders a 5-paint ring — one segment per paint, evenly spaced", () => {
     for (const size of SIZES) {
       const { target, dispose } = mountIn(PaintLoader, { size });
-      const rects = [...target.querySelectorAll("svg rect.sw")];
-      expect(rects.length, `swatch count at ${size}`).toBe(size === "xs" ? 3 : 5);
-      const fills = rects.map((r) => r.getAttribute("fill"));
-      expect(new Set(fills).size, "unique fills").toBe(rects.length);
-      const styles = rects.map((r) => r.getAttribute("style") ?? "");
-      for (const s of styles) expect(s).toMatch(/--a:\s*-?\d+deg/);
-      const delays = styles.map((s) => Number(/animation-delay:\s*([\d.]+)s/.exec(s)?.[1]));
-      expect(delays[0]).toBe(0);
-      for (let i = 1; i < delays.length; i++) expect(delays[i]).toBeGreaterThan(delays[i - 1]);
+      const segs = [...target.querySelectorAll("svg circle.seg")];
+      expect(segs.length, `segment count at ${size}`).toBe(5);
+      expect(segs.map((c) => c.getAttribute("stroke"))).toEqual(["#C2378F", "#F2456E", "#FF6B3D", "#FF9A2B", "#FFC93C"]);
+      const offsets = segs.map((c) => Number(c.getAttribute("stroke-dashoffset")));
+      const step = offsets[0] - offsets[1];
+      expect(step).toBeGreaterThan(0);
+      for (let i = 1; i < offsets.length; i++) expect(offsets[i - 1] - offsets[i]).toBeCloseTo(step, 5);
       dispose();
     }
   });
@@ -232,7 +231,7 @@ describe("LoadingState", () => {
     const fans = root.querySelectorAll(".pinta-paint-loader");
     expect(fans.length).toBe(1);
     expect(fans[0].getAttribute("data-size")).toBe("lg");
-    expect(fans[0].querySelectorAll("rect.sw").length).toBe(5);
+    expect(fans[0].querySelectorAll("circle.seg").length).toBe(5);
     // One announcement per wait: the inner fan must not be a second status.
     expect(root.querySelectorAll('[role="status"]').length).toBe(0);
     expect(fans[0].getAttribute("aria-hidden")).toBe("true");

@@ -15,6 +15,12 @@ import type {
 // Type-only — erased at compile time, so no runtime cycle with
 // test-pilot-md.ts (which imports parseTestDocMarkdown from here).
 import type { TestPilotSignoff } from "./test-pilot-md.js";
+import {
+  failureNotesDigest,
+  isFailureNoteImage,
+  notesForExport,
+  splitSteps,
+} from "./failure-notes.js";
 
 /**
  * Compose a catalog back into the markdown shape the agent emits on
@@ -163,6 +169,9 @@ export type UnfiledFailure = {
   section: string;
   test: string;
   expected: string;
+  /** The tester's failure notes as plain text (no screenshots — the
+   *  agent run stays cheap). Absent when the row has none. */
+  notes?: string;
 };
 
 /**
@@ -180,12 +189,16 @@ export function selectUnfiledFailures(
   const failed = catalog.sections.flatMap((s) =>
     s.tests
       .filter((t) => t.status === "fail")
-      .map((t) => ({
-        id: t.id,
-        section: s.title,
-        test: t.test,
-        expected: t.expected,
-      })),
+      .map((t) => {
+        const notes = failureNotesDigest(t.failNotes ?? []);
+        return {
+          id: t.id,
+          section: s.title,
+          test: t.test,
+          expected: t.expected,
+          ...(notes ? { notes } : {}),
+        };
+      }),
   );
   let unfiled = failed.filter(
     (t) => !Object.prototype.hasOwnProperty.call(filedIssues, t.id),
@@ -342,7 +355,10 @@ function docxHeading(text: string, level: 1 | 2 | 3 | 4): string {
   // reads clearly when Word opens the file.
   const sz = level === 1 ? 36 : level === 2 ? 30 : level === 3 ? 26 : 22;
   const after = level === 1 ? 240 : level === 2 ? 200 : 160;
-  return `<w:p><w:pPr><w:spacing w:before="${after}" w:after="${Math.floor(after / 2)}"/></w:pPr>${docxRun(text, { bold: true, sz })}</w:p>`;
+  // The outline level makes the heading real without a styles.xml: Word's
+  // navigation pane lists it, and docx-to-md.ts reads the level back
+  // exactly instead of guessing from the bold size.
+  return `<w:p><w:pPr><w:spacing w:before="${after}" w:after="${Math.floor(after / 2)}"/><w:outlineLvl w:val="${level - 1}"/></w:pPr>${docxRun(text, { bold: true, sz })}</w:p>`;
 }
 
 /** Table cell with inline padding + a thin border. Width is in
@@ -368,6 +384,34 @@ function docxRow(cells: string[]): string {
 }
 
 /**
+ * The Markdown export's frontmatter envelope, on one small grey line above
+ * the title. A Word file has no frontmatter, so without this a .docx that
+ * comes back to Test Pilot has no doc-id: results would replace the
+ * developer's catalog instead of overlaying it. Same keys, same order as
+ * `composeFrontmatter` (test-pilot-md.ts) — `recoverPintaFrontmatter`
+ * (docx-to-md.ts) turns the line back into the envelope on import.
+ */
+function docxEnvelope(docId: string, signoff?: TestPilotSignoff, scope?: string): string {
+  const flat = (s: string) => s.replace(/\s+/g, " ").trim();
+  const bits = ["pinta-test-pilot: 1", `doc-id: ${flat(docId)}`];
+  if (scope && scope !== "all") bits.push(`scope: ${flat(scope)}`);
+  if (signoff) {
+    if (signoff.tester.trim()) bits.push(`tester: ${flat(signoff.tester)}`);
+    if (signoff.email?.trim()) bits.push(`email: ${flat(signoff.email)}`);
+    if (signoff.date.trim()) bits.push(`date: ${flat(signoff.date)}`);
+    if (signoff.environment.trim()) bits.push(`environment: ${flat(signoff.environment)}`);
+    if (signoff.runType?.trim()) bits.push(`run-type: ${flat(signoff.runType)}`);
+    if (signoff.notes?.trim()) bits.push(`notes: ${flat(signoff.notes)}`);
+  }
+  // One key per line (soft breaks inside one paragraph): the reader then
+  // takes each line as exactly one pair, whatever the value contains.
+  const runs = bits
+    .map((bit, i) => `<w:r><w:rPr><w:sz w:val="14"/><w:color w:val="999999"/></w:rPr>${i > 0 ? "<w:br/>" : ""}<w:t xml:space="preserve">${xmlEscape(bit)}</w:t></w:r>`)
+    .join("");
+  return `<w:p>${runs}</w:p>`;
+}
+
+/**
  * Compose a hand-rolled DOCX from the catalog. Output is a Uint8Array
  * of zip bytes — the caller wraps it in a Blob with the
  * `application/vnd.openxmlformats-officedocument.wordprocessingml.document`
@@ -382,8 +426,13 @@ function docxRow(cells: string[]): string {
  * so the rendered hierarchy doesn't depend on a built-in style being
  * present in Word's normal.dotx.
  */
-export async function composeTesterSheetDocx(catalog: TestPilotCatalog): Promise<Uint8Array> {
+export async function composeTesterSheetDocx(
+  catalog: TestPilotCatalog,
+  /** Phase 21 scope token when the sheet covers part of the catalog. */
+  scope?: string,
+): Promise<Uint8Array> {
   const body: string[] = [];
+  body.push(docxEnvelope(catalog.docId, undefined, scope));
 
   const title = catalog.title?.trim() || catalog.filename;
   body.push(docxHeading(title, 1));
@@ -464,11 +513,16 @@ export async function composeTesterSheetDocx(catalog: TestPilotCatalog): Promise
  */
 // fflate is loaded on demand (only when a .docx is actually exported) so
 // it stays out of the side panel's startup bundle.
-async function wrapDocxBody(body: string[]): Promise<Uint8Array> {
+async function wrapDocxBody(
+  body: string[],
+  media: DocxMedia[] = [],
+): Promise<Uint8Array> {
   const { zipSync, strToU8 } = await import("fflate");
   const documentXml =
     `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>` +
-    `<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">` +
+    `<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"` +
+    ` xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"` +
+    ` xmlns:wp="http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing">` +
     `<w:body>${body.join("")}</w:body>` +
     `</w:document>`;
 
@@ -477,6 +531,8 @@ async function wrapDocxBody(body: string[]): Promise<Uint8Array> {
     `<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">` +
     `<Default Extension="xml" ContentType="application/xml"/>` +
     `<Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/>` +
+    (media.some((m) => m.ext === "png") ? `<Default Extension="png" ContentType="image/png"/>` : "") +
+    (media.some((m) => m.ext === "jpeg") ? `<Default Extension="jpeg" ContentType="image/jpeg"/>` : "") +
     `<Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/>` +
     `</Types>`;
 
@@ -486,11 +542,154 @@ async function wrapDocxBody(body: string[]): Promise<Uint8Array> {
     `<Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="word/document.xml"/>` +
     `</Relationships>`;
 
-  return zipSync({
+  const files: Record<string, Uint8Array> = {
     "[Content_Types].xml": strToU8(contentTypes),
     "_rels/.rels": strToU8(rootRels),
     "word/document.xml": strToU8(documentXml),
-  });
+  };
+  if (media.length > 0) {
+    // Pictures are separate parts: the body references each by its
+    // relationship id, and this file maps the id to the media part.
+    files["word/_rels/document.xml.rels"] = strToU8(
+      `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>` +
+        `<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">` +
+        media
+          .map(
+            (m) =>
+              `<Relationship Id="${m.relId}" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/image" Target="media/${m.file}"/>`,
+          )
+          .join("") +
+        `</Relationships>`,
+    );
+    for (const m of media) files[`word/media/${m.file}`] = m.bytes;
+  }
+  return zipSync(files);
+}
+
+/** A picture part of the DOCX package. */
+type DocxMedia = {
+  relId: string;
+  /** File name under `word/media/`. */
+  file: string;
+  ext: "png" | "jpeg";
+  bytes: Uint8Array;
+};
+
+/**
+ * Pixel size of a PNG or JPEG read from its header — Word needs an
+ * explicit extent for every picture. Returns null when the bytes are
+ * not a readable PNG/JPEG, and the caller falls back to a placeholder
+ * line instead of embedding a picture Word could not lay out.
+ */
+export function imageDimensions(
+  bytes: Uint8Array,
+): { width: number; height: number } | null {
+  // PNG: 8-byte signature, then the IHDR chunk (width, height as BE u32).
+  if (
+    bytes.length >= 24 &&
+    bytes[0] === 0x89 &&
+    bytes[1] === 0x50 &&
+    bytes[2] === 0x4e &&
+    bytes[3] === 0x47
+  ) {
+    const u32 = (o: number) =>
+      ((bytes[o]! << 24) | (bytes[o + 1]! << 16) | (bytes[o + 2]! << 8) | bytes[o + 3]!) >>> 0;
+    const width = u32(16);
+    const height = u32(20);
+    return width > 0 && height > 0 ? { width, height } : null;
+  }
+  // JPEG: walk the segments to the first start-of-frame marker.
+  if (bytes.length >= 4 && bytes[0] === 0xff && bytes[1] === 0xd8) {
+    let i = 2;
+    while (i + 8 < bytes.length) {
+      if (bytes[i] !== 0xff) {
+        i++;
+        continue;
+      }
+      const marker = bytes[i + 1]!;
+      // Fill bytes before a marker.
+      if (marker === 0xff) {
+        i++;
+        continue;
+      }
+      // Standalone markers carry no length.
+      if (marker === 0xd8 || marker === 0x01 || (marker >= 0xd0 && marker <= 0xd7)) {
+        i += 2;
+        continue;
+      }
+      const len = (bytes[i + 2]! << 8) | bytes[i + 3]!;
+      // SOF0..SOF15 except DHT (C4), JPG (C8) and DAC (CC).
+      if (marker >= 0xc0 && marker <= 0xcf && marker !== 0xc4 && marker !== 0xc8 && marker !== 0xcc) {
+        const height = (bytes[i + 5]! << 8) | bytes[i + 6]!;
+        const width = (bytes[i + 7]! << 8) | bytes[i + 8]!;
+        return width > 0 && height > 0 ? { width, height } : null;
+      }
+      if (len < 2) return null;
+      i += 2 + len;
+    }
+  }
+  return null;
+}
+
+function base64ToBytes(b64: string): Uint8Array {
+  const bin = atob(b64);
+  const out = new Uint8Array(bin.length);
+  for (let i = 0; i < bin.length; i++) out[i] = bin.charCodeAt(i);
+  return out;
+}
+
+/** Widest a picture is laid out, in EMU — 6 inches, the text width of a
+ *  default Word page. Taller-than-a-page screenshots are capped too. */
+const DOCX_IMAGE_MAX_W = 6 * 914400;
+const DOCX_IMAGE_MAX_H = 8 * 914400;
+/** 96 dpi pixels → EMU. */
+const EMU_PER_PX = 9525;
+
+/**
+ * Inline picture paragraph for a `data:image/png|jpeg` URL. Registers
+ * the bytes in `media` and returns the body XML, or null when the image
+ * can't be embedded (bad base64, unreadable header).
+ */
+function docxImage(
+  dataUrl: string,
+  name: string,
+  media: DocxMedia[],
+): string | null {
+  const m = /^data:image\/(png|jpeg);base64,(.+)$/.exec(dataUrl);
+  if (!m) return null;
+  let bytes: Uint8Array;
+  try {
+    bytes = base64ToBytes(m[2]!);
+  } catch {
+    return null;
+  }
+  const size = imageDimensions(bytes);
+  if (!size) return null;
+  const n = media.length + 1;
+  const ext = m[1] as "png" | "jpeg";
+  const relId = `rIdImg${n}`;
+  media.push({ relId, file: `image${n}.${ext}`, ext, bytes });
+  let cx = size.width * EMU_PER_PX;
+  let cy = size.height * EMU_PER_PX;
+  const scale = Math.min(1, DOCX_IMAGE_MAX_W / cx, DOCX_IMAGE_MAX_H / cy);
+  cx = Math.round(cx * scale);
+  cy = Math.round(cy * scale);
+  const alt = xmlEscape(name);
+  return (
+    `<w:p><w:pPr><w:spacing w:after="160"/></w:pPr><w:r><w:drawing>` +
+    `<wp:inline distT="0" distB="0" distL="0" distR="0">` +
+    `<wp:extent cx="${cx}" cy="${cy}"/>` +
+    `<wp:docPr id="${n}" name="${alt}"/>` +
+    `<a:graphic xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main">` +
+    `<a:graphicData uri="http://schemas.openxmlformats.org/drawingml/2006/picture">` +
+    `<pic:pic xmlns:pic="http://schemas.openxmlformats.org/drawingml/2006/picture">` +
+    `<pic:nvPicPr><pic:cNvPr id="${n}" name="${alt}"/><pic:cNvPicPr/></pic:nvPicPr>` +
+    `<pic:blipFill><a:blip r:embed="${relId}"/><a:stretch><a:fillRect/></a:stretch></pic:blipFill>` +
+    `<pic:spPr><a:xfrm><a:off x="0" y="0"/><a:ext cx="${cx}" cy="${cy}"/></a:xfrm>` +
+    `<a:prstGeom prst="rect"><a:avLst/></a:prstGeom></pic:spPr>` +
+    `</pic:pic></a:graphicData></a:graphic>` +
+    `</wp:inline></w:drawing></w:r></w:p>`
+  );
 }
 
 /**
@@ -509,8 +708,12 @@ export function composeResultsDocx(
   catalog: TestPilotCatalog,
   today: string,
   signoff?: TestPilotSignoff,
+  /** Phase 21 scope token when the run covered part of the catalog. */
+  scope?: string,
 ): Promise<Uint8Array> {
   const body: string[] = [];
+  const media: DocxMedia[] = [];
+  body.push(docxEnvelope(catalog.docId, signoff, scope));
 
   let pass = 0,
     fail = 0,
@@ -536,8 +739,8 @@ export function composeResultsDocx(
   );
   if (signoff) {
     // Sign-off block — Word twin of the markdown export's readable
-    // sign-off lines. The .docx never round-trips back into Pinta, so
-    // this is purely for the human reviewer.
+    // sign-off lines, for the human reviewer. (What Pinta reads back on
+    // import is the envelope line at the top, not this.)
     const bits: string[] = [signoff.tester.trim()];
     if (signoff.email?.trim()) bits.push(signoff.email.trim());
     if (signoff.environment.trim()) bits.push(signoff.environment.trim());
@@ -578,7 +781,9 @@ export function composeResultsDocx(
               t.status === "pass"
                 ? "✓ Pass"
                 : t.status === "fail"
-                  ? "✗ Fail"
+                  ? notesForExport(t).length > 0
+                    ? "✗ Fail (see notes)"
+                    : "✗ Fail"
                   : "⚠ Untested";
             return docxRow([
               docxCell(t.id, widths[0]!),
@@ -590,6 +795,56 @@ export function composeResultsDocx(
           .join("") +
         `</w:tbl>`,
     );
+
+    // Failure notes — one block per failed row that has any. Each
+    // carries the test id + title and the expected result, so a note
+    // still makes sense when it is copied out of the report on its own.
+    const withNotes = section.tests.filter(
+      (t: TestPilotTest) => notesForExport(t).length > 0,
+    );
+    if (withNotes.length > 0) {
+      body.push(docxHeading("Failure notes", 3));
+      for (const t of withNotes) {
+        const notes = notesForExport(t);
+        const name = t.test.replace(/\n/g, " ").trim() || "(untitled)";
+        body.push(docxHeading(`${t.id} — ${name}`, 4));
+        if (t.expected.trim()) {
+          body.push(
+            `<w:p>${docxRun("Expected: ", { bold: true, sz: 20 })}${docxRun(t.expected.replace(/\r?\n+/g, " ").trim(), { sz: 20 })}</w:p>`,
+          );
+        }
+        notes.forEach((n, ni) => {
+          if (notes.length > 1) {
+            body.push(
+              `<w:p>${docxRun(`Note ${ni + 1} of ${notes.length}`, { bold: true, sz: 20, color: "555555" })}</w:p>`,
+            );
+          }
+          if (n.description.trim()) {
+            body.push(`<w:p>${docxRun("Description", { bold: true, sz: 20 })}</w:p>`);
+            for (const line of n.description.split(/\r?\n/)) {
+              if (line.trim()) body.push(docxParagraph(line.trim(), { sz: 20 }));
+            }
+          }
+          const steps = splitSteps(n.steps);
+          if (steps.length > 0) {
+            body.push(
+              `<w:p>${docxRun("Steps to reproduce", { bold: true, sz: 20 })}</w:p>`,
+            );
+            steps.forEach((step, si) => {
+              body.push(docxParagraph(`${si + 1}. ${step}`, { sz: 20 }));
+            });
+          }
+          (n.images ?? []).forEach((im, ii) => {
+            const label = im.name || `${t.id} screenshot ${ii + 1}`;
+            const xml = isFailureNoteImage(im) ? docxImage(im.dataUrl, label, media) : null;
+            body.push(
+              xml ??
+                `<w:p>${docxRun(`[image: ${label} — could not be embedded]`, { sz: 20, color: "888888" })}</w:p>`,
+            );
+          });
+        });
+      }
+    }
 
     // Conversations block — only rows with a chat thread. Mirrors the
     // markdown export's per-section "Conversations" appendix.
@@ -611,7 +866,7 @@ export function composeResultsDocx(
     }
   }
 
-  return wrapDocxBody(body);
+  return wrapDocxBody(body, media);
 }
 
 // ─────────────────────────────────────────────────────────────────────

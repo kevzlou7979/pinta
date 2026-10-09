@@ -1939,7 +1939,7 @@ run files every failed, not-yet-filed test. Query comment:
   "docTitle": "Insclix Training Portal — UAT",
   "url": "http://localhost:5175/",
   "tests": [
-    { "id": "AUTH-02", "section": "Authentication", "test": "…", "expected": "…" }
+    { "id": "AUTH-02", "section": "Authentication", "test": "…", "expected": "…", "notes": "…" }
   ],
   "gitlab": { "projectId": "group/app", "labels": "bug, qa", "assignee": "@kevin" } | null,
   "fallbackToLocal": true
@@ -1956,7 +1956,10 @@ run files every failed, not-yet-filed test. Query comment:
    with the test id: `{id} {Component}: {symptom}` (under ~100 chars).
    Summary names the doc (`docTitle`), run type when the catalog has a
    sign-off, and that the tester marked it Fail; Repro = the test row's
-   steps with `expected` as the expected line; read the feature's
+   steps with `expected` as the expected line. When the row has `notes`
+   (optional — the tester's own failure description + "Steps to
+   reproduce", text only), use them as the symptom and prefer their
+   steps for Repro; read the feature's
    source for Root cause / Fix direction; de-dupe marker
    `<!-- pinta:test {id} -->` as the last line. Before creating, `glab issue list --search "pinta:test {id}"`
    — reuse an open issue's URL only if its body's LAST line is that

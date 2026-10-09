@@ -9,14 +9,29 @@
 // and stores binary data efficiently.
 
 import type { ImportedSession, Session } from "@pinta/shared";
+import {
+  isSavedSheet,
+  isSavedSheetSummary,
+  summarizeSheet,
+  type SavedSheet,
+  type SavedSheetSummary,
+  type SheetShelf,
+} from "./sheet-shelf.js";
 
 const DB_NAME = "pinta-standalone";
 // v2 added the imported_sessions store. createObjectStore is idempotent
 // against `objectStoreNames.contains`, so the v1 → v2 migration is just
 // "create if missing" — no data backfill needed.
-const DB_VERSION = 2;
+// v3 added test_sheets (standalone Test Pilot's saved sheets) the same
+// way; v4 added test_sheet_index, backfilled from test_sheets in case a
+// v3 database already held sheets.
+const DB_VERSION = 4;
 const STORE = "sessions";
 const IMPORTED_STORE = "imported_sessions";
+const SHEETS_STORE = "test_sheets";
+// One small row per shelved sheet (title + tally) so the switcher can
+// list them without loading the sheets and their screenshots.
+const SHEET_INDEX_STORE = "test_sheet_index";
 
 let dbPromise: Promise<IDBDatabase> | null = null;
 
@@ -35,8 +50,42 @@ function openDb(): Promise<IDBDatabase> {
         // id — multiple imports of the same source file remain distinct.
         db.createObjectStore(IMPORTED_STORE, { keyPath: "id" });
       }
+      if (!db.objectStoreNames.contains(SHEETS_STORE)) {
+        // One row per shelved tester sheet, keyed by the catalog doc-id.
+        db.createObjectStore(SHEETS_STORE, { keyPath: "docId" });
+      }
+      if (!db.objectStoreNames.contains(SHEET_INDEX_STORE)) {
+        const index = db.createObjectStore(SHEET_INDEX_STORE, { keyPath: "docId" });
+        // Sheets saved before the index existed still need a row in it,
+        // or the switcher would not list them. Same upgrade transaction.
+        const sheets = req.transaction?.objectStore(SHEETS_STORE);
+        if (sheets) {
+          sheets.openCursor().onsuccess = (e) => {
+            const cursor = (e.target as IDBRequest<IDBCursorWithValue | null>).result;
+            if (!cursor) return;
+            if (isSavedSheet(cursor.value)) index.put(summarizeSheet(cursor.value));
+            cursor.continue();
+          };
+        }
+      }
     };
-    req.onsuccess = () => resolve(req.result);
+    // Another extension page still holds the old schema open and has
+    // not let go: fail this attempt rather than wait forever (the next
+    // call retries).
+    req.onblocked = () => {
+      dbPromise = null;
+      reject(new Error("local database is busy in another Pinta window — close it and try again"));
+    };
+    req.onsuccess = () => {
+      const db = req.result;
+      // Another extension page opening a newer schema must not be
+      // blocked by this connection — let go and reopen on next use.
+      db.onversionchange = () => {
+        db.close();
+        dbPromise = null;
+      };
+      resolve(db);
+    };
     req.onerror = () => {
       // Invalidate the cached promise so subsequent callers retry
       // instead of awaiting the same poisoned rejection forever
@@ -158,3 +207,103 @@ export function originOf(url: string | null): string | null {
     return null;
   }
 }
+
+/** A shelf call that never settles would stall every later sheet
+ *  switch and import behind it — give up after this long instead. */
+const SHELF_TIMEOUT_MS = 15_000;
+
+function settleWithin<T>(work: Promise<T>, what: string): Promise<T> {
+  return new Promise<T>((resolve, reject) => {
+    const timer = setTimeout(
+      () => reject(new Error(`${what} timed out — the browser's local database is not responding`)),
+      SHELF_TIMEOUT_MS,
+    );
+    work.then(
+      (v) => {
+        clearTimeout(timer);
+        resolve(v);
+      },
+      (e) => {
+        clearTimeout(timer);
+        reject(e);
+      },
+    );
+  });
+}
+
+/** Run one transaction over the sheet stores; resolves with whatever
+ *  `body` handed to `done` once the transaction has committed. */
+function sheetTx<T>(
+  mode: IDBTransactionMode,
+  what: string,
+  body: (tx: IDBTransaction, done: (value: T) => void) => void,
+): Promise<T> {
+  return settleWithin(
+    openDb().then(
+      (db) =>
+        new Promise<T>((resolve, reject) => {
+          const tx = db.transaction([SHEETS_STORE, SHEET_INDEX_STORE], mode);
+          let value!: T;
+          // A failing request reports its reason on the request; the
+          // transaction's own `error` is only set once it has aborted.
+          // Keep the first reason and settle on abort, so the tester is
+          // told WHY (a full disk reads very differently from a glitch).
+          let cause: DOMException | null = null;
+          const fail = () => {
+            const err = tx.error ?? cause;
+            reject(
+              err?.name === "QuotaExceededError"
+                ? new Error("this browser has no room left for saved sheets — delete a saved sheet you no longer need")
+                : (err ?? new Error(`${what} failed`)),
+            );
+          };
+          tx.oncomplete = () => resolve(value);
+          tx.onerror = (e) => {
+            cause ??= (e.target as IDBRequest | null)?.error ?? null;
+          };
+          tx.onabort = fail;
+          body(tx, (v) => {
+            value = v;
+          });
+        }),
+    ),
+    what,
+  );
+}
+
+/** IndexedDB-backed shelf of saved tester sheets (see sheet-shelf.ts).
+ *  Rows that don't look right are skipped, never thrown on. A sheet and
+ *  its index row are always written and removed in one transaction. */
+export const idbSheetShelf: SheetShelf = {
+  list() {
+    // No IndexedDB in this context at all: nothing can be on the shelf,
+    // so "empty" is the true answer (writes still fail loudly). A
+    // database that exists but won't answer is an error, not "empty".
+    if (typeof indexedDB === "undefined") return Promise.resolve([]);
+    return sheetTx<SavedSheetSummary[]>("readonly", "listing saved sheets", (tx, done) => {
+      const req = tx.objectStore(SHEET_INDEX_STORE).getAll();
+      req.onsuccess = () =>
+        done(((req.result as unknown[] | undefined) ?? []).filter(isSavedSheetSummary));
+    });
+  },
+  get(docId) {
+    if (typeof indexedDB === "undefined") return Promise.resolve(null);
+    return sheetTx<SavedSheet | null>("readonly", "opening a saved sheet", (tx, done) => {
+      done(null);
+      const req = tx.objectStore(SHEETS_STORE).get(docId);
+      req.onsuccess = () => done(isSavedSheet(req.result) ? req.result : null);
+    });
+  },
+  put(sheet: SavedSheet) {
+    return sheetTx<void>("readwrite", "saving the sheet", (tx) => {
+      tx.objectStore(SHEETS_STORE).put(sheet);
+      tx.objectStore(SHEET_INDEX_STORE).put(summarizeSheet(sheet));
+    });
+  },
+  remove(docId) {
+    return sheetTx<void>("readwrite", "removing a saved sheet", (tx) => {
+      tx.objectStore(SHEETS_STORE).delete(docId);
+      tx.objectStore(SHEET_INDEX_STORE).delete(docId);
+    });
+  },
+};

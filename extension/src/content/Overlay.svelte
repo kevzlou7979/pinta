@@ -19,6 +19,8 @@
     applyPreview,
     rebuildInline,
     diffAppliedProps,
+    composeTransform,
+    inlineTransformOf,
   } from "./tools/inline-style.js";
   import Canvas from "./Canvas.svelte";
   import CommentInput from "./CommentInput.svelte";
@@ -2418,6 +2420,13 @@
     const diff = diffAppliedProps(p.baseCssText, el.style.cssText);
     const cssChanges: Record<string, string> = {};
     for (const [k, v] of Object.entries(diff)) if (v) cssChanges[k] = v;
+    if ("transform" in cssChanges) {
+      if (Math.round(tTx) || Math.round(tTy)) {
+        cssChanges.transform = `translate(${Math.round(tTx)}px, ${Math.round(tTy)}px)`;
+      } else {
+        delete cssChanges.transform;
+      }
+    }
     if (Object.keys(cssChanges).length === 0 && !transformComment.trim()) {
       cancelTransform();
       return;
@@ -2529,7 +2538,10 @@
       tTy = by + (ev.clientY - sy);
       tChanges = {
         ...tChanges,
-        transform: `translate(${Math.round(tTx)}px, ${Math.round(tTy)}px)`,
+        transform: composeTransform(
+          `translate(${Math.round(tTx)}px, ${Math.round(tTy)}px)`,
+          inlineTransformOf(transformPending?.baseCssText ?? ""),
+        ),
       };
       tApply();
     };
@@ -2552,12 +2564,16 @@
     const r = p.el.getBoundingClientRect();
     const sx = e.clientX;
     const sy = e.clientY;
-    const sw = r.width;
-    const sh = r.height;
+    // Layout size + on-screen scale (from an earlier Scale preview): the
+    // drag delta is in screen px, width/height are in layout px.
+    const sw = p.el.offsetWidth || r.width;
+    const sh = p.el.offsetHeight || r.height;
+    const kx = sw > 0 ? r.width / sw : 1;
+    const ky = sh > 0 ? r.height / sh : 1;
     tgt.setPointerCapture?.(e.pointerId);
     const move = (ev: PointerEvent) => {
-      const w = Math.max(8, Math.round(sw + (ev.clientX - sx)));
-      const h = Math.max(8, Math.round(sh + (ev.clientY - sy)));
+      const w = Math.max(8, Math.round(sw + (ev.clientX - sx) / (kx || 1)));
+      const h = Math.max(8, Math.round(sh + (ev.clientY - sy) / (ky || 1)));
       tChanges = { ...tChanges, width: `${w}px`, height: `${h}px` };
       tApply();
     };
@@ -2840,7 +2856,10 @@
     // Preview only — grows from the element's own top-left so it expands
     // into the page the way the real change would read.
     el.style.transformOrigin = "top left";
-    el.style.transform = `scale(${p.percent / 100})`;
+    el.style.transform = composeTransform(
+      inlineTransformOf(p.baseCssText),
+      `scale(${p.percent / 100})`,
+    );
   }
 
   function setScalePercent(next: number): void {

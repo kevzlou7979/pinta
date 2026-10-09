@@ -79,6 +79,10 @@ async function mountTab() {
   await sleep(50);
   app.testPilot.catalog = catalog();
   app.testPilot.error = null;
+  // A project companion is selected (appMode "connected"); each case sets
+  // connectionStatus itself. True standalone is covered in
+  // test-pilot-standalone.repro.test.ts.
+  (app as any).selectedCompanion = { port: 7878, projectRoot: "C:/p", pid: 1 };
   flushSync(); await tick();
   const settle = async () => { flushSync(); await tick(); };
   const openExport = async () => {
@@ -127,7 +131,7 @@ describe("Tester sheet export — auto-generate missing steps", () => {
     await drain(app);
   });
 
-  it("standalone: holds the download, explains, and offers download anyway", async () => {
+  it("companion selected but disconnected: holds the download, explains, and offers download anyway", async () => {
     const t = await mountTab();
     t.app.connectionStatus = "disconnected";
     await t.openExport();

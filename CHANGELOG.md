@@ -4,6 +4,35 @@ Notable changes shipped on top of the original V1 pipeline. Newest first.
 For the architectural design behind each item, see
 [`spec/SPEC.md`](spec/SPEC.md).
 
+## Unreleased
+
+### Added
+
+- **Test Pilot: failure notes.** A failed test gets an inline "Add
+  failure note" under its row (and in its detail view): what went
+  wrong, steps to reproduce, and up to 4 screenshots (pick or paste). A
+  row can carry several notes. The results exports put each note beside
+  its test id and title — the Word export embeds the screenshots, the
+  markdown export lists them by name — and a `.pinta` bundle carries the
+  notes back to the developer, who sees them read-only on the imported
+  run. "File failed tests" sends the note text along so the issue
+  describes what the tester actually saw.
+
+- **Test Pilot: several tester sheets side by side (standalone).** A
+  tester with no companion can keep each project's sheet in the same
+  browser. Importing another project's sheet no longer replaces the open
+  one: the open sheet is saved whole (marks, failure notes, plans, scope)
+  and a switcher beside the title swaps between them in one click, with
+  no re-import. Saved sheets live in IndexedDB, so they don't count
+  against the 10 MB extension storage limit. Re-importing a sheet she
+  already has brings that sheet back instead of adding a copy.
+
+### Changed
+
+- **Test Pilot:** a section that finishes with a failed test no longer
+  folds itself away — the failed row stays in view so a note can be
+  added. All-pass sections still fold.
+
 ## 0.10.0 — 2026-09-29
 
 ### Added

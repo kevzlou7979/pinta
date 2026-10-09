@@ -64,6 +64,9 @@
      *  round trip to the agent. Interpolate context (e.g. row id, author
      *  name) at the call site. */
     greeting?: string;
+    /** History-only: hide the composer (no agent to ask — e.g. Test Pilot
+     *  in standalone mode) and show one muted line instead. */
+    readOnly?: boolean;
     /** Optional quick-action pills shown under the greeting in the empty
      *  state. Each pill, when clicked, fires `onSend(prompt)` exactly as
      *  if the user had typed and submitted it. Render only when
@@ -114,6 +117,7 @@
     onExport,
     redactionSummary,
     greeting = "",
+    readOnly = false,
     quickPrompts = [],
     addToSectionLabel,
     onAddSuggestions,
@@ -888,6 +892,11 @@
          panel's vertical scrollbar — without it the pink button sat
          flush against the scrollbar at the panel's right edge. -->
     <div class="shrink-0 border-t border-ink-200 dark:border-night-line p-3 pr-4 bg-white dark:bg-night-card">
+      {#if readOnly}
+        <p class="text-[11px] text-ink-600 dark:text-night-dim leading-snug" data-pinta-chat-readonly>
+          Read-only — chat needs a connected companion.
+        </p>
+      {:else}
       {#if app.connectionStatus !== "connected"}
         <p class="text-[11px] text-red-600 dark:text-red-400 mb-2 leading-snug">
           Companion disconnected. Reconnect to ask the agent.
@@ -998,6 +1007,7 @@
         <p class="mt-1.5 px-3 text-[10px] text-ink-400 dark:text-night-mute leading-snug">
           <kbd class="font-mono">Enter</kbd> to send · <kbd class="font-mono">Alt + Enter</kbd> for a new line
         </p>
+      {/if}
       {/if}
     </div>
   </div>

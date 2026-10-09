@@ -20,6 +20,7 @@ import type {
   Session,
   SessionManifest,
 } from "@pinta/shared";
+import { sanitizeFailureNotesById } from "./failure-notes.js";
 
 const SCHEMA_VERSION = "1" as const;
 
@@ -157,7 +158,15 @@ function sanitizeTestPilot(x: unknown): PintaFileTestPilot | undefined {
       };
     }
   }
-  return { docId: tp.docId, signoff, statuses };
+  // Failure notes are validated note by note (and image by image) —
+  // bad ones drop, the marks still import.
+  const failNotes = sanitizeFailureNotesById(tp.failNotes);
+  return {
+    docId: tp.docId,
+    signoff,
+    statuses,
+    ...(Object.keys(failNotes).length > 0 ? { failNotes } : {}),
+  };
 }
 
 /** decodePintaFile result — the ImportedSession that lands in IDB plus

@@ -41,7 +41,7 @@
   // Test Pilot tab — interactive module surface.
   //
   // Four states the user moves between:
-  //  1. EMPTY      — no doc imported yet. CTA to pick a .md file.
+  //  1. EMPTY      — no doc imported yet. CTA to pick a .md / .docx file.
   //  2. PARSING    — agent extracting the catalog. Loading state.
   //  3. CATALOG    — sections + test rows with P/F + Ask buttons.
   //  4. DETAIL     — one test row expanded; steps + Pass/Fail.
@@ -57,6 +57,7 @@
   import PaintLoader from "../lib/PaintLoader.svelte";
   import LoadingState from "../lib/LoadingState.svelte";
   import EmptyState from "../lib/EmptyState.svelte";
+  import FailureNotes from "./FailureNotes.svelte";
   import { parseStep } from "../lib/step-md.js";
   import { escapeHtml, loadChatSheet, loadPrism } from "../lib/lazy-ui.js";
   import { safeExternalUrl } from "../content/capture.js";
@@ -80,6 +81,20 @@
 
   let fileInput = $state<HTMLInputElement | null>(null);
   let viewing = $state<{ testId: string } | null>(null);
+  // An open test belongs to the sheet it was opened from. When another
+  // sheet takes the screen (an import, a switch) the detail view must
+  // not stay up and rebind to that sheet's test with the same id.
+  let viewingDocId: string | undefined;
+  $effect(() => {
+    const docId = app.testPilot.catalog?.docId;
+    if (docId === viewingDocId) return;
+    if (viewingDocId !== undefined) {
+      viewing = null;
+      chatOpen = false;
+      chatTestId = null;
+    }
+    viewingDocId = docId;
+  });
   // Catalog search — filters the CATALOG view by free text matched
   // against test id (e.g. "AUTH-1"), section title (category), and test
   // title / expected-result content. Empty string = no filter. While a
@@ -263,13 +278,18 @@
       const total = section.tests.length;
       if (total === 0) continue;
       let marked = 0;
+      let failed = 0;
       for (const t of section.tests) {
         if (t.status === "pass" || t.status === "fail") marked++;
+        if (t.status === "fail") failed++;
       }
       const isComplete = marked === total;
       const was = prevSectionComplete.get(section.title) === true;
       // Fire on the transition only — leaves manual re-expand alone.
-      if (isComplete && !was) {
+      // A section that finished with a failure stays open: the failed
+      // row is where the tester adds a failure note, and folding it
+      // away the moment they click Fail would hide that.
+      if (isComplete && !was && failed === 0) {
         collapsedSections[section.title] = true;
       }
       prevSectionComplete.set(section.title, isComplete);
@@ -306,6 +326,18 @@
   // all three chat surfaces (Test Pilot FAB, Annotate Just Ask, global
   // header icon). Off by default — users opt in.
   const chatEnabled = $derived(app.moduleReady("chat"));
+  /** Standalone = no companion selected, so no agent. Everything that
+   *  needs one (ask / re-ask for steps, chat, suggest tests, file issues,
+   *  generate missing steps) is hidden rather than left to fail — a
+   *  tester running an imported sheet only sees what works offline.
+   *  Deliberately "not connected" rather than appMode === "standalone":
+   *  the app rescans for companions on every tab switch / navigation and
+   *  reports "discovering" for that moment, which would flash every
+   *  agent control back on for a tester. */
+  const standalone = $derived(app.appMode !== "connected");
+  /** Tester-sheet export generates missing steps only when there is an
+   *  agent to ask and the user left the option on. */
+  const wantSteps = $derived(app.testerInfo.generateSteps && !standalone);
   const gitlabReady = $derived(app.moduleReady("gitlab-issues"));
   // WS2 — an imported tester run is overlaid: every mark-editing surface
   // (row status trigger, detail Pass/Fail, Clear marks) is read-only
@@ -361,9 +393,9 @@
     specDragOver = false;
     const files = [...(e.dataTransfer?.files ?? [])];
     if (files.length === 0) return;
-    const file = files.find((f) => /\.(md|markdown)$/i.test(f.name));
+    const file = files.find((f) => /\.(md|markdown|docx)$/i.test(f.name));
     if (!file) {
-      specDropNote = `${files[0]!.name} isn't a markdown file — drop a .md spec.`;
+      specDropNote = `${files[0]!.name} isn't a Markdown or Word file — drop a .md or .docx spec.`;
       return;
     }
     specDropNote = null;
@@ -848,6 +880,7 @@
         target.closest("[data-pinta-kebab-trigger]") ||
         target.closest("[data-pinta-kebab-menu]");
       const inExport = target.closest("[data-pinta-export-menu]");
+      if (!target.closest("[data-pinta-sheet-menu]")) sheetMenuOpen = false;
       if (!target.closest("[data-pinta-scope-menu]") && scopeMenuOpen) closeScopeMenu();
       if (!inStatus) dropdownTestId = null;
       if (!inKebab) {
@@ -861,8 +894,17 @@
         exportMenuOpen = false;
       }
     }
+    // The sheet popover is placed from measurements taken when it opens;
+    // a resized panel would leave it in the wrong spot.
+    const onResize = () => {
+      sheetMenuOpen = false;
+    };
+    window.addEventListener("resize", onResize);
     document.addEventListener("click", onDocClick, true);
-    return () => document.removeEventListener("click", onDocClick, true);
+    return () => {
+      window.removeEventListener("resize", onResize);
+      document.removeEventListener("click", onDocClick, true);
+    };
   });
 
   // Phase 14.4 — auto-scroll the side panel while a drag is in flight
@@ -941,15 +983,28 @@
       (n, s) => n + s.tests.filter((t) => t.status !== "untested").length,
       0,
     );
-    if (marked === 0) return;
+    const noted = c.sections.reduce(
+      (n, s) => n + s.tests.filter((t) => (t.failNotes?.length ?? 0) > 0).length,
+      0,
+    );
+    // Notes kept on a row that was un-marked are hidden but still
+    // stored — they must stay clearable even with no marks left.
+    if (marked === 0 && noted === 0) return;
     // The count in the prompt is the catalog-wide one this actually
     // resets — saying "12" while the scoped counters above read "2"
     // would be the lie. The scope note spells that out.
     const ok = await confirmDialog({
       title: "Reset all marks?",
       message:
-        `Reset ${marked} marked test${marked === 1 ? "" : "s"} back to untested? ` +
-        `Cached step instructions will be cleared too. The spec itself isn't touched.` +
+        (marked > 0
+          ? `Reset ${marked} marked test${marked === 1 ? "" : "s"} back to untested? `
+          : "") +
+        (standalone
+          ? `The steps in the sheet are kept.`
+          : `Cached step instructions will be cleared too. The spec itself isn't touched.`) +
+        (noted > 0
+          ? ` Failure notes on ${noted} test${noted === 1 ? "" : "s"} are deleted too.`
+          : "") +
         (scopeActive
           ? ` This covers the whole catalog, not just “${app.scopeLabel}”.`
           : ""),
@@ -967,10 +1022,50 @@
     await importSpecFile(file);
   }
 
-  /** Shared by the file picker and the empty-state drop card. */
+  /** Shared by the file picker and the empty-state drop card. A Word
+   *  file is converted to Markdown first and then takes the exact same
+   *  import path (Google Drive hands an uploaded .md back as .docx). */
   async function importSpecFile(file: File) {
-    const text = await file.text();
-    await app.importTestDoc(file.name, text);
+    let name = file.name;
+    let text: string;
+    // A fresh attempt: don't leave an earlier import's error on screen.
+    app.testPilot.error = null;
+    const isDocx = /\.docx$/i.test(name);
+    if (/\.(doc|docm|dot|dotx|dotm|rtf|odt|pdf)$/i.test(name)) {
+      // Picked through "All files": binary, and would otherwise be sent on
+      // as garbled text.
+      app.testPilot.error = `${name} can't be imported. Save it as Word (.docx) or Markdown (.md) and try again.`;
+      return;
+    }
+    if (isDocx) {
+      try {
+        const { docxToMarkdown, MAX_DOCX_BYTES, DocxImportError } = await import("../lib/docx-to-md.js");
+        // Checked before the bytes are read into memory.
+        if (file.size > MAX_DOCX_BYTES) throw new DocxImportError("This Word file is too large to import.");
+        text = await docxToMarkdown(new Uint8Array(await file.arrayBuffer()));
+      } catch (err) {
+        // DocxImportError carries a message written for the user; anything
+        // else (a failed chunk load, an unreadable file) gets the generic one.
+        app.testPilot.error =
+          err instanceof Error && err.name === "DocxImportError"
+            ? `${name}: ${err.message}`
+            : `Couldn't read ${name}. Try downloading it again, or export it as Markdown.`;
+        return;
+      }
+      // "sheet.md.docx" (how Google Drive names a converted .md) → "sheet.md".
+      name = name.replace(/(?:\.(?:md|markdown))?\.docx$/i, ".md");
+    } else {
+      text = await file.text();
+    }
+    await app.importTestDoc(name, text);
+    // The local parser explains itself in Markdown syntax, which means
+    // nothing to someone who picked a Word file.
+    const importError = app.testPilot.error as string | null;
+    if (isDocx && importError?.startsWith("Couldn't read this file")) {
+      app.testPilot.error = `${file.name}: Pinta couldn't find a test sheet in this Word file. It needs a title, a heading per section, and a table with ID, Test, Expected Result and Result columns. For a free-form test plan, connect /pinta and import it again so the agent can read it.`;
+    } else if (isDocx && importError?.startsWith("No test rows found")) {
+      app.testPilot.error = `${file.name}: ${importError}`;
+    }
     // A results file for a DIFFERENT catalog — or an unmarked sheet
     // that would replace a catalog which already has Pass/Fail marks —
     // parks itself in pendingImportConflict. Surface the shared confirm
@@ -1039,7 +1134,14 @@
    *  empty after the retry rounds; `retries` = how many retry rounds
    *  ran; `timedOut` = the row the agent stopped answering on (the run
    *  stops there). */
-  type BulkStepsOutcome = { failed: string[]; retries: number; timedOut: string | null };
+  type BulkStepsOutcome = {
+    failed: string[];
+    retries: number;
+    timedOut: string | null;
+    /** The companion connection went away mid-run — the run stopped, and
+     *  the rows left over are not the agent's fault. */
+    disconnected?: boolean;
+  };
 
   /** Fetch steps for every row in `tests` that has none, strictly one
    *  at a time. FAIL-SAFE: a row the agent errors on is skipped, the
@@ -1067,9 +1169,20 @@
       onAsk?: (test: TestPilotTest, retry: number) => void;
       /** Once per row on the first pass only (progress counting). */
       onRow?: (test: TestPilotTest) => void;
+      /** Companion port the rows belong to, captured by the caller when
+       *  it QUEUED the job — a job that waits in the bulk queue across a
+       *  project switch must not start against the new project. */
+      port?: number;
     } = {},
   ): Promise<BulkStepsOutcome> {
     const outcome: BulkStepsOutcome = { failed: [], retries: 0, timedOut: null };
+    // The rows belong to the catalog of the project connected right now.
+    // If that catalog is cleared, or swapped because the companion
+    // changed (project switch, drop to standalone), the run is over and
+    // nobody is to blame — stop without naming rows as errored.
+    const port = "port" in opts ? opts.port : app.selectedCompanion?.port;
+    const gone = () =>
+      !app.testPilot.catalog || app.selectedCompanion?.port !== port;
     const askOne = async (test: TestPilotTest, retry: number) => {
       // If another caller has it in flight already (per-row Ask),
       // just wait for that one to clear before moving on.
@@ -1093,7 +1206,11 @@
     const errored: TestPilotTest[] = [];
     for (const test of tests) {
       if (opts.shouldStop?.()) break;
-      if (!app.testPilot.catalog) break;
+      if (gone()) break;
+      if (app.connectionStatus !== "connected") {
+        outcome.disconnected = true;
+        break;
+      }
       if (hasSteps(test) || opts.skip?.(test)) {
         // Answered elsewhere (per-row Ask / section Ask) while we were
         // queued, or no longer wanted — still counts toward progress.
@@ -1125,7 +1242,13 @@
     // row is a real bug to report, not a blip to keep hammering).
     let pending = errored;
     for (let round = 1; pending.length > 0; round++) {
-      if (outcome.timedOut || opts.shouldStop?.() || !app.testPilot.catalog) {
+      if (gone()) break;
+      if (app.connectionStatus !== "connected") {
+        // Not the agent's doing — don't name these rows as errored.
+        outcome.disconnected = true;
+        break;
+      }
+      if (outcome.timedOut || opts.shouldStop?.()) {
         outcome.failed.push(...pending.map((t) => t.id));
         break;
       }
@@ -1133,7 +1256,14 @@
         outcome.failed.push(...pending.map((t) => t.id));
         break;
       }
-      await sleep(Math.min(bulkRetry.baseMs * 2 ** (round - 1), bulkRetry.maxMs), () => opts.shouldStop?.() ?? false);
+      // The backoff also ends the moment the catalog / project goes away,
+      // so a switch never leaves the queue (and the export buttons)
+      // held for the rest of a 30s wait.
+      await sleep(
+        Math.min(bulkRetry.baseMs * 2 ** (round - 1), bulkRetry.maxMs),
+        () => (opts.shouldStop?.() ?? false) || gone(),
+      );
+      if (gone()) break;
       if (opts.shouldStop?.()) {
         outcome.failed.push(...pending.map((t) => t.id));
         break;
@@ -1141,7 +1271,13 @@
       outcome.retries = round;
       const stillErrored: TestPilotTest[] = [];
       for (const test of pending) {
-        if (outcome.timedOut || opts.shouldStop?.() || !app.testPilot.catalog) {
+        if (!gone() && app.connectionStatus !== "connected") outcome.disconnected = true;
+        if (
+          outcome.disconnected ||
+          outcome.timedOut ||
+          opts.shouldStop?.() ||
+          gone()
+        ) {
           stillErrored.push(test);
           continue;
         }
@@ -1154,6 +1290,11 @@
       }
       pending = stillErrored;
     }
+    // Whatever order the checks above ran in: if the catalog / project
+    // these rows belonged to is gone, there is nothing to report on the
+    // screen the user is looking at now — no failed rows, no timeout,
+    // no "disconnected".
+    if (gone()) return { failed: [], retries: outcome.retries, timedOut: null };
     return outcome;
   }
 
@@ -1170,6 +1311,9 @@
   /** One line for the popover note / the section banner: which rows
    *  the fail-safe could not rescue, and why. Empty when all landed. */
   function describeBulkOutcome(outcome: BulkStepsOutcome): string {
+    if (outcome.disconnected) {
+      return "the companion disconnected before every test was asked — reconnect and ask again";
+    }
     const parts: string[] = [];
     if (outcome.failed.length) {
       const n = outcome.retries;
@@ -1191,14 +1335,20 @@
     // Chain onto the global queue — guarantees only one section's loop
     // is actively firing requests at a time. The spinner shown while
     // we wait for our turn is "queued, your turn is coming."
+    const port = app.selectedCompanion?.port;
     await enqueueBulk(async () => {
       try {
-        const outcome = await fetchStepsSequentially(section.tests);
+        const outcome = await fetchStepsSequentially(section.tests, { port });
         const why = describeBulkOutcome(outcome);
         // Rows that landed stay landed; only the leftovers are named,
         // and the per-row ? is the way to ask for one of them again.
-        if (why) {
-          app.testPilot.error = `Some steps in "${section.title}" could not be generated: ${why}. Click ? on a row to ask again.`;
+        // In standalone there is no ? to click and nothing to retry —
+        // the controls are gone, so an error banner would only get in
+        // the way of the steps that did land.
+        if (why && !standalone) {
+          app.testPilot.error = outcome.disconnected
+            ? `Some steps in "${section.title}" could not be generated: ${why}.`
+            : `Some steps in "${section.title}" could not be generated: ${why}. Click ? on a row to ask again.`;
         }
       } finally {
         delete bulkFetchingSections[section.title];
@@ -1241,7 +1391,7 @@
     stepPrepNote = null;
     // "Generate missing steps first" unticked — export the sheet as it
     // stands (rows without steps keep their placeholder).
-    if (!app.testerInfo.generateSteps) return true;
+    if (!wantSteps) return true;
     const missing = rowsWithoutSteps();
     if (missing.length === 0) return true;
     stepPrepTarget = target;
@@ -1249,6 +1399,8 @@
       stepPrepNote = `${nTests(missing.length)} ${missing.length === 1 ? "has" : "have"} no steps yet and there is no companion to generate them. Start pinta-companion + /pinta, then`;
       return false;
     }
+    // D1 guard: the sheet we were asked to export is this project's.
+    const prepPort = app.selectedCompanion?.port;
     stepPrep = { done: 0, total: missing.length, cancel: false, inFlight: null, retrying: 0 };
     // Light the section-level spinner on every section we'll touch that
     // a queued Ask-all isn't already lighting (that job owns its flag),
@@ -1263,6 +1415,7 @@
         outcome = await fetchStepsSequentially(
           missing.map((m) => m.test),
           {
+            port: prepPort,
             shouldStop: () => stepPrep?.cancel ?? true,
             // Scope narrowed mid-prep — don't spend tokens on rows the
             // sheet will no longer carry.
@@ -1295,9 +1448,10 @@
       cancelled = stepPrep?.cancel ?? false;
       stepPrep = null;
     }
-    // Catalog gone mid-prep (Clear catalog / companion switch): there is
-    // no sheet to write and the empty-state view already says so.
-    if (!app.scopedCatalogView()) return false;
+    // Catalog gone mid-prep (Clear catalog), or swapped for another one
+    // (project switch, companion dropped to the standalone sheet): what
+    // is loaded now is not the sheet that was asked for — write nothing.
+    if (!app.scopedCatalogView() || app.selectedCompanion?.port !== prepPort) return false;
     const left = rowsWithoutSteps().length;
     if (left === 0) return true;
     // Whatever landed is kept: Retry only asks for what is still
@@ -1352,7 +1506,7 @@
     chatDraft = "";
     chatOpen = false;
     chatTestId = null;
-    if (!test.detail) {
+    if (!test.detail && !standalone) {
       void app.fetchDetailSteps(test.id);
     }
   }
@@ -1396,7 +1550,7 @@
   }
 
   function reAsk() {
-    if (!viewing) return;
+    if (!viewing || standalone) return;
     // Force a fresh fetch by clearing the cached detail.
     const catalog = app.testPilot.catalog;
     if (!catalog) return;
@@ -1555,6 +1709,20 @@
 
   async function openSignoff(fmt: "md" | "docx") {
     exportMenuOpen = false;
+    // A note typed but never saved would silently miss the report.
+    const unsaved = app.unsavedFailureNoteCount();
+    if (
+      unsaved > 0 &&
+      !(await confirmDialog({
+        title: "Unsaved failure notes",
+        message:
+          `${unsaved} failure note${unsaved === 1 ? " is" : "s are"} written but not saved, so ` +
+          `${unsaved === 1 ? "it" : "they"} won't be in the export. Go back and click “Save note” first, or export without ${unsaved === 1 ? "it" : "them"}.`,
+        confirmLabel: "Export anyway",
+        cancelLabel: "Go back",
+      }))
+    )
+      return;
     await app.loadTesterInfo();
     signoffDate = new Date().toISOString().slice(0, 10);
     signoffNotes = "";
@@ -1668,6 +1836,79 @@
     }
   }
 
+  // ── Saved sheets (standalone) ─────────────────────────────────────
+  // The switcher beside the title: the tester's other sheets, saved in
+  // this browser, one click away — no re-import.
+  let sheetMenuOpen = $state(false);
+  /** Switcher trigger — Escape inside the popover hands focus back. */
+  let sheetMenuBtnEl = $state<HTMLButtonElement | null>(null);
+
+  /** The title row the popover is positioned in. */
+  let sheetRowEl = $state<HTMLDivElement | null>(null);
+  /** Popover's left edge, in px from the title row's left. */
+  let sheetMenuLeft = $state(0);
+  const SHEET_MENU_MAX_W = 352; // 22rem
+  const SHEET_MENU_GUTTER = 16;
+
+  function closeSheetMenu(refocus = false) {
+    sheetMenuOpen = false;
+    if (refocus) sheetMenuBtnEl?.focus();
+  }
+
+  /** Open the popover right under its button: right edges line up. On a
+   *  narrow panel that would push it off the left side, so it slides
+   *  right just enough to keep the gutter. */
+  function toggleSheetMenu() {
+    if (!sheetMenuOpen) {
+      const row = sheetRowEl?.getBoundingClientRect();
+      const btn = sheetMenuBtnEl?.getBoundingClientRect();
+      if (row && btn) {
+        const width = Math.min(SHEET_MENU_MAX_W, window.innerWidth - 2 * SHEET_MENU_GUTTER);
+        const underButton = btn.right - row.left - width;
+        const leftmost = SHEET_MENU_GUTTER - row.left;
+        const rightmost = window.innerWidth - SHEET_MENU_GUTTER - row.left - width;
+        sheetMenuLeft = Math.round(Math.max(leftmost, Math.min(underButton, rightmost)));
+      }
+    }
+    sheetMenuOpen = !sheetMenuOpen;
+  }
+
+  async function switchSheet(docId: string) {
+    if (app.testPilot.sheetBusy) return;
+    const ok = await app.switchTestSheet(docId);
+    sheetMenuOpen = false;
+    if (!ok) return;
+    // A different catalog is on screen: nothing about the old one's
+    // open test, menus or folded sections carries over.
+    viewing = null;
+    activeTestId = null;
+    dropdownTestId = null;
+    sectionKebabOpen = null;
+    testKebabOpen = null;
+    chatOpen = false;
+    chatTestId = null;
+    const next: Record<string, boolean> = {};
+    app.testPilot.catalog?.sections.forEach((sec, i) => {
+      next[sec.title] = i !== 0;
+    });
+    collapsedSections = next;
+  }
+
+  async function removeSheet(docId: string, title: string) {
+    const ok = await confirmDialog({
+      title: "Delete this saved sheet?",
+      message: `“${title}” and its Pass/Fail marks and failure notes will be removed from this browser. Export the results first if you still need them.`,
+      confirmLabel: "Delete sheet",
+      danger: true,
+    });
+    if (ok) await app.removeSavedSheet(docId);
+  }
+
+  function importAnotherSheet() {
+    sheetMenuOpen = false;
+    onPickFile();
+  }
+
   function clearCatalog() {
     if (
       !confirm(
@@ -1721,10 +1962,61 @@
   }
 </script>
 
+<!-- Why a dropped file was not imported — shared by both empty states. -->
+<!-- The tester's saved sheets (standalone): one row each — open it, or
+     delete it. Used by the switcher popover and by the empty screen. -->
+{#snippet savedSheetRows()}
+  {#each app.testPilot.savedSheets as sheet (sheet.docId)}
+    <div class="flex items-stretch hover:bg-ink-50 dark:hover:bg-night-alt" data-pinta-sheet={sheet.docId}>
+      <button
+        type="button"
+        class="min-w-0 flex-1 flex items-start gap-2 pl-3 pr-1 py-1.5 text-left disabled:opacity-50 disabled:cursor-wait"
+        onclick={() => void switchSheet(sheet.docId)}
+        disabled={app.testPilot.sheetBusy}
+        aria-label={`Open ${sheet.title}`}
+      >
+        <span class="shrink-0 w-3" aria-hidden="true"></span>
+        <span class="min-w-0 flex-1">
+          <span class="block text-[12px] font-medium text-ink-800 dark:text-night-text leading-snug break-words">{sheet.title}</span>
+          <span class="block text-[10.5px] text-ink-500 dark:text-night-mute tabular-nums">{sheet.pass + sheet.fail} of {sheet.total} run{sheet.fail > 0 ? ` · ${sheet.fail} failed` : ""}</span>
+        </span>
+      </button>
+      <button
+        type="button"
+        class="shrink-0 w-8 inline-flex items-center justify-center text-ink-400 dark:text-night-mute hover:text-red-600 dark:hover:text-red-400 disabled:opacity-50"
+        onclick={() => void removeSheet(sheet.docId, sheet.title)}
+        disabled={app.testPilot.sheetBusy}
+        aria-label={`Delete saved sheet ${sheet.title}`}
+        title="Delete this saved sheet"
+      >
+        <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="3 6 5 6 21 6"/><path d="M19 6l-1.5 14a2 2 0 0 1-2 1.5h-7a2 2 0 0 1-2-1.5L5 6"/></svg>
+      </button>
+    </div>
+  {/each}
+{/snippet}
+
+{#snippet specDropNoteBlock()}
+  <div role="status" aria-live="polite">
+    {#if specDropNote}
+      <p class="mt-1.5 flex items-start gap-1.5 text-[11px] text-amber-700 dark:text-amber-400">
+        <span class="flex-1 min-w-0 [overflow-wrap:anywhere]">{specDropNote}</span>
+        <button
+          type="button"
+          class="shrink-0 -mt-0.5 w-5 h-5 inline-flex items-center justify-center rounded hover:bg-amber-100 dark:hover:bg-amber-900/40"
+          aria-label="Dismiss"
+          onclick={() => (specDropNote = null)}
+        >
+          <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.6" stroke-linecap="round" aria-hidden="true"><path d="M18 6 6 18M6 6l12 12"/></svg>
+        </button>
+      </p>
+    {/if}
+  </div>
+{/snippet}
+
 <input
   bind:this={fileInput}
   type="file"
-  accept=".md,.markdown,text/markdown"
+  accept=".md,.markdown,text/markdown,.docx,application/vnd.openxmlformats-officedocument.wordprocessingml.document"
   class="hidden"
   onchange={onFileChange}
 />
@@ -1734,7 +2026,7 @@
   <section class="p-3">
     <LoadingState title={`Parsing ${app.testPilot.pending.filename}…`}>
       {#snippet richHint()}
-        The agent is extracting the test catalog from your markdown spec.
+        The agent is extracting the test catalog from your spec.
         This needs <code class="font-mono text-[10px] bg-ink-100 dark:bg-night-alt px-1 rounded">/pinta</code>
         running in a Claude Code terminal for this project.
       {/snippet}
@@ -1752,8 +2044,8 @@
 {:else if app.testPilot.error && !app.testPilot.catalog}
   <!-- ERROR state (no catalog yet) ---------------------------------- -->
   <section class="space-y-3 p-3">
-    <div class="rounded-md border border-red-300 bg-red-50 dark:border-red-800/50 dark:bg-red-950/30 p-3 text-[12px] text-red-700 dark:text-red-300 leading-snug flex items-start gap-2">
-      <span class="flex-1 min-w-0">{app.testPilot.error}</span>
+    <div role="alert" class="rounded-md border border-red-300 bg-red-50 dark:border-red-800/50 dark:bg-red-950/30 p-3 text-[12px] text-red-700 dark:text-red-300 leading-snug flex items-start gap-2">
+      <span class="flex-1 min-w-0 [overflow-wrap:anywhere]">{app.testPilot.error}</span>
       <button
         type="button"
         class="shrink-0 text-red-500 hover:text-red-700 dark:text-red-400 dark:hover:text-red-200 leading-none px-1"
@@ -1793,16 +2085,19 @@
       {/snippet}
     </LoadingState>
   </section>
-{:else if !app.testPilot.catalog && app.appMode === "standalone"}
+{:else if !app.testPilot.catalog && standalone}
   <!-- STANDALONE empty state — testers without a companion can still
-       import a developer-shipped tester sheet (.md) and walk through
-       it offline. Pass/Fail starts blank for them to fill in; results
-       export back to .md for the developer to re-import. -->
-  <section class="space-y-3 p-3">
+       import a developer-shipped tester sheet (.md or .docx) and walk
+       through it offline. Pass/Fail starts blank for them to fill in;
+       results export back for the developer to re-import. The whole
+       section is a drop target. -->
+  <section class="space-y-3 p-3" ondragover={onSpecDragOver} ondragleave={(e) => {
+      if (!(e.currentTarget as HTMLElement).contains(e.relatedTarget as Node | null)) specDragOver = false;
+    }} ondrop={onSpecDrop} aria-label="Import a tester sheet" data-pinta-spec-drop-standalone>
     <EmptyState
       title="Walk through a tester sheet"
       heading="h2"
-      hint="Got a tester sheet from the developer? Import it and start walking through the tests."
+      hint="Got a tester sheet from the developer? Import the .md or .docx file — or drop it here — and start walking through the tests."
       class="!py-6"
     >
       {#snippet icon()}
@@ -1826,6 +2121,16 @@
         </button>
       {/snippet}
     </EmptyState>
+    {@render specDropNoteBlock()}
+    {#if app.testPilot.savedSheets.length > 0}
+      <div class="rounded-md border border-ink-200 dark:border-night-line bg-white dark:bg-night-card py-1" aria-label="Your saved sheets" role="group" data-pinta-saved-sheets>
+        <div class="px-3 pt-1.5 pb-1 text-[10px] uppercase tracking-wider font-semibold text-ink-500 dark:text-night-mute">Your saved sheets</div>
+        {@render savedSheetRows()}
+        <p class="px-3 pt-1 pb-1.5 text-[10.5px] text-ink-500 dark:text-night-mute leading-snug">
+          Open one to carry on where you left off — its marks and failure notes are kept.
+        </p>
+      </div>
+    {/if}
     <div class="rounded-md border border-ink-200 dark:border-night-line bg-ink-50 dark:bg-night-alt p-3 text-[11px] text-ink-700 dark:text-night-dim leading-snug space-y-1.5">
       <p>Need to generate a new catalog instead? Ask the developer for their project's <code class="font-mono text-[10px] bg-ink-100 dark:bg-night-alt px-1 rounded">pinta-companion</code> command and connect above.</p>
     </div>
@@ -1922,27 +2227,13 @@
           <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" y1="3" x2="12" y2="15"/></svg>
         </span>
         <span class="min-w-0">
-          <span class="block text-[13.5px] font-semibold text-ink-900 dark:text-night-text">{specDragOver ? "Drop to import" : "Import a markdown spec"}</span>
+          <span class="block text-[13.5px] font-semibold text-ink-900 dark:text-night-text">{specDragOver ? "Drop to import" : "Import a test spec"}</span>
           <span class="block text-[12px] text-ink-600 dark:text-night-dim">
-            Drop a <code class="font-mono text-[11px]">.md</code> file here, or <span class="underline underline-offset-2">browse</span>
+            Drop a <code class="font-mono text-[11px]">.md</code> or <code class="font-mono text-[11px]">.docx</code> file here, or <span class="underline underline-offset-2">browse</span>
           </span>
         </span>
       </button>
-      <div role="status" aria-live="polite">
-        {#if specDropNote}
-          <p class="mt-1.5 flex items-start gap-1.5 text-[11px] text-amber-700 dark:text-amber-400">
-            <span class="flex-1">{specDropNote}</span>
-            <button
-              type="button"
-              class="shrink-0 -mt-0.5 w-5 h-5 inline-flex items-center justify-center rounded hover:bg-amber-100 dark:hover:bg-amber-900/40"
-              aria-label="Dismiss"
-              onclick={() => (specDropNote = null)}
-            >
-              <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.6" stroke-linecap="round" aria-hidden="true"><path d="M18 6 6 18M6 6l12 12"/></svg>
-            </button>
-          </p>
-        {/if}
-      </div>
+      {@render specDropNoteBlock()}
     </div>
 
     <div class="flex gap-2.5 rounded-xl border border-amber-300/60 dark:border-amber-700/40 bg-amber-50 dark:bg-amber-950/20 p-3 text-[11.5px] leading-relaxed text-amber-900 dark:text-amber-200">
@@ -1980,7 +2271,8 @@
   <!-- DETAIL state --------------------------------------------------- -->
   {@const test = findViewingTest()}
   {@const sectionTitle = findViewingSectionTitle()}
-  <section class="space-y-3 p-3">
+  <!-- Inert while the open sheet is being put away, same as the catalog. -->
+  <section class="space-y-3 p-3" inert={app.testPilot.sheetSwapping} aria-busy={app.testPilot.sheetSwapping}>
     <button
       type="button"
       class="text-[11px] text-ink-600 dark:text-night-dim hover:text-brand-pink dark:hover:text-brand-pink-light flex items-center gap-1"
@@ -2018,11 +2310,11 @@
       <div class="flex items-center justify-between gap-2">
         <div class="flex items-baseline gap-2">
           <span class="text-[10px] uppercase tracking-wider font-semibold text-ink-500 dark:text-night-mute">Steps</span>
-          {#if test.detail}
+          {#if test.detail && test.detail.steps.length > 0}
             <span class="text-[11px] text-ink-500 dark:text-night-mute">{test.detail.steps.length} total</span>
           {/if}
         </div>
-        {#if test.detail}
+        {#if !standalone && !app.testPilot.pendingDetails[test.id]}
           <div class="flex items-center gap-2">
             <label
               class="inline-flex items-center gap-1.5 text-[11px] text-ink-700 dark:text-night-dim cursor-pointer select-none"
@@ -2070,8 +2362,8 @@
           </button>
         </div>
       {:else if app.testPilot.error}
-        <div class="rounded-md border border-red-300 bg-red-50 dark:border-red-800/50 dark:bg-red-950/30 p-2 text-[12px] text-red-700 dark:text-red-300 leading-snug flex items-start gap-2">
-          <span class="flex-1 min-w-0">{app.testPilot.error}</span>
+        <div role="alert" class="rounded-md border border-red-300 bg-red-50 dark:border-red-800/50 dark:bg-red-950/30 p-2 text-[12px] text-red-700 dark:text-red-300 leading-snug flex items-start gap-2">
+          <span class="flex-1 min-w-0 [overflow-wrap:anywhere]">{app.testPilot.error}</span>
           <button
             type="button"
             class="shrink-0 text-red-500 hover:text-red-700 dark:text-red-400 dark:hover:text-red-200 leading-none px-1"
@@ -2082,7 +2374,7 @@
             ✕
           </button>
         </div>
-      {:else if test.detail}
+      {:else if test.detail && test.detail.steps.length > 0}
         <!-- Timeline of steps -->
         <ol class="relative">
           {#each test.detail.steps as step, i}
@@ -2236,7 +2528,11 @@
           {/each}
         </ol>
       {:else}
-        <EmptyState compact title="No steps yet." hint="Click Re-ask above." />
+        {#if standalone}
+          <EmptyState compact title="No steps for this test." hint="Go by the expected result above, or ask the developer for a sheet with steps." />
+        {:else}
+          <EmptyState compact title="No steps yet." hint="Click Re-ask above." />
+        {/if}
       {/if}
 
       <!-- Pass (green filled) / Fail (ghost) -->
@@ -2262,6 +2558,13 @@
           Fail
         </button>
       </div>
+      {#if test.status === "fail" && (!readOnlyRun || (test.failNotes?.length ?? 0) > 0)}
+        <div class="pt-3 border-t border-ink-200 dark:border-night-line">
+          {#key app.testPilot.catalog?.docId}
+            <FailureNotes {test} readOnly={readOnlyRun} />
+          {/key}
+        </div>
+      {/if}
       </div>
     {/if}
   </section>
@@ -2271,7 +2574,7 @@
        the scrolling content. Hidden when the chat sheet is already
        open (the sheet's send button replaces it as the primary
        affordance) or when the chat module setting is off. -->
-  {#if chatEnabled && !chatOpen && viewing}
+  {#if chatEnabled && !chatOpen && viewing && (!standalone || (findViewingTest()?.chat?.length ?? 0) > 0)}
     {@const viewingTest = findViewingTest()}
     {@const chatCount = viewingTest?.chat?.length ?? 0}
     <button
@@ -2279,9 +2582,9 @@
       class="fixed bottom-4 right-4 z-30 w-12 h-12 rounded-full bg-brand-pink text-white shadow-lg hover:bg-brand-magenta dark:hover:bg-brand-pink-light inline-flex items-center justify-center transition-transform hover:scale-105 active:scale-95"
       onclick={() => { chatTestId = viewing!.testId; chatOpen = true; }}
       title={chatCount > 0
-        ? `Resume chat (${chatCount} message${chatCount === 1 ? "" : "s"})`
+        ? `${standalone ? "View" : "Resume"} chat (${chatCount} message${chatCount === 1 ? "" : "s"})`
         : "Ask the agent about this test"}
-      aria-label="Open chat with agent"
+      aria-label={standalone ? "View chat history" : "Open chat with agent"}
     >
       <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
         <path d="M7.9 20A9 9 0 1 0 4 16.1L2 22Z" />
@@ -2304,7 +2607,9 @@
   {@const passPct = t.total > 0 ? (t.pass / t.total) * 100 : 0}
   {@const failPct = t.total > 0 ? (t.fail / t.total) * 100 : 0}
   {@const meta = app.testPilot.catalog}
-  <section class="space-y-4 p-4">
+  <!-- Inert for the instant the open sheet is being put away: a mark
+       made then would land on a sheet whose saved copy is already taken. -->
+  <section class="space-y-4 p-4" inert={app.testPilot.sheetSwapping} aria-busy={app.testPilot.sheetSwapping}>
     <!-- HEADER — title + author/date + actions on one row. On wide
          panels (≥ ~480px) buttons sit top-right; on narrow viewports
          the wrapper flex-wraps and buttons drop below the title block.
@@ -2312,6 +2617,10 @@
     <div class="flex items-start justify-between gap-3 flex-wrap">
       <div class="min-w-0 flex-1 basis-[200px]">
         <div class="min-w-0 flex-1 space-y-1">
+        <!-- Title row: the title, then (standalone) the sheet switcher.
+             The menu hangs off this row so it can never leave the panel. -->
+        <div class="relative flex items-start gap-1.5" bind:this={sheetRowEl}>
+        <div class="min-w-0 flex-1">
         <!-- Title (or filename fallback) — click to edit -->
         {#if editingField === "title"}
           <input
@@ -2337,6 +2646,73 @@
             {meta.title || meta.filename}
           </button>
         {/if}
+        </div>
+        {#if standalone}
+          {@const others = app.testPilot.savedSheets}
+          <button
+            type="button"
+            class="shrink-0 inline-flex items-center gap-1 h-6 px-1.5 rounded-md border border-ink-200 dark:border-night-line bg-white dark:bg-night-card text-[11px] font-medium text-ink-700 dark:text-night-dim hover:text-brand-pink dark:hover:text-brand-pink-light hover:border-brand-pink/60 dark:hover:border-brand-pink-light/60"
+            onclick={toggleSheetMenu}
+            onkeydown={(e) => {
+              if (e.key !== "Escape" || !sheetMenuOpen) return;
+              e.stopPropagation();
+              closeSheetMenu(true);
+            }}
+            bind:this={sheetMenuBtnEl}
+            data-pinta-sheet-menu
+            aria-haspopup="dialog"
+            aria-expanded={sheetMenuOpen}
+            aria-label="Switch test sheet"
+            title={others.length > 0
+              ? `Switch test sheet — ${others.length} other${others.length === 1 ? "" : "s"} saved in this browser`
+              : "Your test sheets — import another to keep several side by side"}
+          >
+            <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polygon points="12 2 2 7 12 12 22 7 12 2"/><polyline points="2 17 12 22 22 17"/><polyline points="2 12 12 17 22 12"/></svg>
+            <span class="tabular-nums">{others.length + 1}</span>
+            <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="6 9 12 15 18 9"/></svg>
+          </button>
+          {#if sheetMenuOpen}
+            <div
+              class="absolute z-30 top-full mt-1 w-[min(22rem,calc(100vw-2rem))] bg-white dark:bg-night-card border border-ink-200 dark:border-night-line rounded-md shadow-lg py-1"
+              style:left="{sheetMenuLeft}px"
+              role="dialog"
+              aria-label="Your test sheets"
+              tabindex="-1"
+              data-pinta-sheet-menu
+              onkeydown={(e) => {
+                if (e.key !== "Escape") return;
+                e.stopPropagation();
+                closeSheetMenu(true);
+              }}
+            >
+              <div class="px-3 pt-1.5 pb-1 text-[10px] uppercase tracking-wider font-semibold text-ink-500 dark:text-night-mute">Your test sheets</div>
+              <div class="max-h-64 overflow-y-auto">
+                <!-- The sheet on screen -->
+                <div class="flex items-start gap-2 px-3 py-1.5 bg-brand-pink/5" aria-current="true" data-pinta-sheet-current>
+                  <svg class="shrink-0 mt-0.5 text-brand-pink dark:text-brand-pink-light" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="20 6 9 17 4 12"/></svg>
+                  <div class="min-w-0 flex-1">
+                    <div class="text-[12px] font-semibold text-ink-900 dark:text-night-text leading-snug break-words">{meta.title || meta.filename}</div>
+                    <div class="text-[10.5px] text-ink-500 dark:text-night-mute tabular-nums">{t.pass + t.fail} of {t.total} run{t.fail > 0 ? ` · ${t.fail} failed` : ""} · open now</div>
+                  </div>
+                </div>
+                {@render savedSheetRows()}
+              </div>
+              <div class="my-1 border-t border-ink-100 dark:border-night-line"></div>
+              <button
+                type="button"
+                class="w-full flex items-center gap-2 px-3 py-1.5 text-[12px] text-ink-700 dark:text-night-dim hover:bg-ink-50 dark:hover:bg-night-alt hover:text-brand-pink dark:hover:text-brand-pink-light"
+                onclick={importAnotherSheet}
+              >
+                <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>
+                Import another sheet…
+              </button>
+              <p class="px-3 pt-1 pb-1.5 text-[10.5px] text-ink-500 dark:text-night-mute leading-snug">
+                Each sheet keeps its own marks and failure notes in this browser — switch as often as you like.
+              </p>
+            </div>
+          {/if}
+        {/if}
+        </div>
 
         <!-- Subline: Author · as of <importedAt>. Author is clickable
              to edit; date is plain text derived from the catalog's
@@ -2428,24 +2804,23 @@
           type="button"
           class="inline-flex items-center justify-center w-8 h-8 text-ink-700 dark:text-night-dim hover:text-red-600 dark:hover:text-red-400 hover:bg-ink-50 dark:hover:bg-night-alt disabled:opacity-40 disabled:cursor-not-allowed disabled:hover:bg-transparent disabled:hover:text-ink-700 dark:disabled:hover:text-night-dim"
           onclick={() => void clearMarks()}
-          disabled={!app.testPilotHasMarks || readOnlyRun}
+          disabled={!(app.testPilotHasMarks || app.testPilotHasNotes) || readOnlyRun}
           title={readOnlyRun
             ? READ_ONLY_TITLE
-            : !app.testPilotHasMarks
+            : !(app.testPilotHasMarks || app.testPilotHasNotes)
               ? "Clear marks — nothing to clear, no rows are marked yet"
               : "Clear marks — reset every Pass/Fail mark in the catalog back to untested (keeps the catalog)"}
           aria-label="Clear all Pass/Fail marks"
         >
           <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 6h18"/><path d="M8 6V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/><path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6"/></svg>
         </button>
+        {#if !standalone}
         <button
           type="button"
           class="inline-flex items-center justify-center w-8 h-8 text-ink-700 dark:text-night-dim hover:text-brand-pink dark:hover:text-brand-pink-light hover:bg-ink-50 dark:hover:bg-night-alt disabled:opacity-40 disabled:cursor-not-allowed disabled:hover:bg-transparent disabled:hover:text-ink-700 dark:disabled:hover:text-night-dim"
           onclick={openFileIssuesSheet}
-          disabled={app.appMode === "standalone" || failedUnfiled.length === 0 || app.testPilot.pendingFileIssues}
-          title={app.appMode === "standalone"
-            ? "File failed tests — needs a connected companion (export your results and send them to the developer instead)"
-            : failedUnfiled.length === 0
+          disabled={failedUnfiled.length === 0 || app.testPilot.pendingFileIssues}
+          title={failedUnfiled.length === 0
               ? scopeActive
                 ? `File failed tests — nothing unfiled in “${app.scopeLabel}”`
                 : "File failed tests — no failures marked yet"
@@ -2460,6 +2835,7 @@
             <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M20.59 13.41 13.42 20.58a2 2 0 0 1-2.83 0L2 12V2h10l8.59 8.59a2 2 0 0 1 0 2.82z"/><line x1="7" y1="7" x2="7.01" y2="7"/></svg>
           {/if}
         </button>
+        {/if}
         <div class="relative" data-pinta-export-menu>
           <button
             type="button"
@@ -2573,7 +2949,7 @@
                   <div class="mt-1 h-1 rounded-full bg-ink-200 dark:bg-night-line overflow-hidden" aria-hidden="true">
                     <div class="h-full bg-brand-pink dark:bg-brand-pink-light transition-[width]" style="width:{Math.round((stepPrep.done / stepPrep.total) * 100)}%"></div>
                   </div>
-                {:else if stepPrepNote && steplessCount > 0 && stepPrepTarget && targets.includes(stepPrepTarget)}
+                {:else if stepPrepNote && !standalone && steplessCount > 0 && stepPrepTarget && targets.includes(stepPrepTarget)}
                   <div class="mt-1.5 text-[10.5px] text-amber-700 dark:text-amber-400 leading-snug" data-pinta-step-prep-note>
                     {stepPrepNote}
                     <button
@@ -2597,6 +2973,7 @@
                 <div class="text-[10.5px] text-ink-500 dark:text-night-mute leading-snug mt-0.5 mb-1.5">Steps per row, Result left blank for the tester. Re-importable in standalone mode.</div>
                 <!-- Applies to .md, .docx and Email below. Remembered with
                      the other tester-sheet prefs (pinta-tester-info). -->
+                {#if !standalone}
                 <label class="mb-2 flex items-start gap-1.5 text-[11px] text-ink-800 dark:text-night-text cursor-pointer" title="Ask the agent for steps on every test that has none before the sheet downloads or is emailed. Untick to export the sheet as it stands.">
                   <input
                     type="checkbox"
@@ -2613,16 +2990,21 @@
                     </span>
                   </span>
                 </label>
+                {:else if steplessCount > 0}
+                  <p class="mb-2 text-[11px] text-ink-600 dark:text-night-dim" data-pinta-stepless-note>
+                    {nTests(steplessCount)} {steplessCount === 1 ? "has" : "have"} no steps — exported as is.
+                  </p>
+                {/if}
                 <div class="flex items-center gap-1.5">
-                  {@render fmtBtn(".md", app.testerInfo.generateSteps ? "Tester sheet as Markdown — generates any missing steps first" : "Tester sheet as Markdown, as it stands", () => void downloadTesterSheetMdPrepared(), !!stepPrep)}
-                  {@render fmtBtn(".docx", app.testerInfo.generateSteps ? "Tester sheet as Word — generates any missing steps first; opens directly in Word, no pandoc needed" : "Tester sheet as Word, as it stands — opens directly in Word, no pandoc needed", () => void downloadTesterSheetDocx(), !!stepPrep)}
+                  {@render fmtBtn(".md", wantSteps ? "Tester sheet as Markdown — generates any missing steps first" : "Tester sheet as Markdown, as it stands", () => void downloadTesterSheetMdPrepared(), !!stepPrep)}
+                  {@render fmtBtn(".docx", wantSteps ? "Tester sheet as Word — generates any missing steps first; opens directly in Word, no pandoc needed" : "Tester sheet as Word, as it stands — opens directly in Word, no pandoc needed", () => void downloadTesterSheetDocx(), !!stepPrep)}
                 </div>
                 {@render prepStatus(["md", "docx"])}
               </div>
 
               <div class="px-3 py-2 border-t border-ink-100 dark:border-night-line">
                 <div class="text-[12px] font-semibold text-ink-900 dark:text-night-text">Email</div>
-                <div class="text-[10.5px] text-ink-500 dark:text-night-mute leading-snug mt-0.5 mb-2">Downloads the tester sheet (.md){app.testerInfo.generateSteps ? ", generating any missing steps first," : ""} and opens a prefilled draft — attach the file and send.</div>
+                <div class="text-[10.5px] text-ink-500 dark:text-night-mute leading-snug mt-0.5 mb-2">Downloads the tester sheet (.md){wantSteps ? ", generating any missing steps first," : ""} and opens a prefilled draft — attach the file and send.</div>
                 <input
                   type="email"
                   class="w-full px-2 py-1 text-[11px] rounded-md border border-ink-200 dark:border-night-line bg-white dark:bg-night-card text-ink-900 dark:text-night-text placeholder:text-ink-400 dark:placeholder:text-night-mute outline-none focus:border-brand-pink dark:focus:border-brand-pink-light"
@@ -2665,7 +3047,7 @@
                   class="mt-1.5 w-full inline-flex items-center justify-center gap-1.5 rounded-md bg-brand-pink px-2 py-1.5 text-[11.5px] font-semibold text-white hover:bg-brand-magenta dark:hover:bg-brand-pink-light disabled:opacity-50 disabled:cursor-not-allowed disabled:hover:bg-brand-pink transition-colors"
                   onclick={() => void emailTesterSheet("gmail")}
                   disabled={!emailReady || emailBusy || !!stepPrep}
-                  title={app.testerInfo.generateSteps ? "Generates any missing steps, downloads the .md and opens a prefilled Gmail draft — attach the downloaded file and send" : "Downloads the .md as it stands and opens a prefilled Gmail draft — attach the downloaded file and send"}
+                  title={wantSteps ? "Generates any missing steps, downloads the .md and opens a prefilled Gmail draft — attach the downloaded file and send" : "Downloads the .md as it stands and opens a prefilled Gmail draft — attach the downloaded file and send"}
                 >
                   {#if emailBusy}
                     <PaintLoader size="xs" tone="mono" />
@@ -2828,7 +3210,7 @@
 
     <!-- FILE-FAILED-TESTS selection sheet (WS4) — small inline sheet,
          failed + unfiled rows with checkboxes (all pre-checked). -->
-    {#if fileIssuesOpen}
+    {#if fileIssuesOpen && !standalone}
       <div class="rounded-md border border-ink-200 dark:border-night-line bg-white dark:bg-night-card p-2.5 space-y-2">
         <div class="text-[12px] font-semibold text-ink-900 dark:text-night-text">
           File failed tests as issues
@@ -2868,11 +3250,9 @@
             Cancel
           </button>
           <span class="ml-auto text-[10.5px] text-ink-500 dark:text-night-mute">
-            {app.appMode === "standalone"
-              ? "Needs a connected companion — nothing will be filed"
-              : gitlabReady
-                ? "via glab, one issue per test"
-                : "GitLab module off — entries land in .pinta/tasks.md"}
+            {gitlabReady
+              ? "via glab, one issue per test"
+              : "GitLab module off — entries land in .pinta/tasks.md"}
           </span>
         </div>
       </div>
@@ -2992,7 +3372,7 @@
                 {@render scopeItem(`since:${app.testPilot.scope.rev}`, `New in v${app.testPilot.scope.rev + 1}`, "Added or reworded in that revision")}
               {/if}
               {#if !hasRevisionHistory}
-                <div class="px-3 py-1 pl-8 text-[10.5px] text-ink-400 dark:text-night-mute leading-tight">“New in …” appears once the catalog is regenerated (it is at v{catalogRev}).</div>
+                <div class="px-3 py-1 pl-8 text-[10.5px] text-ink-400 dark:text-night-mute leading-tight">{standalone ? "“New in …” appears when a sheet carries more than one revision." : `“New in …” appears once the catalog is regenerated (it is at v${catalogRev}).`}</div>
               {/if}
               {@render scopeItem("failed", "Failed last run", "Frozen when picked")}
               {@render scopeItem("untested", "Not run yet", "Frozen when picked")}
@@ -3188,8 +3568,8 @@
     </div>
 
     {#if app.testPilot.error}
-      <div class="rounded-md border border-red-300 bg-red-50 dark:border-red-800/50 dark:bg-red-950/30 p-2.5 text-[12px] text-red-700 dark:text-red-300 leading-snug flex items-start gap-2">
-        <span class="flex-1 min-w-0">{app.testPilot.error}</span>
+      <div role="alert" class="rounded-md border border-red-300 bg-red-50 dark:border-red-800/50 dark:bg-red-950/30 p-2.5 text-[12px] text-red-700 dark:text-red-300 leading-snug flex items-start gap-2">
+        <span class="flex-1 min-w-0 [overflow-wrap:anywhere]">{app.testPilot.error}</span>
         <button
           type="button"
           class="shrink-0 text-red-500 hover:text-red-700 dark:text-red-400 dark:hover:text-red-200 leading-none px-1"
@@ -3363,7 +3743,7 @@
                    has a cached detail (nothing left to ask). Disabled +
                    spinning while the queue is chewing through the
                    section. -->
-              {#if secUnloaded > 0}
+              {#if secUnloaded > 0 && !standalone}
                 <button
                   type="button"
                   class="shrink-0 w-8 h-9 inline-flex items-center justify-center rounded-full hover:bg-ink-100 dark:hover:bg-night-line disabled:opacity-60 disabled:cursor-not-allowed"
@@ -3447,6 +3827,7 @@
                       <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>
                       Add test below
                     </button>
+                    {#if !standalone}
                     <button
                       type="button"
                       class="w-full flex items-center gap-2 px-3 py-1.5 text-[12px] text-ink-700 dark:text-night-dim hover:bg-ink-50 dark:hover:bg-night-alt hover:text-ink-900 dark:hover:text-night-text disabled:opacity-40 disabled:cursor-not-allowed disabled:hover:bg-transparent disabled:hover:text-ink-700 dark:disabled:hover:text-night-dim"
@@ -3457,6 +3838,7 @@
                       <svg width="12" height="12" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M12 3l1.9 4.6L18.5 9.5 13.9 11.4 12 16l-1.9-4.6L5.5 9.5l4.6-1.9z"/></svg>
                       {app.testPilot.pendingSectionSuggest[section.title] ? "Suggesting…" : "Suggest tests"}
                     </button>
+                    {/if}
                     <div class="my-1 border-t border-ink-100 dark:border-night-line"></div>
                     <button
                       type="button"
@@ -3728,7 +4110,7 @@
                            quick question without forcing a fetchDetailSteps
                            round-trip. Hidden when chat is disabled via
                            module setting. -->
-                      {#if chatEnabled}
+                      {#if chatEnabled && (!standalone || (test.chat?.length ?? 0) > 0)}
                         {@const hasChat = (test.chat?.length ?? 0) > 0}
                         <button
                           type="button"
@@ -3812,13 +4194,19 @@
                           ? "Fetching steps from the agent…"
                           : detailLoaded
                             ? "View loaded steps"
-                            : "Ask for step-by-step instructions"}
+                            : standalone
+                              ? "Open this test"
+                              : "Ask for step-by-step instructions"}
                         aria-label={detailLoading
                           ? `Fetching steps for ${test.id}`
-                          : `Ask for steps for ${test.id}`}
+                          : standalone || detailLoaded
+                            ? `Open ${test.id}`
+                            : `Ask for steps for ${test.id}`}
                       >
                         {#if detailLoading}
                           <PaintLoader size="xs" />
+                        {:else if standalone}
+                          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="9 18 15 12 9 6"/></svg>
                         {:else}
                           <svg width="19" height="19" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><path d="M9.09 9a3 3 0 0 1 5.83 1c0 2-3 3-3 3"/><line x1="12" y1="17" x2="12.01" y2="17"/></svg>
                         {/if}
@@ -3908,6 +4296,25 @@
                       {/if}
                     </div>
                   </div>
+
+                  <!-- Failure notes — inline under a failed row, indented
+                       to the title column. In the read-only imported-run
+                       view the block shows only when the tester left
+                       notes (there is nothing to add). -->
+                  {#if test.status === "fail" && !editingTitle && !editingExpected && (!readOnlyRun || (test.failNotes?.length ?? 0) > 0)}
+                    <div
+                      class="pl-11 pr-3 pb-3 -mt-1 {isActive
+                        ? 'bg-ink-100 dark:bg-night-alt'
+                        : 'bg-white dark:bg-night-card'}"
+                    >
+                      <!-- Keyed by sheet: two sheets can share a test id,
+                           and one sheet's open draft must not show up
+                           on the other's row. -->
+                      {#key app.testPilot.catalog.docId}
+                        <FailureNotes {test} readOnly={readOnlyRun} />
+                      {/key}
+                    </div>
+                  {/if}
 
                   <!-- Status dropdown menu — anchored beside the checkbox -->
                   {#if dropdownTestId === test.id}
@@ -4034,7 +4441,8 @@
     pending={chatPending}
     error={app.testPilot.error}
     placeholder="Ask the agent about this test…"
-    greeting={`Hi${firstName ? ` ${firstName}` : ""} — I can help you review ${chatTest?.id ?? "this test"}. What would you like to check?`}
+    readOnly={standalone}
+    greeting={standalone ? "" : `Hi${firstName ? ` ${firstName}` : ""} — I can help you review ${chatTest?.id ?? "this test"}. What would you like to check?`}
     quickPrompts={[
       { label: "Summarize this test", prompt: `Summarize ${chatTest?.id ?? "this test"} in 2-3 sentences — what it's checking, why it matters, and what the tester should look for.` },
       { label: "Submit Gitlab Issue", prompt: `Help me draft a GitLab issue for a bug I found while running ${chatTest?.id ?? "this test"}. Ask me for the repro steps, expected vs actual behavior, and severity, then format it as a GitLab issue (title + markdown body).` },
@@ -4046,6 +4454,11 @@
     ]}
     onClear={() => {
       if (chatTestId) app.clearChat(chatTestId);
+      // Nothing left to read and no agent to ask — close it.
+      if (standalone) {
+        chatOpen = false;
+        chatTestId = null;
+      }
     }}
     onExport={() => {
       if (!chatTestId) return;

@@ -113,6 +113,24 @@ import {
   parseTestDocMarkdown,
   selectUnfiledFailures,
 } from "./test-pilot-doc.js";
+import { idbSheetShelf } from "./local-store.js";
+import {
+  isSamePlainSheet,
+  sameSheetTitle,
+  type SavedSheet,
+  type SavedSheetSummary,
+  type SheetShelf,
+} from "./sheet-shelf.js";
+import {
+  cleanImageName,
+  FAILURE_NOTE_LIMITS,
+  isFailureNoteImage,
+  notesForExport,
+  renderFailureNotesMarkdown,
+  type FailureNote,
+  type FailureNoteDraft,
+  type FailureNoteParkedDraft,
+} from "./failure-notes.js";
 import {
   composeFrontmatter,
   overlayResults,
@@ -249,6 +267,12 @@ export type TestPilotTest = {
    * the user hasn't asked anything yet.
    */
   chat?: ChatMessage[];
+  /** What the tester wrote down when this row failed — description,
+   *  steps to reproduce, screenshots. Several per row. Local-only like
+   *  `status`; exported with the results and carried in the `.pinta`
+   *  bundle. Kept when the row is re-marked (so a mis-click loses
+   *  nothing) but only shown and exported while the row is failed. */
+  failNotes?: FailureNote[];
   /** Phase 21 — provenance. The catalog revision this id first appeared
    *  in, and the last revision whose wording changed. Absent on rows
    *  that predate versioning; those read as revision 1. Stamped by
@@ -334,6 +358,10 @@ export type TestPilotImportedRun = {
   overlaidAt: number;
   /** The developer's own marks, snapshotted just before the overlay. */
   priorStatuses: Record<string, TestPilotStatus>;
+  /** The developer's own failure notes on every row the run's notes
+   *  replaced (`null` = the row had none). Absent when the run carried
+   *  no notes. Clear puts them back. */
+  priorFailNotes?: Record<string, FailureNote[] | null>;
   applied: number;
   unknownIds: string[];
   /** Phase 21 — the export's `scope:` token when the run covered only
@@ -795,7 +823,17 @@ class ExtensionState {
     /** Saved named selections, persisted under `${key}:plans` — kept
      *  out of the catalog so a regenerate can never destroy them. */
     plans: TestPlan[];
-  }>({ catalog: null, pending: null, pendingDetails: {}, pendingChats: {}, pendingSectionSuggest: {}, sectionSuggestions: {}, pendingSectionChats: {}, detailOutcomes: {}, error: null, editingActive: false, pendingFileIssues: false, filedIssues: {}, importedRun: null, pendingImportConflict: null, bundleNotice: null, scope: { kind: "all" }, plans: [] });
+    /** Standalone only — the tester's OTHER sheets (every saved sheet
+     *  except the one on screen), newest first. The switcher beside the
+     *  title lists them. */
+    savedSheets: SavedSheetSummary[];
+    /** A sheet switch / save is in flight — the switcher waits. */
+    sheetBusy: boolean;
+    /** The sheet on screen is being put away (shelved, then replaced).
+     *  The catalog is inert for that moment: a mark made now would land
+     *  on a sheet whose saved copy is already taken. */
+    sheetSwapping: boolean;
+  }>({ catalog: null, pending: null, pendingDetails: {}, pendingChats: {}, pendingSectionSuggest: {}, sectionSuggestions: {}, pendingSectionChats: {}, detailOutcomes: {}, error: null, editingActive: false, pendingFileIssues: false, filedIssues: {}, importedRun: null, pendingImportConflict: null, bundleNotice: null, scope: { kind: "all" }, plans: [], savedSheets: [], sheetBusy: false, sheetSwapping: false });
 
   /**
    * Phase 14 — cross-cutting chat state for the two non-Test-Pilot
@@ -1209,10 +1247,19 @@ class ExtensionState {
     this.clearTestPilotTimeout();
     this.clearFileIssuesTimeout();
     this.testPilot.catalog = null;
+    // The "still waiting for an agent to pick this up" notice belongs to
+    // the import / generate we are dropping — without a companion there
+    // is nothing left to wait for (cancelAudit & co. clear it the same way).
+    if (this.testPilot.pending) this.claimNotice = null;
     this.testPilot.pending = null;
     this.testPilot.pendingDetails = {};
     this.testPilot.detailOutcomes = {};
     this.testPilot.pendingChats = {};
+    // "Suggest tests" has no timeout of its own — only the agent's reply
+    // clears it — so a project switch / drop to standalone must, or the
+    // spinner sticks on a same-titled section of the next catalog.
+    this.testPilot.pendingSectionSuggest = {};
+    this.testPilot.sectionSuggestions = {};
     this.testPilot.pendingFileIssues = false;
     this.testPilot.importedRun = null;
     this.testPilot.pendingImportConflict = null;
@@ -1249,6 +1296,7 @@ class ExtensionState {
    *  Kept separate from the catalog value so older readers of the
    *  catalog key keep working. */
   private async saveImportedRun(): Promise<void> {
+    if (this.slotSwapInProgress()) return;
     const runKey = `${this.testPilotStorageKey()}:run`;
     try {
       if (this.testPilot.importedRun) {
@@ -1258,9 +1306,399 @@ class ExtensionState {
       } else {
         await chrome.storage?.local?.remove(runKey);
       }
-    } catch {
-      // best-effort — the catalog save is the one that reports quota
+    } catch (err) {
+      // The run sidecar holds the only copy of the developer's own
+      // marks and notes while a run is overlaid. If it can't be saved,
+      // a reload would show the tester's run with no banner and no way
+      // back — so undo the overlay now, while the snapshot is still in
+      // memory, and say why.
+      if (ExtensionState.isQuotaExceeded(err) && this.testPilot.importedRun) {
+        void this.rejectImportedRunForQuota();
+      }
     }
+  }
+
+  /** True from the moment a run is overlaid until the catalog carrying
+   *  it has been stored once (see saveTestPilot). */
+  private importedRunUnsaved = false;
+  private rejectingImportedRun = false;
+  private static readonly RUN_REJECTED_PREFIX =
+    "Browser storage is full — the imported run couldn't be kept";
+
+  /** Storage couldn't hold an imported run: put the developer's own
+   *  marks and notes back and say why. */
+  private async rejectImportedRunForQuota(): Promise<void> {
+    // Both the catalog save and the sidecar save can fail for the same
+    // overlay — undo it once.
+    if (this.rejectingImportedRun || !this.testPilot.importedRun) return;
+    this.rejectingImportedRun = true;
+    this.importedRunUnsaved = false;
+    try {
+      // Free the sidecar's room BEFORE writing the restored catalog —
+      // the developer's own screenshots may need it to fit back.
+      await chrome.storage?.local
+        ?.remove(`${this.testPilotStorageKey()}:run`)
+        .catch(() => {});
+      this.clearImportedRun();
+      this.testPilot.bundleNotice = null;
+      this.testPilot.error =
+        `${ExtensionState.RUN_REJECTED_PREFIX}, so your own marks were put back. ` +
+        "Free some space (failure-note screenshots and global chat images take the most) and import it again.";
+    } finally {
+      this.rejectingImportedRun = false;
+    }
+  }
+
+  /**
+   * Swap every row's failure notes for the imported run's — rows the
+   * run has no notes for show none, so the developer's own notes are
+   * never presented (or exported) as the tester's. Returns what was
+   * there, keyed by test id, for `clearImportedRun` to put back;
+   * undefined when nothing changed.
+   */
+  private overlayRunFailNotes(
+    catalog: TestPilotCatalog,
+    runNotes: Record<string, FailureNote[]>,
+  ): Record<string, FailureNote[] | null> | undefined {
+    const prior: Record<string, FailureNote[] | null> = Object.create(null);
+    for (const s of catalog.sections) {
+      for (const t of s.tests) {
+        const fromRun = Object.prototype.hasOwnProperty.call(runNotes, t.id)
+          ? runNotes[t.id]
+          : undefined;
+        if (t.failNotes && t.failNotes.length > 0) {
+          prior[t.id] = $state.snapshot(t.failNotes) as FailureNote[];
+        } else if (fromRun) {
+          prior[t.id] = null;
+        }
+        if (fromRun && fromRun.length > 0) t.failNotes = fromRun;
+        else delete t.failNotes;
+      }
+    }
+    return Object.keys(prior).length > 0 ? prior : undefined;
+  }
+
+  // ─── Standalone saved sheets ────────────────────────────────────────
+  //
+  // A tester without a companion keeps several projects' sheets in one
+  // browser. The sheet on screen stays in the standalone slot (so
+  // everything else — marks, exports, a project adopting it — works
+  // unchanged); the others wait whole on the shelf, and switching swaps
+  // the two. A sheet only ever opens because the tester picked it: an
+  // empty slot is never filled from the shelf on its own, or the next
+  // project to connect would adopt a sheet nobody opened. See
+  // sheet-shelf.ts.
+
+  /** Where shelved sheets are stored. Swappable so tests don't need
+   *  IndexedDB. */
+  sheetShelf: SheetShelf = idbSheetShelf;
+
+  /** Shelf work runs one at a time: a double-clicked switch must not
+   *  shelve the same sheet under two ids or interleave two swaps.
+   *  Queued callbacks only call the un-queued helpers below. */
+  private sheetOps: Promise<unknown> = Promise.resolve();
+  private sheetOpsRunning = 0;
+  private runSheetOp<T>(fn: () => Promise<T>): Promise<T> {
+    this.sheetOpsRunning++;
+    this.testPilot.sheetBusy = true;
+    const run = this.sheetOps.then(fn).finally(() => {
+      this.sheetOpsRunning--;
+      if (this.sheetOpsRunning === 0) this.testPilot.sheetBusy = false;
+    });
+    this.sheetOps = run.catch(() => {});
+    return run;
+  }
+
+  /** Re-read the saved-sheet list: every shelved sheet but the one on
+   *  screen, newest first. When the shelf can't be read the last known
+   *  list stays (minus the open sheet) — a busy database must not make
+   *  saved sheets look deleted. */
+  private async refreshSavedSheets(): Promise<void> {
+    const activeId = this.testPilot.catalog?.docId;
+    try {
+      this.testPilot.savedSheets = (await this.sheetShelf.list())
+        .filter((sheet) => sheet.docId !== activeId)
+        .sort((a, b) => b.savedAt - a.savedAt);
+    } catch {
+      this.testPilot.savedSheets = this.testPilot.savedSheets.filter(
+        (sheet) => sheet.docId !== activeId,
+      );
+    }
+  }
+
+  /** Copy the sheet on screen — marks, failure notes, plans, scope —
+   *  onto the shelf. Throws when it can't be stored, so callers never
+   *  take a sheet off screen that was not saved first. */
+  private async shelveActiveSheet(): Promise<void> {
+    const c = this.testPilot.catalog;
+    if (!c) return;
+    await this.sheetShelf.put({
+      docId: c.docId,
+      savedAt: Date.now(),
+      catalog: $state.snapshot(c) as TestPilotCatalog,
+      importedRun: this.testPilot.importedRun
+        ? ($state.snapshot(this.testPilot.importedRun) as TestPilotImportedRun)
+        : null,
+      plans: $state.snapshot(this.testPilot.plans) as TestPlan[],
+      scope: $state.snapshot(this.testPilot.scope),
+    });
+  }
+
+  /** Remove a shelf row; one retry, then give up quietly (a leftover
+   *  row for the open sheet is hidden from the list and overwritten the
+   *  next time that sheet is shelved). */
+  private async dropShelfRow(docId: string): Promise<void> {
+    try {
+      await this.sheetShelf.remove(docId);
+    } catch {
+      await this.sheetShelf.remove(docId).catch(() => {});
+    }
+  }
+
+  /** Take whatever is on screen off it (state + the standalone slot's
+   *  four keys). The caller has already shelved it. Only removals — it
+   *  cannot run into the storage limit. */
+  private unloadActiveSheet(): void {
+    this.testPilot.catalog = null;
+    this.testPilot.importedRun = null;
+    this.importedRunUnsaved = false;
+    this.testPilot.plans = [];
+    this.testPilot.scope = { kind: "all" };
+    this.testPilot.pending = null;
+    this.testPilot.pendingImportConflict = null;
+    this.testPilot.bundleNotice = null;
+    this.testPilot.detailOutcomes = {};
+    void this.saveTestPilot();
+    void this.saveImportedRun();
+    void this.saveTestPlans();
+    void this.saveTestPilotScope();
+  }
+
+  /**
+   * True while a swap owns the standalone slot. The ordinary
+   * fire-and-forget saves stand down for that moment — one landing
+   * between "new sheet written" and "new sheet shown" would put the OLD
+   * sheet back in the slot after its shelf copy was taken. Standalone
+   * only: a project's keys are never part of a swap.
+   */
+  private slotSwapInProgress(): boolean {
+    return this.testPilot.sheetSwapping && !this.selectedCompanion;
+  }
+
+  /**
+   * Write a shelved sheet into the standalone slot — catalog and its
+   * three sidecars in ONE storage write, so a full store (the slot is
+   * capped at 10 MB, the shelf is not) fails as a whole and leaves the
+   * slot exactly as it was. A sidecar the sheet doesn't have is written
+   * as null (every loader reads null as "none") rather than removed
+   * afterwards, so the previous sheet's run banner, plans or scope can
+   * never be left behind under the new one. Throws on failure; the
+   * caller keeps the shelf copy until this has succeeded.
+   */
+  private async writeSheetToSlot(sheet: SavedSheet): Promise<void> {
+    const key = ExtensionState.STANDALONE_TEST_PILOT_KEY;
+    const plans = Array.isArray(sheet.plans) ? sheet.plans : [];
+    const scoped = !!sheet.scope && sheet.scope.kind !== "all";
+    await chrome.storage.local.set({
+      [key]: sheet.catalog,
+      [`${key}:run`]: sheet.importedRun ?? null,
+      [`${key}:plans`]: plans.length > 0 ? plans : null,
+      [`${key}:scope`]: scoped ? sheet.scope : null,
+    });
+  }
+
+  /** Put a sheet that `writeSheetToSlot` has just stored on screen. */
+  private showSheet(sheet: SavedSheet): void {
+    ExtensionState.migrateCommentsToChat(sheet.catalog);
+    this.testPilot.catalog = sheet.catalog;
+    this.testPilot.importedRun = sheet.importedRun ?? null;
+    this.importedRunUnsaved = false;
+    this.testPilot.plans = Array.isArray(sheet.plans) ? sheet.plans : [];
+    const scope = sheet.scope as typeof this.testPilot.scope | undefined;
+    this.testPilot.scope = scope && typeof scope.kind === "string" ? scope : { kind: "all" };
+    this.testPilot.pending = null;
+    this.testPilot.pendingImportConflict = null;
+    this.testPilot.bundleNotice = null;
+    this.testPilot.detailOutcomes = {};
+    this.testPilot.error = null;
+  }
+
+  /** Why a saved sheet could not be opened, in the tester's words. */
+  private static sheetOpenError(title: string, err: unknown): string {
+    return ExtensionState.isQuotaExceeded(err)
+      ? `Browser storage is full — “${title}” couldn't be opened. It is still saved. Free some space (failure-note screenshots on the open sheet and global chat images take the most), then try again.`
+      : `“${title}” couldn't be opened and is still saved: ${(err as Error)?.message ?? "storage error"}`;
+  }
+
+  /**
+   * Shelve the open sheet (if any), then open a saved one in its place.
+   * Every step that can fail happens before anything is given up: on
+   * failure the screen and the slot still hold the sheet that was open
+   * and the saved sheet is still on the shelf. Un-queued — callers run
+   * it inside `runSheetOp`.
+   *
+   * - `"shown"`     — `target` is on screen.
+   * - `"failed"`    — nothing changed; `testPilot.error` says why.
+   * - `"connected"` — a companion connected meanwhile; standalone
+   *                    sheets are no longer on screen, nothing shown.
+   */
+  private async swapInSavedSheet(
+    target: SavedSheet,
+    failedHow: string,
+  ): Promise<"shown" | "failed" | "connected"> {
+    if (this.selectedCompanion) return "connected";
+    const openId = this.testPilot.catalog?.docId;
+    this.testPilot.sheetSwapping = true;
+    try {
+      try {
+        await this.shelveActiveSheet();
+      } catch (err) {
+        this.testPilot.error = `Couldn't save the sheet you have open, so ${failedHow}: ${(err as Error)?.message ?? "storage error"}`;
+        return "failed";
+      }
+      // Connected while the shelf was busy: what was just shelved was
+      // read before the project's catalog loaded, so the row is a fair
+      // copy of the standalone sheet — keep it, touch nothing else.
+      if (this.selectedCompanion) return "connected";
+      try {
+        await this.writeSheetToSlot(target);
+      } catch (err) {
+        // The open sheet never left the slot; its fresh shelf copy
+        // would only be a stale duplicate later.
+        if (openId && !this.selectedCompanion) await this.dropShelfRow(openId);
+        this.testPilot.error = ExtensionState.sheetOpenError(
+          target.catalog.title?.trim() || target.catalog.filename,
+          err,
+        );
+        return "failed";
+      }
+      // Connected during the write: the slot now holds `target` and the
+      // shelf holds both — consistent for the next standalone session.
+      // The project's catalog is on screen; don't show a standalone one.
+      if (this.selectedCompanion) return "connected";
+      this.showSheet(target);
+    } finally {
+      this.testPilot.sheetSwapping = false;
+    }
+    await this.dropShelfRow(target.docId);
+    return "shown";
+  }
+
+  /**
+   * Standalone: swap the sheet on screen for a saved one (or open one
+   * from the empty state). Resolves true when it is on screen.
+   */
+  switchTestSheet(docId: string): Promise<boolean> {
+    return this.runSheetOp(async () => {
+      if (this.selectedCompanion) return false;
+      if (this.testPilot.catalog?.docId === docId) return true;
+      let target: SavedSheet | null = null;
+      try {
+        target = await this.sheetShelf.get(docId);
+      } catch (err) {
+        if (!this.selectedCompanion) {
+          this.testPilot.error = `That sheet couldn't be opened just now — it is still saved: ${(err as Error)?.message ?? "storage error"}`;
+        }
+        return false;
+      }
+      if (this.selectedCompanion) return false;
+      if (!target) {
+        this.testPilot.error = "That sheet is no longer saved in this browser.";
+        await this.refreshSavedSheets();
+        return false;
+      }
+      const outcome = await this.swapInSavedSheet(target, "it was kept on screen");
+      await this.refreshSavedSheets();
+      return outcome === "shown";
+    });
+  }
+
+  /** Standalone: delete a saved sheet that is NOT on screen (the open
+   *  one goes through `clearTestPilot`). */
+  removeSavedSheet(docId: string): Promise<void> {
+    return this.runSheetOp(async () => {
+      if (this.selectedCompanion || this.testPilot.catalog?.docId === docId) return;
+      await this.dropShelfRow(docId);
+      await this.refreshSavedSheets();
+    });
+  }
+
+  /**
+   * Standalone import. Decides whether the file is the open sheet again
+   * (left to the normal import), one of the saved sheets (bring that
+   * one back, then import onto it — so its marks are never bypassed),
+   * or a new one (shelve the open sheet so the import starts on an
+   * empty slot). Resolves true only when the import must stop — and
+   * then `testPilot.error` always says why.
+   */
+  private makeRoomForAnotherSheet(filename: string, content: string): Promise<boolean> {
+    return this.runSheetOp(async () => {
+      if (this.selectedCompanion) return false;
+      const current = this.testPilot.catalog;
+      const pinta = parsePintaResultsMarkdown(filename, content);
+      const incoming = pinta ? pinta.catalog : parseTestDocMarkdown(filename, content);
+      // Unreadable file, or headings with no test rows — the normal
+      // path refuses those with a reason; nothing moves.
+      if (!incoming) return false;
+      if (!incoming.sections.some((sec) => sec.tests.length > 0)) return false;
+      const isCurrent =
+        !!current &&
+        (pinta ? incoming.docId === current.docId : isSamePlainSheet(incoming, current));
+      if (isCurrent) return false;
+
+      // One of the saved sheets? A Pinta export says so by doc-id; a
+      // plain sheet by title + shared test ids, newest first.
+      let match: SavedSheet | null = null;
+      try {
+        const saved = (await this.sheetShelf.list()).sort((a, b) => b.savedAt - a.savedAt);
+        const candidates = pinta
+          ? saved.filter((sheet) => sheet.docId === incoming.docId)
+          : saved.filter((sheet) => sameSheetTitle(incoming.title, sheet.title));
+        for (const candidate of candidates) {
+          const full = await this.sheetShelf.get(candidate.docId);
+          if (full && (pinta || isSamePlainSheet(incoming, full.catalog))) {
+            match = full;
+            break;
+          }
+        }
+      } catch (err) {
+        // Not knowing whether a marked copy of this sheet is saved,
+        // importing would open a blank one over it — and the saved
+        // copy would be overwritten the next time it is shelved.
+        if (this.selectedCompanion) return false;
+        this.testPilot.error = `Couldn't check your saved sheets, so nothing was imported — try again: ${(err as Error)?.message ?? "storage error"}`;
+        return true;
+      }
+      // A companion connected while the shelf was read: this is now a
+      // project import — let it run in place, as it always did.
+      if (this.selectedCompanion) return false;
+
+      if (match) {
+        const outcome = await this.swapInSavedSheet(match, "nothing was imported");
+        if (outcome === "shown") await this.refreshSavedSheets();
+        return outcome === "failed";
+      }
+      if (!current) return false; // first sheet — nothing to make room for
+      this.testPilot.sheetSwapping = true;
+      try {
+        try {
+          await this.shelveActiveSheet();
+        } catch (err) {
+          this.testPilot.error = `Couldn't save the sheet you have open, so nothing was imported: ${(err as Error)?.message ?? "storage error"}`;
+          return true;
+        }
+        // Connected meanwhile: the row just written is a fair copy of
+        // the standalone sheet; the import carries on as a project one.
+        if (this.selectedCompanion) return false;
+      } finally {
+        this.testPilot.sheetSwapping = false;
+      }
+      this.unloadActiveSheet();
+      // The list changes here, not after the import: nothing async may
+      // sit between the import and its caller's follow-up.
+      await this.refreshSavedSheets();
+      return false;
+    });
   }
 
   /** Hydrate Test Pilot state for the given companion. Pass null to
@@ -1304,6 +1742,11 @@ class ExtensionState {
       } catch {
         // storage missing (test env) — defaults are fine
       }
+      // List the tester's other sheets — not awaited: plans + scope
+      // hydrate right after this, and a slow shelf must not hold them
+      // up. Nothing is opened from the shelf here (see the note above
+      // `sheetShelf`).
+      void this.runSheetOp(() => this.refreshSavedSheets());
       return;
     }
     const key = ExtensionState.testPilotKeyFor(companion);
@@ -1349,9 +1792,37 @@ class ExtensionState {
         ) {
           ExtensionState.migrateCommentsToChat(standalone);
           this.testPilot.catalog = standalone;
-          await chrome.storage?.local?.set({
-            [key]: $state.snapshot(this.testPilot.catalog),
-          });
+          try {
+            await chrome.storage?.local?.set({
+              [key]: $state.snapshot(this.testPilot.catalog),
+            });
+          } catch (err) {
+            if (!ExtensionState.isQuotaExceeded(err)) throw err;
+            // A catalog heavy with failure-note screenshots doesn't fit
+            // twice. The copy in memory is safe, so free the standalone
+            // slot first and write again.
+            const snap = $state.snapshot(this.testPilot.catalog);
+            await chrome.storage?.local?.remove(
+              ExtensionState.STANDALONE_TEST_PILOT_KEY,
+            );
+            try {
+              await chrome.storage?.local?.set({ [key]: snap });
+            } catch {
+              // Still no room. Put it back where it was and adopt
+              // nothing: the standalone slot keeps the sheet with its
+              // run banner, plans and scope intact, and the claim runs
+              // again on the next connect. A half-claim would strand
+              // those sidecars and show an overlaid run as editable.
+              await chrome.storage?.local
+                ?.set({ [ExtensionState.STANDALONE_TEST_PILOT_KEY]: snap })
+                .catch(() => {});
+              this.testPilot.catalog = null;
+              this.testPilot.error =
+                "Browser storage is full — your tester sheet couldn't be moved into this project, so it was left where it was. " +
+                "Stop the companion to keep working on it in standalone mode, or free some space (global chat images take the most) and reopen the panel.";
+              return;
+            }
+          }
           await chrome.storage?.local?.remove(
             ExtensionState.STANDALONE_TEST_PILOT_KEY,
           );
@@ -1522,6 +1993,7 @@ class ExtensionState {
   }
 
   private async saveTestPilot(): Promise<void> {
+    if (this.slotSwapInProgress()) return;
     const companion = this.selectedCompanion;
     // Standalone writes land in a dedicated slot: the tester persona
     // imports a sheet and marks Pass/Fail with no companion running,
@@ -1531,6 +2003,10 @@ class ExtensionState {
     const key = companion
       ? ExtensionState.testPilotKeyFor(companion)
       : ExtensionState.STANDALONE_TEST_PILOT_KEY;
+    // Read before the await: only the save that stores a freshly
+    // overlaid run may undo it. Once that run is safely in storage, a
+    // later quota failure (a chat screenshot, say) is an ordinary one.
+    const storesFreshRun = this.importedRunUnsaved;
     try {
       if (this.testPilot.catalog) {
         await chrome.storage?.local?.set({
@@ -1539,20 +2015,34 @@ class ExtensionState {
       } else {
         await chrome.storage?.local?.remove(key);
       }
+      if (storesFreshRun) this.importedRunUnsaved = false;
     } catch (err) {
       // Quota exceeded is the failure mode most likely to surprise
       // users — silent loss of their Pass/Fail marks because chrome
       // ran out of room. Surface it so they know what to clear.
       // The on-disk markdown is the recovery path (Phase 13 disk
       // sync writes status into the Result column on every change).
-      if (ExtensionState.isQuotaExceeded(err)) {
+      if (
+        ExtensionState.isQuotaExceeded(err) &&
+        storesFreshRun &&
+        this.testPilot.importedRun
+      ) {
+        // The overlaid run (its notes carry screenshots) doesn't fit.
+        // Left as is, a reload would show the developer's stored marks
+        // under the tester's banner — same undo as saveImportedRun.
+        void this.rejectImportedRunForQuota();
+      } else if (
+        ExtensionState.isQuotaExceeded(err) &&
+        // The undo above explains itself; don't bury it under this.
+        !this.testPilot.error?.startsWith(ExtensionState.RUN_REJECTED_PREFIX)
+      ) {
         this.testPilot.error =
           "Browser storage is full — Test Pilot couldn't save your latest change. " +
-          "Most likely cause: global chat with image attachments. " +
+          "Most likely cause: screenshots on failure notes or in global chat. " +
           "Try clearing global chat (header icon → … or via DevTools: chrome.storage.local.remove('pinta-global-chat')). " +
           (companion
             ? "Your catalog structure + Pass/Fail marks are still safe on disk at .pinta/test-docs/."
-            : "Export your results (.md) now so your marks aren't lost.");
+            : "Export your results now (.docx or a .pinta bundle keep the screenshots) so nothing is lost.");
       }
     }
   }
@@ -1686,6 +2176,7 @@ class ExtensionState {
           unknownIds: [],
         }
       : null;
+    this.reconcileScopeWithCatalog();
     void this.saveTestPilot();
     void this.saveImportedRun();
     this.pushTestDocToCompanion();
@@ -1700,16 +2191,24 @@ class ExtensionState {
   ): void {
     const catalog = this.testPilot.catalog;
     if (!catalog) return;
+    // A second import on top of a run still on screen would snapshot
+    // the FIRST tester's marks as "the developer's". Put the
+    // developer's own back first.
+    if (this.testPilot.importedRun) this.clearImportedRun();
     const priorStatuses = snapshotStatuses(catalog);
     const { applied, unknownIds } = overlayResults(catalog, run);
+    // The markdown sheet carries no notes — the run shows none.
+    const priorFailNotes = this.overlayRunFailNotes(catalog, {});
     this.testPilot.importedRun = {
       signoff,
       overlaidAt: Date.now(),
       priorStatuses,
+      ...(priorFailNotes ? { priorFailNotes } : {}),
       applied,
       unknownIds,
       ...(scope ? { scope } : {}),
     };
+    this.importedRunUnsaved = true;
     this.testPilot.pending = null;
     this.testPilot.error = null;
     void this.saveTestPilot();
@@ -1907,6 +2406,7 @@ class ExtensionState {
   }
 
   private async saveTestPilotScope(): Promise<void> {
+    if (this.slotSwapInProgress()) return;
     const key = this.testScopeStorageKey();
     try {
       if (this.testPilot.scope.kind === "all") {
@@ -1953,7 +2453,11 @@ class ExtensionState {
       const stored = await chrome.storage?.local?.get(from);
       const value = stored?.[from];
       if (value !== undefined) {
-        await chrome.storage?.local?.set({ [`${projectKey}:${name}`]: value });
+        // null = "this sheet has none" (see writeSheetToSlot) — nothing
+        // to carry over, just clear the slot.
+        if (value !== null) {
+          await chrome.storage?.local?.set({ [`${projectKey}:${name}`]: value });
+        }
         await chrome.storage?.local?.remove(from);
       }
     } catch {
@@ -1962,6 +2466,7 @@ class ExtensionState {
   }
 
   private async saveTestPlans(): Promise<void> {
+    if (this.slotSwapInProgress()) return;
     const key = this.testPlansStorageKey();
     try {
       if (this.testPilot.plans.length > 0) {
@@ -2004,6 +2509,16 @@ class ExtensionState {
     return !!c && c.sections.some((s) => s.tests.some((t) => t.status !== "untested"));
   }
 
+  /** True when any row still holds a failure note — including notes
+   *  kept on a row that was re-marked, which are hidden but stored.
+   *  Clear marks stays reachable while this is true. */
+  get testPilotHasNotes(): boolean {
+    const c = this.testPilot.catalog;
+    return (
+      !!c && c.sections.some((s) => s.tests.some((t) => (t.failNotes?.length ?? 0) > 0))
+    );
+  }
+
   /** Build the `testPilot` block for a `.pinta` export — docId +
    *  sign-off + full status map (untested rows ride too, so the
    *  developer sees the run exactly as the tester left it). Returns
@@ -2014,10 +2529,19 @@ class ExtensionState {
   ): PintaFileTestPilot | undefined {
     const c = this.testPilot.catalog;
     if (!c || !this.testPilotHasMarks) return undefined;
+    // Null prototype: a test id like `__proto__` stays an ordinary key.
+    const failNotes: Record<string, FailureNote[]> = Object.create(null);
+    for (const s of c.sections) {
+      for (const t of s.tests) {
+        const notes = notesForExport(t);
+        if (notes.length > 0) failNotes[t.id] = $state.snapshot(notes) as FailureNote[];
+      }
+    }
     return {
       docId: c.docId,
       signoff,
       statuses: snapshotStatuses(c),
+      ...(Object.keys(failNotes).length > 0 ? { failNotes } : {}),
     };
   }
 
@@ -2029,15 +2553,22 @@ class ExtensionState {
   private applyBundleTestPilot(tp: PintaFileTestPilot): void {
     const catalog = this.testPilot.catalog;
     if (catalog && catalog.docId === tp.docId) {
+      // Same guard as applyRunOverlay: never snapshot one tester's run
+      // as the developer's own.
+      if (this.testPilot.importedRun) this.clearImportedRun();
       const priorStatuses = snapshotStatuses(catalog);
       const { applied, unknownIds } = overlayStatusesById(catalog, tp.statuses);
+      // The tester's failure notes ride with their marks.
+      const priorFailNotes = this.overlayRunFailNotes(catalog, tp.failNotes ?? {});
       this.testPilot.importedRun = {
         signoff: tp.signoff,
         overlaidAt: Date.now(),
         priorStatuses,
+        ...(priorFailNotes ? { priorFailNotes } : {}),
         applied,
         unknownIds,
       };
+      this.importedRunUnsaved = true;
       this.testPilot.pending = null;
       this.testPilot.error = null;
       void this.saveTestPilot();
@@ -2061,8 +2592,18 @@ class ExtensionState {
     const run = this.testPilot.importedRun;
     const catalog = this.testPilot.catalog;
     this.testPilot.importedRun = null;
+    this.importedRunUnsaved = false;
     if (run && catalog) {
       restoreStatuses(catalog, run.priorStatuses);
+      for (const s of catalog.sections) {
+        for (const t of s.tests) {
+          const prior = run.priorFailNotes;
+          if (!prior || !Object.prototype.hasOwnProperty.call(prior, t.id)) continue;
+          const notes = prior[t.id];
+          if (notes && notes.length > 0) t.failNotes = notes;
+          else delete t.failNotes;
+        }
+      }
       void this.saveTestPilot();
       this.pushTestDocToCompanion();
       this.pushResultsToCompanion();
@@ -2071,6 +2612,17 @@ class ExtensionState {
   }
 
   async importTestDoc(filename: string, content: string): Promise<void> {
+    // Standalone: a DIFFERENT sheet is kept beside the open one (which
+    // goes to the shelf) instead of replacing it, and a sheet the
+    // tester already has saved is brought back before it is imported
+    // onto. `true` = the import was stopped.
+    if (!this.selectedCompanion) {
+      if (await this.makeRoomForAnotherSheet(filename, content)) return;
+    }
+    await this.importTestDocInPlace(filename, content);
+  }
+
+  private async importTestDocInPlace(filename: string, content: string): Promise<void> {
     // Pinta-authored exports (frontmatter envelope) short-circuit both
     // branches below — parsed locally, connected or not.
     if (this.tryImportPintaMd(filename, content)) return;
@@ -2087,13 +2639,28 @@ class ExtensionState {
           "Couldn't read this file — does it look like a Pinta test sheet? Expected `# Title`, `## Section`, and a `| ID | Test | Expected | Result |` table per section.";
         return;
       }
+      // A document with headings but no test rows is not a sheet (a
+      // hand-written plan parses to empty sections). Loading it would
+      // show an empty catalog with no hint why.
+      if (!parsed.sections.some((sec) => sec.tests.length > 0)) {
+        this.testPilot.error =
+          "No test rows found in this file. A sheet needs a table with ID, Test, Expected Result and Result columns under each section. For a free-form test plan, connect /pinta and import it again so the agent can read it.";
+        return;
+      }
       // Reuse the existing catalog's docId on re-import so any per-doc
       // disk artifacts stay anchored.
       if (this.testPilot.catalog?.docId) parsed.docId = this.testPilot.catalog.docId;
+      // Same guard as a Pinta export: never wipe Pass/Fail progress
+      // without asking. The UI shows the confirm-replace prompt.
+      if (this.testPilotHasMarks) {
+        this.testPilot.pendingImportConflict = { run: parsed, signoff: null };
+        return;
+      }
       ExtensionState.normalizeRevisions(parsed);
       this.testPilot.catalog = parsed;
       this.testPilot.pending = null;
       this.testPilot.error = null;
+      this.reconcileScopeWithCatalog();
       void this.saveTestPilot();
       return;
     }
@@ -2235,6 +2802,7 @@ class ExtensionState {
   cancelTestPilotPending(): void {
     if (!this.testPilot.pending) return;
     this.clearTestPilotTimeout();
+    this.claimNotice = null;
     this.testPilot.pending = null;
     this.testPilot.error = "Cancelled.";
   }
@@ -2585,6 +3153,113 @@ class ExtensionState {
         }
       }
     }
+  }
+
+  /** Half-written failure notes, keyed by catalog + test id, parked
+   *  while their composer is off screen (FailureNotes.svelte). Plain
+   *  map on purpose — nothing renders from it. In memory only, and
+   *  dropped whenever the marks or the catalog they belong to go. */
+  readonly failureNoteDrafts = new Map<string, FailureNoteParkedDraft>();
+
+  /** Key of a row's parked draft in `failureNoteDrafts`. */
+  failureNoteDraftKey(testId: string): string {
+    return `${this.testPilot.catalog?.docId ?? ""}\u0000${testId}`;
+  }
+
+  /** Forget the parked drafts of rows that are going away — `USER-N`
+   *  ids are reused, and a new row must not open with an old draft. */
+  private dropFailureNoteDrafts(testIds: string[]): void {
+    for (const id of testIds) this.failureNoteDrafts.delete(this.failureNoteDraftKey(id));
+  }
+
+  /**
+   * How many failure notes on FAILED rows of the loaded catalog are
+   * written but not saved (a composer left open with content, or an
+   * edit that differs from the saved note). Exports ask before leaving
+   * them out. Not reactive — read it at the moment of the export.
+   */
+  unsavedFailureNoteCount(): number {
+    // Under an imported run the rows show the tester's notes and no
+    // composer; the developer's parked drafts are not part of it.
+    if (this.testPilot.importedRun) return 0;
+    let n = 0;
+    for (const section of this.testPilot.catalog?.sections ?? []) {
+      for (const t of section.tests) {
+        if (t.status !== "fail") continue;
+        const d = this.failureNoteDrafts.get(this.failureNoteDraftKey(t.id));
+        if (!d) continue;
+        const saved = (t.failNotes ?? []).find((x) => x.id === d.editing);
+        const dirty = saved
+          ? d.description.trim() !== saved.description ||
+            d.steps.trim() !== (saved.steps ?? "") ||
+            d.images.length !== (saved.images?.length ?? 0)
+          : d.description.trim() !== "" || d.steps.trim() !== "" || d.images.length > 0;
+        if (dirty) n++;
+      }
+    }
+    return n;
+  }
+
+  /** Find a row by id across every section. */
+  private findTestById(testId: string): TestPilotTest | null {
+    for (const section of this.testPilot.catalog?.sections ?? []) {
+      for (const t of section.tests) if (t.id === testId) return t;
+    }
+    return null;
+  }
+
+  /**
+   * Add a failure note to a row, or replace one (`draft.id` set).
+   * Returns false when nothing was saved: no such row, the imported-run
+   * view is read-only, the draft is empty, or the row is at its note
+   * limit. Persists like a status change (storage + results sidecar).
+   */
+  saveFailureNote(testId: string, draft: FailureNoteDraft): boolean {
+    if (this.testPilot.importedRun) return false;
+    const test = this.findTestById(testId);
+    if (!test) return false;
+    const description = draft.description
+      .slice(0, FAILURE_NOTE_LIMITS.descriptionChars)
+      .trim();
+    const steps = (draft.steps ?? "").slice(0, FAILURE_NOTE_LIMITS.stepsChars).trim();
+    // Same gate as notes read from a file: only PNG/JPEG data URLs are
+    // ever stored, whatever the caller hands in.
+    const images = (draft.images ?? [])
+      .filter(isFailureNoteImage)
+      .slice(0, FAILURE_NOTE_LIMITS.imagesPerNote)
+      .map((im) => {
+        const name = cleanImageName(im.name);
+        return { dataUrl: im.dataUrl, mediaType: im.mediaType, ...(name ? { name } : {}) };
+      });
+    if (!description && !steps && images.length === 0) return false;
+    const notes = test.failNotes ?? [];
+    const existing = draft.id ? notes.find((n) => n.id === draft.id) : undefined;
+    if (!existing && notes.length >= FAILURE_NOTE_LIMITS.notesPerTest) return false;
+    const note: FailureNote = {
+      id: existing?.id ?? crypto.randomUUID(),
+      at: existing?.at ?? Date.now(),
+      description,
+      ...(steps ? { steps } : {}),
+      ...(images.length > 0 ? { images } : {}),
+    };
+    test.failNotes = existing
+      ? notes.map((n) => (n.id === existing.id ? note : n))
+      : [...notes, note];
+    void this.saveTestPilot();
+    this.pushResultsToCompanion();
+    return true;
+  }
+
+  deleteFailureNote(testId: string, noteId: string): void {
+    if (this.testPilot.importedRun) return;
+    const test = this.findTestById(testId);
+    if (!test?.failNotes) return;
+    const left = test.failNotes.filter((n) => n.id !== noteId);
+    if (left.length === test.failNotes.length) return;
+    if (left.length > 0) test.failNotes = left;
+    else delete test.failNotes;
+    void this.saveTestPilot();
+    this.pushResultsToCompanion();
   }
 
   // ─── Phase 14 — chat (per-row interactive dialogue with the agent) ──
@@ -3727,20 +4402,14 @@ class ExtensionState {
     const base = this.httpBase();
     if (!base) return; // standalone — no companion, nothing to push
     const authorSlug = ExtensionState.slugifyAuthor(c.author);
-    const results: Record<
-      string,
-      { status?: TestPilotStatus; chat?: ChatMessage[]; detail?: { steps: string[]; askedAt: number } }
-    > = {};
+    const results: Record<string, ResultsSidecarEntry> = {};
     for (const section of c.sections) {
       for (const t of section.tests) {
-        const entry: {
-          status?: TestPilotStatus;
-          chat?: ChatMessage[];
-          detail?: { steps: string[]; askedAt: number };
-        } = {};
+        const entry: ResultsSidecarEntry = {};
         if (t.status && t.status !== "untested") entry.status = t.status;
         if (t.chat && t.chat.length > 0) entry.chat = t.chat;
         if (t.detail) entry.detail = t.detail;
+        if (t.failNotes && t.failNotes.length > 0) entry.failNotes = t.failNotes;
         if (Object.keys(entry).length > 0) results[t.id] = entry;
       }
     }
@@ -3995,7 +4664,8 @@ class ExtensionState {
   removeTestPilotSection(title: string): void {
     const found = this.findSection(title);
     if (!found) return;
-    this.testPilot.catalog!.sections.splice(found.idx, 1);
+    const [removed] = this.testPilot.catalog!.sections.splice(found.idx, 1);
+    this.dropFailureNoteDrafts((removed?.tests ?? []).map((t) => t.id));
     this.commitCatalogEdit();
   }
 
@@ -4258,6 +4928,7 @@ class ExtensionState {
     const found = this.findTest(testId);
     if (!found) return;
     found.section.tests.splice(found.tIdx, 1);
+    this.dropFailureNoteDrafts([testId]);
     this.commitCatalogEdit();
   }
 
@@ -9915,11 +10586,16 @@ class ExtensionState {
         // block. Table itself stays one row per test (multi-line
         // markdown would break the table render).
         const hasChat = Array.isArray(t.chat) && t.chat.length > 0;
-        const resultCell = hasChat ? `${result} [chat]` : result;
+        const hasNotes = notesForExport(t).length > 0;
+        const resultCell =
+          result + (hasNotes ? " [notes]" : "") + (hasChat ? " [chat]" : "");
         out += `| ${id} | ${test} | ${expected} | ${resultCell} |\n`;
         if (hasChat) conversations.push({ id: t.id, chat: t.chat! });
       }
       out += `\n`;
+      // What the tester wrote down for each failed row — id + title so
+      // the note reads on its own once it is pasted into a ticket.
+      out += renderFailureNotesMarkdown(s.tests);
       if (conversations.length > 0) {
         // Per-section block lists each row's Q&A as a blockquote with
         // **tester:** / **agent:** prefixes — readable in any markdown
@@ -9971,7 +10647,7 @@ class ExtensionState {
   async exportTesterSheetDocx(): Promise<Uint8Array | null> {
     const c = this.scopedCatalogView();
     if (!c) return null;
-    return composeTesterSheetDocx(c);
+    return composeTesterSheetDocx(c, this.scopeToken);
   }
 
   /**
@@ -9990,11 +10666,15 @@ class ExtensionState {
       $state.snapshot(c) as TestPilotCatalog,
       today,
       signoff,
+      this.scopeToken,
     );
   }
 
   clearTestPilot(): void {
     this.clearTestPilotTimeout();
+    this.failureNoteDrafts.clear();
+    const clearedDocId = this.testPilot.catalog?.docId;
+    const standaloneSheets = !this.selectedCompanion;
     // Drop in-flight per-row asks with the catalog they belong to —
     // otherwise a bulk loop keeps waiting on rows that no longer exist
     // and a late reply has nothing to land on.
@@ -10003,6 +10683,8 @@ class ExtensionState {
     }
     this.testPilot.pendingDetails = {};
     this.testPilot.detailOutcomes = {};
+    this.testPilot.pendingSectionSuggest = {};
+    this.testPilot.sectionSuggestions = {};
     this.testPilot.catalog = null;
     this.testPilot.pending = null;
     this.testPilot.error = null;
@@ -10010,6 +10692,15 @@ class ExtensionState {
     this.testPilot.pendingImportConflict = null;
     void this.saveTestPilot();
     void this.saveImportedRun();
+    if (standaloneSheets) {
+      // Standalone: a leftover shelf copy of the deleted sheet must not
+      // come back later. The tester's other sheets stay saved and are
+      // listed on the empty screen.
+      void this.runSheetOp(async () => {
+        if (clearedDocId) await this.dropShelfRow(clearedDocId);
+        await this.refreshSavedSheets();
+      });
+    }
     // Also wipe the on-disk copy of the spec. UAT docs often contain
     // real credentials / internal URLs — leaving them lying around in
     // .pinta/test-docs/ after the user has cleared the catalog is a
@@ -12314,6 +13005,7 @@ class ExtensionState {
                 // history the tester accumulated during the previous
                 // run.
                 chat: carriedOver?.chat,
+                failNotes: carriedOver?.failNotes,
               };
             })
           : [],
@@ -12431,10 +13123,17 @@ class ExtensionState {
     // overlaid run (the toolbar button is disabled too; this guard is
     // the state-level backstop). Clear the imported run first.
     if (this.testPilot.importedRun) return;
+    this.failureNoteDrafts.clear();
     for (const section of c.sections) {
       for (const test of section.tests) {
         test.status = "untested";
-        test.detail = undefined;
+        // A fresh run starts clean: the notes described the failures
+        // that are being wiped.
+        delete test.failNotes;
+        // Cached steps can be re-asked only with an agent. Without a
+        // companion they came from the imported sheet and cannot be
+        // fetched again, so clearing marks must not take them.
+        if (this.appMode === "connected") test.detail = undefined;
       }
     }
     void this.saveTestPilot();

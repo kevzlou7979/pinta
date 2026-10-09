@@ -1,6 +1,6 @@
 // Test Pilot empty state (connected, no catalog): Coverage radio cards
 // drive the thorough_tests setting and the CTA label, the import card
-// accepts a dropped .md (and explains a non-markdown drop), and the
+// accepts a dropped .md or .docx (and explains anything else), and the
 // footer "How?" discloses the pandoc/.docx instructions.
 //   npx vitest run --config vitest.repro.config.ts test-pilot-empty
 import { describe, it, expect, vi } from "vitest";
@@ -105,13 +105,14 @@ describe("Test Pilot empty state", () => {
     await sleep(20); await settle();
     expect(bad.defaultPrevented).toBe(true);
     expect(imp).not.toHaveBeenCalled();
-    expect(target.textContent).toContain("notes.txt isn't a markdown file");
-    expect(norm(zone.textContent)).toContain("Import a markdown spec");
+    expect(target.textContent).toContain("notes.txt isn't a Markdown or Word file");
+    expect(norm(zone.textContent)).toContain("Import a test spec");
+    expect(norm(zone.textContent)).toContain("Drop a .md or .docx file here");
 
     // The note is dismissible.
     [...target.querySelectorAll<HTMLButtonElement>('button[aria-label="Dismiss"]')].at(-1)!.click();
     await settle();
-    expect(target.textContent).not.toContain("isn't a markdown file");
+    expect(target.textContent).not.toContain("isn't a Markdown or Word file");
 
     // Several files: the first markdown one wins.
     const e = new Event("drop", { bubbles: true, cancelable: true }) as any;
@@ -119,11 +120,48 @@ describe("Test Pilot empty state", () => {
     zone.dispatchEvent(e);
     await sleep(30); await settle();
     expect(imp).toHaveBeenCalledWith("spec.md", "# Spec\n");
-    expect(target.textContent).not.toContain("isn't a markdown file");
+    expect(target.textContent).not.toContain("isn't a Markdown or Word file");
 
     // Radio names are just the titles; hint + chips are the description.
     const smoke = target.querySelector<HTMLInputElement>('input[value="smoke"]')!;
     expect(document.getElementById(smoke.getAttribute("aria-labelledby")!)!.textContent).toBe("Smoke test");
+  }, 30000);
+
+  // Google Drive hands an uploaded .md back as Word — the card takes it.
+  it("imports a dropped .docx as Markdown, and explains an unreadable one", async () => {
+    const { zipSync, strToU8 } = await import("fflate");
+    const { app, target, settle } = await mountEmpty();
+    const zone = target.querySelector<HTMLButtonElement>("[data-pinta-spec-drop]")!;
+    const imp = vi.spyOn(app, "importTestDoc").mockResolvedValue(undefined as any);
+    const drop = (file: File) => {
+      const e = new Event("drop", { bubbles: true, cancelable: true }) as any;
+      e.dataTransfer = { files: [file], types: ["Files"] };
+      zone.dispatchEvent(e);
+    };
+    imp.mockClear(); // the spy is shared with the earlier drop test
+    const W = 'xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"';
+    const p = (t: string, style = "") => `<w:p>${style ? `<w:pPr><w:pStyle w:val="${style}"/></w:pPr>` : ""}<w:r><w:t>${t}</w:t></w:r></w:p>`;
+    const c = (t: string) => `<w:tc>${p(t)}</w:tc>`;
+    const xml = `<?xml version="1.0"?><w:document ${W}><w:body>${p("Claims UAT", "Heading1")}${p("Sign in", "Heading2")}<w:tbl><w:tr>${c("ID")}${c("Test")}${c("Expected Result")}${c("Result")}</w:tr><w:tr>${c("AUTH-01")}${c("Login")}${c("Dashboard")}${c("✓ Pass")}</w:tr></w:tbl></w:body></w:document>`;
+    const docx = zipSync({ "word/document.xml": strToU8(xml) });
+
+    drop(new File([docx], "Claims UAT.docx"));
+    await sleep(120); await settle();
+    expect(imp).toHaveBeenCalledTimes(1);
+    const [name, md] = imp.mock.calls[0]! as [string, string];
+    expect(name).toBe("Claims UAT.md");
+    expect(md).toContain("# Claims UAT");
+    expect(md).toContain("## Sign in");
+    expect(md).toContain("| AUTH-01 | Login | Dashboard | ✓ Pass |");
+    expect(app.testPilot.error).toBeNull();
+
+    imp.mockClear();
+    drop(new File(["this is not a zip"], "broken.docx"));
+    await sleep(120); await settle();
+    expect(imp).not.toHaveBeenCalled();
+    expect(app.testPilot.error).toContain("broken.docx");
+    expect(app.testPilot.error).toContain("isn't a Word .docx file");
+    app.testPilot.error = null;
   }, 30000);
 
   it("a file dropped outside the card does not navigate the panel", async () => {

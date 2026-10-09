@@ -127,7 +127,7 @@ const TEST_PILOT: ModuleSpec = {
   id: "test-pilot",
   name: "Test Pilot",
   description:
-    "Import a markdown test spec; the agent extracts the test catalog and lets you check off tests as you run them. Click any row to get step-by-step instructions. Enable here, then open the new Test Pilot tab in the side panel.",
+    "Import a Markdown or Word (.docx) test spec; the agent extracts the test catalog and lets you check off tests as you run them. Click any row to get step-by-step instructions. Enable here, then open the new Test Pilot tab in the side panel.",
   mode: "interactive",
   sessionCheckboxLabel: "",
   sessionCheckboxHint: "",
