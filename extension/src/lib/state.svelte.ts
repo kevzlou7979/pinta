@@ -5336,6 +5336,8 @@ class ExtensionState {
     previewingVariantId: string | null;
     /** Pages gallery routes (persisted). */
     pages: PageEntry[];
+      /** variants-generate: how many variants this run asked for. */
+      count?: number;
     /** Selected device preset label (persisted). */
     device: string;
     /** Bumped by refreshGallery() — re-keys the gallery iframes. */
@@ -5578,6 +5580,7 @@ class ExtensionState {
       url: this.queryUrl,
       designSystemPath:
         typeof settings.designSystemPath === "string"
+      count: this.variants.count,
           ? settings.designSystemPath
           : "",
       count: this.variants.count,
@@ -6226,6 +6229,12 @@ class ExtensionState {
         }
       } else if (pending.op === "variants-apply") {
         const parsed = parseApplyResult(summary);
+            // A late result from another run (its runId differs) must not
+            // be measured against this run's count.
+            ...(pending.count &&
+            (!parsed.runId || parsed.runId === pending.runId)
+              ? { requestedCount: pending.count }
+              : {}),
         if (parsed && this.variants.currentRun) {
           this.variants.currentRun.appliedVariantId =
             parsed.variantId ?? pending.variantId;

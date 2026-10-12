@@ -31,6 +31,7 @@
     VARIANT_PREVIEW_PAGE,
     variantPreviewKey,
     variantCountLabel,
+    variantShortfall,
     type DesignVariant,
     type ShadowCardParams,
   } from "../lib/design-variants.js";
@@ -38,6 +39,13 @@
   const connected = $derived(app.connectionStatus === "connected");
   const run = $derived(app.variants.currentRun);
   const pending = $derived(app.variants.pending);
+  /** Variants the agent left out of this run (0 = it returned them all).
+   *  Moot once one is applied — the user already chose. */
+  const shortfall = $derived(
+    run && !run.appliedVariantId
+      ? variantShortfall(run.requestedCount, run.variants.length)
+      : 0,
+  );
 
   // Device presets from the module setting (defaults when blank/bad).
   const presets = $derived(
@@ -285,7 +293,7 @@
   const pendingLabel = $derived.by(() => {
     if (!pending) return "";
     if (pending.op === "variants-generate")
-      return `Generating ${variantCountLabel(app.variants.count)}…`;
+      return `Generating ${variantCountLabel(pending.count ?? app.variants.count)}…`;
     if (pending.op === "variants-apply")
       return "Applying the variant to your source…";
     return "Discovering your app's pages…";
@@ -670,6 +678,16 @@
           {@render devicePicker()}
         </div>
       </div>
+
+      {#if shortfall > 0}
+        <p
+          class="text-[11px] text-amber-700 dark:text-amber-400 leading-snug"
+          role="status"
+          data-testid="variants-shortfall"
+        >
+          You asked for {run.requestedCount}, the agent returned {run.variants.length}. Regenerate to try again — if it keeps happening, restart /pinta.
+        </p>
+      {/if}
 
       {#each run.variants as v, vi (v.id)}
         {@const applied = run.appliedVariantId === v.id}

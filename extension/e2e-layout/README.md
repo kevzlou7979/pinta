@@ -89,4 +89,21 @@ node e2e-layout/saved-sheets.cjs            # build + run
 node e2e-layout/saved-sheets.cjs --no-build # reuse the last build
 ```
 
-`npm run test:e2e` runs all three scripts.
+## variants-count.cjs — Design Variants count
+
+Regression for "I asked for 5 variants and got 3". Mounts the real
+`DesignVariantsTab` (`?variant=design-variants`) and plays the companion: it
+captures what the tab sends and answers as the agent. Asserts the query carries
+the selected `count` even when the direction box names another number, that a
+short run (3 of 5) shows the "You asked for 5, the agent returned 3" notice
+inside the 420px panel, and that a full run shows none.
+
+The agent's half of the fix is the `count` rule in SKILL.md §7.16 — not
+something a browser can drive.
+
+```sh
+node e2e-layout/variants-count.cjs            # build + run
+node e2e-layout/variants-count.cjs --no-build # reuse the last build
+```
+
+`npm run test:e2e` runs all four scripts.

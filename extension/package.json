@@ -9,7 +9,7 @@
     "check": "svelte-check --tsconfig ./tsconfig.json",
     "test": "vitest run && vitest run --config vitest.repro.config.ts",
     "test:watch": "vitest",
-    "test:e2e": "node e2e-layout/run.cjs --control && node e2e-layout/docx-import.cjs --no-build && node e2e-layout/saved-sheets.cjs --no-build"
+    "test:e2e": "node e2e-layout/run.cjs --control && node e2e-layout/docx-import.cjs --no-build && node e2e-layout/saved-sheets.cjs --no-build && node e2e-layout/variants-count.cjs --no-build"
   },
   "dependencies": {
     "@fontsource/poppins": "^5.1.0",

@@ -3,12 +3,19 @@ import { mount } from "svelte";
 import Shell from "./Shell.svelte";
 import ShellHidden from "./Shell.hidden.svelte";
 import ShellTestPilot from "./Shell.testpilot.svelte";
+import ShellVariants from "./Shell.variants.svelte";
 
 // ?variant=control mounts the simulated pre-fix shell (negative control);
-// ?variant=test-pilot mounts the Test Pilot tab (docx-import.cjs).
+// ?variant=test-pilot mounts the Test Pilot tab (docx-import.cjs);
+// ?variant=design-variants mounts the Design Variants tab (variants-count.cjs).
 const variant = new URLSearchParams(location.search).get("variant");
 const control = variant === "control";
 const target = document.getElementById("app")!;
-mount(variant === "test-pilot" ? ShellTestPilot : control ? ShellHidden : Shell, { target });
+const named: Record<string, typeof Shell> = {
+  "test-pilot": ShellTestPilot,
+  "design-variants": ShellVariants,
+};
+const tab = variant && named[variant] ? variant : null;
+mount(tab ? named[tab]! : control ? ShellHidden : Shell, { target });
 (window as unknown as { __harnessVariant: string }).__harnessVariant =
-  variant === "test-pilot" ? "test-pilot" : control ? "control" : "real";
+  tab ?? (control ? "control" : "real");

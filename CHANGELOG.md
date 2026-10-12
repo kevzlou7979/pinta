@@ -41,6 +41,17 @@ For the architectural design behind each item, see
   sheet without a companion and send ONE file back. Standalone Test
   Pilot keeps the catalog and Pass/Fail marks across side-panel
   reloads; results and tester sheets carry a sign-off envelope (tester,
+### Fixed
+
+- **Design Variants: asking for 5 could return 3.** The Variants
+  selector is now the only thing that sets the number — a number typed
+  in the direction box ("give 3 options") or an earlier run no longer
+  changes it, and the agent counts its variants before submitting. If a
+  run still comes back short, the tab says so ("You asked for 5, the
+  agent returned 3") instead of showing the short deck silently. Extra
+  variants are kept.
+  Restart `/pinta` to pick up the updated skill.
+
   email, date, environment, run type Smoke / Thorough / Regression,
   notes); importing a returned run overlays its marks read-only on the
   developer's catalog ("N of M results applied", partial-run scope

@@ -47,6 +47,7 @@ import {
   validateVariantRun,
   VARIANT_COUNT_CHOICES,
   variantCountLabel,
+  variantShortfall,
   type DesignVariant,
 } from "./design-variants.js";
 
@@ -504,6 +505,22 @@ describe("variant count", () => {
   it("pluralizes the label", () => {
     expect(variantCountLabel(1)).toBe("1 variant");
     expect(variantCountLabel(3)).toBe("3 variants");
+  });
+
+  // Report 2026-10-12: asked for 5, the agent returned 3 and the tab
+  // showed the short deck without a word.
+  it("reports how many variants the agent left out", () => {
+    expect(variantShortfall(5, 3)).toBe(2);
+    expect(variantShortfall(5, 5)).toBe(0);
+    expect(variantShortfall(3, 5)).toBe(0); // extras are kept, never flagged
+    expect(variantShortfall(1, 0)).toBe(1);
+  });
+
+  it("reports no shortfall when the requested count is unknown", () => {
+    // Runs saved before requestedCount existed, or a corrupt value.
+    for (const unknown of [undefined, null, 0, 6, 2.5, "5", NaN]) {
+      expect(variantShortfall(unknown, 3)).toBe(0);
+    }
   });
 
   it("parses a single-variant run", () => {

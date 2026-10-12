@@ -55,6 +55,9 @@ export type VariantRun = {
   scope: VariantScope;
   url: string;
   variants: DesignVariant[];
+  /** How many variants this run ASKED for (the tab's count at generate
+   *  time). Absent on runs saved before the field existed. */
+  requestedCount?: number;
   appliedVariantId?: string;
   applySummary?: string;
   appliedFiles?: { path: string; note?: string }[];
@@ -103,6 +106,17 @@ export function isValidVariantCount(n: unknown): n is number {
 /** "1 variant" / "3 variants" — for buttons and progress copy. */
 export function variantCountLabel(n: number): string {
   return `${n} variant${n === 1 ? "" : "s"}`;
+}
+
+/**
+ * How many variants the agent left out: requested minus returned, 0 when
+ * the run is complete or the requested count is unknown / invalid (an
+ * older saved run). The tab says so instead of showing a short deck
+ * silently.
+ */
+export function variantShortfall(requested: unknown, returned: number): number {
+  if (!isValidVariantCount(requested)) return 0;
+  return Math.max(0, requested - Math.max(0, returned));
 }
 export const MAX_PAGES = 12;
 /** Cap on the optional free-text art direction sent with a generate
