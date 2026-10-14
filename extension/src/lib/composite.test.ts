@@ -6,6 +6,7 @@ import {
   agentCropBand,
   annotationBoxes,
   compositeAnnotations,
+  compositeAnnotationsToViewport,
   compositeOutputSize,
 } from "./composite.js";
 
@@ -154,5 +155,17 @@ describe("compositeAnnotations crop", () => {
     await compositeAnnotations("data:,", [sel(3000)], { maxLongEdge: Infinity });
     expect(calls.find((c) => c.op === "drawImage")!.args.slice(1, 5)).toEqual([0, 0, 1280, 6000]);
     expect(calls.some((c) => c.op === "translate")).toBe(false);
+  });
+
+  it("a device shot paints only the annotations it includes, keeping global numbers", async () => {
+    const { calls } = stub(402, 874);
+    const mobile = { ...sel(100), viewport: { scrollY: 0, width: 402, height: 874 } } as Annotation;
+    const ipad = { ...sel(100), viewport: { scrollY: 0, width: 820, height: 1180 } } as Annotation;
+    await compositeAnnotationsToViewport("data:,", [ipad, mobile], { offsetY: 0, width: 402, height: 874 }, {
+      include: (a) => a.viewport?.width === 402,
+    });
+    const labels = calls.filter((c) => c.op === "fillText").map((c) => String(c.args[0]));
+    expect(labels).toContain("2"); // the Mobile annotation keeps its list number
+    expect(labels).not.toContain("1"); // the iPad one is not painted
   });
 });

@@ -95,8 +95,9 @@ class ContentState {
   // hotkeys, and hide their host.
   readonly inFrame = window.top !== window.self;
   /** Set by Overlay.svelte so overlay.ts can ask for a re-announce
-   *  (overlay.ready) without reaching into the component. */
-  announceFrame: () => void = () => {};
+   *  (overlay.ready) without reaching into the component. `ping` marks a
+   *  reply to the canvas's 2s keep-alive — nothing changed on the page. */
+  announceFrame: (ping?: boolean) => void = () => {};
   /** Set by Overlay.svelte so overlay.ts can arm a tool itself. Activating
    *  a device frame has to work without the side panel (it may be closed):
    *  the canvas's activation ping alone arms Select. */

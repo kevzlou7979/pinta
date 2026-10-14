@@ -174,16 +174,20 @@
 
   /** Tell the side panel this page (or active device frame) is live so it
    *  adopts the URL and replays pins. Inactive device frames stay quiet. */
-  function announceReady(): void {
+  function announceReady(ping = false): void {
     if (!content.frameActive) return;
     try {
       // previewActive lets the panel tell a fresh document (preview gone
       // with the old DOM) from an SPA calling replaceState while a preview
-      // is still up — both reach it as overlay.ready.
+      // is still up — both reach it as overlay.ready. `width` tells the
+      // Devices canvas panel which device this is (annotations carry the
+      // width they were made at); `ping` = the canvas keep-alive reply.
       void sendToPanel({
         type: "overlay.ready",
         url: pageUrl(),
         previewActive: content.variantPreviewActive,
+        width: window.innerWidth,
+        ...(ping ? { ping: true } : {}),
       })?.catch(() => {});
     } catch {
       // No extension context available — ignore.
@@ -210,7 +214,17 @@
     if (prev === null || prev === active) return;
     if (active) announceReady();
     else {
-      untrack(() => setMode("idle"));
+      untrack(() => {
+        setMode("idle");
+        // The next device can't reach what this one is showing: undo a live
+        // variant preview here (telling the panel, so its card stops saying
+        // "Previewing") and drop an imported-session overlay. The panel
+        // re-sends the overlay to whichever frame takes over.
+        if (content.variantPreviewActive) {
+          variantsQueue = variantsQueue.then(() => restoreVariantPreviewLocal(true));
+        }
+        imported = null;
+      });
       try {
         void sendToPanel({ type: "frame.inactive" })?.catch(() => {});
       } catch {
@@ -226,8 +240,18 @@
       _sender: chrome.runtime.MessageSender,
       sendResponse: (response: unknown) => void,
     ) => {
-      // Inactive device frame: the panel's broadcast is for another frame.
-      if (!content.frameActive) return;
+      // Inactive device frame: the panel's broadcast is for another frame —
+      // except cleanup. The panel sends remove / clear to every device frame
+      // it has heard from, and a redo's reapply only to the frame the
+      // annotation was made in: a preview left behind in a device you've
+      // switched away from would otherwise outlive its card.
+      const t = (msg as { type?: unknown } | null)?.type;
+      if (
+        !content.frameActive &&
+        t !== "annotated.remove" &&
+        t !== "annotated.clear" &&
+        t !== "annotated.reapply"
+      ) return;
       const m = msg as {
         type?: string;
         mode?: Mode;
@@ -255,6 +279,19 @@
           width: window.innerWidth,
           height: window.innerHeight,
           url: pageUrl(),
+        });
+        return;
+      }
+      if (m?.type === "frame.hmr") {
+        // Devices canvas: the panel can't script into a frame of its own
+        // extension page, so the annotating frame answers "does this page
+        // hot-reload?" itself (DOM markers — same as App.svelte detectHmr).
+        sendResponse({
+          hmr:
+            !!document.querySelector(
+              'script[src*="@vite/client"], script[src*="vite/dist"], vite-error-overlay, nextjs-portal, nextjs-build-watcher',
+            ) ||
+            (!!document.querySelector("[data-svelte-h]") && location.hostname === "localhost"),
         });
         return;
       }
@@ -3797,8 +3834,13 @@
 <!-- Processing pulse — pink pulsating glow around the viewport edges
   while the agent is picking up / applying the session. Sits below the
   pin badges in z-order but above the page content. Driven by
-  `processing.start` / `processing.end` messages from the side panel. -->
-{#if isProcessing}
+  `processing.start` / `processing.end` messages from the side panel.
+  Gated on the panel being open: a closed panel can never send the
+  `processing.end`, and the glow must not outlive it. Gated, not
+  cleared, so a background-port blip doesn't drop a run still going.
+  Never inside a frame: on the Devices canvas the canvas paints it on
+  every device (a frame's overlay is hidden unless it is annotating). -->
+{#if isProcessing && content.panelOpen && !content.inFrame}
   <div
     class="pinta-processing-pulse"
     style:--pinta-pulse-rgb={hexToRgbTriple(processingColor)}

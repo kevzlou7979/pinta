@@ -112,6 +112,8 @@ function panelOpen(): boolean {
 }
 function broadcastPanelState(): void {
   const open = panelOpen();
+  // Extension pages (the Devices canvas) don't get tabs.sendMessage.
+  chrome.runtime.sendMessage({ type: "panel.state", open }).catch(() => {});
   chrome.tabs.query({}).then((tabs) => {
     for (const t of tabs) {
       if (t.id != null) {

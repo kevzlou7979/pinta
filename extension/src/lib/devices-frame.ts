@@ -136,6 +136,10 @@ export type FrameRectReport = {
   viewportWidth: number;
   viewportHeight: number;
   devicePixelRatio: number;
+  /** The canvas's scroll surface (<main>, below the toolbar), CSS px of
+   *  the canvas viewport. Frames are only visible inside it — anything
+   *  outside is the toolbar or page chrome. Absent = the whole window. */
+  visible?: { x: number; y: number; width: number; height: number };
 };
 
 export type FrameCaptureGeometry = {
@@ -170,10 +174,13 @@ export function frameCaptureGeometry(r: FrameRectReport): FrameCaptureGeometry |
   if (!(r.cssWidth > 0) || !(r.cssHeight > 0) || !(rect.width > 0)) return null;
   const scale = rect.width / r.cssWidth;
   const dpr = r.devicePixelRatio > 0 ? r.devicePixelRatio : 1;
-  const left = Math.max(0, rect.x);
-  const top = Math.max(0, rect.y);
-  const right = Math.min(r.viewportWidth, rect.x + rect.width);
-  const bottom = Math.min(r.viewportHeight, rect.y + rect.height);
+  // Clip to the window AND the canvas scroll surface: a tall frame
+  // scrolled under the toolbar must not take the toolbar into the shot.
+  const v = r.visible;
+  const left = Math.max(0, v ? v.x : 0, rect.x);
+  const top = Math.max(0, v ? v.y : 0, rect.y);
+  const right = Math.min(r.viewportWidth, v ? v.x + v.width : Infinity, rect.x + rect.width);
+  const bottom = Math.min(r.viewportHeight, v ? v.y + v.height : Infinity, rect.y + rect.height);
   if (right <= left || bottom <= top) return null;
   return {
     sx: Math.round(left * dpr),
@@ -189,4 +196,40 @@ export function frameCaptureGeometry(r: FrameRectReport): FrameCaptureGeometry |
     scale,
     clipped: left > rect.x || top > rect.y || right < rect.x + rect.width || bottom < rect.y + rect.height,
   };
+}
+
+// ---------------------------------------------------------------------------
+// Which device an annotation belongs to. Annotations carry the viewport of
+// the frame they were made in; on the canvas that width is what tells a
+// Mobile annotation from an iPad one (frame ids change on every reload).
+
+/** True when two viewport widths are the same device (±1px rounding). */
+export function sameDeviceWidth(a: number | undefined, b: number | undefined): boolean {
+  return (
+    typeof a === "number" && typeof b === "number" &&
+    Number.isFinite(a) && Number.isFinite(b) && Math.abs(a - b) <= 1
+  );
+}
+
+/**
+ * Whether annotation `a` may be painted onto a device-frame screenshot of
+ * `shot` (the captured device's width and page URL). Annotations made in
+ * another device or on another page ride along as text only — their
+ * coordinates mean nothing on this image. `sessionUrl` stands in for an
+ * annotation without its own url.
+ */
+export function onDeviceShot(
+  a: { viewport?: { width: number }; url?: string },
+  shot: { width: number; url: string },
+  sessionUrl: string,
+): boolean {
+  if (!sameDeviceWidth(a.viewport?.width, shot.width)) return false;
+  return !shot.url || (a.url ?? sessionUrl) === shot.url;
+}
+
+/** A frame-targeted chrome.tabs.sendMessage failed because that frame is
+ *  gone (removed, reloaded to a new frameId) — not a busy listener. */
+export function isDeadFrameError(err: unknown): boolean {
+  const msg = err instanceof Error ? err.message : String(err ?? "");
+  return /receiving end does not exist|no frame with id|frame .* (was )?removed/i.test(msg);
 }

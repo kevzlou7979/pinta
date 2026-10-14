@@ -9,6 +9,7 @@
     dimsFor,
     effectiveScale,
     frameTitle,
+    isCustomSizeModelId,
     type DeviceFrame,
   } from "../lib/devices.js";
 
@@ -20,6 +21,12 @@
   /** Activated AND the frame's overlay answered — only then do the panel
    *  tools actually work inside this frame. */
   const annotateLive = $derived(annotating && devices.annotateReadyId === frame.id);
+  // Processing pulse — the same edge glow the page gets, on every device.
+  const pulsing = $derived(devices.processing.on && devices.panelOpen);
+  const pulseRgb = $derived.by(() => {
+    const h = devices.processing.color.replace("#", "");
+    return [0, 2, 4].map((i) => parseInt(h.slice(i, i + 2), 16)).join(", ");
+  });
   // Expanded: fit the device into the viewport (never upscale — a
   // transform-scaled iframe above 1x renders blurry text).
   let winW = $state(1200);
@@ -143,8 +150,11 @@
       onchange={(e) => devices.setModel(frame.id, e.currentTarget.value)}
     >
       {#if !knownModel}
+        <!-- A typed size is in no catalog by design — it isn't "removed". -->
         <option value={frame.modelId} disabled>
-          {frame.label} · {frame.width}×{frame.height} (removed)
+          {isCustomSizeModelId(frame.modelId)
+            ? `${frame.width}×${frame.height} (custom size)`
+            : `${frame.label} · ${frame.width}×${frame.height} (removed)`}
         </option>
       {/if}
       {#each grouped as g (g.cls)}
@@ -247,7 +257,7 @@
     class:ring-offset-2={annotateLive}
   >
     <div
-      class="overflow-hidden rounded-xl bg-white"
+      class="relative overflow-hidden rounded-xl bg-white"
       style="width: {Math.round(d.width * s)}px; height: {Math.round(d.height * s)}px;"
     >
       {#if devices.srcFor(frame.id)}
@@ -263,6 +273,14 @@
             style="width: {d.width}px; height: {d.height}px; transform: scale({s}); transform-origin: top left; border: 0;"
           ></iframe>
         {/key}
+      {/if}
+      {#if pulsing}
+        <div
+          class="pinta-device-pulse"
+          style:--pinta-pulse-rgb={pulseRgb}
+          data-testid="device-pulse"
+          aria-hidden="true"
+        ></div>
       {/if}
     </div>
   </div>

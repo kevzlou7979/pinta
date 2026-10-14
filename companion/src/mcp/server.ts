@@ -70,8 +70,13 @@ export function createMcpServer(backend: Backend): McpServer {
       },
     },
     async ({ id, summary }) => {
-      await backend.setStatus(id, { status: "done", summary });
-      return ok(`session ${id} → done`);
+      const session = await backend.setStatus(id, { status: "done", summary });
+      const warning = (session as { warning?: unknown }).warning;
+      return ok(
+        `session ${id} → done` +
+          (typeof warning === "string" ? `
+WARNING: ${warning}` : ""),
+      );
     },
   );
 

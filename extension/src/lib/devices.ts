@@ -159,6 +159,12 @@ export function customSizeModel(
   return { id: `size:${w}x${h}`, label: `${w}×${h}`, class: "Custom", width: w, height: h };
 }
 
+/** True for a frame added by typed size (customSizeModel) — it is in no
+ *  catalog by design, so the model picker must not call it "removed". */
+export function isCustomSizeModelId(id: string): boolean {
+  return id.startsWith("size:");
+}
+
 // ---------------------------------------------------------------------------
 // Device groups (bulk add)
 

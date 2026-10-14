@@ -679,6 +679,23 @@ export function expectedSessionRole(session: Session): SessionRole {
 }
 
 /**
+ * Annotations a batch left behind: the agent resolved some cards (done /
+ * error) and these have neither. Empty when NO card was resolved — a
+ * batch closed with only a session-level status (older skills, query
+ * sessions) gives no per-card signal to judge by. Callers decide when it
+ * matters (a settled batch, or the agent posting `done`).
+ */
+export function skippedAnnotations(
+  session: Pick<Session, "annotations">,
+): Annotation[] {
+  const resolved = (a: Annotation) =>
+    a.status === "done" || a.status === "error";
+  const cards = session.annotations.filter((a) => a.kind !== "query");
+  if (!cards.some(resolved)) return [];
+  return cards.filter((a) => !resolved(a));
+}
+
+/**
  * Wraps a Session for the share-file (`.pinta`) format. The author /
  * title / accentColor live here rather than on Session itself so the
  * wire contract between extension and companion stays untouched —

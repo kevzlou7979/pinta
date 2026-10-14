@@ -7,6 +7,7 @@ import type {
   Session,
   SessionStatus,
 } from "@pinta/shared";
+import { skippedAnnotations } from "@pinta/shared";
 import { SessionStore } from "./store.js";
 import type { WatchEvent } from "./watcher.js";
 import {
@@ -81,6 +82,9 @@ const okStatuses: SessionStatus[] = [
 ];
 
 const okAnnotationStatuses: AnnotationStatus[] = ["applying", "done", "error"];
+/** Annotation ids the early-done warning may quote back to the agent. */
+const SAFE_ANNOTATION_ID = /^[A-Za-z0-9_.:-]{1,80}$/;
+const MAX_WARNED_IDS = 20;
 
 export type StartedServer = {
   close: () => Promise<void>;
@@ -704,7 +708,36 @@ async function handle(
     }
     const session = await store.setStatus(statusMatch[1]!, body.status, body);
     log(`session ${session.id} → ${session.status}`);
-    return sendJson(res, 200, session);
+    // Closing a batch with cards still unresolved is accepted (a refusal
+    // would strand the session on an older skill) but answered with a
+    // warning — first in the body, where an agent reading the reply sees it.
+    // `warning` / `unresolvedAnnotationIds` are the companion's voice to
+    // the agent: never echo a stored session's own keys of that name, and
+    // only name ids that look like ids (they are client-supplied strings).
+    const {
+      warning: _warning,
+      unresolvedAnnotationIds: _unresolved,
+      ...clean
+    } = session as Session & Record<string, unknown>;
+    const skipped = body.status === "done" ? skippedAnnotations(session) : [];
+    if (skipped.length > 0) {
+      const ids = skipped
+        .map((a) => a.id)
+        .filter((id) => SAFE_ANNOTATION_ID.test(id))
+        .slice(0, MAX_WARNED_IDS);
+      const more = skipped.length - ids.length;
+      log(`session ${session.id} closed with ${skipped.length} unresolved annotation(s)`);
+      return sendJson(res, 200, {
+        warning:
+          `${skipped.length} annotation(s) were never marked done or error` +
+          (ids.length > 0 ? `: ${ids.join(", ")}` : "") +
+          (more > 0 && ids.length > 0 ? ` (+${more} more)` : "") +
+          `. Finish each one and mark it done (or error with a reason) — the user sees them as "Not applied".`,
+        unresolvedAnnotationIds: ids,
+        ...clean,
+      });
+    }
+    return sendJson(res, 200, clean);
   }
 
   const annotationStatusMatch = path.match(

@@ -33,14 +33,6 @@ For the architectural design behind each item, see
   folds itself away — the failed row stays in view so a note can be
   added. All-pass sections still fold.
 
-## 0.10.0 — 2026-09-29
-
-### Added
-
-- **Test Pilot: tester round-trip.** A human tester can run a tester
-  sheet without a companion and send ONE file back. Standalone Test
-  Pilot keeps the catalog and Pass/Fail marks across side-panel
-  reloads; results and tester sheets carry a sign-off envelope (tester,
 ### Fixed
 
 - **Design Variants: asking for 5 could return 3.** The Variants
@@ -52,6 +44,49 @@ For the architectural design behind each item, see
   variants are kept.
   Restart `/pinta` to pick up the updated skill.
 
+- **Annotations the agent skipped no longer sit there with an empty
+  dot.** An agent could mark a batch done after applying only some of
+  its cards. Those cards now read "Not applied" in the Submitted tray
+  and carry a resubmit icon (also shown on failed cards) that copies the
+  annotation into your draft to send again. The skill tells the agent to
+  resolve every card before closing a batch, and the companion answers
+  an early "done" with a warning naming the cards it left.
+
+- **Processing pulse works again, and covers every agent wait.** The
+  page-edge glow (Settings → Interface → Processing pulse) only followed
+  the live draft, which is never pending now that sent batches move to
+  the Submitted tray — so it never showed. It now pulses while anything
+  waits on the agent: sent annotations, AuditFlow, Report, Design
+  Variants, Test Pilot, Code Review, chat, commit and Drift Check. It
+  also comes back after the page reloads mid-run and follows you when
+  you switch tabs. It steps aside for screenshots, and stops when the
+  side panel closes or the companion goes away. On the Devices canvas
+  every device glows, not only the one you were last annotating.
+
+- **Devices canvas: annotating in more than one device.** Deleting a
+  card, Clear all and Send to agent now undo the preview in every
+  device, not only the one you're annotating in, and Redo puts a
+  change back only in the device it was made in. Pins stay in their
+  own device (a Mobile pin no longer lands on the iPad). The screenshot
+  marks only what was made in the captured device, never includes the
+  canvas toolbar, and warns you when the device was cut off. Removing
+  the device you annotate in no longer leaves the panel "connected" to
+  it. "Open" on another page, Reload and the after-batch reload act on
+  the devices instead of replacing or reloading the whole canvas; an
+  imported session and a variant preview follow you to the next
+  device. Manual tasks get the device's width (not the side panel's),
+  and a slow dev server is no longer reloaded while it's still loading.
+  A device added by typed size no longer reads "(removed)" in its model
+  picker.
+
+## 0.10.0 — 2026-09-29
+
+### Added
+
+- **Test Pilot: tester round-trip.** A human tester can run a tester
+  sheet without a companion and send ONE file back. Standalone Test
+  Pilot keeps the catalog and Pass/Fail marks across side-panel
+  reloads; results and tester sheets carry a sign-off envelope (tester,
   email, date, environment, run type Smoke / Thorough / Regression,
   notes); importing a returned run overlays its marks read-only on the
   developer's catalog ("N of M results applied", partial-run scope

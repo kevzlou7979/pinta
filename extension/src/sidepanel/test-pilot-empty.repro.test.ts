@@ -146,7 +146,10 @@ describe("Test Pilot empty state", () => {
     const docx = zipSync({ "word/document.xml": strToU8(xml) });
 
     drop(new File([docx], "Claims UAT.docx"));
-    await sleep(120); await settle();
+    // The conversion lazy-loads its unzip code; a fixed pause was too
+    // short when the whole suite runs in parallel. Wait for the outcome.
+    for (let i = 0; i < 100 && imp.mock.calls.length === 0; i++) await sleep(30);
+    await settle();
     expect(imp).toHaveBeenCalledTimes(1);
     const [name, md] = imp.mock.calls[0]! as [string, string];
     expect(name).toBe("Claims UAT.md");
@@ -157,7 +160,8 @@ describe("Test Pilot empty state", () => {
 
     imp.mockClear();
     drop(new File(["this is not a zip"], "broken.docx"));
-    await sleep(120); await settle();
+    for (let i = 0; i < 100 && !app.testPilot.error; i++) await sleep(30);
+    await settle();
     expect(imp).not.toHaveBeenCalled();
     expect(app.testPilot.error).toContain("broken.docx");
     expect(app.testPilot.error).toContain("isn't a Word .docx file");

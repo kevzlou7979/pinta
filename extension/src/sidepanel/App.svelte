@@ -7,6 +7,7 @@
     Session,
     SessionManifest,
   } from "@pinta/shared";
+  import { skippedAnnotations } from "@pinta/shared";
   import { app } from "../lib/state.svelte.js";
   import { uid } from "../lib/id.js";
   import {
@@ -35,8 +36,11 @@
   import {
     devicesCanvasTargetUrl,
     deviceFrameReadyUrl,
+    isDeadFrameError,
     isDevicesCanvasUrl,
     isDirectSubframeSender,
+    onDeviceShot,
+    sameDeviceWidth,
   } from "../lib/devices-frame.js";
   import { scrubUrl } from "../content/capture.js";
   import type { Companion } from "../lib/companions.js";
@@ -280,6 +284,46 @@
   let devicesFrameLive = $state(false);
   /** Chrome frameId of that live device frame (sender.frameId). */
   let devicesFrameId: number | null = null;
+  /** Per canvas TAB: every device frame that announced itself (overlay.ready)
+   *  → its page URL and viewport width. Cleanup (annotated.remove / clear)
+   *  goes to all of them: a device you switched away from still holds its
+   *  previews and pins. Kept across tab switches (inactive frames never
+   *  re-announce); dropped when that canvas reloads or its tab closes. */
+  const deviceFramesByTab = new Map<number, Map<number, { url: string; width?: number }>>();
+  /** The active canvas tab's frames (empty off the canvas). */
+  function tabFrames(): Map<number, { url: string; width?: number }> {
+    if (activeTabId == null) return new Map();
+    let m = deviceFramesByTab.get(activeTabId);
+    if (!m) deviceFramesByTab.set(activeTabId, (m = new Map()));
+    return m;
+  }
+  /** Annotation id → the canvas tab + device frame it was made in. Redo
+   *  re-applies the preview there and nowhere else. */
+  const annotationFrames = new Map<string, { tabId: number; frameId: number }>();
+
+  /** The canvas in `tabId` reloaded (or closed): its frames are all gone. */
+  function forgetCanvasTab(tabId: number): void {
+    deviceFramesByTab.delete(tabId);
+    for (const [id, f] of annotationFrames) if (f.tabId === tabId) annotationFrames.delete(id);
+    if (tabId === activeTabId) {
+      devicesFrameLive = false;
+      devicesFrameId = null;
+    }
+  }
+
+  /** A device frame is gone (removed, reloaded to a new frameId). If it was
+   *  the one we annotate in, stop claiming "Device frame connected".
+   *  `tabId` is the tab the failed send went to — frame ids are only unique
+   *  within a tab, and the user may have switched tabs before it failed. */
+  function dropDeviceFrame(frameId: number, tabId: number | null): void {
+    if (tabId == null) return;
+    deviceFramesByTab.get(tabId)?.delete(frameId);
+    if (tabId === activeTabId && devicesFrameId === frameId) {
+      devicesFrameLive = false;
+      devicesFrameId = null;
+      activeTool = null;
+    }
+  }
 
   /** On a Devices canvas, make sure a device frame's overlay has
    *  announced itself before we send it anything: ask the canvas to
@@ -315,9 +359,38 @@
     // reach a sandboxed device frame; devicesFrameId is learned only from
     // a direct runtime overlay.ready (see lib/devices-frame.ts).
     if (onDevicesCanvas && devicesFrameId != null) {
-      return chrome.tabs.sendMessage(activeTabId, msg, { frameId: devicesFrameId });
+      const frameId = devicesFrameId;
+      const tabId = activeTabId;
+      return chrome.tabs.sendMessage(tabId, msg, { frameId }).catch((err: unknown) => {
+        if (isDeadFrameError(err)) dropDeviceFrame(frameId, tabId);
+        throw err;
+      });
     }
     return chrome.tabs.sendMessage(activeTabId, msg);
+  }
+
+  /** Annotation cleanup (annotated.remove / annotated.clear). On a Devices
+   *  canvas it goes to EVERY device frame we've heard from — inactive ones
+   *  let cleanup through — so a preview made in Mobile doesn't outlive its
+   *  card after you switch Annotate to the iPad. Elsewhere = sendToPage. */
+  function sendCleanup(msg: unknown): void {
+    if (activeTabId == null) return;
+    if (!onDevicesCanvas) {
+      sendToPage(msg).catch(() => {});
+      return;
+    }
+    const tabId = activeTabId;
+    // Tab-wide as well: frames this panel never heard from (it was closed
+    // when they were active) clean up too. Remove / clear are idempotent,
+    // so a frame reached both ways is fine.
+    chrome.tabs.sendMessage(tabId, msg).catch(() => {});
+    const ids = new Set(tabFrames().keys());
+    if (devicesFrameId != null) ids.add(devicesFrameId);
+    for (const frameId of ids) {
+      chrome.tabs.sendMessage(tabId, msg, { frameId }).catch((err: unknown) => {
+        if (isDeadFrameError(err)) dropDeviceFrame(frameId, tabId);
+      });
+    }
   }
   const extRoot = (() => {
     try {
@@ -335,6 +408,8 @@
     const id = tab?.id ?? null;
     const canvas = isDevicesCanvasUrl(url, extRoot);
     const sameCanvas = canvas && onDevicesCanvas && id === activeTabId;
+    // Which frame is annotating is re-learned on return (the canvas re-pings
+    // it); the frames themselves are remembered per tab.
     if (!sameCanvas) {
       devicesFrameLive = false;
       devicesFrameId = null;
@@ -369,6 +444,9 @@
   /** Submit-footer choices — persisted; see ExtensionState.submitOptions. */
   const submitOptions = $derived(app.submitOptions);
   let hmrDetected = $state<boolean | null>(null);
+  /** Devices canvas: the last device screenshot was cut off (see
+   *  captureDeviceFrameSlice). Dismissible amber notice. */
+  let deviceShotNotice = $state<string | null>(null);
   let reloadingAt = $state<number | null>(null);
   // A batch finished without HMR but we did NOT auto-reload (auto-reload is
   // off, or you'd started annotating again) — offer a manual Reload instead
@@ -472,18 +550,34 @@
    * can repaint its pin badge. Best-effort; silently no-ops if the
    * content script isn't listening.
    */
-  function replayAnnotationsToTab(tabId: number, url: string): void {
+  function replayAnnotationsToTab(tabId: number, url: string, frameWidth?: number): void {
     // sendToPage always addresses the ACTIVE tab (on the Devices canvas,
     // the annotating frame inside it). A background tab's content script
     // mounting must not repaint the active page using that other tab's
     // URL filter, so drop anything that isn't the tab we're viewing.
     if (tabId !== activeTabId) return;
+    // Devices canvas: replay only into the annotating frame, at its width.
+    // Callers without a width (the session / count effect) use the width
+    // that frame announced; no frame or no width = nothing to replay into.
+    if (onDevicesCanvas) {
+      frameWidth ??= devicesFrameId != null ? tabFrames().get(devicesFrameId)?.width : undefined;
+      if (devicesFrameId == null || frameWidth == null) return;
+    }
     const sessionUrl = app.session?.url ?? "";
     const all = app.session?.annotations ?? [];
     for (const ann of all) {
       if (ann.kind !== "select") continue;
       const annUrl = ann.url ?? sessionUrl;
       if (annUrl !== url) continue;
+      // Devices canvas: the same URL is open in every device, so the width
+      // an annotation was made at says which device it belongs to — a
+      // Mobile pin must not resolve onto some wrapper in the iPad frame.
+      if (
+        onDevicesCanvas &&
+        frameWidth != null &&
+        ann.viewport &&
+        !sameDeviceWidth(ann.viewport.width, frameWidth)
+      ) continue;
       // Must go through sendToPage: on the Devices canvas a tab-wide
       // send doesn't reliably reach the sandboxed device frame, so pins
       // would never repaint there.
@@ -835,6 +929,30 @@
   ) => {
     if (sender?.id !== chrome.runtime.id) return;
     const m = msg as IncomingMsg;
+    // A Devices canvas just (re)loaded and lost its glow — re-send it.
+    if ((msg as { type?: string } | null)?.type === "devices.canvas-ready") {
+      const tabId = (msg as { tabId?: unknown }).tabId;
+      // Every device frame of the old canvas went with it (in whichever
+      // tab): stop addressing their frame ids.
+      if (typeof tabId === "number") forgetCanvasTab(tabId);
+      if (tabId === activeTabId) syncPulse(true);
+      return;
+    }
+    // The canvas stopped annotating (device removed, Clear all, Annotate
+    // toggled off, or it gave up): a removed frame can't send its own
+    // frame.inactive, so the canvas says it for it.
+    if (
+      (msg as { type?: string } | null)?.type === "devices.annotate-frame" &&
+      (msg as { tabId?: unknown }).tabId === activeTabId &&
+      onDevicesCanvas
+    ) {
+      if ((msg as { annotating?: unknown }).annotating !== true) {
+        devicesFrameLive = false;
+        devicesFrameId = null;
+        activeTool = null;
+      }
+      return;
+    }
     if (m?.type === "frame.inactive" && sender.tab?.id === activeTabId) {
       // Only the frame we adopted going inert matters — a late message from
       // the PREVIOUS target must not hide the frame that just took over.
@@ -854,6 +972,8 @@
       // truth for "what page is the user looking at". chrome.tabs API
       // doesn't fire info.url for hash-only changes, so without this
       // the filter mis-classifies annotations as "on another page".
+      let frameWidth: number | undefined;
+      let newFrame = false;
       if (url && sender.tab.id === activeTabId) {
         if (onDevicesCanvas) {
           // Only a direct runtime send from a device sub-frame counts (a
@@ -864,13 +984,26 @@
             ? deviceFrameReadyUrl(url, sender.url)
             : "";
           if (!frameUrl || sender.frameId == null) return;
+          const frameId = sender.frameId;
+          const w = (m as { width?: unknown }).width;
+          frameWidth = typeof w === "number" && Number.isFinite(w) && w > 0 ? w : undefined;
+          const unchanged = tabFrames().get(frameId)?.url === frameUrl && devicesFrameId === frameId;
+          newFrame = devicesFrameId !== frameId;
+          tabFrames().set(frameId, { url: frameUrl, width: frameWidth });
           pageUrl = frameUrl;
           devicesFrameLive = true;
-          devicesFrameId = sender.frameId;
+          devicesFrameId = frameId;
+          // The canvas keep-alive (every 2s) from the frame we already
+          // adopted on this URL: nothing changed on the page, so no replay
+          // — each one costs a DOM scan per annotation.
+          if ((m as { ping?: unknown }).ping === true && unchanged) return;
         } else {
           pageUrl = url;
         }
       }
+      // A fresh document (reload, navigation) also lost the processing
+      // pulse — re-send it, or a run that outlives the page goes dark.
+      if (sender.tab.id === activeTabId) syncPulse(true);
       // A fresh document took any live variant preview with it, so the
       // card must stop claiming "Previewing". The page tells us whether a
       // preview is still standing: overlay.ready also fires when an SPA
@@ -887,7 +1020,10 @@
       // A real document load resets our shared-DOM attributes — re-arm the
       // reload guard so Vite full-reloads stay held on this tab.
       pushReloadHold(sender.tab.id, !app.autoReload);
-      replayAnnotationsToTab(sender.tab.id, url);
+      replayAnnotationsToTab(sender.tab.id, url, frameWidth);
+      // Another device took over Annotate: an open imported-session overlay
+      // follows it (the old frame dropped its copy on going inactive).
+      if (newFrame && app.viewingImportedId) pushImportedOverlay();
       return;
     }
     if (m?.type === "imported.located" && typeof m.matched === "number" && typeof m.total === "number") {
@@ -1035,13 +1171,15 @@
         // so older companion JSONs round-trip cleanly.
         target: targets[0],
         groupingMode: targets.length > 1 ? (m.groupingMode ?? "single-edit") : undefined,
-        viewport: m.viewport ?? snapshotViewport(),
+        // The page's own viewport — never the side panel's window size.
+        viewport: m.viewport,
         // Stamp from the content script's location.href — authoritative
         // for SPAs where chrome.tabs.onUpdated misses hash/pushState changes
         // and the side panel's lastUrl can be stale.
         url: m.url ? scrubUrl(m.url) : undefined,
       };
       app.addAnnotation(annotation);
+      noteAnnotationFrame(annotation.id, sender);
       pushUndo(annotation);
       if (freeTransform) transformIds = [...transformIds, annotation.id];
       activeTool = null;
@@ -1051,10 +1189,18 @@
       sender.tab?.id === activeTabId
     ) {
       app.addAnnotation(m.annotation);
+      noteAnnotationFrame(m.annotation.id, sender);
       pushUndo(m.annotation);
       if (freeTransform) transformIds = [...transformIds, m.annotation.id];
     }
   };
+
+  /** Devices canvas: remember which device frame an annotation came from. */
+  function noteAnnotationFrame(id: string, sender: chrome.runtime.MessageSender): void {
+    if (onDevicesCanvas && isDirectSubframeSender(sender, chrome.runtime.id, activeTabId)) {
+      annotationFrames.set(id, { tabId: activeTabId!, frameId: sender.frameId! });
+    }
+  }
 
   // Voice Command (Phase 20) — Alt+V dictates into the focused text field
   // anywhere in the side panel. Works even on fields without their own mic
@@ -1132,6 +1278,9 @@
     const anns = (app.session?.annotations ?? []).filter((a) => ids.includes(a.id));
     if (anns.length <= 1) return; // 0 or 1 — nothing to merge; leave as-is
     const merged = buildMergedTransform(anns);
+    // The merged result lives in the frame its ops were made in.
+    const made = anns.map((a) => annotationFrames.get(a.id)).find((f) => f != null);
+    if (made) annotationFrames.set(merged.id, made);
     await app.addAnnotation(merged);
     for (const id of ids) await app.removeAnnotation(id);
     // Fold the session into undo history: drop the per-op entries, add the
@@ -1155,10 +1304,7 @@
     // wipe any lingering pin badges the per-id removal may have missed (e.g. an
     // op that wasn't tracked due to a toggle-broadcast race). Safe because
     // there's nothing else to keep.
-    if (ids.length >= total && activeTabId != null) {
-      sendToPage({ type: "annotated.clear" })
-        .catch(() => {});
-    }
+    if (ids.length >= total) sendCleanup({ type: "annotated.clear" });
   }
 
   // MV3 doesn't inject content scripts into tabs that were already open when
@@ -1182,13 +1328,15 @@
     offsetY: number;
     width: number;
     height: number;
+    /** The frame's page URL ("" when it didn't answer). */
+    url: string;
   }> {
     if (activeTabId == null) throw new Error("no active tab");
     // Address the live device frame directly when known — every other frame
     // on the canvas would otherwise receive (and ignore) the broadcast.
     const vpMsg = { type: "frame.viewport" };
     const vp = (await sendToPage(vpMsg).catch(() => null)) as
-      | { scrollY?: number }
+      | { scrollY?: number; url?: string }
       | null
       | undefined;
     const resp = (await chrome.runtime.sendMessage({
@@ -1198,18 +1346,31 @@
       ok: boolean;
       /** width/height = device CSS px (the composite viewport); the image
        *  itself may be smaller (imageWidth/imageHeight) — never upscaled. */
-      capture?: { dataUrl: string; width: number; height: number };
+      capture?: { dataUrl: string; width: number; height: number; clipped?: boolean };
       error?: string;
     };
     if (!resp?.ok || !resp.capture) {
       throw new Error(resp?.error ?? "device frame capture failed");
     }
+    // Part of the device was outside the canvas view: the shot is cut off
+    // (white there) — say so rather than send it silently.
+    deviceShotNotice = resp.capture.clipped
+      ? "Part of the device was off-screen, so its screenshot is cut off. Scroll the whole device into view on the canvas (or zoom out) and send again for a full shot."
+      : null;
     return {
       dataUrl: resp.capture.dataUrl,
       offsetY: typeof vp?.scrollY === "number" ? vp.scrollY : 0,
       width: resp.capture.width,
       height: resp.capture.height,
+      url: typeof vp?.url === "string" ? vp.url : "",
     };
+  }
+
+  /** Only what was made in the captured device, on its page, is painted on
+   *  a device shot; the rest of the batch rides as text. */
+  function deviceShotFilter(shot: { width: number; url: string }): (a: Annotation) => boolean {
+    const sessionUrl = app.session?.url ?? "";
+    return (a) => onDeviceShot(a, shot, sessionUrl);
   }
 
   // ── Undo / Redo ─────────────────────────────────────────────────────
@@ -1229,10 +1390,39 @@
 
   async function readdAnnotation(ann: Annotation): Promise<void> {
     await app.addAnnotation(ann);
-    if (activeTabId != null) {
-      sendToPage({ type: "annotated.reapply", annotation: ann })
-        .catch(() => {});
+    if (activeTabId == null) return;
+    const msg = { type: "annotated.reapply", annotation: ann };
+    if (!onDevicesCanvas) {
+      sendToPage(msg).catch(() => {});
+      return;
     }
+    // Devices canvas: only the frame it was made in — Mobile's preview
+    // applied to the iPad frame would be a change nobody asked for.
+    const frameId = redoFrameFor(ann);
+    if (frameId == null) return;
+    const tabId = activeTabId;
+    chrome.tabs.sendMessage(tabId, msg, { frameId }).catch((err: unknown) => {
+      if (isDeadFrameError(err)) dropDeviceFrame(frameId, tabId);
+    });
+  }
+
+  /** The device frame a redo may re-apply `ann` in: the frame it was made
+   *  in, if that frame still shows the annotation's page (Chrome keeps a
+   *  frameId across navigations inside the frame); otherwise the annotating
+   *  frame when it is the same device (width) on the same page. Null =
+   *  leave the page alone. */
+  function redoFrameFor(ann: Annotation): number | null {
+    const frames = tabFrames();
+    const annUrl = ann.url ?? app.session?.url ?? "";
+    const made = annotationFrames.get(ann.id);
+    if (made && made.tabId === activeTabId && frames.get(made.frameId)?.url === annUrl) {
+      return made.frameId;
+    }
+    if (devicesFrameId == null) return null;
+    const cur = frames.get(devicesFrameId);
+    return cur && cur.url === annUrl && sameDeviceWidth(ann.viewport?.width, cur.width)
+      ? devicesFrameId
+      : null;
   }
 
   async function undoLast(): Promise<void> {
@@ -1350,6 +1540,7 @@
     if (destroyed) return;
     chrome.tabs?.onActivated?.addListener(onTabActivated);
     chrome.tabs?.onUpdated?.addListener(onTabUpdated);
+    chrome.tabs?.onRemoved?.addListener(forgetCanvasTab);
   });
 
   let destroyed = false;
@@ -1374,6 +1565,7 @@
     destroyed = true;
     chrome.tabs?.onActivated?.removeListener(onTabActivated);
     chrome.tabs?.onUpdated?.removeListener(onTabUpdated);
+    chrome.tabs?.onRemoved?.removeListener(forgetCanvasTab);
     chrome.runtime.onMessage.removeListener(runtimeMessageHandler);
     window.removeEventListener("keydown", voiceHotkey);
     window.removeEventListener("keydown", undoRedoHotkey);
@@ -1479,7 +1671,16 @@
   async function openOtherPage(u: string): Promise<void> {
     if (activeTabId == null) return;
     try {
-      await chrome.tabs.update(activeTabId, { url: u });
+      // Devices canvas: ask the canvas to show that page in its devices —
+      // updating the tab's URL would replace the canvas itself.
+      if (onDevicesCanvas) {
+        await chrome.runtime.sendMessage({ type: "devices.open-url", tabId: activeTabId, url: u });
+        // Every device reloads to the new page under new frame ids — same
+        // as Reload: wait for them to announce rather than fail one click.
+        forgetCanvasTab(activeTabId);
+      } else {
+        await chrome.tabs.update(activeTabId, { url: u });
+      }
     } catch {
       // Tab gone or URL invalid — silently no-op; the user can navigate manually.
     }
@@ -1587,7 +1788,7 @@
 
   // Copy the drifted / missing annotations into the current draft (fresh
   // ids, cleared status) so the user can re-send them. The primary Send
-  // button relabels to "Resubmit" while this is armed.
+  // button reads "Resubmit" while the draft holds such a copy.
   async function resubmitFlagged(): Promise<void> {
     const ids = new Set(app.driftFlaggedIds);
     if (ids.size === 0) return;
@@ -1595,16 +1796,69 @@
       .flatMap((b) => b.annotations)
       .filter((a) => ids.has(a.id));
     if (flagged.length === 0) return;
-    app.drift.resubmitting = true;
-    for (const a of flagged) {
-      const copy: Annotation = {
-        ...a,
-        id: uid("ann"),
-        createdAt: Date.now(),
-        status: undefined,
-        errorMessage: undefined,
-      };
+    // Shares the per-card bookkeeping, so a card already resubmitted
+    // from its own icon isn't copied twice.
+    for (const a of flagged) await resubmitAnnotation(a);
+  }
+  // ─── Skipped annotations ────────────────────────────────────────────
+  // An agent can close a batch after applying only some of its cards
+  // (seen 2026-10-13: "done" posted after the first of three). Those
+  // cards used to sit in the tray with an idle dot and no way forward.
+  const batchSettled = (status: string) => status === "done" || status === "error";
+  const skippedIds = $derived(
+    new Set(
+      app.inFlightBatches
+        .filter((b) => batchSettled(b.status))
+        .flatMap((b) => skippedAnnotations(b))
+        .map((a) => a.id),
+    ),
+  );
+  // original annotation id → id of the copy made by Resubmit.
+  let requeuedCopies = $state<Record<string, string>>({});
+  const sentIds = $derived(
+    new Set(app.inFlightBatches.flatMap((b) => b.annotations).map((a) => a.id)),
+  );
+  /** Where the resubmitted copy of `id` is now; null once the user
+   *  removed it from the draft (the icon comes back). */
+  function requeuedState(id: string): "draft" | "sent" | null {
+    const copy = requeuedCopies[id];
+    if (!copy) return null;
+    if (sentIds.has(copy)) return "sent";
+    return queuing.includes(id) || annotations.some((a) => a.id === copy) ? "draft" : null;
+  }
+  // Originals whose copy is on its way into the draft (the companion
+  // echoes it back a moment later) — closes the double-click window.
+  let queuing = $state<string[]>([]);
+  // The send button reads "Resubmit" while the draft holds such a copy.
+  const draftHasResubmit = $derived.by(() => {
+    const copies = new Set(Object.values(requeuedCopies));
+    return annotations.some((a) => copies.has(a.id));
+  });
+  /** A card can be resubmitted when its batch is finished and it did not
+   *  land: skipped by the agent, failed, or part of a failed batch. */
+  function canResubmit(a: Annotation, batchStatus: string): boolean {
+    if (!batchSettled(batchStatus) || a.status === "done") return false;
+    return skippedIds.has(a.id) || a.status === "error" || batchStatus === "error";
+  }
+  // Copy one card into the draft (fresh id, cleared status); the Send
+  // button relabels to "Resubmit", same as the Drift Check flow.
+  async function resubmitAnnotation(a: Annotation): Promise<void> {
+    if (requeuedState(a.id)) return;
+    const copy: Annotation = {
+      ...a,
+      id: uid("ann"),
+      createdAt: Date.now(),
+      status: undefined,
+      errorMessage: undefined,
+    };
+    requeuedCopies = { ...requeuedCopies, [a.id]: copy.id };
+    queuing = [...queuing, a.id];
+    try {
       await app.addAnnotation(copy);
+    } finally {
+      // Long enough for the echo; if the add was dropped (socket down)
+      // the icon comes back instead of a stuck "In draft".
+      setTimeout(() => (queuing = queuing.filter((id) => id !== a.id)), 1500);
     }
   }
   // Drawing-kind annotations carry only stroke coords + comment — no DOM
@@ -1926,26 +2180,38 @@
     });
   }
 
-  function snapshotViewport() {
-    return {
-      scrollY: 0,
-      width: window.innerWidth,
-      height: window.innerHeight,
-    };
+  /** The viewport of the page being annotated (on the Devices canvas, the
+   *  annotating device) — NOT this side panel's window, which is ~400px
+   *  wide and would tag every manual task "Mobile". Undefined when the
+   *  page doesn't answer: no viewport beats a wrong one. */
+  async function snapshotViewport(): Promise<Annotation["viewport"]> {
+    if (activeTabId == null) return undefined;
+    const vp = (await sendToPage({ type: "frame.viewport" }).catch(() => null)) as
+      | { width?: unknown; height?: unknown }
+      | null
+      | undefined;
+    if (typeof vp?.width !== "number" || typeof vp?.height !== "number") return undefined;
+    return { scrollY: 0, width: vp.width, height: vp.height };
   }
 
-  function addAnnotationFromForm() {
+  async function addAnnotationFromForm() {
     if (!selector.trim() || !comment.trim()) return;
+    const text = comment.trim();
+    const sel = selector.trim();
+    // Cleared up front: the viewport round-trip must not let a double
+    // Enter add the same task twice.
+    selector = "";
+    comment = "";
     const annotation: Annotation = {
       id: uid("ann"),
       createdAt: Date.now(),
       kind: "select",
       strokes: [],
       color: "#FF3D6E",
-      comment: comment.trim(),
-      viewport: snapshotViewport(),
+      comment: text,
+      viewport: await snapshotViewport(),
       target: {
-        selector: selector.trim(),
+        selector: sel,
         outerHTML: "",
         computedStyles: {},
         nearbyText: [],
@@ -1954,13 +2220,11 @@
     };
     app.addAnnotation(annotation);
     pushUndo(annotation);
-    selector = "";
-    comment = "";
   }
 
   // Free-form manual task — no DOM target, no selector, no screenshot.
   // The comment is the task; optional reference images ride along inline.
-  function addNoteFromForm(payload: { comment: string; images: AnnotationImage[] }) {
+  async function addNoteFromForm(payload: { comment: string; images: AnnotationImage[] }) {
     const text = payload.comment.trim();
     if (!text && payload.images.length === 0) return;
     const annotation: Annotation = {
@@ -1971,7 +2235,7 @@
       color: "#FF3D6E",
       comment: text,
       images: payload.images.length > 0 ? payload.images : undefined,
-      viewport: snapshotViewport(),
+      viewport: await snapshotViewport(),
     };
     app.addAnnotation(annotation);
     pushUndo(annotation);
@@ -1979,11 +2243,9 @@
 
   function removeAnnotation(id: string) {
     app.removeAnnotation(id);
-    // Drop the matching pin badge in the content overlay too.
-    if (activeTabId != null) {
-      sendToPage({ type: "annotated.remove", annotationId: id })
-        .catch(() => {});
-    }
+    // Drop the matching pin badge (and preview) in the content overlay too —
+    // on the Devices canvas in every device frame, not just the active one.
+    sendCleanup({ type: "annotated.remove", annotationId: id });
   }
 
   async function clearAllAnnotations() {
@@ -2002,17 +2264,24 @@
   async function cancelSession() {
     if (!app.session) return;
     // Wipe pin badges in the content overlay before the session resets.
-    if (activeTabId != null) {
-      sendToPage({ type: "annotated.clear" })
-        .catch(() => {});
-    }
+    sendCleanup({ type: "annotated.clear" });
     await app.cancelAndRestart(pageUrl || app.session.url);
     activeTool = null;
   }
 
   // Best-effort HMR detection: probe the page for known dev-mode markers.
   // Returns true if any are present (Vite, Webpack/Next.js, Parcel HMR).
-  async function detectHmr(tabId: number): Promise<boolean> {
+  async function detectHmr(tabId: number): Promise<boolean | null> {
+    // Devices canvas: the top frame is our own page, so scripting into the
+    // tab always fails — ask the annotating device frame instead. No answer
+    // (nothing annotating) is "unknown", not "no HMR": null.
+    if (onDevicesCanvas && tabId === activeTabId) {
+      const r = (await sendToPage({ type: "frame.hmr" }).catch(() => null)) as
+        | { hmr?: unknown }
+        | null
+        | undefined;
+      return typeof r?.hmr === "boolean" ? r.hmr : null;
+    }
     try {
       const [first] = await chrome.scripting.executeScript({
         target: { tabId },
@@ -2078,7 +2347,17 @@
     pendingReload = false;
     reloadingAt = Date.now();
     try {
-      await chrome.tabs.reload(activeTabId);
+      // Devices canvas: reload the device frames, not the canvas tab —
+      // that would also drop which device you were annotating in.
+      if (onDevicesCanvas) {
+        await chrome.runtime.sendMessage({ type: "devices.refresh-all", tabId: activeTabId });
+        // Every frame reloads to a new frameId (no previews left in them):
+        // forget them now, so the next tool click waits for the annotating
+        // frame to re-announce instead of failing on the old id.
+        forgetCanvasTab(activeTabId);
+      } else {
+        await chrome.tabs.reload(activeTabId);
+      }
       setTimeout(() => {
         if (reloadingAt && Date.now() - reloadingAt >= 1500) reloadingAt = null;
       }, 1600);
@@ -2109,7 +2388,9 @@
     detectHmr(activeTabId).then((hasHmr) => {
       hmrDetected = hasHmr;
       if (hasHmr) return; // HMR already refreshed the page for us
-      if (app.autoReload && !draftingAgain) {
+      // Unknown (a canvas with no device answering): never reload every
+      // device on a guess — offer the button instead.
+      if (app.autoReload && !draftingAgain && hasHmr === false) {
         reloadActiveTab();
       } else {
         pendingReload = true; // manual mode, or busy annotating → offer a button
@@ -2129,39 +2410,88 @@
     const previous = lastOverlaySessionId;
     lastOverlaySessionId = id;
     if (previous === null) return;
-    if (activeTabId == null) return;
-    sendToPage({ type: "annotated.clear" })
-      .catch(() => {});
+    untrack(() => sendCleanup({ type: "annotated.clear" }));
   });
 
   // Drive the page-edge processing pulse — content script paints a
-  // pulsating inset glow while the agent is picking up / applying the
-  // session so the user has visible confirmation that something is
-  // happening on a foreign machine. Off by default (Settings → Visual
-  // feedback). Tracks both `sessionPending` AND whether the user
-  // enabled the pulse, so flipping the toggle while a session is in
-  // flight starts / stops the glow immediately.
-  let lastProcessingPing = $state<string | null>(null);
-  $effect(() => {
-    const processing = sessionPending && app.pulseSettings.enabled;
+  // pulsating inset glow while the agent is working, so the user has
+  // visible confirmation that something is happening on a foreign
+  // machine. Off by default (Settings → Interface). Follows
+  // `app.agentBusy` — every agent wait, not just the live draft: since
+  // batches detach into the Submitted tray on send, the draft is never
+  // "pending" any more, and module runs never touched it at all.
+  // Tracks the pulse setting too, so flipping the toggle mid-run starts
+  // / stops the glow immediately.
+  let lastProcessingPing: string | null = null;
+  let pulseTabId: number | null = null;
+  /** Whether `pulseTabId` is a Devices canvas (told over chrome.runtime). */
+  let pulseCanvas = false;
+  /** What the page on `pulseTabId` was last told. */
+  let pulseOn = false;
+  /** Tell one tab to start / stop the glow. A Devices canvas paints it
+   *  on EVERY device frame itself — each frame's own overlay is hidden
+   *  unless that frame is the one being annotated, so a frame-targeted
+   *  pulse lit only the last device annotated. */
+  function sendPulse(tabId: number, canvas: boolean, on: boolean, color?: string): void {
+    if (canvas) {
+      chrome.runtime
+        .sendMessage({ type: "devices.processing", tabId, on, color })
+        .catch(() => {});
+    } else if (tabId === activeTabId) {
+      sendToPage({ type: on ? "processing.start" : "processing.end", color }).catch(() => {});
+    } else {
+      chrome.tabs.sendMessage(tabId, { type: "processing.end" }).catch(() => {});
+    }
+  }
+  /** Held true around a screenshot so the glow isn't captured into it. */
+  let pulsePaused = $state(false);
+  function syncPulse(force = false): void {
+    const processing =
+      app.agentBusy && app.pulseSettings.enabled && !pulsePaused;
     const color = app.pulseSettings.color;
-    if (activeTabId == null) return;
-    const key = processing ? `on:${color}` : "off";
-    if (lastProcessingPing === key) return;
+    const tabId = activeTabId;
+    const canvas = onDevicesCanvas;
+    if (tabId == null) return;
+    const key = `${tabId}:${canvas ? "canvas" : "page"}:${processing ? `on:${color}` : "off"}`;
+    if (!force && lastProcessingPing === key) return;
+    // The glow belongs to the tab the panel is on — a tab the user just
+    // left must not keep pulsing after the work ends.
+    if (pulseTabId != null && (pulseTabId !== tabId || pulseCanvas !== canvas)) {
+      if (pulseOn) sendPulse(pulseTabId, pulseCanvas, false);
+      pulseOn = false;
+    }
+    pulseTabId = tabId;
+    pulseCanvas = canvas;
     lastProcessingPing = key;
-    sendToPage({
-        type: processing ? "processing.start" : "processing.end",
-        color: processing ? color : undefined,
-      })
-      .catch(() => {});
-  });
+    if (!processing && !pulseOn) return; // nothing on the page to turn off
+    pulseOn = processing;
+    sendPulse(tabId, canvas, processing, processing ? color : undefined);
+  }
+  $effect(() => syncPulse());
+  /** Take the glow off the page before a screenshot (an earlier batch or
+   *  a module run may still be going) and give the page a beat to
+   *  repaint. Pair with resumePulse() in a `finally`. */
+  async function pausePulse(): Promise<void> {
+    const wasOn = pulseOn;
+    pulsePaused = true;
+    syncPulse(true);
+    if (wasOn) await new Promise((r) => setTimeout(r, 120));
+  }
+  function resumePulse(): void {
+    if (!pulsePaused) return;
+    pulsePaused = false;
+    syncPulse(true);
+  }
 
   // Push the imported-session overlay (metadata pill + per-annotation
   // halos / badges) to the active tab whenever the user opens or closes
   // the read-only viewer. The content script reads the manifest's
   // accentColor to tint everything in the chosen palette so multiple
   // shared sessions stay visually distinguishable.
-  $effect(() => {
+  $effect(() => pushImportedOverlay());
+  /** Also called when a different device frame takes over Annotate on the
+   *  canvas (overlay.ready) — this effect doesn't track the frame. */
+  function pushImportedOverlay(): void {
     if (activeTabId == null) return;
     const viewing = app.viewingImportedId
       ? app.importedSessions.find((s) => s.id === app.viewingImportedId)
@@ -2191,7 +2521,7 @@
       sendToPage({ type: "imported.hide" })
         .catch(() => {});
     }
-  });
+  }
 
   // WS3 — reseed the GitLab-filing selection when the viewed import
   // changes: all shareable, not-yet-filed annotations start checked;
@@ -2318,9 +2648,13 @@
         error?: string;
       };
       let resp: BundleCapture;
+      /** Devices canvas: paint only what was made in the captured device. */
+      let include: ((a: Annotation) => boolean) | undefined;
+      await pausePulse();
       if (onDevicesCanvas) {
         // One slice: the annotating device's viewport.
         const shot = await captureDeviceFrameSlice();
+        include = deviceShotFilter(shot);
         resp = {
           ok: true,
           capture: {
@@ -2361,6 +2695,7 @@
             slice.dataUrl,
             annotations,
             { offsetY: slice.offsetY, width: vw, height: vh },
+            { include },
           );
           const name =
             slices.length === 1
@@ -2407,6 +2742,7 @@
       app.lastError = `bundle export failed: ${(err as Error).message}`;
     } finally {
       bundleBusy = false;
+      resumePulse();
     }
   }
 
@@ -2436,13 +2772,15 @@
       }
 
       let composited: string;
+      await pausePulse();
       if (onDevicesCanvas) {
         const shot = await captureDeviceFrameSlice();
-        composited = await compositeAnnotationsToViewport(shot.dataUrl, annotations, {
-          offsetY: shot.offsetY,
-          width: shot.width,
-          height: shot.height,
-        });
+        composited = await compositeAnnotationsToViewport(
+          shot.dataUrl,
+          annotations,
+          { offsetY: shot.offsetY, width: shot.width, height: shot.height },
+          { include: deviceShotFilter(shot) },
+        );
       } else {
         // Stitched only — no raw slices ride back over messaging.
         const resp = (await chrome.runtime.sendMessage({
@@ -2472,6 +2810,7 @@
       app.lastError = `screenshot failed: ${(err as Error).message}`;
     } finally {
       capturing = false;
+      resumePulse();
     }
   }
 
@@ -2480,10 +2819,7 @@
   // pin badges: they belonged to the batch the agent now owns, and leaving
   // them on-screen would mix with pins the user adds to the new draft.
   function afterSubmit() {
-    if (activeTabId != null) {
-      sendToPage({ type: "annotated.clear" })
-        .catch(() => {});
-    }
+    sendCleanup({ type: "annotated.clear" });
   }
 </script>
 
@@ -4070,6 +4406,11 @@
               canEdit={false}
               pending={(item.batchStatus === "submitted" || item.batchStatus === "applying") && item.annotation.status !== "done" && item.annotation.status !== "error"}
               drift={app.drift.results[item.annotation.id] ?? null}
+              skipped={skippedIds.has(item.annotation.id)}
+              requeued={requeuedState(item.annotation.id)}
+              onresubmit={canResubmit(item.annotation, item.batchStatus)
+                ? () => void resubmitAnnotation(item.annotation)
+                : undefined}
               onremove={() => {}}
               onsave={() => {}}
             />
@@ -4089,6 +4430,25 @@
           class="shrink-0 text-red-500 hover:text-red-700 dark:text-red-400 dark:hover:text-red-200 leading-none px-1"
           onclick={() => (app.lastError = null)}
           aria-label="Dismiss error"
+          title="Dismiss"
+        >
+          ✕
+        </button>
+      </div>
+    {/if}
+
+    {#if deviceShotNotice}
+      <div
+        class="flex items-start gap-2 text-xs text-amber-800 border border-amber-200 bg-amber-50 dark:text-amber-200 dark:border-amber-900/40 dark:bg-amber-950/40 rounded-md p-2"
+        role="status"
+        data-testid="device-shot-notice"
+      >
+        <p class="flex-1 min-w-0 break-words">{deviceShotNotice}</p>
+        <button
+          type="button"
+          class="shrink-0 text-amber-600 hover:text-amber-800 dark:text-amber-300 dark:hover:text-amber-100 leading-none px-1"
+          onclick={() => (deviceShotNotice = null)}
+          aria-label="Dismiss notice"
           title="Dismiss"
         >
           ✕
@@ -4850,7 +5210,7 @@
             💬 Ask agent
           {:else if fileOnlyMode}
             File issues
-          {:else if app.drift.resubmitting}
+          {:else if app.drift.resubmitting || draftHasResubmit}
             Resubmit
           {:else}
             Send to agent

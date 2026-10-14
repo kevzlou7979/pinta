@@ -718,6 +718,61 @@ class ExtensionState {
   });
 
   /**
+   * True while ANYTHING is waiting on the agent — a sent batch (the live
+   * draft or a detached one in the Submitted tray), or any module run:
+   * Test Pilot, AuditFlow, Report, Design Variants, Code Review, chat,
+   * commit, Drift Check, an imported module's board, an imported file.
+   * Drives the page-edge processing pulse. A new agent wait must be added
+   * here or the pulse stays dark for it. Always false with no companion
+   * selected: nothing can be progressing, and a wait with no timeout of
+   * its own must not leave the page glowing after a disconnect.
+   */
+  get agentBusy(): boolean {
+    if (!this.selectedCompanion) return false;
+    const live = (s?: string) => s === "submitted" || s === "applying";
+    const any = (m: Record<string, unknown>) => Object.values(m).some(Boolean);
+    const tp = this.testPilot;
+    const au = this.audit;
+    const dv = this.variants;
+    const cr = this.review;
+    return (
+      live(this.session?.status) ||
+      this.inFlightBatches.some((b) => live(b.status)) ||
+      tp.pending !== null ||
+      any(tp.pendingDetails) ||
+      any(tp.pendingChats) ||
+      any(tp.pendingSectionSuggest) ||
+      any(tp.pendingSectionChats) ||
+      tp.pendingFileIssues ||
+      au.pending !== null ||
+      any(au.pendingAuditSuggest) ||
+      any(au.pendingCheckChat) ||
+      any(au.pendingFileIssue) ||
+      any(au.pendingCheckFix) ||
+      this.report.pending !== null ||
+      this.report.shotPending !== null ||
+      this.report.howToPending !== null ||
+      this.report.expandingDate !== null ||
+      dv.pending !== null ||
+      any(dv.pendingDiscuss) ||
+      cr.pending !== null ||
+      any(cr.pendingLearn) ||
+      any(cr.pendingFix) ||
+      this.chat.pendingGlobal ||
+      any(this.chat.pendingAnnotateBatch) ||
+      this.commit.pending !== null ||
+      this.drift.pending !== null ||
+      Object.values(this.moduleBoards).some(
+        (b) =>
+          !!b?.pending ||
+          any(b?.cardStepsPending ?? {}) ||
+          any(b?.cardShotsPending ?? {}),
+      ) ||
+      this.importedFilePending !== null
+    );
+  }
+
+  /**
    * When true, the side panel reloads the page after the agent finishes
    * applying a batch IF no hot-reload (HMR) was detected — so you see the
    * change without a manual refresh. Default OFF so the page never refreshes
@@ -5323,6 +5378,8 @@ class ExtensionState {
       sessionId?: string | null;
       variantId?: string;
       scope?: VariantScope;
+      /** variants-generate: how many variants this run asked for. */
+      count?: number;
     } | null;
     error: string | null;
     /** Scope the NEXT generate run will use. */
@@ -5336,8 +5393,6 @@ class ExtensionState {
     previewingVariantId: string | null;
     /** Pages gallery routes (persisted). */
     pages: PageEntry[];
-      /** variants-generate: how many variants this run asked for. */
-      count?: number;
     /** Selected device preset label (persisted). */
     device: string;
     /** Bumped by refreshGallery() — re-keys the gallery iframes. */
@@ -5567,6 +5622,7 @@ class ExtensionState {
       op: "variants-generate",
       sessionId: null,
       scope,
+      count: this.variants.count,
     };
     this.variants.error = null;
     this.claimNotice = null;
@@ -5580,7 +5636,6 @@ class ExtensionState {
       url: this.queryUrl,
       designSystemPath:
         typeof settings.designSystemPath === "string"
-      count: this.variants.count,
           ? settings.designSystemPath
           : "",
       count: this.variants.count,
@@ -6216,6 +6271,12 @@ class ExtensionState {
             scope,
             url: this.queryUrl,
             variants: validateVariantRun(parsed.variants, scope.kind),
+            // A late result from another run (its runId differs) must not
+            // be measured against this run's count.
+            ...(pending.count &&
+            (!parsed.runId || parsed.runId === pending.runId)
+              ? { requestedCount: pending.count }
+              : {}),
           };
           // New deck of variants — the old run's Discuss threads must
           // not attach to new cards (agents reuse ids v1/v2/v3, so a
@@ -6229,12 +6290,6 @@ class ExtensionState {
         }
       } else if (pending.op === "variants-apply") {
         const parsed = parseApplyResult(summary);
-            // A late result from another run (its runId differs) must not
-            // be measured against this run's count.
-            ...(pending.count &&
-            (!parsed.runId || parsed.runId === pending.runId)
-              ? { requestedCount: pending.count }
-              : {}),
         if (parsed && this.variants.currentRun) {
           this.variants.currentRun.appliedVariantId =
             parsed.variantId ?? pending.variantId;
@@ -8370,8 +8425,16 @@ class ExtensionState {
           if (idx === -1) continue; // dismissed mid-fetch
           // The companion store only moves status forward, so any change is
           // an advance worth applying. Skip a no-op to avoid a needless
-          // reactive churn.
-          if (session.status === this.inFlightBatches[idx]!.status) continue;
+          // reactive churn. Card statuses count: an agent can resolve a
+          // card after closing its batch (the "Not applied" follow-up).
+          const cardStates = (s: Session) =>
+            s.annotations.map((a) => `${a.id}:${a.status ?? ""}`).join("|");
+          if (
+            session.status === this.inFlightBatches[idx]!.status &&
+            cardStates(session) === cardStates(this.inFlightBatches[idx]!)
+          ) {
+            continue;
+          }
           this.inFlightBatches[idx] = session;
           this.inFlightBatches = [...this.inFlightBatches];
           // Leaving "submitted" retires the stale claim-warning notice —

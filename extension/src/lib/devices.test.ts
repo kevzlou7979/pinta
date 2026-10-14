@@ -6,6 +6,7 @@ import {
   FRAME_MIN_W,
   classDefaultZoom,
   customSizeModel,
+  isCustomSizeModelId,
   defaultDevicesState,
   dimsFor,
   effectiveScale,
@@ -242,6 +243,12 @@ describe("customSizeModel", () => {
     expect(customSizeModel(480, 4001)).toBeNull();
     expect(customSizeModel(NaN, 800)).toBeNull();
     expect(customSizeModel(Infinity, 800)).toBeNull();
+  });
+
+  it("its id is recognised as a typed size, not a removed catalog model", () => {
+    expect(isCustomSizeModelId(customSizeModel(480, 800)!.id)).toBe(true);
+    expect(isCustomSizeModelId("iphone-16-pro")).toBe(false);
+    expect(isCustomSizeModelId("custom:Kiosk")).toBe(false);
   });
 });
 

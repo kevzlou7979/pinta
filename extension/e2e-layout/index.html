@@ -45,16 +45,59 @@
           storage: { local: area(), session: area(), sync: area(), onChanged: ev() },
           runtime: {
             id: "pinta-e2e-layout",
-            onMessage: ev(),
-            sendMessage: function () { return Promise.resolve({}); },
+            // Listeners are kept on window.__runtimeListeners so a script
+            // can deliver a page message (overlay.ready) to the panel.
+            onMessage: {
+              addListener: function (l) { (window.__runtimeListeners = window.__runtimeListeners || []).push(l); },
+              removeListener: function (l) { window.__runtimeListeners = (window.__runtimeListeners || []).filter(function (x) { return x !== l; }); },
+              hasListener: function () { return false; },
+            },
+            // Recorded in window.__runtimeSent; `seq` orders them against
+            // window.__tabMessages.
+            sendMessage: function (msg) {
+              (window.__runtimeSent = window.__runtimeSent || []).push({ seq: (window.__seq = (window.__seq || 0) + 1), msg: msg });
+              // window.__runtimeReply(msg) (optional) plays the receiver.
+              return Promise.resolve(window.__runtimeReply ? window.__runtimeReply(msg) : {});
+            },
             getManifest: function () { return { version: "0.9.0" }; },
-            getURL: function (p) { return p; },
+            // window.__extRoot (set before load) plays the extension origin.
+            getURL: function (p) { return (window.__extRoot || "") + p; },
             connect: function () { return { onMessage: ev(), onDisconnect: ev(), postMessage: noop, disconnect: noop }; },
           },
           tabs: {
-            query: function () { return Promise.resolve([]); },
-            sendMessage: function () { return Promise.resolve({}); },
-            onActivated: ev(), onUpdated: ev(), onRemoved: ev(),
+            // window.__tabs (set before load) is the tab list; every message
+            // sent to a tab is recorded in window.__tabMessages.
+            query: function () { return Promise.resolve(window.__tabs || []); },
+            // The tab an extension page (the Devices canvas) runs in.
+            getCurrent: function () { return Promise.resolve(window.__currentTab); },
+            // `frameId` is recorded for frame-targeted sends; the optional
+            // window.__tabReply(tabId, msg, frameId) plays the page — return
+            // a reply, or throw to reject (e.g. a frame that is gone).
+            sendMessage: function (tabId, msg, opts) {
+              var frameId = opts && typeof opts.frameId === "number" ? opts.frameId : undefined;
+              (window.__tabMessages = window.__tabMessages || []).push({ seq: (window.__seq = (window.__seq || 0) + 1), tabId: tabId, msg: msg, frameId: frameId });
+              try {
+                return Promise.resolve(window.__tabReply ? window.__tabReply(tabId, msg, frameId) : {});
+              } catch (e) {
+                return Promise.reject(e);
+              }
+            },
+            // Navigations / reloads of a tab, in window.__tabActions.
+            update: function (tabId, props) {
+              (window.__tabActions = window.__tabActions || []).push({ op: "update", tabId: tabId, props: props });
+              return Promise.resolve({ id: tabId });
+            },
+            reload: function (tabId) {
+              (window.__tabActions = window.__tabActions || []).push({ op: "reload", tabId: tabId });
+              return Promise.resolve();
+            },
+            // Kept on window.__tabActivatedListeners so a script can switch tabs.
+            onActivated: {
+              addListener: function (l) { (window.__tabActivatedListeners = window.__tabActivatedListeners || []).push(l); },
+              removeListener: noop,
+              hasListener: function () { return false; },
+            },
+            onUpdated: ev(), onRemoved: ev(),
           },
           windows: { WINDOW_ID_NONE: -1, onFocusChanged: ev() },
         };

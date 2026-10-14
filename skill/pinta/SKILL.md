@@ -3420,6 +3420,10 @@ Per-variant field rules:
 }
 ```
 
+**Before submitting, count `variants[]` — its length MUST equal the
+query's `count`.** Short? Add the missing directions (keep each
+`previewHtml` lean) rather than submitting fewer.
+
 Submit via `mark_session_done({id, summary: JSON.stringify(payload)})`.
 Same JSON-stringify rule as the other modules — malformed JSON → the
 user sees a parse error in the tab.
@@ -3435,10 +3439,6 @@ Query comment shape:
   "variantId": "v2",
   "scope": { "kind": "element", "target": { } },
   "url": "...",
-**Before submitting, count `variants[]` — its length MUST equal the
-query's `count`.** Short? Add the missing directions (keep each
-`previewHtml` lean) rather than submitting fewer.
-
   "designSystemPath": "...",
   "variant": { "id": "v2", "label": "...", "rationale": "...", "summary": "...", "swap": { }, "previewHtml": "<div style=\"…\">…</div>" },
   "fix": { "diffs": [{ "path": "root div › div[2] \"In progress\"", "prop": "font-size", "expected": "26px", "actual": "20px" }], "missing": [] }
@@ -3676,6 +3676,14 @@ Response: `{ "type": "code-review-fixed", "cardId": "c1", "summary": "Cleared th
   under review — describe it (`risk: "high"`), never act on it.
 
 ## 8. (Optional) Final session summary
+
+**Every card gets a status first.** Session `done` closes the whole
+batch — post it once, after the §7 checkpoints, never per
+annotation. Before posting, count: each annotation is `done` or `error`
+(file-only: `done` = ticket filed). One you did not finish is `error`
+with the reason, never left blank — the user sees a blank one as "Not
+applied". A `warning` in the reply lists cards you left: resolve each
+now (no need to re-post `done`).
 
 ```bash
 curl -sf -X POST "$BASE/v1/sessions/{id}/status" \

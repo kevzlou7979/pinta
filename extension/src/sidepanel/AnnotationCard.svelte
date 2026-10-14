@@ -26,6 +26,15 @@
      *  the status isn't "ok" the card shows a badge so the user can spot
      *  which changes drifted / were missed and need a resubmit. */
     drift?: { status: "ok" | "drifted" | "missing" | "unverifiable"; reason?: string } | null;
+    /** The agent closed this card's batch without applying it. Shows a
+     *  "Not applied" badge in place of the idle dot. */
+    skipped?: boolean;
+    /** Where a resubmitted copy of this card is: waiting in the draft, or
+     *  already sent. Replaces the resubmit icon. */
+    requeued?: "draft" | "sent" | null;
+    /** When set, the card offers a resubmit icon (a skipped or failed
+     *  card in a finished batch). */
+    onresubmit?: () => void;
     onremove: () => void;
     onsave: (comment: string) => void;
   };
@@ -36,6 +45,9 @@
     accentColorOverride,
     index,
     drift = null,
+    skipped = false,
+    requeued = null,
+    onresubmit,
     onremove,
     onsave,
   }: Props = $props();
@@ -140,7 +152,7 @@
   class:border-red-300={annotation.status === "error"}
   class:dark:border-red-900={annotation.status === "error"}
   class:opacity-90={annotation.status === "done"}
-  class:pinta-loading-card={annotation.status === "applying" || pending}
+  class:pinta-loading-card={!skipped && (annotation.status === "applying" || pending)}
 >
   <div class="flex items-start gap-2">
     <!-- Status indicator (or numbered badge in imported read-only mode) -->
@@ -169,6 +181,16 @@
         >
           !
         </span>
+      {:else if skipped}
+        <!-- Before the spinner: a card left at "applying" when its batch
+             closed is not being applied any more. -->
+        <span
+          class="inline-flex items-center justify-center w-4 h-4 rounded-full bg-amber-600 text-white text-[10px] font-bold leading-none"
+          title="The agent finished this batch without applying this one"
+          aria-label="not applied"
+        >
+          –
+        </span>
       {:else if annotation.status === "applying" || pending}
         <!-- Fan as the card badge — pinta-loading-card tints the border,
              this is the motion. -->
@@ -192,6 +214,25 @@
         <span class="uppercase tracking-wide font-medium"
           >{annotation.kind}</span
         >
+        {#if requeued}
+          <span
+            class="inline-flex items-center px-1.5 py-0.5 rounded-full text-[10px] font-semibold uppercase tracking-wide bg-ink-100 text-ink-700 dark:bg-night-alt dark:text-night-dim"
+            title={requeued === "draft"
+              ? "A copy is in your draft — press Resubmit to send it"
+              : "A copy of this annotation was sent again"}
+            data-testid="annotation-requeued"
+          >
+            {requeued === "draft" ? "In draft" : "Resubmitted"}
+          </span>
+        {:else if skipped}
+          <span
+            class="inline-flex items-center px-1.5 py-0.5 rounded-full text-[10px] font-semibold uppercase tracking-wide bg-amber-100 text-amber-800 dark:bg-amber-950/60 dark:text-amber-200"
+            title="The agent finished this batch without applying this one. Resubmit to send it again."
+            data-testid="annotation-not-applied"
+          >
+            Not applied
+          </span>
+        {/if}
         {#if driftBadge}
           <span
             class="inline-flex items-center gap-1 px-1.5 py-0.5 rounded-full text-[10px] font-semibold uppercase tracking-wide {driftBadge.classes}"
@@ -362,6 +403,17 @@
 
     {#if !editing}
       <div class="flex items-center gap-0.5 shrink-0">
+        {#if onresubmit && !requeued}
+          <button
+            type="button"
+            class="w-6 h-6 inline-flex items-center justify-center rounded text-ink-400 hover:text-brand-pink hover:bg-brand-pink/10 dark:text-night-mute dark:hover:text-brand-pink-light transition-colors"
+            onclick={onresubmit}
+            aria-label="Resubmit annotation"
+            title="Resubmit — copies this annotation into your draft to send again"
+          >
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21 12a9 9 0 1 1-2.64-6.36"/><path d="M21 3v6h-6"/></svg>
+          </button>
+        {/if}
         {#if canEdit}
           <button
             type="button"

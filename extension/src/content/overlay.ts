@@ -212,7 +212,9 @@ if (!document.querySelector(HOST_TAG)) {
       // address this frame until it hears from it.
       if (on) {
         ack(true);
-        content.announceFrame();
+        // Marked as a ping: the panel adopts a frame it hasn't heard from
+        // but doesn't replay pins into one it already knows (every 2s).
+        content.announceFrame(true);
         // Deliberately NOT re-arming a tool here. apply() already arms
         // Select the moment a frame is activated, so any idle state at this
         // point is one the user chose (Esc, or un-picking the tool) — and

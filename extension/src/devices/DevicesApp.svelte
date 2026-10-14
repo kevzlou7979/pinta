@@ -22,6 +22,12 @@
   let hydrated = $state(false);
 
   let urlInputEl = $state<HTMLInputElement | null>(null);
+  // The scroll surface — the device-frame screenshot is cropped to it.
+  let mainEl = $state<HTMLElement | null>(null);
+  $effect(() => {
+    devices.registerViewport(mainEl);
+    return () => devices.registerViewport(null);
+  });
 
   onMount(() => {
     void devices.hydrate().then(() => {
@@ -40,6 +46,7 @@
       .getCurrent()
       .then((t) => {
         myTabId = t?.id ?? null;
+        devices.tabId = myTabId;
       })
       .catch(() => {
         myTabId = null;
@@ -58,6 +65,11 @@
       sendResponse: (r: unknown) => void,
     ): boolean | undefined => {
       if (sender.id !== chrome.runtime.id) return;
+      const t = (msg as { type?: string } | null)?.type;
+      if (t === "panel.state") {
+        devices.panelOpen = !!(msg as { open?: unknown }).open;
+        return;
+      }
       // A device frame's overlay confirming activation — accepted only
       // straight from a content script in a sub-frame of THIS tab.
       const ack = parseAnnotateAck(msg);
@@ -69,6 +81,17 @@
       }
       const m = msg as { type?: string; tabId?: number; payload?: unknown } | null;
       if (m?.tabId !== myTabId) return;
+      if (m.type === "devices.processing") {
+        const p = m as { on?: unknown; color?: unknown };
+        devices.processing = {
+          on: p.on === true,
+          color:
+            typeof p.color === "string" && /^#[0-9a-fA-F]{6}$/.test(p.color)
+              ? p.color
+              : devices.processing.color,
+        };
+        return;
+      }
       if (m.type === "devices.annotate-frame-rect") {
         void devices.annotateFrameRect().then((rect) => sendResponse({ rect }));
         return true;
@@ -79,6 +102,19 @@
         sendResponse({ annotating: devices.repingAnnotate() });
         return;
       }
+      // The panel never navigates or reloads this TAB (that would replace
+      // the canvas, or reload every frame and drop the Annotate pick) — it
+      // asks the canvas. Extension pages only: no content script may
+      // navigate the canvas.
+      if (m.type === "devices.open-url" && !sender.tab) {
+        const url = (m as { url?: unknown }).url;
+        if (typeof url === "string") devices.openUrl(url);
+        return;
+      }
+      if (m.type === "devices.refresh-all" && !sender.tab) {
+        devices.refreshAll();
+        return;
+      }
       return;
     };
     let listening = false;
@@ -87,6 +123,17 @@
       if (disposed) return;
       chrome.runtime.onMessage.addListener(onRuntime);
       listening = true;
+      // Ask whether the panel is open, then tell it this canvas is here so
+      // a run already in flight lights it (after a reload, too).
+      chrome.runtime
+        .sendMessage({ type: "panel.query" })
+        .then((r) => {
+          devices.panelOpen = !!(r as { open?: unknown } | undefined)?.open;
+        })
+        .catch(() => {});
+      chrome.runtime
+        .sendMessage({ type: "devices.canvas-ready", tabId: myTabId })
+        .catch(() => {});
     });
     return () => {
       disposed = true;
@@ -360,7 +407,7 @@
   {/if}
 
   <!-- The canvas is the scroll surface (both axes) — the toolbar stays put. -->
-  <main class="dot-grid flex-1 overflow-auto p-6">
+  <main class="dot-grid flex-1 overflow-auto p-6" bind:this={mainEl}>
     {#if !devices.state.url && hydrated}
       <div class="mx-auto mt-24 max-w-md rounded-xl border border-dashed border-ink-300 dark:border-night-line bg-white/70 dark:bg-night-card/70 p-6 text-center space-y-2">
         <p class="text-sm font-semibold">Point the canvas at your app</p>

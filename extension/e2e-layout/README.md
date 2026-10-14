@@ -106,4 +106,112 @@ node e2e-layout/variants-count.cjs            # build + run
 node e2e-layout/variants-count.cjs --no-build # reuse the last build
 ```
 
-`npm run test:e2e` runs all four scripts.
+## resubmit-skipped.cjs — annotations the agent skipped
+
+Regression for "some annotations came back with an empty dot". An agent can
+close a batch after applying only some of its cards. Mounts the whole side
+panel (`?variant=app`), seeds the Submitted tray and plays the companion.
+Asserts skipped cards say "Not applied" and carry a resubmit icon; that the
+icon copies the card into the draft with a fresh id and no status, relabels
+the send button to "Resubmit" and turns the card to "In draft" (then
+"Resubmitted" once sent); and that applied cards, cards still in progress and
+file-only batches are left alone.
+
+The companion's half (a warning to the agent that closed the batch early) is
+covered by `companion/src/skipped-annotations.test.ts`.
+
+```sh
+node e2e-layout/resubmit-skipped.cjs            # build + run
+node e2e-layout/resubmit-skipped.cjs --no-build # reuse the last build
+```
+
+## processing-pulse.cjs — the page-edge processing pulse
+
+Regression for "the processing pulse never shows". The panel used to follow
+only the live draft's status, which is never pending now that a sent batch
+detaches into the Submitted tray, and module runs never touched it. Mounts the
+whole side panel (`?variant=app`) on a stub tab (`window.__tabs`) and reads the
+messages it sends to the page (`window.__tabMessages`): `processing.start` in
+the chosen colour for a sent batch and for AuditFlow, Report, Design Variants,
+Test Pilot, Code Review and chat runs; one pulse for overlapping runs; a re-send
+after the page reloads (`overlay.ready`); the setting toggling it mid-run; a tab
+switch moving it; `processing.end` when the last run finishes.
+
+`src/sidepanel/agent-busy.repro.test.ts` covers every wait behind
+`app.agentBusy`, the flag the pulse follows.
+
+```sh
+node e2e-layout/processing-pulse.cjs            # build + run
+node e2e-layout/processing-pulse.cjs --no-build # reuse the last build
+```
+
+## devices-pulse.cjs — the processing pulse on the Devices canvas
+
+Regression for "when annotating multiple devices only the last is pulsating".
+Every device frame's Pinta overlay is hidden unless that frame is the one being
+annotated, so a pulse sent to the annotating frame lit one device only. The
+canvas now paints the glow on every device itself.
+
+- Canvas half (`?variant=devices`, `window.__currentTab` = its tab): every
+  device glows on `devices.processing`, in the chosen colour, without blocking
+  clicks; a message for another tab is ignored; the glow is gated on
+  `panel.state` (a closed panel can never end it); a device added mid-run glows.
+- Panel half (`?variant=app` on a canvas tab, `window.__extRoot` plays the
+  extension origin): the panel tells the canvas over chrome.runtime and sends no
+  frame a page pulse; a reloaded canvas (`devices.canvas-ready`) is told again;
+  switching to a normal tab ends the canvas glow and starts the page one.
+
+```sh
+node e2e-layout/devices-pulse.cjs            # build + run
+node e2e-layout/devices-pulse.cjs --no-build # reuse the last build
+```
+
+## devices-frames.cjs — annotating across several devices
+
+Regression for the Devices QA audit (2026-10-14): the panel only knew the
+device it was annotating in right now. Three halves:
+
+- Panel (`?variant=app` on a canvas tab, playing a Mobile frame = frameId 3
+  and an iPad frame = frameId 5; the stub records each send's `frameId`):
+  deleting a card sends `annotated.remove` to both frames, Redo re-applies
+  in Mobile only, Send to agent clears both; the iPad frame replays only the
+  iPad pin and a keep-alive `ping` replays nothing; an imported session is
+  re-sent to the frame that takes over; "Open" on another page asks the
+  canvas (`devices.open-url`) and never navigates the tab; a manual task
+  gets the frame's width (no answer = no viewport); a cut-off device shot
+  shows a notice; a finished batch asks the frame for HMR (`frame.hmr`) and
+  reloads the devices (`devices.refresh-all`), never the tab;
+  `devices.annotate-frame`, a send to a gone frame and `devices.canvas-ready`
+  each end "Device frame connected". Adding annotations replays only the
+  annotating device's pins; frames are remembered per tab, so after leaving
+  the canvas and coming back undo/redo still reach Mobile (a merged Free
+  Transform too); redo skips a source frame that navigated away and falls
+  back to the annotating frame only on the same width and page; Reload
+  drops the old frame ids; no HMR answer from any device = no auto-reload.
+- Normal tab (`?variant=app` on an http tab): remove and Clear all stay
+  plain tab-wide sends, "Open" calls `tabs.update`, a finished batch without
+  HMR calls `tabs.reload`, a manual task takes the page's width.
+- Canvas (`?variant=devices`): removing the annotating device tells the
+  panel; the screenshot rect carries the scroll surface below the toolbar
+  and raises the device; `devices.refresh-all` / `devices.open-url` act on
+  the devices (open-url from a content script is ignored, and "Open" on the
+  URL already shown still brings every device back); a typed custom size
+  says "custom size", not "removed"; a frame on a slow
+  server (`/slow.html`) is not reloaded mid-load, only 2.5s after it loads.
+- Overlay (`?variant=overlay` inside `/frame-host.html`, activated with the
+  canvas's `pinta-annotate` ping): `overlay.ready` carries the width and
+  marks the keep-alive as a ping; `frame.hmr` answers; `annotated.remove`,
+  `annotated.clear` and `annotated.reapply` work in an inactive frame while
+  other messages are ignored; going inactive drops an imported overlay and
+  restores a variant preview (telling the panel).
+
+Unit coverage: `src/lib/devices-frame.test.ts` (crop to the scroll surface,
+`onDeviceShot`, `isDeadFrameError`) and `src/lib/composite.test.ts` (the
+device shot paints only included annotations, keeping global numbers).
+
+```sh
+node e2e-layout/devices-frames.cjs            # build + run
+node e2e-layout/devices-frames.cjs --no-build # reuse the last build
+```
+
+`npm run test:e2e` runs all eight scripts.

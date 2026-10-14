@@ -6,7 +6,10 @@ import {
   ANNOTATE_ACK_MESSAGE,
   deviceFrameReadyUrl,
   isDirectSubframeSender,
+  isDeadFrameError,
+  onDeviceShot,
   parseAnnotateAck,
+  sameDeviceWidth,
 } from "./devices-frame.js";
 import * as devices from "./devices.js";
 
@@ -65,6 +68,55 @@ describe("frameCaptureGeometry", () => {
   it("returns null when the frame is off-screen or unmeasured", () => {
     expect(frameCaptureGeometry({ ...base, rect: { x: 2000, y: 0, width: 402, height: 874 } })).toBeNull();
     expect(frameCaptureGeometry({ ...base, cssWidth: 0, rect: { x: 0, y: 0, width: 402, height: 874 } })).toBeNull();
+  });
+
+  it("clips to the canvas scroll surface, never taking the toolbar above it", () => {
+    // <main> starts at y=60 under the toolbar; the frame is scrolled up under it.
+    const visible = { x: 0, y: 60, width: 1600, height: 940 };
+    const g = frameCaptureGeometry({ ...base, devicePixelRatio: 1, visible, rect: { x: 10, y: 20, width: 402, height: 874 } })!;
+    expect([g.sy, g.sh]).toEqual([60, 834]);
+    expect([g.dy, g.dh]).toEqual([40, 834]);
+    expect(g.clipped).toBe(true);
+    // Fully inside the surface: not clipped.
+    const inside = frameCaptureGeometry({ ...base, devicePixelRatio: 1, visible, rect: { x: 10, y: 80, width: 402, height: 874 } })!;
+    expect(inside.clipped).toBe(false);
+    // Entirely under the toolbar: nothing to capture.
+    expect(frameCaptureGeometry({ ...base, visible, rect: { x: 10, y: -900, width: 402, height: 874 } })).toBeNull();
+  });
+});
+
+describe("which device an annotation belongs to", () => {
+  const url = "http://localhost:5173/";
+  const shot = { width: 402, url };
+  it("matches device widths within a pixel", () => {
+    expect(sameDeviceWidth(402, 402)).toBe(true);
+    expect(sameDeviceWidth(402, 403)).toBe(true);
+    expect(sameDeviceWidth(402, 820)).toBe(false);
+    expect(sameDeviceWidth(undefined, 402)).toBe(false);
+    expect(sameDeviceWidth(Number.NaN, 402)).toBe(false);
+  });
+
+  it("paints only annotations made in the captured device, on the captured page", () => {
+    const mobile = { viewport: { width: 402 }, url };
+    const ipad = { viewport: { width: 820 }, url };
+    const otherPage = { viewport: { width: 402 }, url: "http://localhost:5173/cart" };
+    const noUrl = { viewport: { width: 402 } };
+    const noViewport = { url };
+    expect(onDeviceShot(mobile, shot, url)).toBe(true);
+    expect(onDeviceShot(ipad, shot, url)).toBe(false);
+    expect(onDeviceShot(otherPage, shot, url)).toBe(false);
+    expect(onDeviceShot(noUrl, shot, url)).toBe(true); // session URL stands in
+    expect(onDeviceShot(noUrl, shot, "http://localhost:5173/cart")).toBe(false);
+    expect(onDeviceShot(noViewport, shot, url)).toBe(false); // text only
+    // The frame couldn't say where it is: width alone decides.
+    expect(onDeviceShot(otherPage, { width: 402, url: "" }, url)).toBe(true);
+  });
+
+  it("recognises a frame that is gone", () => {
+    expect(isDeadFrameError(new Error("Could not establish connection. Receiving end does not exist."))).toBe(true);
+    expect(isDeadFrameError(new Error("No frame with id 12 in tab 7."))).toBe(true);
+    expect(isDeadFrameError(new Error("The message port closed before a response was received."))).toBe(false);
+    expect(isDeadFrameError(undefined)).toBe(false);
   });
 });
 

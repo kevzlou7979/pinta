@@ -38,6 +38,12 @@ const MODULES_KEY = "pinta-modules";
 /** Soft cap — every frame is a full live instance of the user's app. */
 export const MAX_FRAMES = 12;
 
+/** How long a LOADED frame gets to acknowledge activation before the
+ *  watchdog reloads it once (and then gives up). */
+export const ANNOTATE_GRACE_MS = 2500;
+/** Upper bound for a frame that never fires `load` at all. */
+const ANNOTATE_LOAD_CAP_MS = 20000;
+
 type ModulesBlob = Record<
   string,
   { settings?: Record<string, string | boolean> } | undefined
@@ -66,6 +72,12 @@ class DevicesPageState {
    *  the side panel's tab-wide broadcasts reach exactly one live overlay.
    *  Session-only — never persisted. */
   annotateFrameId = $state<string | null>(null);
+  /** The side panel's processing pulse for this canvas: every device
+   *  frame glows while the agent works (`devices.processing`). */
+  processing = $state<{ on: boolean; color: string }>({ on: false, color: "#3B82F6" });
+  /** Whether the side panel is open — a closed panel can never send the
+   *  pulse's end, so the glow is gated on it (`panel.state`). */
+  panelOpen = $state(false);
   /** Frame whose overlay acknowledged activation (null = none live yet).
    *  Until this matches annotateFrameId the header shows "Starting…". */
   annotateReadyId = $state<string | null>(null);
@@ -73,6 +85,17 @@ class DevicesPageState {
    *  before the extension loaded has no content script until it does). */
   private annotateTimer: ReturnType<typeof setTimeout> | null = null;
   private annotateRetried = false;
+  /** Frame still waiting for its first ack since activation. The watchdog
+   *  runs from that frame's LOAD, not the click — a cold dev server can
+   *  take longer than the 2.5s grace just to serve the page. */
+  private annotateWatch: string | null = null;
+  /** Frames whose current document has fired `load`. */
+  private loadedIds = new Set<string>();
+  /** This canvas's tab id (DevicesApp resolves it) — tags what we tell
+   *  the side panel, like devices.processing does the other way. */
+  tabId: number | null = null;
+  /** The canvas scroll surface (<main>): frames are only visible in it. */
+  private viewportEl: HTMLElement | null = null;
 
   /** DOM iframes by frame id — identity lookup for postMessage sources.
    *  Not reactive on purpose; only read inside event handlers. */
@@ -205,6 +228,7 @@ class DevicesPageState {
     this.setAnnotateFrame(null);
     this.state.frames = [];
     this.frameSrc = {};
+    this.loadedIds.clear();
     this.nav.clear();
     this.cancelNavPropagation();
     this.frontId = null;
@@ -267,6 +291,7 @@ class DevicesPageState {
     this.state.frames = this.state.frames.filter((f) => f.id !== id);
     delete this.frameSrc[id];
     this.iframeEls.delete(id);
+    this.loadedIds.delete(id);
     this.nav.forget(id);
     if (this.expandedId === id) this.expandedId = null;
     this.save();
@@ -317,6 +342,7 @@ class DevicesPageState {
     const frame = this.state.frames.find((f) => f.id === id);
     if (!frame) return;
     this.nav.markRepointed(id, Date.now());
+    this.loadedIds.delete(id);
     frame.nonce++;
   }
 
@@ -327,6 +353,7 @@ class DevicesPageState {
     const now = Date.now();
     for (const f of this.state.frames) {
       this.nav.markRepointed(f.id, now);
+      this.loadedIds.delete(f.id);
       f.nonce++;
     }
   }
@@ -344,6 +371,21 @@ class DevicesPageState {
       this.refreshAll(); // marks every frame re-pointed (nav grace)
       this.save();
     }
+  }
+
+  /** The side panel's "Open" on another page: show `raw` in EVERY device,
+   *  even when it is already the canvas URL — with sync off, devices may
+   *  have navigated elsewhere inside the app, and setUrl alone would leave
+   *  them there. */
+  openUrl(raw: string): void {
+    const u = normalizeTargetUrl(raw);
+    if (u === "") return; // never clears the canvas, never a non-http(s) URL
+    if (u === this.state.url) {
+      this.resetFrameSrcs();
+      this.refreshAll();
+      return;
+    }
+    this.setUrl(raw);
   }
 
   // -----------------------------------------------------------------------
@@ -364,13 +406,32 @@ class DevicesPageState {
     this.annotateRetried = false;
     this.annotateFrameId = id;
     this.annotateReadyId = null;
+    this.annotateWatch = id;
     if (prev && prev !== id) this.postAnnotate(prev, false);
     if (id) {
       this.frontId = id;
       this.postAnnotate(id, true);
-      this.armAnnotateWatchdog(id);
+      // Still loading: the watchdog arms on its load (notifyFrameLoaded);
+      // the long cap only covers a frame that never loads at all.
+      this.armAnnotateWatchdog(id, this.loadedIds.has(id) ? ANNOTATE_GRACE_MS : ANNOTATE_LOAD_CAP_MS);
     }
+    // Nothing annotates any more: say so. A removed frame never gets to
+    // send its own frame.inactive (it's gone in the same tick), and the
+    // panel would keep addressing the dead frame id.
+    if (prev && !id) this.tellPanelAnnotating(false);
     this.syncPinging();
+  }
+
+  /** Tell the side panel whether a device is annotating on this canvas. */
+  private tellPanelAnnotating(annotating: boolean): void {
+    if (this.tabId == null) return;
+    try {
+      void chrome.runtime
+        .sendMessage({ type: "devices.annotate-frame", tabId: this.tabId, annotating })
+        ?.catch(() => {});
+    } catch {
+      // extension context gone — ignore
+    }
   }
 
   /** The frame's overlay answered — annotation is really live there.
@@ -382,6 +443,7 @@ class DevicesPageState {
     if (!this.iframeEls.has(token)) return;
     if (on && this.annotateFrameId === token) {
       this.clearAnnotateTimer();
+      this.annotateWatch = null;
       this.annotateReadyId = token;
     } else if (this.annotateReadyId === token) {
       this.annotateReadyId = null;
@@ -391,22 +453,25 @@ class DevicesPageState {
   /** No ack means no Pinta in that frame yet. Reload it once (content
    *  scripts land on the fresh document), then give up with a message
    *  rather than leaving the header claiming it's annotating. */
-  private armAnnotateWatchdog(id: string): void {
+  private armAnnotateWatchdog(id: string, ms: number): void {
     this.clearAnnotateTimer();
     this.annotateTimer = setTimeout(() => {
       this.annotateTimer = null;
       if (this.annotateFrameId !== id || this.annotateReadyId === id) return;
       if (!this.annotateRetried) {
         this.annotateRetried = true;
+        // Re-armed by the reloaded document's load event.
         this.refreshFrame(id);
-        this.armAnnotateWatchdog(id);
+        this.armAnnotateWatchdog(id, ANNOTATE_LOAD_CAP_MS);
         return;
       }
       this.error =
         "Couldn't start annotating in that device. Reload this page (F5) and try again — frames opened before Pinta was reloaded don't have it yet.";
       this.annotateFrameId = null;
+      this.annotateWatch = null;
+      this.tellPanelAnnotating(false);
       this.syncPinging();
-    }, 2500);
+    }, ms);
   }
 
   private clearAnnotateTimer(): void {
@@ -454,7 +519,10 @@ class DevicesPageState {
   async annotateFrameRect(): Promise<FrameRectReport | null> {
     const id = this.annotateFrameId;
     const el = id ? this.iframeEls.get(id) : null;
-    if (!el) return null;
+    if (!el || !id) return null;
+    // Raised above any frame overlapping it — the capture is of pixels,
+    // so a frame on top would land in the shot.
+    this.frontId = id;
     el.scrollIntoView({ block: "nearest", inline: "nearest" });
     // rAF never fires in a hidden tab — don't hang the screenshot on it.
     await Promise.race([
@@ -462,6 +530,10 @@ class DevicesPageState {
       new Promise((r) => setTimeout(r, 150)),
     ]);
     const b = el.getBoundingClientRect();
+    // The scroll surface's client box (inside its scrollbars): above it is
+    // the toolbar, so a tall frame must be cropped to it.
+    const v = this.viewportEl;
+    const vr = v?.getBoundingClientRect();
     return {
       rect: { x: b.x, y: b.y, width: b.width, height: b.height },
       cssWidth: el.offsetWidth,
@@ -469,7 +541,14 @@ class DevicesPageState {
       viewportWidth: window.innerWidth,
       viewportHeight: window.innerHeight,
       devicePixelRatio: window.devicePixelRatio || 1,
+      ...(v && vr
+        ? { visible: { x: vr.x + v.clientLeft, y: vr.y + v.clientTop, width: v.clientWidth, height: v.clientHeight } }
+        : {}),
     };
+  }
+
+  registerViewport(el: HTMLElement | null): void {
+    this.viewportEl = el;
   }
 
   registerIframe(id: string, el: HTMLIFrameElement | null): void {
@@ -484,7 +563,15 @@ class DevicesPageState {
    *  so its first report — often a redirect — isn't read as navigation. */
   notifyFrameLoaded(id?: string): void {
     if (id && this.annotateReadyId === id) this.annotateReadyId = null;
-    if (id) this.nav.loaded(id, Date.now());
+    if (id) {
+      this.loadedIds.add(id);
+      this.nav.loaded(id, Date.now());
+      // Activation still unanswered: the grace starts now that the page
+      // (and so its content script) is actually there.
+      if (this.annotateWatch === id && this.annotateFrameId === id) {
+        this.armAnnotateWatchdog(id, ANNOTATE_GRACE_MS);
+      }
+    }
     if (this.state.sync || this.annotateFrameId) this.pingFrames();
   }
 

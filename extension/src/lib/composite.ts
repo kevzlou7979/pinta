@@ -34,6 +34,10 @@ export type CompositeOptions = {
    *  so a tall page stays legible. `viewportHeight` (CSS px) sets how much
    *  context is kept above/below. */
   cropToAnnotations?: { viewportHeight: number };
+  /** compositeAnnotationsToViewport only: paint just the annotations this
+   *  accepts (the rest ride as text). Numbering stays the global 1..N, so
+   *  badge numbers still match the annotation list. */
+  include?: (a: Annotation) => boolean;
 };
 
 /** Longest side, in px, of a composite bound for the agent. The model
@@ -241,6 +245,7 @@ export async function compositeAnnotationsToViewport(
     const n = i + 1;
     const color = a.color || SELECT_COLOR;
     const badgeColor = opts.badgeColorOverride ?? color;
+    if (opts.include && !opts.include(a)) continue;
     const anchorY = anchorYFor(a);
     if (anchorY == null) continue;
     if (anchorY < yMin || anchorY >= yMax) continue;
