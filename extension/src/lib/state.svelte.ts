@@ -32,6 +32,7 @@ import {
 import {
   DEFAULT_MOTION_SYSTEM,
   buildApplyPayload,
+  firstRehearsable,
   getPattern as getMotionPattern,
   nextPatternAfterRepick,
   rankPatterns,
@@ -5460,19 +5461,6 @@ class ExtensionState {
   private variantsOpTimers = new Map<string, ReturnType<typeof setTimeout>>();
   private static readonly VARIANTS_CHATS_KEY = "pinta-variants:chats";
 
-  async loadVariantsState(): Promise<void> {
-    try {
-      const stored = await chrome.storage?.local?.get(
-        ExtensionState.VARIANTS_KEY,
-      );
-      const raw = stored?.[ExtensionState.VARIANTS_KEY] as
-        | {
-            currentRun?: VariantRun | null;
-            pages?: PageEntry[];
-            device?: string;
-          }
-        | undefined;
-      if (!raw || typeof raw !== "object") return;
   // --- Phase 25: Motion ----------------------------------------------------
   // Element-first, exactly like Variants: scope → pattern → tokens →
   // rehearse. Everything up to Apply is pure in-page Web Animations, so
@@ -5524,6 +5512,11 @@ class ExtensionState {
     staggerStep: DEFAULT_MOTION_SYSTEM.stagger.base,
     reduced: false,
     speed: 1,
+    /** Row under the pointer being tried on the page (hover to try) —
+     *  never the kept `patternId`; leaving the row stops it. */
+    previewingId: string | null;
+    /** The Tune disclosure — remembered for the session, not persisted. */
+    tuneOpen: boolean;
     loop: false,
     showAll: false,
     note: "",
@@ -5548,10 +5541,15 @@ class ExtensionState {
   /** Catalog ordered for whatever is picked. Empty target = flat list. */
   get motionRanked(): RankedPatterns {
     return rankPatterns(readTarget(this.motion.pickedTarget));
+    previewingId: null,
+    tuneOpen: false,
   }
 
   /** Resolved duration + easing for the chosen pattern, tokens included. */
   get motionTiming(): ResolvedTiming | null {
+  /** Seq of an arm whose ready must seek to the END state (the kept
+   *  pattern re-armed after a hover preview — F15). One-shot. */
+  private motionSeekEndSeq: number | null = null;
     const p = this.motionPattern;
     if (!p) return null;
     return resolveTiming(p, this.motion.system, {
@@ -5593,8 +5591,10 @@ class ExtensionState {
       this.motion.error =
         "Couldn't reach the page — reload the app tab (F5) and try again.";
     }
+    // The page keeps the role: the end pick labels "opens into this".
   }
 
+      role,
   async cancelMotionPick(): Promise<void> {
     this.motion.picking = null;
     const tabId = await ExtensionState.currentTabId();
@@ -5618,11 +5618,14 @@ class ExtensionState {
     // A new element invalidates the destination; the pattern follows the
     // new element unless it was an explicit off-list choice.
     this.motion.destTarget = null;
-    const next = nextPatternAfterRepick(
-      this.motion.patternId,
-      rankPatterns(readTarget(target)),
-      previous,
-    );
+    const ranked = rankPatterns(readTarget(target));
+    let next = nextPatternAfterRepick(this.motion.patternId, ranked, previous);
+    // First previewable wins: a fresh suggestion must be one the page can
+    // rehearse (a card ranks Container transform first, which can't play
+    // yet). A kept choice survives as it is — it just doesn't auto-play.
+    if (next !== this.motion.patternId) next = firstRehearsable(ranked)?.id ?? next;
+    // Only a real change re-selects: re-selecting the same id would wipe
+    // the Tune tokens / trigger for nothing (F4).
     if (next !== this.motion.patternId) this.selectMotionPattern(next);
   }
 
@@ -5637,6 +5640,8 @@ class ExtensionState {
     this.motion.patternId = null;
     this.motion.trigger = null;
   }
+    // Pick and it plays — the one click the whole tab is built around.
+    if (this.motionPattern?.rehearsable) void this.rehearseMotion(true);
 
   selectMotionPattern(id: string | null): void {
     void this.stopMotionRehearsal();
@@ -5659,6 +5664,8 @@ class ExtensionState {
     // token change is the whole point of tuning here rather than in code.
     if (this.motion.rehearsing) void this.rehearseMotion(true);
   }
+    // A destination only means something to a two-target pattern (F10).
+    if (p && p.targets !== 2) this.motion.destTarget = null;
 
   setMotionStaggerStep(step: number): void {
     this.motion.staggerStep = Math.max(0, Math.round(step));
@@ -5681,28 +5688,78 @@ class ExtensionState {
     void chrome.tabs.sendMessage(tabId, msg).catch(() => {});
   }
 
-  /** Arm the rehearsal on the page. `autoPlay` replays straight away —
-   *  used when a token change should be heard without a second click. */
+  /** Arm the KEPT pattern on the page. `autoPlay` replays straight away —
+   *  the one way anything auto-plays: the pick, a row click, a token or
+   *  stagger change heard without a second click. */
   async rehearseMotion(autoPlay = false): Promise<void> {
     const p = this.motionPattern;
     const target = this.motion.pickedTarget;
-    if (!p || !target || !p.rehearsable) return;
+    if (!target || !p.rehearsable) return;
+    // Replies for an older arm are ignored (see onMotionReady & co), and
+    // the seq is taken BEFORE the first await so a stop that lands in the
+    // gap (pointer already off the row) cancels this arm instead of
+    // being overtaken by it.
+    const seq = ++this.motion.seq;
+    // Only the arm that asked for it parks at the end; any newer arm
+    // (a row click, a token change) plays or rests from 0 as usual.
+    this.motionSeekEndSeq = opts.seekToEnd ? seq : null;
     const tabId = await ExtensionState.currentTabId();
-    if (tabId == null) return;
+    if (tabId == null || seq !== this.motion.seq) return;
     this.motion.error = null;
     this.clearMotionLoopTimer();
-    // Replies for an older arm are ignored (see onMotionReady & co).
-    const seq = ++this.motion.seq;
     const ok = await ExtensionState.sendToTabWithInject(tabId, {
       type: "motion.rehearse",
       seq,
       selector: target.selector,
       patternId: p.id,
-      system: $state.snapshot(this.motion.system),
-      overrides: {
+    if (!p) return;
+    // The kept pattern supersedes any hover preview still on the page.
+    this.motion.previewingId = null;
+    await this.armRehearsal(p, autoPlay, {
+      ...(this.motion.durationToken ? { duration: this.motion.durationToken } : {}),
+      ...(this.motion.easingToken ? { easing: this.motion.easingToken } : {}),
+    });
+  }
+
+  /** Hover to try: play `id` on the page WITHOUT touching the kept
+   *  `patternId` — the row's own tokens, the current stagger step. The
+   *  page stops the previous handle when the new arm lands, so there is
+   *  no explicit stop between two previews. */
+  async previewMotionPattern(id: string): Promise<void> {
+    const p = getMotionPattern(id);
+    if (!p || !p.rehearsable) return;
+    this.motion.previewingId = id;
+    await this.armRehearsal(p, true, {});
+  }
+
+  /** Leaving the row restores the element, then re-arms the KEPT pattern
+   *  parked at its END state (never paused at 0 — a fade-in element
+   *  would vanish), so the kept row reads "Played · total ms" and Tune's
+   *  Reverse / Reset / scrub stay live. It is never replayed (F15). */
+  async endMotionPreview(): Promise<void> {
+    if (!this.motion.previewingId) return;
+    await this.stopMotionRehearsal();
+    const kept = this.motionPattern;
+    if (!kept?.rehearsable || !this.motion.pickedTarget) return;
+    await this.armRehearsal(
+      kept,
+      false,
+      {
         ...(this.motion.durationToken ? { duration: this.motion.durationToken } : {}),
         ...(this.motion.easingToken ? { easing: this.motion.easingToken } : {}),
       },
+      { seekToEnd: true },
+    );
+  }
+
+  private async armRehearsal(
+    p: MotionPattern,
+    autoPlay: boolean,
+    overrides: { duration?: string; easing?: string },
+    opts: { seekToEnd?: boolean } = {},
+  ): Promise<void> {
+      system: $state.snapshot(this.motion.system),
+      overrides,
       staggerStep: this.motion.staggerStep,
       reduced: this.motion.reduced,
     });
@@ -5719,8 +5776,10 @@ class ExtensionState {
     seq: number;
     total: number;
     childCount: number;
+    if (seq !== this.motion.seq) return; // a newer arm already took over
     stagger: { step: number; requested: number; clamped: boolean } | null;
     reduced: boolean;
+      this.motion.previewingId = null; // no dashed border on a dead preview (F3)
   }): void {
     if (info.seq !== this.motion.seq) return;
     this.motion.rehearsing = true;
@@ -5742,6 +5801,15 @@ class ExtensionState {
       reason === "not-found"
         ? "That element isn't on the page any more — pick it again."
         : reason === "no-number"
+    if (this.motionSeekEndSeq === info.seq) {
+      // The kept pattern coming back after a hover preview: park it at
+      // the end state (F15). One-shot — consumed here.
+      this.motionSeekEndSeq = null;
+      this.motion.playing = false;
+      this.motion.position = info.total;
+      void this.sendMotion({ type: "motion.seek", ms: info.total });
+      return;
+    }
           ? "Count up needs an element whose text contains a number."
           : reason === "unsupported"
             ? "That element can't be animated — for Count up, pick the element that holds just the number."
@@ -5749,6 +5817,7 @@ class ExtensionState {
   }
 
   onMotionTick(position: number, running: boolean, seq: number): void {
+    this.motion.previewingId = null; // F3
     if (seq !== this.motion.seq) return;
     this.motion.position = position;
     this.motion.playing = running;
@@ -5828,6 +5897,11 @@ class ExtensionState {
       pattern: p,
       system: $state.snapshot(this.motion.system),
       timing,
+    this.motion.previewingId = null;
+    this.motionSeekEndSeq = null;
+    // Retire the live seq: a ready/tick for the arm just stopped must not
+    // flip `rehearsing` back on after the element was restored.
+    this.motion.seq++;
       start: $state.snapshot(start),
       end: this.motion.destTarget ? $state.snapshot(this.motion.destTarget) : null,
       trigger: this.motion.trigger ?? p.defaultTrigger,
@@ -5850,6 +5924,19 @@ class ExtensionState {
       }
       if (Array.isArray(raw.pages)) {
         this.variants.pages = raw.pages.filter(
+  async loadVariantsState(): Promise<void> {
+    try {
+      const stored = await chrome.storage?.local?.get(
+        ExtensionState.VARIANTS_KEY,
+      );
+      const raw = stored?.[ExtensionState.VARIANTS_KEY] as
+        | {
+            currentRun?: VariantRun | null;
+            pages?: PageEntry[];
+            device?: string;
+          }
+        | undefined;
+      if (!raw || typeof raw !== "object") return;
           (p): p is PageEntry =>
             !!p &&
             typeof p.path === "string" &&

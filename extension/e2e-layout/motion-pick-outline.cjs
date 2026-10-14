@@ -12,8 +12,15 @@
 // is entered the way the panel does it — a chrome.tabs.sendMessage from
 // the extension's own service worker. For BOTH motion-pick and
 // variant-pick it asserts that hovering an element draws `.hl.hl--hover`
-// over it with the "click to pick for …" label, and that Esc removes the
-// outline and sends the `<owner>.pick-cancelled` runtime message.
+// over it, and that Esc removes the outline and sends the
+// `<owner>.pick-cancelled` runtime message.
+//
+// Option A (2026-10-14): the motion label names the top REHEARSABLE
+// suggestion for the hovered element — "div.kpi · Count up · click to
+// animate", "ul.grid · Stagger · click to animate", and a plain prose
+// section falls back to "Rise in". The variants label is unchanged
+// ("… · click to pick for variants · Esc cancels"). Needs a fresh
+// extension/dist — run `npm run build` first (or drop --no-build).
 //
 // Loaded extensions need Chromium's new headless mode (channel:
 // "chromium"); if that fails to launch the script falls back to headed.
@@ -59,9 +66,12 @@ const FIXTURE = `<!doctype html><meta charset="utf-8"><title>pick fixture</title
   .kpi { display: inline-block; padding: 12px 20px; font-size: 32px; font-weight: 700; }
   ul.grid { display: grid; grid-template-columns: repeat(4, 120px); gap: 12px; list-style: none; padding: 0; margin: 40px 0 0; }
   ul.grid li { height: 60px; background: #eee; }
+  section.prose { margin-top: 40px; padding: 24px; border: 1px solid #ddd; }
+  section.prose p { margin: 0 0 8px; }
 </style>
 <div class="kpi">£128,460</div>
-<ul class="grid" style="display:grid">${"<li>card</li>".repeat(8)}</ul>`;
+<ul class="grid" style="display:grid">${"<li>card</li>".repeat(8)}</ul>
+<section class="prose"><p>Claims are reviewed within two working days of being lodged.</p><p>Anything that needs a second look goes to the senior adjuster.</p></section>`;
 
 function serve() {
   return new Promise((res) => {
@@ -115,16 +125,16 @@ async function launch(userDir) {
 
     // Enter a pick mode the way the panel does: chrome.tabs.sendMessage from
     // the extension. Retried until the content script's listener is up.
-    const sendToTab = async (type) =>
+    const sendToTab = async (type, extra = {}) =>
       sw.evaluate(
-        async ({ url, type }) => {
+        async ({ url, type, extra }) => {
           const [tab] = await chrome.tabs.query({ url });
           if (!tab) throw new Error("fixture tab not found");
           const deadline = Date.now() + 10000;
           let lastErr = null;
           while (Date.now() < deadline) {
             try {
-              await chrome.tabs.sendMessage(tab.id, { type });
+              await chrome.tabs.sendMessage(tab.id, { type, ...extra });
               return tab.id;
             } catch (e) {
               lastErr = String(e && e.message);
@@ -133,13 +143,26 @@ async function launch(userDir) {
           }
           throw new Error("content script never answered: " + lastErr);
         },
-        { url: PAGE_URL + "*", type },
+        { url: PAGE_URL + "*", type, extra },
       );
 
     const outline = page.locator("pinta-overlay-host .hl.hl--hover");
     const label = page.locator("pinta-overlay-host .label");
     const kpi = page.locator(".kpi");
+    const grid = page.locator("ul.grid");
+    const prose = page.locator("section.prose");
     const card = page.locator("ul.grid li").nth(5);
+    // The label's suggestion comes from a lazy import of the motion
+    // catalog that starts when pick mode is entered — give it a moment.
+    const labelWith = async (needle) => {
+      let text = "";
+      for (let i = 0; i < 30; i++) {
+        text = (await label.count()) ? (await label.first().textContent().catch(() => "")) || "" : "";
+        if (text.includes(needle)) break;
+        await page.waitForTimeout(100);
+      }
+      return text.replace(/\s+/g, " ").trim();
+    };
 
     for (const [owner, pickMsg, word] of [
       ["motion", "motion.pick-element", "motion"],
@@ -177,8 +200,33 @@ async function launch(userDir) {
         !!ob && ob.width > 0 && ob.height > 0 && near(ob.x, kb.x) && near(ob.y, kb.y) && near(ob.width, kb.width) && near(ob.height, kb.height),
         `outline box matches the KPI box (${ob ? [ob.x, ob.y, ob.width, ob.height].map(Math.round).join(",") : "none"} vs ${[kb.x, kb.y, kb.width, kb.height].map(Math.round).join(",")})`,
       );
-      const text = visible && (await label.count()) ? (await label.first().textContent().catch(() => "")) || "" : "";
-      ok(text.includes("div.kpi") && text.includes(`click to pick for ${word}`) && text.includes("Esc cancels"), `label reads "${text.trim()}"`);
+      if (owner === "motion") {
+        // Option A: the label names the top rehearsable suggestion.
+        const text = await labelWith("click to animate");
+        ok(text.includes("div.kpi · Count up · click to animate"), `KPI label reads "div.kpi · Count up · click to animate" ("${text}")`);
+        ok(!text.includes("click to pick for motion") && !text.includes("Esc cancels"), "the old \"click to pick for motion · Esc cancels\" copy is gone from the motion label");
+
+        // A grid: hover the gap between two cards so the <ul> itself is
+        // the element under the cursor (gap 12px, cards 120px wide).
+        const gb = await grid.boundingBox();
+        await page.mouse.move(gb.x + 120 + 6, gb.y + 30);
+        const gridText = await labelWith("Stagger");
+        ok(gridText.includes("ul.grid · Stagger · click to animate"), `grid label reads "ul.grid · Stagger · click to animate" ("${gridText}")`);
+        const gbo = await settled(gb);
+        ok(!!gbo && near(gbo.x, gb.x) && near(gbo.width, gb.width), `and the outline is the grid's own box (${gbo ? [gbo.x, gbo.y, gbo.width].map(Math.round).join(",") : "none"})`);
+
+        // Plain prose: nothing scores, so the fallback is the first
+        // rehearsable of the rest — Rise in — never a two-target one.
+        const pb = await prose.boundingBox();
+        await page.mouse.move(pb.x + pb.width / 2, pb.y + 8); // the section's padding, not a <p>
+        const proseText = await labelWith("Rise in");
+        ok(proseText.includes("section.prose · Rise in · click to animate"), `prose label falls back to "section.prose · Rise in · click to animate" ("${proseText}")`);
+        ok(!/Container transform|Forward and backward/.test(proseText), "it never suggests a two-target transition");
+      } else {
+        const text = visible && (await label.count()) ? (await label.first().textContent().catch(() => "")) || "" : "";
+        ok(text.includes("div.kpi") && text.includes(`click to pick for ${word}`) && text.includes("Esc cancels"), `variants label is unchanged: "${text.trim()}"`);
+        ok(!text.includes("click to animate") && !text.includes("Count up"), "no motion suggestion leaks into the variants label");
+      }
 
       // The outline follows the cursor to a grid card.
       const cb = await card.boundingBox();
@@ -202,6 +250,47 @@ async function launch(userDir) {
       }
       ok(msgs.includes(`${owner}.pick-cancelled`), `Esc sends ${owner}.pick-cancelled (saw: ${msgs.join(", ") || "nothing"})`);
     }
+
+    // F16: the END pick (destination) carries role "end" — no suggestion,
+    // the label says what the click sets, and the toast matches.
+    console.log('\n[motion-pick-outline] motion · end pick (role "end")');
+    await page.mouse.move(5, 5);
+    await sendToTab("motion.pick-element", { role: "end" });
+    const kb2 = await kpi.boundingBox();
+    await page.mouse.move(kb2.x + kb2.width / 2, kb2.y + kb2.height / 2);
+    let vis2 = await outline.isVisible().catch(() => false);
+    if (!vis2) {
+      await page.mouse.move(kb2.x + kb2.width / 2 + 1, kb2.y + kb2.height / 2 + 1);
+      vis2 = await outline.waitFor({ state: "visible", timeout: 1500 }).then(() => true, () => false);
+    }
+    ok(vis2, "end pick: hovering the KPI draws .hl.hl--hover");
+    const endText = await labelWith("opens into this");
+    ok(endText === "div.kpi · opens into this · click to set", `end-pick label reads "div.kpi · opens into this · click to set" ("${endText}")`);
+    ok(!endText.includes("click to animate") && !endText.includes("Count up"), 'no suggestion / "click to animate" in the end-pick label');
+    const status = page.locator("pinta-overlay-host .status");
+    const toastText = async () => ((await status.count()) ? (await status.first().textContent().catch(() => "")) || "" : "").replace(/\s+/g, " ").trim();
+    const toast = await toastText();
+    ok(toast === "Motion · click what it opens into · Esc to cancel", `the toast reads "Motion · click what it opens into · Esc to cancel" ("${toast}")`);
+    await page.screenshot({ path: path.join(SHOTS, "pick-outline-motion-end.png") });
+    const beforeEnd = (await seen()).length;
+    await page.keyboard.press("Escape");
+    ok(await outline.waitFor({ state: "detached", timeout: 2000 }).then(() => true, () => false), "Esc removes the end-pick outline");
+    let endMsgs = [];
+    for (let i = 0; i < 20 && !endMsgs.includes("motion.pick-cancelled"); i++) {
+      await page.waitForTimeout(100);
+      endMsgs = (await seen()).slice(beforeEnd);
+    }
+    ok(endMsgs.includes("motion.pick-cancelled"), `Esc sends motion.pick-cancelled (saw: ${endMsgs.join(", ") || "nothing"})`);
+    // A start pick after an end pick is back to the suggestion form.
+    await page.mouse.move(5, 5);
+    await sendToTab("motion.pick-element", { role: "start" });
+    await page.mouse.move(kb2.x + kb2.width / 2, kb2.y + kb2.height / 2);
+    const againText = await labelWith("click to animate");
+    ok(againText.includes("div.kpi · Count up · click to animate"), `a later start pick is back to the suggestion label ("${againText}")`);
+    const toast2 = await toastText();
+    ok(toast2 === "Motion · click the element to animate · Esc to cancel", `and the toast is back to "Motion · click the element to animate · Esc to cancel" ("${toast2}")`);
+    await page.keyboard.press("Escape");
+    await page.waitForTimeout(200);
   } finally {
     await context.close().catch(() => {});
     srv.close();

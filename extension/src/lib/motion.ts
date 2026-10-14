@@ -525,6 +525,35 @@ export function rankPatterns(
 }
 
 /**
+ * First previewable wins: whatever auto-selects or auto-plays after a pick
+ * must be a pattern the page can actually rehearse. Suggested first, then
+ * the rest, skipping the two-target transitions — those are offered in
+ * the list, never silently chosen.
+ */
+export function firstRehearsable(ranked: RankedPatterns): MotionPattern | null {
+  return (
+    ranked.suggested.find((p) => p.rehearsable) ??
+    ranked.rest.find((p) => p.rehearsable) ??
+    null
+  );
+}
+
+/** The three named stagger steps, in order, from the active system. A
+ *  step of 0ms (or less) is no stagger at all — an imported system that
+ *  sets one gets no chip for it rather than a chip that does nothing. */
+export function staggerChoices(
+  system: MotionSystem,
+): Array<{ key: "tight" | "base" | "loose"; ms: number }> {
+  return (
+    [
+      { key: "tight", ms: system.stagger.tight },
+      { key: "base", ms: system.stagger.base },
+      { key: "loose", ms: system.stagger.loose },
+    ] as Array<{ key: "tight" | "base" | "loose"; ms: number }>
+  ).filter((c) => Number.isFinite(c.ms) && c.ms > 0);
+}
+
+/**
  * Which pattern to keep after the target is re-picked. A pattern the OLD
  * element merely suggested follows the new element (grid → dialog goes
  * Stagger → Enter and exit); a choice made off-list ("Show all") was

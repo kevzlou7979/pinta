@@ -80,7 +80,9 @@ const TABS: TabCase[] = [
     reset: (app) => { app.review.pending = null; },
   },
   { id: "devices", label: "Devices", emptyTitle: "Preview on real device sizes", heading: "h2" },
-  { id: "motion", label: "Motion", emptyTitle: "Nothing picked yet" },
+  // Option A: the tab arms pick mode on open, so the empty state is the
+  // instruction card rather than a "nothing yet".
+  { id: "motion", label: "Motion", emptyTitle: "Click the element to animate." },
 ];
 
 const norm = (s: string | null | undefined) => (s ?? "").replace(/\s+/g, " ").trim();

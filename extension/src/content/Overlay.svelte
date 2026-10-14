@@ -282,6 +282,8 @@
         ms?: number;
         /** motion.play — resume from this ms instead of 0. */
         from?: number;
+        /** motion.pick-element — which end the panel is picking for. */
+        role?: string;
       };
       if (m?.type === "frame.viewport") {
         // Devices capture: the annotating frame's scroll + viewport, so the
@@ -415,8 +417,9 @@
       } else if (m?.type === "variants.pick-cancel") {
         if (content.mode === "variant-pick") setMode("idle");
       } else if (m?.type === "motion.pick-element") {
-        // Phase 25 — one-shot Motion element pick (start or destination;
-        // the panel knows which role it asked for).
+        // Phase 25 — one-shot Motion element pick. The role rides along
+        // so the label / toast can say "opens into this" for the end pick.
+        motionPickRole = m.role === "end" ? "end" : "start";
         setMode("motion-pick");
       } else if (m?.type === "motion.pick-cancel") {
         if (content.mode === "motion-pick") setMode("idle");
@@ -849,6 +852,17 @@
           ? "motion"
           : null;
     if (!pickOwner) return;
+    // The Motion label names what would play (Option A); that needs the
+    // catalog, lazily — same chunk the rehearsal loads anyway. Read
+    // untracked: the import resolving must not re-run this effect and
+    // tear down / re-add the document listeners mid-pick (F6).
+    if (pickOwner === "motion" && !untrack(() => motionLib)) {
+      void loadMotionLibs()
+        .then((libs) => {
+          motionLib = libs.lib;
+        })
+        .catch(() => {});
+    }
     function onMove(e: MouseEvent) {
       const el = e.target as Element | null;
       if (el === hovered) return; // pointer still inside the same element
@@ -3858,6 +3872,53 @@
     return cls ? `${tag}.${cls}` : tag;
   }
 
+  // Phase 25 — the motion-pick label's suggestion. The catalog arrives
+  // through the lazy import (set in the pick $effect); facts come from
+  // the hovered element directly — captureTarget per hover is too heavy
+  // — and the $derived memoises per element, so a still pointer costs
+  // nothing. Never throws into the hover path: any failure = no hint.
+  let motionLib = $state<typeof MotionLib | null>(null);
+  /** Which end the panel is picking for (motion.pick-element `role`). */
+  let motionPickRole = $state<"start" | "end">("start");
+
+  /** Enough descendants for the ranker's "leaf / has children" cut,
+   *  without walking a whole page section. */
+  function countDescendants(el: Element, cap: number): number {
+    let n = 0;
+    const stack: Element[] = [el];
+    while (stack.length && n < cap) {
+      const cur = stack.pop()!;
+      for (const c of cur.children) {
+        n++;
+        if (n >= cap) break;
+        stack.push(c);
+      }
+    }
+    return n;
+  }
+
+  function motionFactsOf(el: Element): MotionLib.TargetFacts {
+    return {
+      tag: el.tagName.toLowerCase(),
+      classes: [...el.classList].map((c) => c.toLowerCase()),
+      role: el.getAttribute("role")?.toLowerCase() ?? null,
+      // The ranker only reads text for leaves; a container's subtree
+      // text is a wasted walk per hover (F5).
+      text: el.childElementCount === 0 ? (el.textContent ?? "").replace(/\s+/g, " ").trim().slice(0, 200) : "",
+      descendants: countDescendants(el, 8),
+      display: getComputedStyle(el).display.toLowerCase(),
+    };
+  }
+
+  const motionHint = $derived.by((): string | null => {
+    if (content.mode !== "motion-pick" || motionPickRole === "end" || !hovered || !motionLib) return null;
+    try {
+      return motionLib.firstRehearsable(motionLib.rankPatterns(motionFactsOf(hovered)))?.name ?? null;
+    } catch {
+      return null;
+    }
+  });
+
   let hoverRect = $derived(rectOf(hovered));
   let selectedRect = $derived(rectOf(selected));
   let pendingRect = $derived(rectOfDraft(content.pending));
@@ -4147,7 +4208,13 @@
       style:top="{Math.max(0, hoverRect.top - 22)}px"
       style:left="{hoverRect.left}px"
     >
-      {describe(hovered)} · click to pick for {content.mode === "motion-pick" ? "motion" : "variants"} · Esc cancels
+      {#if content.mode === "motion-pick" && motionPickRole === "end"}
+        {describe(hovered)} · opens into this · click to set
+      {:else if content.mode === "motion-pick" && motionHint}
+        {describe(hovered)} · {motionHint} · click to animate
+      {:else}
+        {describe(hovered)} · click to pick for {content.mode === "motion-pick" ? "motion" : "variants"} · Esc cancels
+      {/if}
     </div>
   {/if}
 {/if}
@@ -4573,7 +4640,7 @@
     {:else if content.mode === "variant-pick"}
       Design Variants · click the element you want 3 design options for · Esc to cancel
     {:else if content.mode === "motion-pick"}
-      Motion · click the element to animate · Esc to cancel
+      Motion · {motionPickRole === "end" ? "click what it opens into" : "click the element to animate"} · Esc to cancel
     {/if}
   </div>
 {/if}

@@ -6,6 +6,7 @@ import {
   buildApplyPayload,
   buildPlan,
   clampStagger,
+  firstRehearsable,
   formatNumeric,
   getPattern,
   nextPatternAfterRepick,
@@ -14,6 +15,7 @@ import {
   readTarget,
   resolveTiming,
   scorePattern,
+  staggerChoices,
   type MotionSystem,
 } from "./motion.js";
 
@@ -270,6 +272,61 @@ describe("nextPatternAfterRepick", () => {
   it("with no current pattern, the top suggestion wins", () => {
     expect(nextPatternAfterRepick(null, dialog, grid)).toBe("enter-exit");
     expect(nextPatternAfterRepick(null, rankPatterns(null), null)).toBeNull();
+  });
+});
+
+describe("firstRehearsable", () => {
+  it("skips a two-target top suggestion: a card link auto-plays Rise in, not Container transform", () => {
+    const ranked = rankPatterns(readTarget(target('<a class="card">Claim</a>')));
+    expect(ranked.suggested[0]?.id).toBe("container-transform");
+    expect(ranked.suggested[1]?.id).toBe("forward-backward");
+    expect(firstRehearsable(ranked)?.id).toBe("rise-in");
+  });
+
+  it("takes the top suggestion when it can play", () => {
+    const ranked = rankPatterns(readTarget(target("<span>£128,460</span>")));
+    expect(firstRehearsable(ranked)?.id).toBe("count-up");
+  });
+
+  it("falls through to the rest when nothing is suggested", () => {
+    const ranked = rankPatterns(null);
+    expect(ranked.suggested).toEqual([]);
+    expect(firstRehearsable(ranked)?.id).toBe("lateral");
+  });
+
+  it("is null only when the whole catalog is un-rehearsable", () => {
+    const none = rankPatterns(null, MOTION_PATTERNS.filter((p) => !p.rehearsable));
+    expect(firstRehearsable(none)).toBeNull();
+  });
+
+  it("is null for an empty ranking (nothing suggested, nothing else)", () => {
+    expect(firstRehearsable({ suggested: [], rest: [] })).toBeNull();
+  });
+});
+
+describe("staggerChoices", () => {
+  it("names the three system steps in order", () => {
+    expect(staggerChoices(DEFAULT_MOTION_SYSTEM)).toEqual([
+      { key: "tight", ms: 40 },
+      { key: "base", ms: 60 },
+      { key: "loose", ms: 90 },
+    ]);
+  });
+
+  it("follows an imported system, not the built-in numbers", () => {
+    const custom: MotionSystem = {
+      ...DEFAULT_MOTION_SYSTEM,
+      stagger: { tight: 20, base: 50, loose: 120, maxTotal: 600 },
+    };
+    expect(staggerChoices(custom).map((c) => c.ms)).toEqual([20, 50, 120]);
+  });
+
+  it("drops a zero (or negative) step — no chip for a stagger that does nothing", () => {
+    const custom: MotionSystem = {
+      ...DEFAULT_MOTION_SYSTEM,
+      stagger: { tight: 0, base: 50, loose: -5, maxTotal: 600 },
+    };
+    expect(staggerChoices(custom)).toEqual([{ key: "base", ms: 50 }]);
   });
 });
 
