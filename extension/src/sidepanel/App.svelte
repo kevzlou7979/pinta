@@ -206,6 +206,7 @@
     | "audit-flow"
     | "report"
     | "design-variants"
+    | "motion"
     | "code-review"
     | "devices"
     | (string & {});
@@ -260,6 +261,15 @@
     }
   });
 
+  // Same rule for Motion (Phase 25): a rehearsal is a live mutation of
+  // the page, so it must not outlive the tab that drives it.
+  $effect(() => {
+    if (activeTab !== "motion" && (app.motion.rehearsing || app.motion.picking)) {
+      void app.stopMotionRehearsal();
+      if (app.motion.picking) void app.cancelMotionPick();
+    }
+  });
+
 
   type ActiveMode =
     | "idle"
@@ -273,7 +283,8 @@
     | "paint"
     | "scale"
     | "transform"
-    | "variant-pick";
+    | "variant-pick"
+    | "motion-pick";
 
   let pageUrl = $state<string>("");
   let activeTabId = $state<number | null>(null);
@@ -536,6 +547,15 @@
     found?: boolean;
     check?: RenderCheck;
     error?: string;
+    /** Phase 25 — Motion rehearsal round-trips (`total` is shared above).
+     *  `seq` echoes the rehearse the reply belongs to. */
+    seq?: number;
+    childCount?: number;
+    stagger?: { step: number; requested: number; clamped: boolean } | null;
+    reduced?: boolean;
+    reason?: string;
+    position?: number;
+    running?: boolean;
   };
 
   /** Selector-resolution count for the currently-viewed imported session,
@@ -1053,6 +1073,10 @@
       if (m.mode !== "variant-pick" && app.variants.picking) {
         app.variants.picking = false;
       }
+      // Phase 25 — same for a Motion pick.
+      if (m.mode !== "motion-pick" && app.motion.picking) {
+        app.motion.picking = null;
+      }
       return;
     }
     if (m?.type === "toolbar.pick-image" && sender.tab?.id === activeTabId) {
@@ -1088,6 +1112,38 @@
     }
     if (m?.type === "variants.pick-cancelled" && sender.tab?.id === activeTabId) {
       app.variants.picking = false;
+      return;
+    }
+    // Phase 25 — Motion pick / rehearsal round-trips.
+    if (m?.type === "motion.picked" && sender.tab?.id === activeTabId) {
+      if (m.target) app.onMotionPicked(m.target);
+      else app.motion.picking = null;
+      return;
+    }
+    if (m?.type === "motion.pick-cancelled" && sender.tab?.id === activeTabId) {
+      app.motion.picking = null;
+      return;
+    }
+    if (m?.type === "motion.rehearse-ready" && sender.tab?.id === activeTabId) {
+      app.onMotionReady({
+        seq: Number(m.seq) || 0,
+        total: Number(m.total) || 0,
+        childCount: Number(m.childCount) || 0,
+        stagger: m.stagger ?? null,
+        reduced: !!m.reduced,
+      });
+      return;
+    }
+    if (m?.type === "motion.rehearse-failed" && sender.tab?.id === activeTabId) {
+      app.onMotionFailed(typeof m.reason === "string" ? m.reason : "", Number(m.seq) || 0);
+      return;
+    }
+    if (m?.type === "motion.tick" && sender.tab?.id === activeTabId) {
+      app.onMotionTick(Number(m.position) || 0, !!m.running, Number(m.seq) || 0);
+      return;
+    }
+    if (m?.type === "motion.finished" && sender.tab?.id === activeTabId) {
+      app.onMotionFinished(Number(m.seq) || 0);
       return;
     }
     if (m?.type === "variants.preview-restored" && sender.tab?.id === activeTabId) {
@@ -3319,7 +3375,7 @@
       </div>
     {/if}
 
-    {#if !app.viewingSettings && !app.viewingImportedId && !showAssociatePrompt && (app.moduleReady("test-pilot") || app.moduleReady("audit-flow") || app.moduleReady("report") || app.moduleReady("design-variants") || app.moduleReady("code-review") || app.moduleReady("devices") || app.interactiveTabSpecs().length > 0)}
+    {#if !app.viewingSettings && !app.viewingImportedId && !showAssociatePrompt && (app.moduleReady("test-pilot") || app.moduleReady("audit-flow") || app.moduleReady("report") || app.moduleReady("design-variants") || app.moduleReady("motion") || app.moduleReady("code-review") || app.moduleReady("devices") || app.interactiveTabSpecs().length > 0)}
       <!-- Tabs scroll sideways INSIDE the nav (never widening <main>). The
            bottom rule is an inset shadow, not a border, so the active
            tab's underline still covers it without -mb-px overflowing the
@@ -3482,6 +3538,31 @@
             Variants
           </button>
         {/if}
+        {#if app.moduleReady("motion")}
+          <button
+            type="button"
+            class="inline-flex shrink-0 items-center gap-1.5 whitespace-nowrap px-3 py-1.5 text-xs font-medium border-b-2 transition-colors"
+            class:border-brand-pink={activeTab === "motion"}
+            class:text-brand-pink={activeTab === "motion"}
+            class:dark:text-brand-pink-light={activeTab === "motion"}
+            class:border-transparent={activeTab !== "motion"}
+            class:text-ink-500={activeTab !== "motion"}
+            class:dark:text-night-mute={activeTab !== "motion"}
+            onclick={() => {
+              activeTab = "motion";
+              void chrome.storage?.local?.set({ "pinta-active-tab": "motion" });
+            }}
+            title={app.motion.rehearsing ? "Motion rehearsal live on the page" : undefined}
+          >
+            <!-- Play-on-a-track glyph — reads as "timeline". -->
+            <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+              <line x1="3" y1="12" x2="8" y2="12"/>
+              <line x1="16" y1="12" x2="21" y2="12"/>
+              <polygon points="10 7 16 12 10 17 10 7"/>
+            </svg>
+            Motion
+          </button>
+        {/if}
         {#if app.moduleReady("code-review")}
           <button
             type="button"
@@ -3612,6 +3693,8 @@
       {#await lazyTab("report", () => import("./ReportTab.svelte"))}{@render tabLoading()}{:then m}<m.default />{:catch}{@render tabLoadError()}{/await}
     {:else if !app.viewingImportedId && !showAssociatePrompt && activeTab === "design-variants" && app.moduleReady("design-variants")}
       {#await lazyTab("design-variants", () => import("./DesignVariantsTab.svelte"))}{@render tabLoading()}{:then m}<m.default />{:catch}{@render tabLoadError()}{/await}
+    {:else if !app.viewingImportedId && !showAssociatePrompt && activeTab === "motion" && app.moduleReady("motion")}
+      {#await lazyTab("motion", () => import("./MotionTab.svelte"))}{@render tabLoading()}{:then m}<m.default />{:catch}{@render tabLoadError()}{/await}
     {:else if !app.viewingImportedId && !showAssociatePrompt && activeTab === "code-review" && app.moduleReady("code-review")}
       {#await lazyTab("code-review", () => import("./CodeReviewTab.svelte"))}{@render tabLoading()}{:then m}<m.default />{:catch}{@render tabLoadError()}{/await}
     {:else if !app.viewingImportedId && !showAssociatePrompt && activeTab === "devices" && app.moduleReady("devices")}

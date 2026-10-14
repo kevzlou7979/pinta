@@ -30,6 +30,21 @@ import {
   type ModuleSpec,
 } from "./modules.js";
 import {
+  DEFAULT_MOTION_SYSTEM,
+  buildApplyPayload,
+  getPattern as getMotionPattern,
+  nextPatternAfterRepick,
+  rankPatterns,
+  readTarget,
+  resolveTiming,
+  type MotionApplyPayload,
+  type MotionPattern,
+  type MotionSystem,
+  type MotionTrigger,
+  type RankedPatterns,
+  type ResolvedTiming,
+} from "./motion.js";
+import {
   foldWeekends,
   formatDayHeading,
   isAnnotateRollup,
@@ -5458,6 +5473,370 @@ class ExtensionState {
           }
         | undefined;
       if (!raw || typeof raw !== "object") return;
+  // --- Phase 25: Motion ----------------------------------------------------
+  // Element-first, exactly like Variants: scope → pattern → tokens →
+  // rehearse. Everything up to Apply is pure in-page Web Animations, so
+  // this whole block works with no companion attached.
+  motion = $state<{
+    /** Active motion system. Built-in M3 until an import replaces it. */
+    system: MotionSystem;
+    /** The element the pattern binds to. */
+    pickedTarget: AnnotationTarget | null;
+    /** Destination, for the two patterns that take one. */
+    destTarget: AnnotationTarget | null;
+    /** Which role the content script is currently picking for. */
+    picking: null | "start" | "end";
+    patternId: string | null;
+    trigger: MotionTrigger | null;
+    /** Token overrides; null = the pattern's own default. */
+    durationToken: string | null;
+    easingToken: string | null;
+    staggerStep: number;
+    /** Rehearse the reduced-motion substitute instead of the real thing. */
+    reduced: boolean;
+    speed: number;
+    loop: boolean;
+    /** "Show all patterns" disclosure under the suggested list. */
+    showAll: boolean;
+    note: string;
+    /** A plan is live on the page right now. */
+    rehearsing: boolean;
+    playing: boolean;
+    position: number;
+    total: number;
+    childCount: number;
+    /** Set when the stagger step had to compress to stay under maxTotal. */
+    staggerClamped: boolean;
+    /** The step the page actually ran (post-clamp), 0 when not staggered. */
+    effectiveStep: number;
+    /** Rehearse counter; page replies echo it so a stale arm can't land. */
+    seq: number;
+    error: string | null;
+  }>({
+    system: DEFAULT_MOTION_SYSTEM,
+    pickedTarget: null,
+    destTarget: null,
+    picking: null,
+    patternId: null,
+    trigger: null,
+    durationToken: null,
+    easingToken: null,
+    staggerStep: DEFAULT_MOTION_SYSTEM.stagger.base,
+    reduced: false,
+    speed: 1,
+    loop: false,
+    showAll: false,
+    note: "",
+    rehearsing: false,
+    playing: false,
+    position: 0,
+    total: 0,
+    childCount: 0,
+    staggerClamped: false,
+    effectiveStep: 0,
+    seq: 0,
+    error: null,
+  });
+  /** Loop's "play the other way after a beat" timer. */
+  private motionLoopTimer: ReturnType<typeof setTimeout> | null = null;
+
+  /** The chosen pattern, or null while the user is still deciding. */
+  get motionPattern(): MotionPattern | null {
+    return this.motion.patternId ? getMotionPattern(this.motion.patternId) : null;
+  }
+
+  /** Catalog ordered for whatever is picked. Empty target = flat list. */
+  get motionRanked(): RankedPatterns {
+    return rankPatterns(readTarget(this.motion.pickedTarget));
+  }
+
+  /** Resolved duration + easing for the chosen pattern, tokens included. */
+  get motionTiming(): ResolvedTiming | null {
+    const p = this.motionPattern;
+    if (!p) return null;
+    return resolveTiming(p, this.motion.system, {
+      ...(this.motion.durationToken ? { duration: this.motion.durationToken } : {}),
+      ...(this.motion.easingToken ? { easing: this.motion.easingToken } : {}),
+    });
+  }
+
+  /** True when the chosen pattern still wants a destination pick. */
+  get motionNeedsDestination(): boolean {
+    const p = this.motionPattern;
+    return !!p && p.targets === 2 && !this.motion.destTarget;
+  }
+
+  /** Why Rehearse is unavailable right now, or null when it is ready. */
+  get motionBlockedReason(): string | null {
+    const p = this.motionPattern;
+    if (!this.motion.pickedTarget) return "Pick an element on the page first.";
+    if (!p) return "Choose a pattern.";
+    if (!p.rehearsable) return p.rehearseNote ?? "This pattern can't be rehearsed yet.";
+    return null;
+  }
+
+  async startMotionPick(role: "start" | "end" = "start"): Promise<void> {
+    const tabId = await ExtensionState.currentTabId();
+    if (tabId == null) return;
+    this.motion.error = null;
+    await this.stopMotionRehearsal();
+    const ok = await ExtensionState.sendToTabWithInject(tabId, {
+      type: "motion.pick-element",
+    });
+    // Set AFTER the send — a freshly injected content script broadcasts
+    // mode.changed("idle") on mount, and flipping first would let that
+    // mount broadcast desync the pick UI (same trap as variants).
+    if (ok) {
+      this.motion.picking = role;
+    } else {
+      this.motion.picking = null;
+      this.motion.error =
+        "Couldn't reach the page — reload the app tab (F5) and try again.";
+    }
+  }
+
+  async cancelMotionPick(): Promise<void> {
+    this.motion.picking = null;
+    const tabId = await ExtensionState.currentTabId();
+    if (tabId != null) {
+      void chrome.tabs.sendMessage(tabId, { type: "motion.pick-cancel" }).catch(() => {});
+    }
+  }
+
+  /** Called from the App message handler when the page reports a pick. */
+  onMotionPicked(target: AnnotationTarget): void {
+    // A pick the panel didn't ask for (late echo after cancel) is noise.
+    if (!this.motion.picking) return;
+    const role = this.motion.picking;
+    this.motion.picking = null;
+    if (role === "end") {
+      this.motion.destTarget = target;
+      return;
+    }
+    const previous = this.motionRanked;
+    this.motion.pickedTarget = target;
+    // A new element invalidates the destination; the pattern follows the
+    // new element unless it was an explicit off-list choice.
+    this.motion.destTarget = null;
+    const next = nextPatternAfterRepick(
+      this.motion.patternId,
+      rankPatterns(readTarget(target)),
+      previous,
+    );
+    if (next !== this.motion.patternId) this.selectMotionPattern(next);
+  }
+
+  clearMotionTarget(role: "start" | "end"): void {
+    void this.stopMotionRehearsal();
+    if (role === "end") {
+      this.motion.destTarget = null;
+      return;
+    }
+    this.motion.pickedTarget = null;
+    this.motion.destTarget = null;
+    this.motion.patternId = null;
+    this.motion.trigger = null;
+  }
+
+  selectMotionPattern(id: string | null): void {
+    void this.stopMotionRehearsal();
+    this.motion.patternId = id;
+    this.motion.durationToken = null;
+    this.motion.easingToken = null;
+    this.motion.staggerClamped = false;
+    const p = id ? getMotionPattern(id) : null;
+    this.motion.trigger = p?.defaultTrigger ?? null;
+  }
+
+  setMotionTrigger(trigger: MotionTrigger): void {
+    this.motion.trigger = trigger;
+  }
+
+  setMotionToken(kind: "duration" | "easing", token: string | null): void {
+    if (kind === "duration") this.motion.durationToken = token;
+    else this.motion.easingToken = token;
+    // Re-arm so the change is audible immediately — auto-replay on a
+    // token change is the whole point of tuning here rather than in code.
+    if (this.motion.rehearsing) void this.rehearseMotion(true);
+  }
+
+  setMotionStaggerStep(step: number): void {
+    this.motion.staggerStep = Math.max(0, Math.round(step));
+    if (this.motion.rehearsing) void this.rehearseMotion(true);
+  }
+
+  setMotionReduced(on: boolean): void {
+    this.motion.reduced = on;
+    if (this.motion.rehearsing) void this.rehearseMotion(true);
+  }
+
+  setMotionSpeed(speed: number): void {
+    this.motion.speed = speed;
+    void this.sendMotion({ type: "motion.rate", rate: speed });
+  }
+
+  private async sendMotion(msg: Record<string, unknown>): Promise<void> {
+    const tabId = await ExtensionState.currentTabId();
+    if (tabId == null) return;
+    void chrome.tabs.sendMessage(tabId, msg).catch(() => {});
+  }
+
+  /** Arm the rehearsal on the page. `autoPlay` replays straight away —
+   *  used when a token change should be heard without a second click. */
+  async rehearseMotion(autoPlay = false): Promise<void> {
+    const p = this.motionPattern;
+    const target = this.motion.pickedTarget;
+    if (!p || !target || !p.rehearsable) return;
+    const tabId = await ExtensionState.currentTabId();
+    if (tabId == null) return;
+    this.motion.error = null;
+    this.clearMotionLoopTimer();
+    // Replies for an older arm are ignored (see onMotionReady & co).
+    const seq = ++this.motion.seq;
+    const ok = await ExtensionState.sendToTabWithInject(tabId, {
+      type: "motion.rehearse",
+      seq,
+      selector: target.selector,
+      patternId: p.id,
+      system: $state.snapshot(this.motion.system),
+      overrides: {
+        ...(this.motion.durationToken ? { duration: this.motion.durationToken } : {}),
+        ...(this.motion.easingToken ? { easing: this.motion.easingToken } : {}),
+      },
+      staggerStep: this.motion.staggerStep,
+      reduced: this.motion.reduced,
+    });
+    if (!ok) {
+      this.motion.rehearsing = false;
+      this.motion.error =
+        "Couldn't reach the page — reload the app tab (F5) and try again.";
+      return;
+    }
+    if (autoPlay) this.motion.playing = true;
+  }
+
+  onMotionReady(info: {
+    seq: number;
+    total: number;
+    childCount: number;
+    stagger: { step: number; requested: number; clamped: boolean } | null;
+    reduced: boolean;
+  }): void {
+    if (info.seq !== this.motion.seq) return;
+    this.motion.rehearsing = true;
+    this.motion.total = info.total;
+    this.motion.childCount = info.childCount;
+    this.motion.staggerClamped = !!info.stagger?.clamped;
+    this.motion.effectiveStep = info.stagger ? Math.round(info.stagger.step) : 0;
+    this.motion.position = 0;
+    if (this.motion.playing) void this.playMotion();
+  }
+
+  onMotionFailed(reason: string, seq: number): void {
+    if (seq !== this.motion.seq) return;
+    this.motion.rehearsing = false;
+    this.motion.playing = false;
+    this.motion.position = 0;
+    this.motion.total = 0;
+    this.motion.error =
+      reason === "not-found"
+        ? "That element isn't on the page any more — pick it again."
+        : reason === "no-number"
+          ? "Count up needs an element whose text contains a number."
+          : reason === "unsupported"
+            ? "That element can't be animated — for Count up, pick the element that holds just the number."
+            : "Couldn't load the motion helpers on this page.";
+  }
+
+  onMotionTick(position: number, running: boolean, seq: number): void {
+    if (seq !== this.motion.seq) return;
+    this.motion.position = position;
+    this.motion.playing = running;
+  }
+
+  onMotionFinished(seq: number): void {
+    if (seq !== this.motion.seq) return;
+    this.motion.playing = false;
+    if (this.motion.loop) {
+      // A loop alternates rather than restarting, so the element returns
+      // to where it began instead of snapping back.
+      this.clearMotionLoopTimer();
+      this.motionLoopTimer = setTimeout(() => {
+        this.motionLoopTimer = null;
+        if (this.motion.loop && this.motion.rehearsing) {
+          void this.sendMotion({
+            type: this.motion.position > 0 ? "motion.reverse" : "motion.play",
+            rate: this.motion.speed,
+          });
+        }
+      }, 500);
+    }
+  }
+
+  private clearMotionLoopTimer(): void {
+    if (this.motionLoopTimer != null) clearTimeout(this.motionLoopTimer);
+    this.motionLoopTimer = null;
+  }
+
+  /** Play forward: a fresh run from 0, a replay from the end, otherwise
+   *  resume from wherever the scrub bar left it. */
+  async playMotion(): Promise<void> {
+    if (!this.motion.rehearsing) {
+      await this.rehearseMotion(true);
+      return;
+    }
+    this.motion.playing = true;
+    const atEnd = this.motion.total > 0 && this.motion.position >= this.motion.total;
+    const from = atEnd ? 0 : this.motion.position;
+    await this.sendMotion({
+      type: "motion.play",
+      rate: this.motion.speed,
+      ...(from > 0 ? { from } : {}),
+    });
+  }
+
+  async reverseMotion(): Promise<void> {
+    if (!this.motion.rehearsing) return;
+    this.motion.playing = true;
+    await this.sendMotion({ type: "motion.reverse", rate: this.motion.speed });
+  }
+
+  async seekMotion(ms: number): Promise<void> {
+    this.motion.playing = false;
+    this.motion.position = ms;
+    await this.sendMotion({ type: "motion.seek", ms });
+  }
+
+  /** Always tells the page, even when nothing seems live: an arm may
+   *  still be in flight, and a stop is cheap. */
+  async stopMotionRehearsal(): Promise<void> {
+    this.clearMotionLoopTimer();
+    this.motion.rehearsing = false;
+    this.motion.playing = false;
+    this.motion.position = 0;
+    this.motion.total = 0;
+    await this.sendMotion({ type: "motion.stop" });
+  }
+
+  /** The op:motion-apply payload for the current selection, or null. */
+  motionApplyPayload(url: string): MotionApplyPayload | null {
+    const p = this.motionPattern;
+    const timing = this.motionTiming;
+    const start = this.motion.pickedTarget;
+    if (!p || !timing || !start) return null;
+    return buildApplyPayload({
+      pattern: p,
+      system: $state.snapshot(this.motion.system),
+      timing,
+      start: $state.snapshot(start),
+      end: this.motion.destTarget ? $state.snapshot(this.motion.destTarget) : null,
+      trigger: this.motion.trigger ?? p.defaultTrigger,
+      staggerStep: this.motion.staggerStep,
+      url,
+      note: this.motion.note,
+    });
+  }
+
       if (
         raw.currentRun &&
         typeof raw.currentRun === "object" &&

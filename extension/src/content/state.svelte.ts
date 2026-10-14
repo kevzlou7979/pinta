@@ -17,7 +17,11 @@ export type Mode =
   | "transform"
   // Phase 22 — one-shot Design Variants element pick: hover highlight,
   // one click captures the target and returns to idle.
-  | "variant-pick";
+  | "variant-pick"
+  // Phase 25 — same one-shot pick, for the Motion tab. Separate mode so
+  // the click lands on the right panel handler; the hover/commit
+  // behaviour is shared with variant-pick.
+  | "motion-pick";
 
 /**
  * A previewed element mutation that must be rolled back when its owning

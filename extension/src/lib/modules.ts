@@ -369,6 +369,40 @@ const DEVICES: ModuleSpec = {
   ],
 };
 
+/**
+ * Motion (Phase 25) — pick an element, pick a transition, rehearse it on
+ * the live page.
+ *
+ * The catalog is two groups: Material 3's six transition patterns (between
+ * views) and the element-level effects (count up, stagger, rise in, fade).
+ * Picking the element FIRST is what makes the catalog useful — it re-ranks
+ * to what that element can plausibly do, the way Design Variants puts scope
+ * before direction.
+ *
+ * Rehearsal is pure in-page Web Animations against the real node, so the
+ * whole loop works with no companion attached; only Apply needs the agent.
+ * `motionSystemPath` points at the project's own motion tokens so applied
+ * code reaches for named tokens instead of an invented cubic-bezier.
+ */
+const MOTION: ModuleSpec = {
+  id: "motion",
+  name: "Motion",
+  description:
+    "Pick an element, choose a transition or effect, and watch it run on your real page — replay, slow to a quarter speed, scrub it by hand. Material 3's six transition patterns plus count up, stagger, rise in and fade. Apply hands your agent named duration and easing tokens, never invented numbers, and always requires a reduced-motion fallback.",
+  mode: "interactive",
+  sessionCheckboxLabel: "",
+  sessionCheckboxHint: "",
+  settings: [
+    {
+      key: "motionSystemPath",
+      type: "string",
+      label: "Motion tokens path (optional)",
+      hint: "File exporting your durations and easings (e.g. src/lib/motion.ts or src/styles/app.css). Leave blank to use the built-in Material 3 tokens.",
+      placeholder: "src/lib/motion.ts",
+    },
+  ],
+};
+
 export const BUILTIN_MODULES: ModuleSpec[] = [
   GITLAB_ISSUES,
   TEST_PILOT,
@@ -379,6 +413,7 @@ export const BUILTIN_MODULES: ModuleSpec[] = [
   DESIGN_VARIANTS,
   CODE_REVIEW,
   DEVICES,
+  MOTION,
 ];
 
 export function getModuleSpec(id: string): ModuleSpec | null {

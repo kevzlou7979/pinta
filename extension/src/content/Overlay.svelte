@@ -34,6 +34,10 @@
   // Type-only: the Design Variants helpers are loaded on first use (see
   // withVariantsLib) so they stay out of the content script every page gets.
   import type * as VariantsLib from "./variants-lib.js";
+  // Phase 25 — Motion rehearsal helpers, same lazy-import treatment so
+  // they stay out of the content script every page gets.
+  import type * as MotionRunLib from "./motion-run.js";
+  import type * as MotionLib from "../lib/motion.js";
 
   /** This page's URL with credential-like query values / fragments
    *  redacted — every URL the overlay stamps or announces goes through it,
@@ -270,6 +274,14 @@
         target?: AnnotationTarget;
         /** Design Variants on-page preview / verify markup (the card contract). */
         previewHtml?: string;
+        // Phase 25 — Motion rehearsal controls. The full rehearse payload
+        // is re-typed as MotionRehearseMsg at the point of use.
+        selector?: string;
+        patternId?: string;
+        rate?: number;
+        ms?: number;
+        /** motion.play — resume from this ms instead of 0. */
+        from?: number;
       };
       if (m?.type === "frame.viewport") {
         // Devices capture: the annotating frame's scroll + viewport, so the
@@ -402,6 +414,37 @@
         setMode("variant-pick");
       } else if (m?.type === "variants.pick-cancel") {
         if (content.mode === "variant-pick") setMode("idle");
+      } else if (m?.type === "motion.pick-element") {
+        // Phase 25 — one-shot Motion element pick (start or destination;
+        // the panel knows which role it asked for).
+        setMode("motion-pick");
+      } else if (m?.type === "motion.pick-cancel") {
+        if (content.mode === "motion-pick") setMode("idle");
+      } else if (
+        m?.type === "motion.rehearse" &&
+        typeof m.selector === "string" &&
+        typeof m.patternId === "string"
+      ) {
+        const mm = m as MotionRehearseMsg;
+        withMotionLibs(
+          (libs) => rehearseMotion(libs, mm),
+          () => void sendToPanel({ type: "motion.rehearse-failed", reason: "load-failed", seq: mm.seq }).catch(() => {}),
+        );
+      } else if (m?.type === "motion.play") {
+        motionHandle?.play(Number(m.rate) || 1, Number(m.from) || 0);
+        startMotionTicker();
+      } else if (m?.type === "motion.reverse") {
+        motionHandle?.reverse(Number(m.rate) || 1);
+        startMotionTicker();
+      } else if (m?.type === "motion.seek") {
+        motionHandle?.seek(Number(m.ms) || 0);
+        motionTick();
+      } else if (m?.type === "motion.rate") {
+        motionHandle?.setRate(Number(m.rate) || 1);
+      } else if (m?.type === "motion.stop") {
+        // Through the queue, never direct: a stop must not overtake the
+        // rehearse it cancels while that one still waits on the import.
+        motionQueue = motionQueue.then(stopMotionRehearsal, stopMotionRehearsal);
       } else if (
         m?.type === "variants.preview" &&
         typeof m.variantId === "string" &&
@@ -797,7 +840,15 @@
   // above — no multi-select, no inline editor, no disabled-control
   // plumbing (variants target visible components, not dead controls).
   $effect(() => {
-    if (content.mode !== "variant-pick") return;
+    // Phase 22 / 25 — the same one-shot pick serves Design Variants and
+    // Motion; only the message the panel hears differs.
+    const pickOwner =
+      content.mode === "variant-pick"
+        ? "variants"
+        : content.mode === "motion-pick"
+          ? "motion"
+          : null;
+    if (!pickOwner) return;
     function onMove(e: MouseEvent) {
       const el = e.target as Element | null;
       if (el === hovered) return; // pointer still inside the same element
@@ -816,14 +867,14 @@
       const target = captureTarget(el);
       hovered = null;
       setMode("idle");
-      sendToPanel({ type: "variants.picked", target })
+      sendToPanel({ type: `${pickOwner}.picked`, target })
         .catch(() => {});
     }
     function onKey(e: KeyboardEvent) {
       if (e.key !== "Escape") return;
       hovered = null;
       setMode("idle");
-      sendToPanel({ type: "variants.pick-cancelled" })
+      sendToPanel({ type: `${pickOwner}.pick-cancelled` })
         .catch(() => {});
     }
     document.addEventListener("mousemove", onMove, true);
@@ -884,6 +935,155 @@
         onLoadFailed();
       })
       .catch((err: unknown) => console.error("[pinta] variant op failed", err));
+  }
+
+  // --- Phase 25: Motion rehearsal -------------------------------------------
+  // Non-destructive by construction: every rehearsal is Web Animations on
+  // the real node, and stop() cancels them, so there is nothing to roll
+  // back. Count up is the one exception — it writes textContent — and its
+  // runner restores the original string.
+
+  type MotionRehearseMsg = {
+    /** Echoed on every reply so the panel can drop a superseded arm. */
+    seq: number;
+    selector: string;
+    patternId: string;
+    system: MotionLib.MotionSystem;
+    overrides?: { duration?: string; easing?: string };
+    staggerStep?: number;
+    reduced?: boolean;
+  };
+  type MotionLibs = { run: typeof MotionRunLib; lib: typeof MotionLib };
+
+  let motionLibsPromise: Promise<MotionLibs> | null = null;
+  function loadMotionLibs(): Promise<MotionLibs> {
+    motionLibsPromise ??= Promise.all([
+      import("./motion-run.js"),
+      import("../lib/motion.js"),
+    ])
+      .then(([run, lib]) => ({ run, lib }))
+      .catch((err: unknown) => {
+        motionLibsPromise = null; // let a later request retry
+        throw err;
+      });
+    return motionLibsPromise;
+  }
+  /** Motion ops run in arrival order even though the first waits on the
+   *  import — a stop must never overtake the rehearse it cancels. */
+  let motionQueue: Promise<void> = Promise.resolve();
+  function withMotionLibs(run: (libs: MotionLibs) => void, onLoadFailed: () => void): void {
+    motionQueue = motionQueue
+      .then(() => loadMotionLibs())
+      .then(run, (err: unknown) => {
+        console.error("[pinta] couldn't load Motion helpers", err);
+        onLoadFailed();
+      })
+      .catch((err: unknown) => console.error("[pinta] motion op failed", err));
+  }
+
+  /** The single live rehearsal, if any. */
+  let motionHandle: MotionRunLib.MotionHandle | null = null;
+  /** The rehearse `seq` the live handle answers for. */
+  let motionSeq = 0;
+  let motionTicker: ReturnType<typeof setInterval> | null = null;
+
+  function motionTick(): void {
+    if (!motionHandle) return;
+    void sendToPanel({
+      type: "motion.tick",
+      seq: motionSeq,
+      position: Math.round(motionHandle.currentTime()),
+      running: motionHandle.running(),
+    }).catch(() => {});
+  }
+
+  // A navigation / bfcache freeze must not leave a count-up writing into
+  // a page that is going away; the overlay unmounting is the same case.
+  $effect(() => {
+    const onHide = () => stopMotionRehearsal();
+    window.addEventListener("pagehide", onHide);
+    return () => {
+      window.removeEventListener("pagehide", onHide);
+      stopMotionRehearsal();
+    };
+  });
+
+  /** Position updates while something is actually moving. Stops itself as
+   *  soon as the timeline settles, so an idle rehearsal costs nothing. */
+  function startMotionTicker(): void {
+    if (motionTicker != null) clearInterval(motionTicker);
+    motionTicker = setInterval(() => {
+      if (!motionHandle) {
+        if (motionTicker != null) clearInterval(motionTicker);
+        motionTicker = null;
+        return;
+      }
+      motionTick();
+      if (!motionHandle.running() && motionTicker != null) {
+        clearInterval(motionTicker);
+        motionTicker = null;
+      }
+    }, 60);
+  }
+
+  function stopMotionRehearsal(): void {
+    if (motionTicker != null) clearInterval(motionTicker);
+    motionTicker = null;
+    motionHandle?.stop();
+    motionHandle = null;
+  }
+
+  function rehearseMotion(libs: MotionLibs, m: MotionRehearseMsg): void {
+    stopMotionRehearsal();
+    const seq = Number(m.seq) || 0;
+    let el: Element | null = null;
+    try {
+      el = document.querySelector(m.selector);
+    } catch {
+      el = null;
+    }
+    if (!el || !el.isConnected) {
+      void sendToPanel({ type: "motion.rehearse-failed", reason: "not-found", seq }).catch(() => {});
+      return;
+    }
+    const pattern = libs.lib.getPattern(m.patternId);
+    if (!pattern) {
+      void sendToPanel({ type: "motion.rehearse-failed", reason: "unknown-pattern", seq }).catch(() => {});
+      return;
+    }
+    const childCount = libs.run.childCountFor(el, isOurNode);
+    const plan = libs.lib.buildPlan(
+      pattern,
+      m.system,
+      { childCount, staggerStep: m.staggerStep, reduced: !!m.reduced },
+      m.overrides,
+    );
+    const handle = libs.run.runPlan(plan, el, { isOurNode });
+    if (!handle.total) {
+      // Count up refuses markup under the figure (it writes textContent);
+      // a plain node with no number is the other way it declines.
+      void sendToPanel({
+        type: "motion.rehearse-failed",
+        reason:
+          pattern.kind === "countup" && el.children.length === 0 ? "no-number" : "unsupported",
+        seq,
+      }).catch(() => {});
+      return;
+    }
+    motionHandle = handle;
+    motionSeq = seq;
+    handle.onFinish(() => {
+      motionTick();
+      void sendToPanel({ type: "motion.finished", seq }).catch(() => {});
+    });
+    void sendToPanel({
+      type: "motion.rehearse-ready",
+      seq,
+      total: handle.total,
+      childCount,
+      stagger: plan.stagger ?? null,
+      reduced: plan.reduced,
+    }).catch(() => {});
   }
 
   function previewPageVariant(lib: typeof VariantsLib, m: {
@@ -3933,7 +4133,7 @@
   {/if}
 {/if}
 
-{#if content.mode === "variant-pick"}
+{#if content.mode === "variant-pick" || content.mode === "motion-pick"}
   {#if hoverRect}
     <div
       class="hl hl--hover"
@@ -3947,7 +4147,7 @@
       style:top="{Math.max(0, hoverRect.top - 22)}px"
       style:left="{hoverRect.left}px"
     >
-      {describe(hovered)} · click to pick for variants · Esc cancels
+      {describe(hovered)} · click to pick for {content.mode === "motion-pick" ? "motion" : "variants"} · Esc cancels
     </div>
   {/if}
 {/if}
@@ -4372,6 +4572,8 @@
       Scale · {scalePending ? "drag the corner or pick a % · Save to keep · Esc to undo" : "click a widget to scale it"} · Esc to exit
     {:else if content.mode === "variant-pick"}
       Design Variants · click the element you want 3 design options for · Esc to cancel
+    {:else if content.mode === "motion-pick"}
+      Motion · click the element to animate · Esc to cancel
     {/if}
   </div>
 {/if}

@@ -80,6 +80,7 @@ const TABS: TabCase[] = [
     reset: (app) => { app.review.pending = null; },
   },
   { id: "devices", label: "Devices", emptyTitle: "Preview on real device sizes", heading: "h2" },
+  { id: "motion", label: "Motion", emptyTitle: "Nothing picked yet" },
 ];
 
 const norm = (s: string | null | undefined) => (s ?? "").replace(/\s+/g, " ").trim();
@@ -110,7 +111,7 @@ describe("every tab: shared EmptyState when empty, shared LoadingState when pend
       expect(document.querySelector(".animate-spin"), `animate-spin leaked in ${where}`).toBeNull();
 
     app.selectedCompanion = { port: 7878, projectRoot: "C:/proj", urlPatterns: [] } as any;
-    for (const id of ["test-pilot", "audit-flow", "report", "design-variants", "code-review", "devices", "chat"]) app.setModuleEnabled(id, true);
+    for (const id of ["test-pilot", "audit-flow", "report", "design-variants", "code-review", "devices", "motion", "chat"]) app.setModuleEnabled(id, true);
     flushSync(); await tick();
     expect(app.appMode).toBe("connected");
 

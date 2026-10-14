@@ -214,4 +214,24 @@ node e2e-layout/devices-frames.cjs            # build + run
 node e2e-layout/devices-frames.cjs --no-build # reuse the last build
 ```
 
-`npm run test:e2e` runs all eight scripts.
+## motion.cjs — Motion module (Phase 25)
+
+Two halves. The panel (`?variant=motion`: the whole side panel with Motion
+on): every message sent to "the tab" is captured, and the page's replies
+(`motion.picked` / `rehearse-ready` / `tick` / `finished` / `rehearse-failed`)
+are delivered through the panel's own `chrome.runtime.onMessage` listener with a
+`sender.tab.id`. Asserts the pick → rank → rehearse → scrub / speed / loop
+state machine, the re-arm on token and reduced changes, the leave-tab cleanup,
+the error banner, and that a message from another tab id changes nothing. The
+runner (`?variant=motion-runner`): `src/content/motion-run.ts` on a fixture DOM
+in real Chromium — jsdom has no `Element.animate`. Asserts timeline length,
+play / reverse / seek / setRate / stop, the stagger clamp and per-child delays,
+count-up text + `aria-hidden` restore (including a run started mid-frame), and
+the reduced-motion plan.
+
+```sh
+node e2e-layout/motion.cjs            # build + run
+node e2e-layout/motion.cjs --no-build # reuse the last build
+```
+
+`npm run test:e2e` runs all nine scripts.
