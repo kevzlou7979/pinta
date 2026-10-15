@@ -433,6 +433,16 @@
     onDevicesCanvas = canvas;
     activeTabId = id;
   }
+  // Phase 25 — the Motion rehearsal tab is pinned on the pick. Switching
+  // the browser to another tab stops the rehearsal on the PINNED tab and
+  // makes Motion inert (no hover preview / loop / re-arm can reach the
+  // tab the user is now on); coming back lifts it. Report 2026-10-15:
+  // "all my tabs is pulsing". Only activeTabId is tracked here — the
+  // motion state it reads must not re-run this.
+  $effect(() => {
+    const id = activeTabId;
+    untrack(() => app.setMotionActiveTab(id));
+  });
   let activeTool = $state<Tool | null>(null);
   // When the on-page floating toolbar is enabled, the side-panel TOOL grid
   // hides (the palette replaces it). Mirrored from chrome.storage.
@@ -1076,6 +1086,7 @@
       // Phase 25 — same for a Motion pick.
       if (m.mode !== "motion-pick" && app.motion.picking) {
         app.motion.picking = null;
+        app.motion.offReason = "esc";
       }
       return;
     }
@@ -1114,17 +1125,22 @@
       app.variants.picking = false;
       return;
     }
-    // Phase 25 — Motion pick / rehearsal round-trips.
-    if (m?.type === "motion.picked" && sender.tab?.id === activeTabId) {
-      if (m.target) app.onMotionPicked(m.target);
+    // Phase 25 — Motion pick / rehearsal round-trips. Replies are only
+    // honoured from the tab Motion talks to: the pinned rehearsal tab,
+    // or the active tab while nothing is pinned yet.
+    const motionTabId = () => app.motion.tabId ?? activeTabId;
+    if (m?.type === "motion.picked" && sender.tab?.id === motionTabId()) {
+      // The sender's tab becomes the rehearsal pin (Phase 25 tab pin).
+      if (m.target) app.onMotionPicked(m.target, sender.tab?.id ?? null);
       else app.motion.picking = null;
       return;
     }
-    if (m?.type === "motion.pick-cancelled" && sender.tab?.id === activeTabId) {
+    if (m?.type === "motion.pick-cancelled" && sender.tab?.id === motionTabId()) {
       app.motion.picking = null;
+      app.motion.offReason = "esc";
       return;
     }
-    if (m?.type === "motion.rehearse-ready" && sender.tab?.id === activeTabId) {
+    if (m?.type === "motion.rehearse-ready" && sender.tab?.id === motionTabId()) {
       app.onMotionReady({
         seq: Number(m.seq) || 0,
         total: Number(m.total) || 0,
@@ -1134,15 +1150,15 @@
       });
       return;
     }
-    if (m?.type === "motion.rehearse-failed" && sender.tab?.id === activeTabId) {
+    if (m?.type === "motion.rehearse-failed" && sender.tab?.id === motionTabId()) {
       app.onMotionFailed(typeof m.reason === "string" ? m.reason : "", Number(m.seq) || 0);
       return;
     }
-    if (m?.type === "motion.tick" && sender.tab?.id === activeTabId) {
+    if (m?.type === "motion.tick" && sender.tab?.id === motionTabId()) {
       app.onMotionTick(Number(m.position) || 0, !!m.running, Number(m.seq) || 0);
       return;
     }
-    if (m?.type === "motion.finished" && sender.tab?.id === activeTabId) {
+    if (m?.type === "motion.finished" && sender.tab?.id === motionTabId()) {
       app.onMotionFinished(Number(m.seq) || 0);
       return;
     }
@@ -1596,8 +1612,15 @@
     if (destroyed) return;
     chrome.tabs?.onActivated?.addListener(onTabActivated);
     chrome.tabs?.onUpdated?.addListener(onTabUpdated);
-    chrome.tabs?.onRemoved?.addListener(forgetCanvasTab);
+    chrome.tabs?.onRemoved?.addListener(onTabRemoved);
   });
+
+  /** A browser tab closed: its canvas frames are gone, and if it was the
+   *  Motion rehearsal pin, so is the picked element (Phase 25, F4). */
+  function onTabRemoved(tabId: number): void {
+    forgetCanvasTab(tabId);
+    app.onMotionTabRemoved(tabId);
+  }
 
   let destroyed = false;
   async function onTabActivated(): Promise<void> {
@@ -1621,7 +1644,7 @@
     destroyed = true;
     chrome.tabs?.onActivated?.removeListener(onTabActivated);
     chrome.tabs?.onUpdated?.removeListener(onTabUpdated);
-    chrome.tabs?.onRemoved?.removeListener(forgetCanvasTab);
+    chrome.tabs?.onRemoved?.removeListener(onTabRemoved);
     chrome.runtime.onMessage.removeListener(runtimeMessageHandler);
     window.removeEventListener("keydown", voiceHotkey);
     window.removeEventListener("keydown", undoRedoHotkey);

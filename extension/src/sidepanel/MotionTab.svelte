@@ -106,6 +106,9 @@
    *  destination for a one-target pattern (F10). */
   function keep(p: MotionPattern) {
     clearHoverTimer();
+    // Away from the pinned tab the rows are inert — nothing may reach
+    // the tab the user is on now (the notice says how to pick here).
+    if (app.motion.away) return;
     if (app.motion.picking === "end") void app.cancelMotionPick();
     if (app.motion.patternId !== p.id) app.selectMotionPattern(p.id);
     if (p.targets === 2) {
@@ -131,7 +134,7 @@
   }
 
   function canPreview(p: MotionPattern): boolean {
-    return !!picked && p.targets !== 2 && p.rehearsable && app.motion.patternId !== p.id;
+    return !!picked && !app.motion.away && p.targets !== 2 && p.rehearsable && app.motion.patternId !== p.id;
   }
 
   /** Count down to a preview. A pointer that rests through the scroll
@@ -215,10 +218,16 @@
   {#if !picked}
     <!-- The whole body is the instruction card: the page is already in
          pick mode. Esc on the page lands here as picking = null, and the
-         text link re-arms it. -->
+         text link re-arms it. Leaving the tab the pick was armed on also
+         lands here (nothing is re-armed on the new tab — that would
+         inject into every tab visited, F6) and the hint says so. -->
     <EmptyState
       title="Click the element to animate."
-      hint={app.motion.picking ? "Esc leaves pick mode." : "Pick mode is off."}
+      hint={app.motion.picking
+        ? "Esc leaves pick mode."
+        : app.motion.offReason === "switched"
+          ? "You switched tabs, so pick mode is off."
+          : "Pick mode is off."}
       compact
       class="rounded-md border border-dashed border-brand-pink/60 bg-brand-pink/5"
     >
@@ -238,7 +247,23 @@
     </EmptyState>
   {:else}
     <!-- Target chip ------------------------------------------------------ -->
-    {#if app.motion.picking === "start"}
+    {#if app.motion.away}
+      <!-- The element lives on another browser tab: the rehearsal there
+           was stopped and nothing here may touch the tab the user is on
+           now. The target and the kept pattern wait for them to return;
+           "Pick here" drops the pin and arms this tab instead. -->
+      <div
+        class="rounded-md border border-dashed border-ink-300 dark:border-night-line bg-ink-50 dark:bg-night-card px-2.5 py-2 text-center space-y-1"
+      >
+        <p class="text-[11.5px] text-ink-700 dark:text-night-dim">
+          Picked on another tab. Switch back to it, or pick here.
+        </p>
+        <button
+          class="text-[11px] underline text-brand-pink dark:text-brand-pink-light hover:text-brand-pink/80"
+          onclick={clearTarget}>Pick here</button
+        >
+      </div>
+    {:else if app.motion.picking === "start"}
       <div
         class="rounded-md border border-brand-pink/60 bg-brand-pink/5 p-2.5 space-y-1.5 text-center"
       >

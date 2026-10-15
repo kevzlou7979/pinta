@@ -5499,7 +5499,26 @@ class ExtensionState {
     effectiveStep: number;
     /** Rehearse counter; page replies echo it so a stale arm can't land. */
     seq: number;
+    /** Row under the pointer being tried on the page (hover to try) —
+     *  never the kept `patternId`; leaving the row stops it. */
+    previewingId: string | null;
+    /** The Tune disclosure — remembered for the session, not persisted. */
+    tuneOpen: boolean;
     error: string | null;
+    /** The tab the picked element lives on; EVERY motion message goes
+     *  here, never to whatever tab happens to be active (report
+     *  2026-10-15: a hover preview re-armed on GitLab and its rows
+     *  "pulsed"). Pinned by `motion.picked`, cleared with the target. */
+    tabId: number | null;
+    /** The active tab is not the pinned one: the rehearsal was stopped
+     *  there and the whole module is inert until the user comes back or
+     *  picks here. Maintained by App.svelte via setMotionActiveTab(). */
+    away: boolean;
+    /** Why pick mode went off without a pick: Esc / Cancel on the page
+     *  or panel ("esc"), or the user switched browser tabs while a pick
+     *  was armed ("switched" — the card says so; nothing is re-armed on
+     *  the new tab, F6). Cleared when a pick is armed again. */
+    offReason: "esc" | "switched" | null;
   }>({
     system: DEFAULT_MOTION_SYSTEM,
     pickedTarget: null,
@@ -5512,11 +5531,6 @@ class ExtensionState {
     staggerStep: DEFAULT_MOTION_SYSTEM.stagger.base,
     reduced: false,
     speed: 1,
-    /** Row under the pointer being tried on the page (hover to try) —
-     *  never the kept `patternId`; leaving the row stops it. */
-    previewingId: string | null;
-    /** The Tune disclosure — remembered for the session, not persisted. */
-    tuneOpen: boolean;
     loop: false,
     showAll: false,
     note: "",
@@ -5528,10 +5542,72 @@ class ExtensionState {
     staggerClamped: false,
     effectiveStep: 0,
     seq: 0,
+    previewingId: null,
+    tuneOpen: false,
     error: null,
+    tabId: null,
+    away: false,
+    offReason: null,
   });
   /** Loop's "play the other way after a beat" timer. */
   private motionLoopTimer: ReturnType<typeof setTimeout> | null = null;
+  /** Seq of an arm whose ready must seek to the END state (the kept
+   *  pattern re-armed after a hover preview — F15). One-shot. */
+  private motionSeekEndSeq: number | null = null;
+  /** The tab a pick was armed on while nothing is pinned yet — so the
+   *  cancel reaches the overlay that is actually in pick mode. */
+  private motionPickTabId: number | null = null;
+  /** Seq of the newest ARM sent (motion.seq also moves on every stop).
+   *  An arm that resolves retired tells the two apart: retired by a stop
+   *  → the page may now be animating something nobody wants (the stop
+   *  landed in the inject window, before the script existed) → stop it;
+   *  retired by a newer arm → that arm owns the page, leave it be (F5). */
+  private motionLastArmSeq = 0;
+
+  /** Where motion messages go: the pinned tab once an element is picked;
+   *  before that (arming the first pick) the active tab. */
+  private async motionTabId(): Promise<number | null> {
+    if (this.motion.tabId != null) return this.motion.tabId;
+    return ExtensionState.currentTabId();
+  }
+
+  /** App.svelte calls this whenever the active tab changes. Away from
+   *  the pinned tab the rehearsal there is stopped (a live mutation must
+   *  not outlive the user's attention) and the module goes inert; back
+   *  on it, nothing is re-armed — the next hover / click plays as usual.
+   *  With no pin yet, a pick armed on the tab being left is cancelled
+   *  there so its overlay doesn't sit in pick mode out of sight. */
+  setMotionActiveTab(activeTabId: number | null): void {
+    const pin = this.motion.tabId;
+    if (pin == null) {
+      this.motion.away = false;
+      const armedOn = this.motionPickTabId;
+      if (this.motion.picking && armedOn != null && activeTabId !== armedOn) {
+        // Not re-armed on the new tab (that would inject into every tab
+        // visited); the card says why pick mode is off (F6).
+        void this.cancelMotionPick("switched");
+      }
+      return;
+    }
+    const away = activeTabId !== pin;
+    if (away === this.motion.away) return;
+    if (away) {
+      // Order matters: stop / cancel go out to the pin BEFORE the flag
+      // flips, and both route through motionTabId(), never the active tab.
+      this.clearMotionLoopTimer();
+      void this.stopMotionRehearsal();
+      if (this.motion.picking) void this.cancelMotionPick("switched");
+    }
+    this.motion.away = away;
+  }
+
+  /** App.svelte: a browser tab closed. If it was the pin, the target it
+   *  held is gone with it — drop pin + target (else the "Switch back to
+   *  it" notice points at a tab that no longer exists, F4). The stop
+   *  clearMotionTarget sends to the dead tab is swallowed by its catch. */
+  onMotionTabRemoved(tabId: number): void {
+    if (tabId === this.motion.tabId) this.clearMotionTarget("start");
+  }
 
   /** The chosen pattern, or null while the user is still deciding. */
   get motionPattern(): MotionPattern | null {
@@ -5541,15 +5617,10 @@ class ExtensionState {
   /** Catalog ordered for whatever is picked. Empty target = flat list. */
   get motionRanked(): RankedPatterns {
     return rankPatterns(readTarget(this.motion.pickedTarget));
-    previewingId: null,
-    tuneOpen: false,
   }
 
   /** Resolved duration + easing for the chosen pattern, tokens included. */
   get motionTiming(): ResolvedTiming | null {
-  /** Seq of an arm whose ready must seek to the END state (the kept
-   *  pattern re-armed after a hover preview — F15). One-shot. */
-  private motionSeekEndSeq: number | null = null;
     const p = this.motionPattern;
     if (!p) return null;
     return resolveTiming(p, this.motion.system, {
@@ -5574,41 +5645,70 @@ class ExtensionState {
   }
 
   async startMotionPick(role: "start" | "end" = "start"): Promise<void> {
-    const tabId = await ExtensionState.currentTabId();
-    if (tabId == null) return;
+    // Away from the pinned tab nothing is armed anywhere: "Pick here"
+    // clears the pin first (clearMotionTarget), which is the only road
+    // from a pin on one tab to a pick on another.
+    if (this.motion.away) return;
+    // Pinned → the pin (never inject into a tab the user hasn't picked
+    // on); not pinned → the active tab, which pins on the pick to come.
+    const tabId = await this.motionTabId();
+    if (tabId == null || this.motion.away) return;
     this.motion.error = null;
-    await this.stopMotionRehearsal();
+    // A rehearsal can only be live on the pin; with none, reset locally
+    // rather than message a tab nothing was ever sent to.
+    if (this.motion.tabId != null) await this.stopMotionRehearsal();
+    else this.resetMotionLive();
+    if (this.motion.away) return;
+    // The page keeps the role: the end pick labels "opens into this".
     const ok = await ExtensionState.sendToTabWithInject(tabId, {
       type: "motion.pick-element",
+      role,
     });
     // Set AFTER the send — a freshly injected content script broadcasts
     // mode.changed("idle") on mount, and flipping first would let that
     // mount broadcast desync the pick UI (same trap as variants).
     if (ok) {
       this.motion.picking = role;
+      this.motionPickTabId = tabId;
+      this.motion.offReason = null;
     } else {
       this.motion.picking = null;
       this.motion.error =
         "Couldn't reach the page — reload the app tab (F5) and try again.";
     }
-    // The page keeps the role: the end pick labels "opens into this".
   }
 
-      role,
-  async cancelMotionPick(): Promise<void> {
+  /** `reason` is what the empty card says afterwards ("switched" = the
+   *  user left the tab the pick was armed on; anything else reads as a
+   *  plain "Pick mode is off."). */
+  async cancelMotionPick(reason: "esc" | "switched" | null = null): Promise<void> {
     this.motion.picking = null;
-    const tabId = await ExtensionState.currentTabId();
+    this.motion.offReason = reason;
+    // The overlay that is in pick mode: the pin, else the tab the pick
+    // was armed on — the active tab may be neither by now. With neither
+    // set no overlay was ever armed, so there is nothing to tell (F3):
+    // never fall back to whatever tab is active.
+    const armedOn = this.motionPickTabId;
+    this.motionPickTabId = null;
+    const tabId = this.motion.tabId ?? armedOn;
     if (tabId != null) {
       void chrome.tabs.sendMessage(tabId, { type: "motion.pick-cancel" }).catch(() => {});
     }
   }
 
-  /** Called from the App message handler when the page reports a pick. */
-  onMotionPicked(target: AnnotationTarget): void {
+  /** Called from the App message handler when the page reports a pick.
+   *  `tabId` is the sender's tab — it becomes the pin: from here on every
+   *  motion message is addressed to it, whatever tab is active. */
+  onMotionPicked(target: AnnotationTarget, tabId: number | null = null): void {
     // A pick the panel didn't ask for (late echo after cancel) is noise.
     if (!this.motion.picking) return;
     const role = this.motion.picking;
     this.motion.picking = null;
+    this.motionPickTabId = null;
+    if (tabId != null) {
+      this.motion.tabId = tabId;
+      this.motion.away = false;
+    }
     if (role === "end") {
       this.motion.destTarget = target;
       return;
@@ -5627,9 +5727,13 @@ class ExtensionState {
     // Only a real change re-selects: re-selecting the same id would wipe
     // the Tune tokens / trigger for nothing (F4).
     if (next !== this.motion.patternId) this.selectMotionPattern(next);
+    // Pick and it plays — the one click the whole tab is built around.
+    if (this.motionPattern?.rehearsable) void this.rehearseMotion(true);
   }
 
   clearMotionTarget(role: "start" | "end"): void {
+    // The stop resolves its tab synchronously (before the pin clears
+    // below), so it still reaches the page that holds the rehearsal.
     void this.stopMotionRehearsal();
     if (role === "end") {
       this.motion.destTarget = null;
@@ -5639,9 +5743,10 @@ class ExtensionState {
     this.motion.destTarget = null;
     this.motion.patternId = null;
     this.motion.trigger = null;
+    // No element, no pin: the next pick may land on any tab ("Pick here").
+    this.motion.tabId = null;
+    this.motion.away = false;
   }
-    // Pick and it plays — the one click the whole tab is built around.
-    if (this.motionPattern?.rehearsable) void this.rehearseMotion(true);
 
   selectMotionPattern(id: string | null): void {
     void this.stopMotionRehearsal();
@@ -5651,6 +5756,8 @@ class ExtensionState {
     this.motion.staggerClamped = false;
     const p = id ? getMotionPattern(id) : null;
     this.motion.trigger = p?.defaultTrigger ?? null;
+    // A destination only means something to a two-target pattern (F10).
+    if (p && p.targets !== 2) this.motion.destTarget = null;
   }
 
   setMotionTrigger(trigger: MotionTrigger): void {
@@ -5658,32 +5765,37 @@ class ExtensionState {
   }
 
   setMotionToken(kind: "duration" | "easing", token: string | null): void {
+    if (this.motion.away) return;
     if (kind === "duration") this.motion.durationToken = token;
     else this.motion.easingToken = token;
     // Re-arm so the change is audible immediately — auto-replay on a
     // token change is the whole point of tuning here rather than in code.
     if (this.motion.rehearsing) void this.rehearseMotion(true);
   }
-    // A destination only means something to a two-target pattern (F10).
-    if (p && p.targets !== 2) this.motion.destTarget = null;
 
   setMotionStaggerStep(step: number): void {
+    if (this.motion.away) return;
     this.motion.staggerStep = Math.max(0, Math.round(step));
     if (this.motion.rehearsing) void this.rehearseMotion(true);
   }
 
   setMotionReduced(on: boolean): void {
+    if (this.motion.away) return;
     this.motion.reduced = on;
     if (this.motion.rehearsing) void this.rehearseMotion(true);
   }
 
   setMotionSpeed(speed: number): void {
+    if (this.motion.away) return;
     this.motion.speed = speed;
     void this.sendMotion({ type: "motion.rate", rate: speed });
   }
 
+  /** Plain send to the rehearsal tab (the pin, else the active tab).
+   *  Not gated on `away` on purpose: the stop that makes us inert goes
+   *  through here, to the pin. The actions above gate themselves. */
   private async sendMotion(msg: Record<string, unknown>): Promise<void> {
-    const tabId = await ExtensionState.currentTabId();
+    const tabId = await this.motionTabId();
     if (tabId == null) return;
     void chrome.tabs.sendMessage(tabId, msg).catch(() => {});
   }
@@ -5692,26 +5804,8 @@ class ExtensionState {
    *  the one way anything auto-plays: the pick, a row click, a token or
    *  stagger change heard without a second click. */
   async rehearseMotion(autoPlay = false): Promise<void> {
+    if (this.motion.away) return;
     const p = this.motionPattern;
-    const target = this.motion.pickedTarget;
-    if (!target || !p.rehearsable) return;
-    // Replies for an older arm are ignored (see onMotionReady & co), and
-    // the seq is taken BEFORE the first await so a stop that lands in the
-    // gap (pointer already off the row) cancels this arm instead of
-    // being overtaken by it.
-    const seq = ++this.motion.seq;
-    // Only the arm that asked for it parks at the end; any newer arm
-    // (a row click, a token change) plays or rests from 0 as usual.
-    this.motionSeekEndSeq = opts.seekToEnd ? seq : null;
-    const tabId = await ExtensionState.currentTabId();
-    if (tabId == null || seq !== this.motion.seq) return;
-    this.motion.error = null;
-    this.clearMotionLoopTimer();
-    const ok = await ExtensionState.sendToTabWithInject(tabId, {
-      type: "motion.rehearse",
-      seq,
-      selector: target.selector,
-      patternId: p.id,
     if (!p) return;
     // The kept pattern supersedes any hover preview still on the page.
     this.motion.previewingId = null;
@@ -5726,6 +5820,7 @@ class ExtensionState {
    *  page stops the previous handle when the new arm lands, so there is
    *  no explicit stop between two previews. */
   async previewMotionPattern(id: string): Promise<void> {
+    if (this.motion.away) return;
     const p = getMotionPattern(id);
     if (!p || !p.rehearsable) return;
     this.motion.previewingId = id;
@@ -5758,13 +5853,48 @@ class ExtensionState {
     overrides: { duration?: string; easing?: string },
     opts: { seekToEnd?: boolean } = {},
   ): Promise<void> {
+    const target = this.motion.pickedTarget;
+    if (!target || !p.rehearsable || this.motion.away) return;
+    // Replies for an older arm are ignored (see onMotionReady & co), and
+    // the seq is taken BEFORE the first await so a stop that lands in the
+    // gap (pointer already off the row) cancels this arm instead of
+    // being overtaken by it.
+    const seq = ++this.motion.seq;
+    this.motionLastArmSeq = seq;
+    // Only the arm that asked for it parks at the end; any newer arm
+    // (a row click, a token change) plays or rests from 0 as usual.
+    this.motionSeekEndSeq = opts.seekToEnd ? seq : null;
+    // The pinned tab — the only tab a rehearsal may ever be injected
+    // into. A tab switch during the await retires this seq (stop).
+    const tabId = await this.motionTabId();
+    if (tabId == null || seq !== this.motion.seq || this.motion.away) return;
+    this.motion.error = null;
+    this.clearMotionLoopTimer();
+    const ok = await ExtensionState.sendToTabWithInject(tabId, {
+      type: "motion.rehearse",
+      seq,
+      selector: target.selector,
+      patternId: p.id,
       system: $state.snapshot(this.motion.system),
       overrides,
       staggerStep: this.motion.staggerStep,
       reduced: this.motion.reduced,
     });
+    if (seq !== this.motion.seq) {
+      // Retired while in flight. By a STOP (tab switch during the inject
+      // + retry window, F5): that stop reached the page before the script
+      // existed, so the arm that just landed is animating a tab nobody is
+      // looking at — stop it, on the very tab it was injected into (the
+      // pin may have been cleared meanwhile; never resolve a tab anew).
+      // By a newer arm: that arm owns the page now, a stop would kill it.
+      if (ok && this.motionLastArmSeq === seq) {
+        void chrome.tabs.sendMessage(tabId, { type: "motion.stop" }).catch(() => {});
+      }
+      return;
+    }
     if (!ok) {
       this.motion.rehearsing = false;
+      this.motion.previewingId = null; // no dashed border on a dead preview (F3)
       this.motion.error =
         "Couldn't reach the page — reload the app tab (F5) and try again.";
       return;
@@ -5776,10 +5906,8 @@ class ExtensionState {
     seq: number;
     total: number;
     childCount: number;
-    if (seq !== this.motion.seq) return; // a newer arm already took over
     stagger: { step: number; requested: number; clamped: boolean } | null;
     reduced: boolean;
-      this.motion.previewingId = null; // no dashed border on a dead preview (F3)
   }): void {
     if (info.seq !== this.motion.seq) return;
     this.motion.rehearsing = true;
@@ -5788,19 +5916,6 @@ class ExtensionState {
     this.motion.staggerClamped = !!info.stagger?.clamped;
     this.motion.effectiveStep = info.stagger ? Math.round(info.stagger.step) : 0;
     this.motion.position = 0;
-    if (this.motion.playing) void this.playMotion();
-  }
-
-  onMotionFailed(reason: string, seq: number): void {
-    if (seq !== this.motion.seq) return;
-    this.motion.rehearsing = false;
-    this.motion.playing = false;
-    this.motion.position = 0;
-    this.motion.total = 0;
-    this.motion.error =
-      reason === "not-found"
-        ? "That element isn't on the page any more — pick it again."
-        : reason === "no-number"
     if (this.motionSeekEndSeq === info.seq) {
       // The kept pattern coming back after a hover preview: park it at
       // the end state (F15). One-shot — consumed here.
@@ -5810,6 +5925,20 @@ class ExtensionState {
       void this.sendMotion({ type: "motion.seek", ms: info.total });
       return;
     }
+    if (this.motion.playing) void this.playMotion();
+  }
+
+  onMotionFailed(reason: string, seq: number): void {
+    if (seq !== this.motion.seq) return;
+    this.motion.rehearsing = false;
+    this.motion.playing = false;
+    this.motion.previewingId = null; // F3
+    this.motion.position = 0;
+    this.motion.total = 0;
+    this.motion.error =
+      reason === "not-found"
+        ? "That element isn't on the page any more — pick it again."
+        : reason === "no-number"
           ? "Count up needs an element whose text contains a number."
           : reason === "unsupported"
             ? "That element can't be animated — for Count up, pick the element that holds just the number."
@@ -5817,7 +5946,6 @@ class ExtensionState {
   }
 
   onMotionTick(position: number, running: boolean, seq: number): void {
-    this.motion.previewingId = null; // F3
     if (seq !== this.motion.seq) return;
     this.motion.position = position;
     this.motion.playing = running;
@@ -5832,7 +5960,7 @@ class ExtensionState {
       this.clearMotionLoopTimer();
       this.motionLoopTimer = setTimeout(() => {
         this.motionLoopTimer = null;
-        if (this.motion.loop && this.motion.rehearsing) {
+        if (this.motion.loop && this.motion.rehearsing && !this.motion.away) {
           void this.sendMotion({
             type: this.motion.position > 0 ? "motion.reverse" : "motion.play",
             rate: this.motion.speed,
@@ -5850,6 +5978,7 @@ class ExtensionState {
   /** Play forward: a fresh run from 0, a replay from the end, otherwise
    *  resume from wherever the scrub bar left it. */
   async playMotion(): Promise<void> {
+    if (this.motion.away) return;
     if (!this.motion.rehearsing) {
       await this.rehearseMotion(true);
       return;
@@ -5865,12 +5994,13 @@ class ExtensionState {
   }
 
   async reverseMotion(): Promise<void> {
-    if (!this.motion.rehearsing) return;
+    if (!this.motion.rehearsing || this.motion.away) return;
     this.motion.playing = true;
     await this.sendMotion({ type: "motion.reverse", rate: this.motion.speed });
   }
 
   async seekMotion(ms: number): Promise<void> {
+    if (this.motion.away) return;
     this.motion.playing = false;
     this.motion.position = ms;
     await this.sendMotion({ type: "motion.seek", ms });
@@ -5879,12 +6009,22 @@ class ExtensionState {
   /** Always tells the page, even when nothing seems live: an arm may
    *  still be in flight, and a stop is cheap. */
   async stopMotionRehearsal(): Promise<void> {
+    this.resetMotionLive();
+    await this.sendMotion({ type: "motion.stop" });
+  }
+
+  /** The panel's side of a stop: nothing live, loop timer off, and the
+   *  live seq retired — a ready/tick for the arm just stopped must not
+   *  flip `rehearsing` back on after the element was restored. */
+  private resetMotionLive(): void {
     this.clearMotionLoopTimer();
     this.motion.rehearsing = false;
     this.motion.playing = false;
     this.motion.position = 0;
     this.motion.total = 0;
-    await this.sendMotion({ type: "motion.stop" });
+    this.motion.previewingId = null;
+    this.motionSeekEndSeq = null;
+    this.motion.seq++;
   }
 
   /** The op:motion-apply payload for the current selection, or null. */
@@ -5897,11 +6037,6 @@ class ExtensionState {
       pattern: p,
       system: $state.snapshot(this.motion.system),
       timing,
-    this.motion.previewingId = null;
-    this.motionSeekEndSeq = null;
-    // Retire the live seq: a ready/tick for the arm just stopped must not
-    // flip `rehearsing` back on after the element was restored.
-    this.motion.seq++;
       start: $state.snapshot(start),
       end: this.motion.destTarget ? $state.snapshot(this.motion.destTarget) : null,
       trigger: this.motion.trigger ?? p.defaultTrigger,
@@ -5911,19 +6046,6 @@ class ExtensionState {
     });
   }
 
-      if (
-        raw.currentRun &&
-        typeof raw.currentRun === "object" &&
-        Array.isArray(raw.currentRun.variants)
-      ) {
-        this.variants.currentRun = raw.currentRun;
-        // A check can't survive a panel reload — never show a stuck spinner.
-        if (this.variants.currentRun?.match?.status === "checking") {
-          delete this.variants.currentRun.match;
-        }
-      }
-      if (Array.isArray(raw.pages)) {
-        this.variants.pages = raw.pages.filter(
   async loadVariantsState(): Promise<void> {
     try {
       const stored = await chrome.storage?.local?.get(
@@ -5937,6 +6059,19 @@ class ExtensionState {
           }
         | undefined;
       if (!raw || typeof raw !== "object") return;
+      if (
+        raw.currentRun &&
+        typeof raw.currentRun === "object" &&
+        Array.isArray(raw.currentRun.variants)
+      ) {
+        this.variants.currentRun = raw.currentRun;
+        // A check can't survive a panel reload — never show a stuck spinner.
+        if (this.variants.currentRun?.match?.status === "checking") {
+          delete this.variants.currentRun.match;
+        }
+      }
+      if (Array.isArray(raw.pages)) {
+        this.variants.pages = raw.pages.filter(
           (p): p is PageEntry =>
             !!p &&
             typeof p.path === "string" &&

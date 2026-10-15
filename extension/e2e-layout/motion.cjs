@@ -810,6 +810,177 @@ const ROW_NAMES = /^(Container transform|Forward and backward|Lateral|Top level|
     ok(m.rehearsing === false && m.total === 0 && m.position === 0 && !!m.error, "a current failure clears rehearsing, total and position (F18)");
     await click(page.getByRole("button", { name: "Dismiss error" }));
 
+    // Report 2026-10-15 ("all my tabs is pulsing"): every send resolved the
+    // ACTIVE tab at send time, so with the Motion tab open a hover preview,
+    // the loop or a token re-arm injected + animated whatever tab the user
+    // had switched to (a generic selector matched GitLab's rows). The
+    // rehearsal tab is now pinned on the pick; away from it Motion is inert.
+    console.log("\n[motion] 15 · the rehearsal tab is pinned — away from it, nothing is sent anywhere");
+    const OTHER = 9;
+    const switchTab = (id) =>
+      page.evaluate(
+        ({ id, TAB, PAGE_URL }) => {
+          window.__tabs = [{ id, url: id === TAB ? PAGE_URL : "https://gitlab.example/pipelines", active: true, windowId: 1 }];
+          for (const l of window.__tabActivatedListeners || []) l({ tabId: id, windowId: 1 });
+        },
+        { id, TAB, PAGE_URL },
+      );
+    const isMotion = (x) => x.msg.type.startsWith("motion.");
+    const toTab = (list, id) => list.filter((x) => x.tabId === id && isMotion(x));
+    const motionSent = async (from) => (await sentAfter(from)).filter(isMotion);
+    const typesOf = (list) => list.map((x) => x.msg.type).join(",") || "nothing";
+    const soFar = await page.evaluate(() => (window.__tabMessages || []).filter((x) => /^motion\./.test(x.msg.type)).map((x) => x.tabId));
+    ok(soFar.length > 0 && soFar.every((t) => t === TAB), `every motion.* message so far went to tab ${TAB} (tabs seen: ${[...new Set(soFar)].join(",")})`);
+    m = await motion();
+    ok(m.tabId === TAB, `motion.tabId is pinned to ${TAB} by the pick (${m.tabId})`);
+    ok(m.away === false, `away is false while tab ${TAB} is active (${m.away})`);
+    await click(countRow);
+    await settle(150);
+    await fromPage({ type: "motion.rehearse-ready", total: 1100, childCount: 0, stagger: null, reduced: false });
+    await settle();
+    ok((await motion()).rehearsing === true, "a rehearsal is live before the browser tab changes");
+    seq = await mark();
+    await switchTab(OTHER);
+    await settle(300);
+    sent = await motionSent(seq);
+    ok(toTab(sent, TAB).filter((x) => x.msg.type === "motion.stop").length === 1, `switching to tab ${OTHER} sends motion.stop once, to the PINNED tab ${TAB} (${typesOf(toTab(sent, TAB))})`);
+    ok(toTab(sent, OTHER).length === 0, `and nothing at all to tab ${OTHER} (${typesOf(toTab(sent, OTHER))})`);
+    m = await motion();
+    ok(m.away === true && m.tabId === TAB, `away is true, the pin is still ${TAB} (${m.away}, ${m.tabId})`);
+    ok(m.rehearsing === false && m.playing === false, "nothing is live on the page");
+    ok(m.pickedTarget && m.pickedTarget.selector === "div.kpi" && m.patternId === "count-up", "the target and the kept pattern survive the switch");
+    const notice = page.getByText("Picked on another tab. Switch back to it, or pick here.", { exact: true });
+    const pickHere = page.getByRole("button", { name: "Pick here", exact: true });
+    ok(await notice.isVisible(), 'the tab reads "Picked on another tab. Switch back to it, or pick here."');
+    ok(await pickHere.isVisible(), 'with a "Pick here" link');
+    ok((await page.getByText("Click the element to animate.", { exact: true }).count()) === 0, "the instruction card is replaced, not stacked");
+    await page.screenshot({ path: path.join(SHOTS, "motion-away.png"), fullPage: true });
+    // F2: injection is the other half of the report — a hover / loop /
+    // re-arm while away must not even ask the background to put the
+    // content script into tab 9. (The panel's own ensure-on-activate for
+    // the Annotate overlay fires INSIDE switchTab, before this mark.)
+    const injectsTo = (from, id) =>
+      page.evaluate(
+        ({ from, id }) => (window.__runtimeSent || []).filter((r) => r.seq > from && r.msg && r.msg.type === "ensure-content-script" && r.msg.tabId === id),
+        { from, id },
+      );
+    const awayMark = await mark();
+    seq = await mark();
+    await hoverRow(riseRow, 300);
+    sent = await motionSent(seq);
+    ok(sent.length === 0, `hovering Rise in while away sends nothing to any tab (${typesOf(sent)} → ${sent.map((x) => x.tabId).join(",")})`);
+    ok((await motion()).previewingId === null, "and nothing is marked as previewing");
+    await park();
+    await page.evaluate(() => {
+      window.__app.motion.loop = true;
+      window.__app.motion.rehearsing = true; // as if a loop were mid-flight
+      window.__app.onMotionFinished(window.__app.motion.seq);
+    });
+    await settle(700);
+    sent = await motionSent(seq);
+    ok(sent.length === 0, `loop on + motion.finished while away sends nothing after 600ms (${typesOf(sent)})`);
+    const baseline = await motion();
+    await page.evaluate(() => {
+      window.__app.motion.loop = false;
+      window.__app.motion.rehearsing = false;
+      window.__app.setMotionToken("duration", "morph");
+      window.__app.setMotionStaggerStep(90);
+      window.__app.setMotionReduced(true);
+      void window.__app.playMotion();
+      void window.__app.reverseMotion();
+      void window.__app.seekMotion(10);
+      window.__app.setMotionSpeed(0.5);
+      void window.__app.rehearseMotion(true);
+      void window.__app.previewMotionPattern("rise-in");
+    });
+    await settle(200);
+    sent = await motionSent(seq);
+    ok(sent.length === 0, `token / stagger / reduced / play / reverse / seek / speed / rehearse / preview while away send nothing (${typesOf(sent)})`);
+    m = await motion();
+    ok(
+      m.rehearsing === false && m.previewingId === null && m.playing === false && m.speed === baseline.speed && m.durationToken === baseline.durationToken && m.staggerStep === baseline.staggerStep && m.reduced === baseline.reduced && m.position === 0,
+      `and change nothing (inert, not queued) (speed ${m.speed}, duration ${m.durationToken}, step ${m.staggerStep}, reduced ${m.reduced})`,
+    );
+    ok((await injectsTo(awayMark, OTHER)).length === 0, `no content-script injection (ensure-content-script) into tab ${OTHER} while away (F2)`);
+    await fromPage({ type: "motion.rehearse-ready", total: 999, childCount: 9, stagger: null, reduced: false }, OTHER);
+    await settle();
+    ok((await motion()).rehearsing === false && (await motion()).total === 0, `a motion.rehearse-ready from tab ${OTHER} is ignored`);
+    seq = await mark();
+    await switchTab(TAB);
+    await settle(200);
+    m = await motion();
+    ok(m.away === false && m.tabId === TAB, `back on tab ${TAB}: away is false, the pin unchanged (${m.away}, ${m.tabId})`);
+    ok((await notice.count()) === 0 && (await pickHere.count()) === 0, "the notice is gone");
+    ok((await motionSent(seq)).length === 0, "returning sends nothing by itself");
+    await hoverRow(riseRow, 300);
+    sent = await sentAfter(seq, "motion.rehearse");
+    ok(sent.length === 1 && sent[0].tabId === TAB && sent[0].msg.patternId === "rise-in", `hovering Rise in previews on tab ${TAB} again (${ids(sent)} → ${sent.map((x) => x.tabId).join(",")})`);
+    await park();
+    await settle(200);
+    await click(rePick.first());
+    await waitPicking("start");
+    seq = await mark();
+    await switchTab(OTHER);
+    await settle(300);
+    sent = await motionSent(seq);
+    ok(toTab(sent, TAB).filter((x) => x.msg.type === "motion.pick-cancel").length === 1, `switching away mid-pick sends motion.pick-cancel once, to ${TAB} (${typesOf(toTab(sent, TAB))})`);
+    ok(toTab(sent, OTHER).length === 0, `and still nothing to ${OTHER}`);
+    m = await motion();
+    ok(m.picking === null && m.away === true, `picking is cleared and away is true (${m.picking}, ${m.away})`);
+    const awayMark2 = await mark();
+    ok((await injectsTo(awayMark2, OTHER)).length === 0, `still no injection into tab ${OTHER} before "Pick here" (F2)`);
+    seq = await mark();
+    const pickHereMark = seq;
+    await click(pickHere);
+    await waitPicking("start");
+    sent = await motionSent(seq);
+    m = await motion();
+    ok(m.tabId === null && m.away === false && m.pickedTarget === null && m.patternId === null, `"Pick here" clears the pin and the target (${m.tabId}, ${m.away})`);
+    ok(toTab(sent, OTHER).filter((x) => x.msg.type === "motion.pick-element").length === 1 && m.picking === "start", `and arms pick mode on the ACTIVE tab ${OTHER} (${typesOf(toTab(sent, OTHER))})`);
+    ok(sent.filter((x) => x.msg.type === "motion.stop").every((x) => x.tabId === TAB), `its stop (if any) went to the old pin ${TAB}, not ${OTHER}`);
+    // F2: in the whole run so far tab 9 was addressed exactly once — by
+    // "Pick here" — and only from then on may the script be put there.
+    const pickElementsTo9 = await page.evaluate((id) => (window.__tabMessages || []).filter((x) => x.tabId === id && x.msg.type === "motion.pick-element").length, OTHER);
+    ok(pickElementsTo9 === 1, `tab ${OTHER} has received exactly ONE motion.pick-element so far — "Pick here" (${pickElementsTo9})`);
+    ok((await injectsTo(awayMark2, OTHER)).every((r) => r.seq > pickHereMark), `any injection into tab ${OTHER} came only after "Pick here" (F2)`);
+
+    // F6 (lead decision): leaving the tab an UNPINNED pick is armed on
+    // cancels it THERE and arms nothing on the new tab (that would inject
+    // into every tab visited); the card says why pick mode went off.
+    seq = await mark();
+    await switchTab(TAB);
+    await settle(300);
+    sent = await motionSent(seq);
+    ok(toTab(sent, OTHER).filter((x) => x.msg.type === "motion.pick-cancel").length === 1, `switching away from an unpinned armed pick sends motion.pick-cancel once, to ${OTHER} (${typesOf(toTab(sent, OTHER))})`);
+    ok(sent.filter((x) => x.msg.type === "motion.pick-element").length === 0, `and arms nothing on tab ${TAB} — no auto-arm (F6) (${typesOf(toTab(sent, TAB))})`);
+    m = await motion();
+    ok(m.picking === null && m.tabId === null && m.away === false && m.offReason === "switched", `picking null, no pin, not away, offReason "switched" (${m.picking}, ${m.tabId}, ${m.away}, ${m.offReason})`);
+    const switchedCopy = page.getByText("You switched tabs, so pick mode is off.", { exact: true });
+    ok(await switchedCopy.isVisible(), 'the card reads "You switched tabs, so pick mode is off."');
+    ok((await page.getByText("Pick mode is off.", { exact: true }).count()) === 0, 'not the plain Esc copy "Pick mode is off."');
+    ok(await pickLink.isVisible(), 'with the same "Pick on page" link');
+    await page.screenshot({ path: path.join(SHOTS, "motion-switched-off.png"), fullPage: true });
+    seq = await mark();
+    await switchTab(OTHER);
+    await settle(300);
+    ok((await motionSent(seq)).filter((x) => x.msg.type === "motion.pick-element").length === 0 && (await switchedCopy.isVisible()), "coming back arms nothing either — the copy stays until the link is clicked");
+    seq = await mark();
+    await click(pickLink);
+    await waitPicking("start");
+    sent = await motionSent(seq);
+    m = await motion();
+    ok(toTab(sent, OTHER).filter((x) => x.msg.type === "motion.pick-element").length === 1 && m.picking === "start" && m.offReason === null, `"Pick on page" arms the ACTIVE tab ${OTHER} and clears the reason (${typesOf(toTab(sent, OTHER))}, ${m.offReason})`);
+    ok(await page.getByText("Esc leaves pick mode.", { exact: true }).isVisible(), 'the hint is back to "Esc leaves pick mode."');
+    seq = await mark();
+    await fromPage({ type: "motion.picked", target: GRID }, OTHER);
+    await settle(150);
+    m = await motion();
+    ok(m.tabId === OTHER && m.pickedTarget && m.pickedTarget.selector === "ul.grid", `a pick from tab ${OTHER} pins ${OTHER} (${m.tabId})`);
+    sent = await sentAfter(seq, "motion.rehearse");
+    ok(sent.length === 1 && sent[0].tabId === OTHER && sent[0].msg.patternId === "stagger", `and its auto-play rehearses on ${OTHER} (${ids(sent)} → ${sent.map((x) => x.tabId).join(",")})`);
+    await page.evaluate(() => window.__app.stopMotionRehearsal());
+    await settle();
+
     await page.close();
     await context.close();
 
