@@ -234,4 +234,24 @@ node e2e-layout/motion.cjs            # build + run
 node e2e-layout/motion.cjs --no-build # reuse the last build
 ```
 
-`npm run test:e2e` runs all nine scripts.
+## report-owner.cjs — Report: declare the owner
+
+Regression for the owner setting. Mounts the whole side panel with Report
+on (`?variant=report`) at 380 × 760 (one pass at 600 wide) and plays the
+companion: captures `module.query.submit` and answers as the agent through
+`__app.onMessage`. Asserts the owner line ("Owner" + "All committers"),
+the gear → "Report settings" dialog and its Owner copy, add (Enter and
+Add) / remove, normalization and every refusal (repeat, too short,
+flag-like, empty, the 5 cap with the input disabled), persistence under
+`pinta-report-owners` (and sanitizing a tampered blob), `author` /
+`authors` on the query (one owner = `author` only), the stamp on the
+finished run, the stale flag + regenerate, the "This report covers only …"
+mismatch banner with its ✕, the markdown export's owner line, and a
+pending run with no `authors` (the loading-states walk) with no page error.
+
+```sh
+node e2e-layout/report-owner.cjs            # build + run
+node e2e-layout/report-owner.cjs --no-build # reuse the last build
+```
+
+`npm run test:e2e` runs all the scripts above.

@@ -56,12 +56,17 @@ import {
   isoDateLocal,
   looksLikeModuleSummary,
   mergeAnnotationChildren,
+  normalizeReportOwner,
   oneLineComment,
   pagePathFromUrl,
   parseShotResult,
   rangeWindow,
   renderReportMarkdown,
   renderReportSummaryMarkdown,
+  REPORT_OWNER_LIMIT,
+  reportEchoedOwners,
+  reportRunOwners,
+  sanitizeReportOwners,
   shotKeyForItem,
   type ReportCategory,
   type ReportCustomItem,
@@ -5079,6 +5084,9 @@ class ExtensionState {
   private static readonly REPORT_RANGE_KEY = "pinta-report-range";
   /** Extra repo paths to combine into the report (Phase 16b). */
   private static readonly REPORT_PROJECTS_KEY = "pinta-report-projects";
+  /** Whose work the report covers — the owner's git author name and/or
+   *  emails (up to `REPORT_OWNER_LIMIT`). Empty = every committer. */
+  private static readonly REPORT_OWNERS_KEY = "pinta-report-owners";
   /** Picked window for the "custom" range. */
   private static readonly REPORT_CUSTOM_KEY = "pinta-report-custom";
   /** Hand-typed custom items, kept in their own cache so a refresh
@@ -5262,6 +5270,10 @@ class ExtensionState {
        *  the title label is right (load-bearing for "custom"). */
       since: string;
       until: string;
+      /** Owner(s) this run was asked for — stamped on the finished run
+       *  so its label says what was requested even if the setting has
+       *  changed since. Empty = every committer. */
+      authors: string[];
       /** Phase 16 — the ephemeral query session's id, pinned from
        *  `module.query.created`. Lets `reconcileReport()` recover a run
        *  whose `session.synced(done)` was missed during a (half-open) WS
@@ -5280,6 +5292,10 @@ class ExtensionState {
      *  `project`. The primary (companion) project is always included
      *  implicitly, so it is NOT in this list. */
     projects: string[];
+    /** Whose work the report covers: the owner's git identities (name
+     *  and/or emails). Empty = every committer. Sent as `author` /
+     *  `authors` on the next generate; persisted. */
+    owners: string[];
     /** Hand-typed entries the user added to the report. Persisted in their
      *  OWN cache (NOT inside `currentRun`), so regenerating the report can't
      *  drop them; merged into the day cards at render time, filtered to the
@@ -5312,6 +5328,10 @@ class ExtensionState {
     /** The day (ISO) an annotation-children fetch is in flight for, or null. */
     annotationChildrenPending: string | null;
     error: string | null;
+    /** A note on a run that SUCCEEDED (amber, not red) — e.g. the agent
+     *  confirmed fewer owner identities than were asked for. Cleared on
+     *  the next generate; `error` stays for failures. */
+    notice: string | null;
   }>({
     currentRun: null,
     pending: null,
@@ -5319,6 +5339,7 @@ class ExtensionState {
     customSince: "",
     customUntil: "",
     projects: [],
+    owners: [],
     customItems: [],
     expandingDate: null,
     shots: {},
@@ -5328,6 +5349,7 @@ class ExtensionState {
     annotationChildren: {},
     annotationChildrenPending: null,
     error: null,
+    notice: null,
   });
   private reportTimer: ReturnType<typeof setTimeout> | null = null;
   private reportExpandTimer: ReturnType<typeof setTimeout> | null = null;
@@ -9297,6 +9319,59 @@ class ExtensionState {
     }
   }
 
+  /**
+   * Declare (one more identity of) the report's owner — a git author
+   * name or email. Returns null when added, or the reason it wasn't,
+   * worded for the settings dialog.
+   */
+  addReportOwner(raw: string): string | null {
+    if (raw.trim() === "") return "Type a git author name or email.";
+    const owner = normalizeReportOwner(raw);
+    if (!owner) {
+      return (
+        "Use a git author name or email (2–100 characters: letters, " +
+        "numbers, spaces, . _ ' - + @)."
+      );
+    }
+    if (this.report.owners.some((o) => o.toLowerCase() === owner.toLowerCase())) {
+      return `“${owner}” is already listed.`;
+    }
+    if (this.report.owners.length >= REPORT_OWNER_LIMIT) {
+      return `Up to ${REPORT_OWNER_LIMIT} names or emails — remove one first.`;
+    }
+    this.setReportOwners([...this.report.owners, owner]);
+    return null;
+  }
+
+  removeReportOwner(owner: string): void {
+    this.setReportOwners(this.report.owners.filter((o) => o !== owner));
+  }
+
+  /** Replace the owner list (re-validated) and persist it. */
+  setReportOwners(list: string[]): void {
+    this.report.owners = sanitizeReportOwners(list);
+    try {
+      void chrome.storage?.local?.set({
+        [ExtensionState.REPORT_OWNERS_KEY]: $state.snapshot(this.report.owners),
+      });
+    } catch {
+      // in-memory still drives the next generate this session
+    }
+  }
+
+  /** The owner fields a report query carries. `author` is the first
+   *  identity (null = every committer) so a /pinta skill that predates
+   *  `authors` still scopes to someone; `authors` only when there are
+   *  several, keeping the one-identity query lean. */
+  private static reportAuthorFields(
+    owners: string[],
+  ): { author: string | null; authors?: string[] } {
+    return {
+      author: owners[0] ?? null,
+      ...(owners.length > 1 ? { authors: [...owners] } : {}),
+    };
+  }
+
   /** Add a hand-typed custom item to the report for a given day. Lives in
    *  its own persisted cache, so regenerating the report never drops it.
    *  Returns the new item's id (or null if the input was empty). */
@@ -9374,6 +9449,9 @@ class ExtensionState {
       ({ since, until } = rangeWindow(r, anchor));
     }
     const runId = crypto.randomUUID();
+    // Re-validated here, not only when typed: the list is read back
+    // from storage and ends up in a command the agent builds.
+    const owners = sanitizeReportOwners($state.snapshot(this.report.owners));
     this.report.pending = {
       runId,
       startedAt: Date.now(),
@@ -9381,9 +9459,12 @@ class ExtensionState {
       anchorDate: anchor,
       since,
       until,
+      authors: owners,
       sessionId: null,
     };
     this.report.error = null;
+    // The previous run's note (e.g. "covers only …") is about THAT run.
+    this.report.notice = null;
     this.claimNotice = null;
     this.armReportTimeout();
     const queryComment = JSON.stringify({
@@ -9394,7 +9475,8 @@ class ExtensionState {
       since,
       until,
       includeWeekends: false,
-      author: null,
+      // Whose work to report: null = every committer.
+      ...ExtensionState.reportAuthorFields(owners),
       // Extra repos to combine (Phase 16b). Omitted when empty so a
       // single-project report stays lean. The agent runs `git -C <path>`
       // per entry and tags each item's `project`.
@@ -9871,7 +9953,8 @@ class ExtensionState {
       // No cap, expand collapsed merges into individual commits.
       nocap: true,
       expandMerges: true,
-      author: run.author ?? null,
+      // Same owner(s) the run itself was scoped to.
+      ...ExtensionState.reportAuthorFields(reportRunOwners(run) ?? []),
       ...(this.report.projects.length > 0
         ? { projects: $state.snapshot(this.report.projects) }
         : {}),
@@ -9979,11 +10062,34 @@ class ExtensionState {
           anchorDate: pending.anchorDate,
           since: pending.since,
           until: pending.until,
+          authors: pending.authors,
           generatedAt: Date.now(),
         });
         if (run) {
           this.report.currentRun = run;
           this.report.error = null;
+          // Several identities were asked for but the agent confirmed
+          // fewer: its /pinta skill predates `authors` and filtered on
+          // the single `author` only. The run keeps the label it was
+          // asked for; the user is told what it actually covers.
+          // A notice, not an error: the run succeeded (amber, F2).
+          const asked = pending.authors ?? [];
+          const confirmed = reportEchoedOwners(raw);
+          if (
+            asked.length > 1 &&
+            confirmed !== null &&
+            confirmed.length < asked.length
+          ) {
+            this.report.notice =
+              `This report covers ${
+                confirmed.length === 0
+                  ? "every committer"
+                  : `only “${confirmed.join(", ")}”`
+              }. Your Pinta agent is out of date and filters on ${
+                confirmed.length === 1 ? "one name only" : "fewer names than you set"
+              }. Update it (npx pinta-companion@latest install-skill), ` +
+              "restart it, then regenerate.";
+          }
           void this.saveReportRun();
         } else {
           const preview = summary.slice(0, 200);
@@ -10082,6 +10188,18 @@ class ExtensionState {
           ...new Set(raw.filter((p): p is string => typeof p === "string")),
         ];
       }
+    } catch {
+      // defaults stand
+    }
+    try {
+      const stored = await chrome.storage?.local?.get(
+        ExtensionState.REPORT_OWNERS_KEY,
+      );
+      // Sanitized on the way in: a tampered or stale blob must never
+      // reach the agent's `--author`.
+      this.report.owners = sanitizeReportOwners(
+        stored?.[ExtensionState.REPORT_OWNERS_KEY],
+      );
     } catch {
       // defaults stand
     }

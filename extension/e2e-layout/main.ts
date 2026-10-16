@@ -7,6 +7,7 @@ import ShellVariants from "./Shell.variants.svelte";
 import ShellApp from "./Shell.app.svelte";
 import ShellDevices from "./Shell.devices.svelte";
 import ShellMotion from "./Shell.motion.svelte";
+import ShellReport from "./Shell.report.svelte";
 
 // ?variant=control mounts the simulated pre-fix shell (negative control);
 // ?variant=test-pilot mounts the Test Pilot tab (docx-import.cjs);
@@ -15,7 +16,8 @@ import ShellMotion from "./Shell.motion.svelte";
 // ?variant=devices mounts the Devices canvas (devices-pulse.cjs);
 // ?variant=overlay runs the content overlay as a device frame (devices-frames.cjs);
 // ?variant=motion mounts the side panel with the Motion module on (motion.cjs);
-// ?variant=motion-runner is a bare page exposing the in-page motion runner (motion.cjs).
+// ?variant=motion-runner is a bare page exposing the in-page motion runner (motion.cjs);
+// ?variant=report mounts the side panel with the Report module on (report-owner.cjs).
 const variant = new URLSearchParams(location.search).get("variant");
 const control = variant === "control";
 const target = document.getElementById("app")!;
@@ -25,6 +27,7 @@ const named: Record<string, typeof Shell> = {
   app: ShellApp,
   devices: ShellDevices,
   motion: ShellMotion,
+  report: ShellReport,
 };
 const tab = variant && named[variant] ? variant : null;
 if (variant === "motion-runner") {

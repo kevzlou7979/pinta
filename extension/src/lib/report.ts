@@ -171,8 +171,14 @@ export type ReportRun = {
   since?: string;
   until?: string;
   generatedAt: number;
-  /** git user / Pinta author the report was scoped to, if any. */
+  /** First owner identity the report was scoped to, if any — the
+   *  old-skill-compatible single `author` the query also carries. */
   author?: string;
+  /** Every owner identity this run was ASKED for (the setting at
+   *  generate time), stamped on the finished run so its label says what
+   *  was requested even if the setting has changed since. Empty = every
+   *  committer. Absent on runs stored before the owner existed. */
+  authors?: string[];
   /** TRUE-dated buckets as returned by the agent (weekend days NOT yet
    *  folded). Render through `foldWeekends` for display. */
   days: ReportDay[];
@@ -548,6 +554,98 @@ export function mergeReportDays(
 
 /** Distinct non-empty project labels across a run. >1 means the report
  *  spans multiple repos → cards + export tag each item with its project. */
+// ─── Report owner ─────────────────────────────────────────────────────
+// Whose work the report covers: the owner's git author name and/or the
+// emails they commit under. The list is sent to the agent as `author` /
+// `authors` and ends up after `git log --author=`, so every entry is
+// re-validated at every boundary (typed, loaded from storage, sent).
+
+/** Most identities one owner may declare — a name plus the emails they
+ *  commit under. Keeps the query (and the agent's `--author` list) short. */
+export const REPORT_OWNER_LIMIT = 5;
+
+/**
+ * Normalize one declared owner — a git author name or email — or null
+ * when it can't be used as one. Internal whitespace collapses to single
+ * spaces (a pasted line break is just spacing and never survives into
+ * the value). What remains must read as a name or an email: letters of
+ * any script, digits, spaces and `. _ ' - + @` — 2 to 100 characters,
+ * starting with a letter or digit. That rules out anything that could be
+ * read as a flag, a pattern or a shell command once the agent puts it
+ * after `--author=`.
+ */
+export function normalizeReportOwner(raw: string): string | null {
+  const v = raw.replace(/\s+/g, " ").trim();
+  return /^[\p{L}\p{N}][\p{L}\p{N} _.'@+-]{1,99}$/u.test(v) ? v : null;
+}
+
+/**
+ * Coerce a stored / received owner list into a usable one: strings only,
+ * each normalized, deduped case-insensitively (git's `-i` match treats
+ * "mark baldemor" and "Mark Baldemor" as the same person), empties
+ * dropped, capped at `REPORT_OWNER_LIMIT`. Anything that isn't an array
+ * → `[]` (every committer).
+ */
+export function sanitizeReportOwners(input: unknown): string[] {
+  if (!Array.isArray(input)) return [];
+  const out: string[] = [];
+  const seen = new Set<string>();
+  for (const raw of input) {
+    if (typeof raw !== "string") continue;
+    const v = normalizeReportOwner(raw);
+    if (!v || seen.has(v.toLowerCase())) continue;
+    seen.add(v.toLowerCase());
+    out.push(v);
+    if (out.length >= REPORT_OWNER_LIMIT) break;
+  }
+  return out;
+}
+
+/**
+ * The owners a run was asked for, from the stamped `authors` (or the
+ * single `author` of an older run). `[]` for a run that covered every
+ * committer — including one stored before the owner existed (no
+ * `authors`, no usable `author`): it WAS an every-committer run, so a
+ * setting declared since flags it stale. Null only when there is no run.
+ */
+export function reportRunOwners(
+  run: ReportRun | null | undefined,
+): string[] | null {
+  if (!run) return null;
+  if (Array.isArray(run.authors)) return sanitizeReportOwners(run.authors);
+  if (typeof run.author === "string") {
+    const one = normalizeReportOwner(run.author);
+    return one ? [one] : [];
+  }
+  return [];
+}
+
+/**
+ * The `Owner: <names>` an export opens with when the run was scoped to
+ * someone — undefined for an every-committer run, so an invoice paste
+ * never gains an "Owner: All committers" line. Shared by the summary
+ * export and the per-day export.
+ */
+export function reportExportOwner(
+  run: ReportRun | null | undefined,
+): string | undefined {
+  const owners = reportRunOwners(run) ?? [];
+  return owners.length > 0 ? owners.join(", ") : undefined;
+}
+
+/** True when both lists name the same people — another order or case is
+ *  NOT a change (git matches case-insensitively anyway). */
+export function sameReportOwners(a: string[], b: string[]): boolean {
+  const key = (list: string[]) =>
+    [...new Set(list.map((o) => o.toLowerCase()))].sort().join("\n");
+  return key(a) === key(b);
+}
+
+/** What the owner line / export says for a list of owners. */
+export function reportOwnerLabel(owners: string[]): string {
+  return owners.length > 0 ? owners.join(", ") : "All committers";
+}
+
 export function reportProjects(run: ReportRun): string[] {
   const set = new Set<string>();
   for (const d of run.days) {
@@ -803,9 +901,14 @@ function renderItemBlocks(items: ReportItem[], multiProject: boolean): string[] 
  *  spans multiple projects. A roll-up item's `children` (e.g. each Pinta
  *  annotation) are indented as nested bullets — plain descriptions, no page
  *  routes. Shared by the whole-report export and the per-day export button. */
-export function renderDayMarkdown(day: ReportDay, multiProject: boolean): string {
+export function renderDayMarkdown(
+  day: ReportDay,
+  multiProject: boolean,
+  owner?: string,
+): string {
   const lines = [
     `## ${formatDayHeading(day.date)}`,
+    ...(owner ? [`Owner: ${owner}`, ""] : []),
     ...renderItemBlocks(day.items, multiProject),
   ];
   return lines.join("\n").trimEnd() + "\n";
@@ -827,7 +930,10 @@ export function renderReportMarkdown(run: ReportRun): string {
   const multiProject = reportProjects(run).length > 1;
   const days = foldWeekends(run.days, run.range);
   const blocks = days.map((day) => renderDayMarkdown(day, multiProject));
-  return [`# Report — ${label}`, "", ...blocks].join("\n").trimEnd() + "\n";
+  // Whose work this is, right under the title — "All committers" when
+  // the report was not scoped to anyone.
+  const owner = `Owner: ${reportOwnerLabel(reportRunOwners(run) ?? [])}`;
+  return [`# Report — ${label}`, "", owner, "", ...blocks].join("\n").trimEnd() + "\n";
 }
 
 /** Hard per-day budget for the summary export — it is pasted into a
@@ -919,6 +1025,8 @@ export function balanceReportDays(
  * "read it like a status update" format. Weekend work is folded into the
  * adjacent weekday (matching the cards), concatenating any weekend summaries.
  * Falls back to plain item lines for a day the agent didn't summarize.
+ * Opens with `Owner: <names>` ONLY when the run was scoped to someone —
+ * an every-committer run gets no owner line (invoice paste stays clean).
  */
 export function renderReportSummaryMarkdown(run: ReportRun): string {
   const multiProject = reportProjects(run).length > 1;
@@ -961,7 +1069,11 @@ export function renderReportSummaryMarkdown(run: ReportRun): string {
       blocks.push(`${head}\n${body}`);
     }
   }
-  return blocks.join("\n\n").trimEnd() + "\n";
+  const owner = reportExportOwner(run);
+  return (
+    [...(owner ? [`Owner: ${owner}`] : []), ...blocks].join("\n\n").trimEnd() +
+    "\n"
+  );
 }
 
 /**
@@ -981,6 +1093,11 @@ export function parseReportPayload(
     generatedAt: number;
     since?: string;
     until?: string;
+    /** The owners the request was scoped to. When given, the run is
+     *  stamped with exactly these (the agent's echo is not trusted for
+     *  the label); omitted = a caller that didn't ask, so the agent's
+     *  `author` is kept if it is a usable one. */
+    authors?: string[];
   },
 ): ReportRun | null {
   if (!raw || typeof raw !== "object") return null;
@@ -1019,9 +1136,34 @@ export function parseReportPayload(
     generatedAt: ctx.generatedAt,
     ...(ctx.since ? { since: ctx.since } : {}),
     ...(ctx.until ? { until: ctx.until } : {}),
-    ...(typeof obj.author === "string" && obj.author ? { author: obj.author } : {}),
+    ...stampReportOwners(obj, ctx.authors),
     days,
   };
+}
+
+/** The owner fields a parsed run carries — see `parseReportPayload.ctx`. */
+function stampReportOwners(
+  obj: Record<string, unknown>,
+  asked: string[] | undefined,
+): Pick<ReportRun, "author" | "authors"> {
+  if (asked === undefined) {
+    const one = typeof obj.author === "string" ? normalizeReportOwner(obj.author) : null;
+    return one ? { author: one } : {};
+  }
+  const owners = sanitizeReportOwners(asked);
+  return { ...(owners.length > 0 ? { author: owners[0] } : {}), authors: owners };
+}
+
+/**
+ * The owners the agent says it gathered for, when it echoed `authors`
+ * back (the /pinta skill does so once it understands the field), or null
+ * when the reply carries no echo — an older skill, which can't be told
+ * apart from "gathered for everyone asked".
+ */
+export function reportEchoedOwners(raw: unknown): string[] | null {
+  if (!raw || typeof raw !== "object") return null;
+  const echoed = (raw as Record<string, unknown>).authors;
+  return Array.isArray(echoed) ? sanitizeReportOwners(echoed) : null;
 }
 
 function coerceItem(raw: unknown, fallbackId: string): ReportItem | null {

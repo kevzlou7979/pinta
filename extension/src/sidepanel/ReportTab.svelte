@@ -28,8 +28,13 @@
     mergeCustomItems,
     rangeWindow,
     renderDayMarkdown,
+    REPORT_OWNER_LIMIT,
+    reportExportOwner,
     reportItemDisplayTitle,
+    reportOwnerLabel,
     reportProjects,
+    reportRunOwners,
+    sameReportOwners,
     type ReportCategory,
     type ReportDay,
     type ReportItem,
@@ -89,6 +94,30 @@
   const pending = $derived(app.report.pending !== null);
   const connected = $derived(app.connectionStatus === "connected");
   const multiProject = $derived(run ? reportProjects(run).length > 1 : false);
+
+  // ─── Owner: whose work the report covers ────────────────────────────
+  // Every array read here is guarded — a `pending` set up without
+  // `authors` (an older caller, the loading-states walk) or an owners
+  // list that is still loading must never crash the tab.
+  /** The owners the run on screen was asked for; [] = an every-committer
+   *  run (including one stored before the owner existed — it covered
+   *  everyone, so a setting declared since flags it); null = no run. */
+  const runOwners = $derived(reportRunOwners(run));
+  /** What the owner line names: the run in flight, else the run on
+   *  screen, else the setting the next generate will use. */
+  const shownOwners = $derived(
+    app.report.pending?.authors ?? runOwners ?? app.report.owners ?? [],
+  );
+  /** The setting changed since this report was generated (same people
+   *  in another order or case is not a change). */
+  const ownerStale = $derived(
+    !pending &&
+      runOwners !== null &&
+      !sameReportOwners(runOwners, app.report.owners ?? []),
+  );
+  const ownerLabel = $derived(reportOwnerLabel(shownOwners));
+  const ownerCount = $derived(app.report.owners?.length ?? 0);
+  const atOwnerLimit = $derived(ownerCount >= REPORT_OWNER_LIMIT);
   // Per-item disclosure for roll-up entries (e.g. the "Pinta annotations"
   // parent) — expand to reveal each child title. Keyed by item id.
   let expandedChildren = $state<Record<string, boolean>>({});
@@ -107,7 +136,83 @@
 
   let newPath = $state("");
   let filterMenuOpen = $state(false);
-  let projectsDialogOpen = $state(false);
+  // Report settings dialog (the gear): owner + extra repos.
+  let settingsOpen = $state(false);
+  let newOwner = $state("");
+  /** Why the last owner entry was refused — shown in the dialog until
+   *  dismissed or the next keystroke. */
+  let ownerError = $state<string | null>(null);
+  /** The control that opened the dialog (the gear or the owner line) —
+   *  focus goes back to it on close so a keyboard user isn't dropped. */
+  let settingsOpener: HTMLElement | null = null;
+
+  function openSettings() {
+    const ae = document.activeElement;
+    settingsOpener = ae instanceof HTMLElement && ae !== document.body ? ae : null;
+    settingsOpen = true;
+  }
+
+  /** Close the dialog; `refocus` hands focus back to the opener (Esc /
+   *  the Close button), falling back to the gear — not on an outside click. */
+  function closeSettings(refocus = false) {
+    settingsOpen = false;
+    newOwner = "";
+    ownerError = null;
+    const back =
+      settingsOpener && settingsOpener.isConnected
+        ? settingsOpener
+        : document.querySelector<HTMLElement>("[data-pinta-report-gear]");
+    settingsOpener = null;
+    if (refocus) queueMicrotask(() => back?.focus());
+  }
+
+  /** Focusable controls inside the dialog, in tab order. */
+  function dialogFocusables(node: HTMLElement): HTMLElement[] {
+    return [
+      ...node.querySelectorAll<HTMLElement>(
+        'button:not([disabled]), input:not([disabled]), [tabindex]:not([tabindex="-1"])',
+      ),
+    ];
+  }
+
+  /** Esc closes; Tab / Shift+Tab stay inside the dialog (aria-modal). */
+  function onSettingsKeydown(e: KeyboardEvent) {
+    if (e.key === "Escape") {
+      e.preventDefault();
+      e.stopPropagation();
+      closeSettings(true);
+      return;
+    }
+    if (e.key !== "Tab") return;
+    const node = e.currentTarget as HTMLElement;
+    const items = dialogFocusables(node);
+    if (items.length === 0) return;
+    const first = items[0]!;
+    const last = items[items.length - 1]!;
+    const active = document.activeElement;
+    if (e.shiftKey && (active === first || active === node || !node.contains(active))) {
+      e.preventDefault();
+      last.focus();
+    } else if (!e.shiftKey && (active === last || !node.contains(active))) {
+      e.preventDefault();
+      first.focus();
+    }
+  }
+
+  /** Put focus in the owner input when the dialog opens (the next
+   *  enabled control when the input is disabled at the limit). */
+  function focusOwnerInput(node: HTMLElement) {
+    queueMicrotask(() => {
+      const input = node.querySelector<HTMLInputElement>("input:not([disabled])");
+      (input ?? dialogFocusables(node)[0] ?? node).focus();
+    });
+  }
+
+  function addOwner() {
+    const reason = app.addReportOwner(newOwner);
+    ownerError = reason;
+    if (!reason) newOwner = "";
+  }
 
   // ─── Per-entry "proof" screenshot (Phase 16f) ───────────────────────
   // Click the camera on a row → if no shot exists yet, ask the /pinta
@@ -404,9 +509,11 @@
         ...(day.foldedFrom ?? []),
       ]);
     const merged = mergeAnnotationChildren([day], app.report.annotationChildren);
+    // The owner line only when the run was scoped to someone — never an
+    // "Owner: All committers" line (same rule as the summary export).
     download(
       `pinta-report-${day.date}.md`,
-      renderDayMarkdown(merged[0]!, multiProject),
+      renderDayMarkdown(merged[0]!, multiProject, reportExportOwner(run)),
     );
   }
 
@@ -787,13 +894,14 @@
         {/if}
       </div>
 
-      <!-- Projects: opens the repos dialog -->
+      <!-- Settings gear: opens the owner + repos dialog -->
       <button
         type="button"
         class={ACTION_BTN}
-        onclick={() => (projectsDialogOpen = true)}
-        title="Projects — combine extra repos"
-        aria-label="Projects"
+        onclick={openSettings}
+        title="Report settings — owner and extra repos"
+        aria-label="Report settings"
+        data-pinta-report-gear
       >
         <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
           <circle cx="12" cy="12" r="3" />
@@ -841,6 +949,28 @@
     </div>
   </div>
 
+  <!-- Owner: whose work the report on screen covers. Click to change. -->
+  <p
+    class="flex flex-wrap items-baseline gap-x-1 text-[11px] text-ink-500 dark:text-night-mute leading-snug"
+    data-pinta-report-owner
+  >
+    <span>Owner</span>
+    <!-- Reads as a control: dotted underline + a pencil, brand pink on hover. -->
+    <button
+      type="button"
+      class="group flex-1 min-w-0 max-w-max text-left break-words [overflow-wrap:anywhere] font-medium text-ink-700 dark:text-night-dim underline decoration-dotted decoration-ink-400 dark:decoration-night-mute underline-offset-2 hover:text-brand-pink hover:decoration-brand-pink dark:hover:text-brand-pink-light dark:hover:decoration-brand-pink-light focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-brand-pink/40 rounded-sm"
+      onclick={openSettings}
+      title={shownOwners.length > 1
+        ? `${ownerLabel} — change whose commits and PRs the report covers`
+        : "Change whose commits and PRs the report covers"}
+      aria-label={`Report owner: ${ownerLabel} — change`}
+    >{ownerLabel}<svg class="inline-block align-[-1px] ml-1 text-ink-400 dark:text-night-mute group-hover:text-brand-pink dark:group-hover:text-brand-pink-light" width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 20h9" /><path d="M16.5 3.5a2.1 2.1 0 0 1 3 3L7 19l-4 1 1-4Z" /></svg></button>
+    {#if ownerStale}
+      <!-- Its own line under the name; "regenerate" is the same action as the toolbar refresh. -->
+      <span class="basis-full text-amber-700 dark:text-amber-400 break-words [overflow-wrap:anywhere]" data-pinta-report-owner-stale>— now set to <span class="font-medium">{reportOwnerLabel(app.report.owners ?? [])}</span>; <button type="button" class="underline decoration-dotted underline-offset-2 hover:text-amber-900 dark:hover:text-amber-200 disabled:opacity-50 focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-amber-400 rounded-sm" onclick={generate} disabled={pending || !connected} title={connected ? "Regenerate the report for the new owner" : "Connect a companion to regenerate"} aria-label="Regenerate the report for the new owner">regenerate</button> to apply</span>
+    {/if}
+  </p>
+
   {#if !connected}
     <p class="text-[11.5px] text-amber-700 dark:text-amber-400 leading-snug">
       Connect a companion (run <code>pinta-companion .</code> in your project) so the agent can gather your tasks.
@@ -857,6 +987,25 @@
         type="button"
         class="shrink-0 text-red-500 hover:text-red-700 dark:hover:text-red-200 leading-none px-1"
         onclick={() => (app.report.error = null)}
+        aria-label="Dismiss"
+        title="Dismiss"
+      >✕</button>
+    </div>
+  {/if}
+
+  <!-- A note on a run that succeeded (e.g. the agent covered fewer owner
+       identities than asked): amber + status, never the red alert. -->
+  {#if app.report.notice}
+    <div
+      class="flex items-start gap-2 rounded-md border border-amber-300 bg-amber-50 dark:border-amber-800/50 dark:bg-amber-950/30 p-2 text-[11.5px] text-amber-800 dark:text-amber-300 leading-snug"
+      role="status"
+      data-pinta-report-notice
+    >
+      <p class="flex-1 min-w-0 break-words [overflow-wrap:anywhere]">{app.report.notice}</p>
+      <button
+        type="button"
+        class="shrink-0 text-amber-600 hover:text-amber-900 dark:hover:text-amber-100 leading-none px-1"
+        onclick={() => (app.report.notice = null)}
         aria-label="Dismiss"
         title="Dismiss"
       >✕</button>
@@ -968,32 +1117,126 @@
   {/if}
 </section>
 
-<!-- Projects dialog (modal) — combine extra repos -->
-{#if projectsDialogOpen}
+<!-- Report settings (modal) — the owner + extra repos to combine -->
+{#if settingsOpen}
   <button
     type="button"
     class="fixed inset-0 z-40 bg-black/40 dark:bg-black/60"
-    onclick={() => (projectsDialogOpen = false)}
-    aria-label="Close projects dialog"
+    onclick={() => closeSettings(false)}
+    tabindex="-1"
+    aria-label="Close report settings"
   ></button>
+  <!-- max-h + overflow is deliberate: a full owner list plus repos can
+       outgrow the side panel, and a modal must not get cut off. Anchored
+       to a fixed top (not centred) so a refusal banner appearing below
+       the input never shifts the input under the pointer. Esc closes;
+       Tab / Shift+Tab cycle inside; focus starts in the owner input. -->
   <div
-    class="fixed left-1/2 top-1/2 -translate-x-1/2 -translate-y-1/2 z-50 w-[90%] max-w-sm rounded-lg border border-ink-200 dark:border-night-line bg-white dark:bg-night-card shadow-2xl p-4 space-y-3"
+    class="fixed left-1/2 top-[10vh] -translate-x-1/2 z-50 w-[90%] max-w-sm max-h-[80vh] overflow-y-auto rounded-lg border border-ink-200 dark:border-night-line bg-white dark:bg-night-card shadow-2xl p-4 space-y-3 focus:outline-none"
     role="dialog"
     aria-modal="true"
-    aria-label="Report projects"
+    aria-label="Report settings"
+    tabindex="-1"
+    onkeydown={onSettingsKeydown}
+    use:focusOwnerInput
   >
     <div class="flex items-center justify-between">
-      <h3 class="text-sm font-semibold text-ink-900 dark:text-night-text">Projects</h3>
+      <h3 class="text-sm font-semibold text-ink-900 dark:text-night-text">Report settings</h3>
       <button
         type="button"
         class="w-7 h-7 inline-flex items-center justify-center rounded-full text-ink-500 dark:text-night-mute hover:text-ink-900 dark:hover:text-night-text hover:bg-ink-100 dark:hover:bg-night-alt"
-        onclick={() => (projectsDialogOpen = false)}
+        onclick={() => closeSettings(true)}
         aria-label="Close"
         title="Close"
       >
         <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><line x1="18" y1="6" x2="6" y2="18" /><line x1="6" y1="6" x2="18" y2="18" /></svg>
       </button>
     </div>
+
+    <!-- Owner -->
+    <div class="space-y-2" data-pinta-report-owner-settings>
+      <div class="flex items-baseline justify-between gap-2">
+        <h4 class="text-[11px] uppercase tracking-wide text-ink-500 dark:text-night-mute font-medium">Owner</h4>
+        <!-- The cap, visible before it bites. -->
+        <span
+          class="text-[10.5px] tabular-nums {atOwnerLimit ? 'text-amber-700 dark:text-amber-400' : 'text-ink-400 dark:text-night-mute'}"
+          data-pinta-report-owner-count
+        >{ownerCount} of {REPORT_OWNER_LIMIT}</span>
+      </div>
+      <p class="text-[11px] text-ink-500 dark:text-night-mute leading-snug">
+        Whose work the report covers. Add the git author name or email the
+        commits are made under — add more if the same person commits under
+        several. With none, the report covers every committer.
+      </p>
+      <div class="flex flex-wrap gap-1.5">
+        {#if ownerCount === 0}
+          <span class="inline-flex items-center px-2 py-0.5 rounded-full bg-ink-100 dark:bg-night-alt text-[11px] text-ink-700 dark:text-night-dim">
+            All committers
+          </span>
+        {/if}
+        {#each app.report.owners ?? [] as owner (owner)}
+          <span class="inline-flex items-center gap-0.5 max-w-full pl-2 pr-0.5 py-0.5 rounded-full bg-brand-pink/10 text-brand-pink dark:text-brand-pink-light text-[11px]">
+            <span class="min-w-0 break-words [overflow-wrap:anywhere]">{owner}</span>
+            <button
+              type="button"
+              class="shrink-0 w-5 h-5 inline-flex items-center justify-center rounded-full leading-none hover:bg-brand-pink/15 hover:text-brand-magenta dark:hover:text-white"
+              onclick={() => {
+                app.removeReportOwner(owner);
+                ownerError = null;
+              }}
+              aria-label={`Remove owner ${owner}`}
+              title="Remove"
+            >×</button>
+          </span>
+        {/each}
+      </div>
+      <div class="flex items-center gap-1.5">
+        <input
+          type="text"
+          bind:value={newOwner}
+          oninput={() => (ownerError = null)}
+          onkeydown={(e) => {
+            if (e.key === "Enter") addOwner();
+          }}
+          placeholder={atOwnerLimit
+            ? `Up to ${REPORT_OWNER_LIMIT} — remove one to add another`
+            : "Git author name or email"}
+          maxlength="100"
+          disabled={atOwnerLimit}
+          aria-label="Report owner — git author name or email"
+          class="flex-1 min-w-0 text-[11.5px] px-2 py-1 rounded border border-ink-200 dark:border-night-line bg-white dark:bg-night-bg text-ink-800 dark:text-night-text placeholder:text-ink-400 dark:placeholder:text-night-mute focus:outline-none focus:ring-1 focus:ring-brand-pink/40 disabled:opacity-50"
+        />
+        <button
+          type="button"
+          class="px-2.5 py-1 text-[11px] rounded border border-ink-200 dark:border-night-line text-ink-600 dark:text-night-dim hover:border-brand-pink hover:text-brand-pink disabled:opacity-50"
+          onclick={addOwner}
+          disabled={newOwner.trim() === "" || atOwnerLimit}
+          aria-label="Add owner"
+        >
+          Add
+        </button>
+      </div>
+      {#if ownerError}
+        <div
+          class="flex items-start gap-2 rounded border border-amber-300 bg-amber-50 dark:border-amber-800/50 dark:bg-amber-950/30 px-2 py-1 text-[11px] text-amber-800 dark:text-amber-300 leading-snug"
+          role="status"
+        >
+          <span class="flex-1 min-w-0 break-words [overflow-wrap:anywhere]">{ownerError}</span>
+          <button
+            type="button"
+            class="shrink-0 leading-none px-0.5 hover:text-amber-950 dark:hover:text-amber-100"
+            onclick={() => (ownerError = null)}
+            aria-label="Dismiss"
+            title="Dismiss"
+          >✕</button>
+        </div>
+      {/if}
+    </div>
+
+    <div class="border-t border-ink-100 dark:border-night-line"></div>
+
+    <!-- Projects -->
+    <h4 class="text-[11px] uppercase tracking-wide text-ink-500 dark:text-night-mute font-medium">Projects</h4>
     <p class="text-[11px] text-ink-500 dark:text-night-mute leading-snug">
       Combine extra repos into the report — gathered from git + your issue
       tracker (no Pinta activity). The current project is always included as

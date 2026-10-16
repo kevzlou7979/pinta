@@ -27,6 +27,14 @@ For the architectural design behind each item, see
   against the 10 MB extension storage limit. Re-importing a sheet she
   already has brings that sheet back instead of adding a copy.
 
+- **Report: declare the owner.** The Report tab now says whose work it
+  covers. Report settings (the gear) takes the owner's git author name
+  and/or emails — up to 5, for someone who commits under several — and
+  the report is gathered for those committers only; with none it covers
+  every committer, and says so. The owner shows above the report, is
+  written under the title of the markdown export, and a report generated
+  before the setting changed is flagged until it is regenerated.
+
 ### Changed
 
 - **Test Pilot:** a section that finishes with a failed test no longer

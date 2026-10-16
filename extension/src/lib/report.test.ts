@@ -18,12 +18,21 @@ import {
   oneLineComment,
   pagePathFromUrl,
   mergeReportDays,
+  normalizeReportOwner,
   parseHowToTestResult,
   parseReportPayload,
   parseShotResult,
   rangeWindow,
+  renderDayMarkdown,
   renderReportMarkdown,
   renderReportSummaryMarkdown,
+  REPORT_OWNER_LIMIT,
+  reportEchoedOwners,
+  reportExportOwner,
+  reportOwnerLabel,
+  reportRunOwners,
+  sameReportOwners,
+  sanitizeReportOwners,
   shotKeyForItem,
   type ReportCustomItem,
   type ReportDay,
@@ -1144,5 +1153,204 @@ describe("mergeReportDays (per-day fetch more)", () => {
     const existing = [{ date: FRI, items: [it_("a")] }];
     mergeReportDays(existing, [{ date: FRI, items: [it_("b")] }]);
     expect(existing[0]!.items).toHaveLength(1);
+  });
+});
+
+describe("report owner", () => {
+  const base: ReportRun = {
+    runId: "o1",
+    range: "daily",
+    anchorDate: FRI,
+    generatedAt: 0,
+    days: [day(FRI, ["Fix login redirect"])],
+  };
+
+  it("keeps a git author name or email as typed, with the spacing tidied", () => {
+    expect(normalizeReportOwner("Mark Baldemor")).toBe("Mark Baldemor");
+    expect(normalizeReportOwner("  Mark   Baldemor ")).toBe("Mark Baldemor");
+    expect(normalizeReportOwner("mark.baldemor@insclix.com")).toBe("mark.baldemor@insclix.com");
+    expect(normalizeReportOwner("kevzlou7979")).toBe("kevzlou7979");
+    expect(normalizeReportOwner("first+tag@example.co.uk")).toBe("first+tag@example.co.uk");
+    expect(normalizeReportOwner("Renée O'Neil-Smith")).toBe("Renée O'Neil-Smith");
+    expect(normalizeReportOwner("José_Ñ")).toBe("José_Ñ");
+    // A pasted line break is just spacing — it never survives into the value.
+    expect(normalizeReportOwner("Mark\nBaldemor")).toBe("Mark Baldemor");
+    // Tabs and a Windows line ending are spacing too.
+    expect(normalizeReportOwner("Mark\tBaldemor")).toBe("Mark Baldemor");
+    expect(normalizeReportOwner("Mark\r\nBaldemor")).toBe("Mark Baldemor");
+    expect(normalizeReportOwner("\t Mark \r\n Baldemor \t")).toBe("Mark Baldemor");
+    expect(normalizeReportOwner("a1")).toBe("a1");
+  });
+
+  it("refuses anything that could be read as a flag, a pattern or a command", () => {
+    for (const bad of [
+      "",
+      "   ",
+      "x",
+      "-n",
+      "--all",
+      "--all; rm -rf .",
+      "$(whoami)",
+      "`id`",
+      "a;b",
+      "a|b",
+      "a&b",
+      "a*b",
+      "a?b",
+      "a[b]",
+      "a(b)",
+      "a<b>",
+      'a"b',
+      "a\\b",
+      "a/b",
+      "a=b",
+      "a,b",
+      ".hidden",
+      "@nobody",
+      "x".repeat(101),
+    ]) {
+      expect(normalizeReportOwner(bad), JSON.stringify(bad)).toBeNull();
+    }
+    expect(normalizeReportOwner("x".repeat(100))).toHaveLength(100);
+  });
+
+  it("sanitizes a stored list: strings only, normalized, deduped by case, capped", () => {
+    expect(sanitizeReportOwners(undefined)).toEqual([]);
+    expect(sanitizeReportOwners("Mark Baldemor")).toEqual([]);
+    expect(sanitizeReportOwners({ 0: "Mark" })).toEqual([]);
+    expect(
+      sanitizeReportOwners(["Mark Baldemor", "--all", "$(whoami)", 7, null, "mark baldemor", " MARK  Baldemor "]),
+    ).toEqual(["Mark Baldemor"]);
+    expect(REPORT_OWNER_LIMIT).toBe(5);
+    expect(sanitizeReportOwners(["a1", "a2", "a3", "a4", "a5", "a6", "a7"])).toEqual([
+      "a1",
+      "a2",
+      "a3",
+      "a4",
+      "a5",
+    ]);
+  });
+
+  it("reads the owners a run was asked for; every-committer runs are [], null only without a run", () => {
+    // F1: a run stored before the owner existed (no `authors`, no usable
+    // `author`) WAS an every-committer run — [] so a setting declared
+    // since flags it stale, never "falls through" to the setting.
+    expect(reportRunOwners(base)).toEqual([]);
+    expect(reportRunOwners({ ...base, author: "--all" })).toEqual([]);
+    expect(reportRunOwners({ ...base, author: "Mark Baldemor" })).toEqual(["Mark Baldemor"]);
+    expect(reportRunOwners({ ...base, authors: [] })).toEqual([]);
+    expect(reportRunOwners({ ...base, author: "x", authors: ["Mark Baldemor", "kevzlou7979"] })).toEqual([
+      "Mark Baldemor",
+      "kevzlou7979",
+    ]);
+    expect(reportRunOwners(null)).toBeNull();
+    expect(reportRunOwners(undefined)).toBeNull();
+  });
+
+  it("reads what the agent echoed as `authors`, or null when it did not echo", () => {
+    expect(reportEchoedOwners(null)).toBeNull();
+    expect(reportEchoedOwners(undefined)).toBeNull();
+    expect(reportEchoedOwners("Mark Baldemor")).toBeNull();
+    expect(reportEchoedOwners(7)).toBeNull();
+    expect(reportEchoedOwners({})).toBeNull();
+    expect(reportEchoedOwners({ author: "Mark Baldemor" })).toBeNull();
+    expect(reportEchoedOwners({ authors: "Mark Baldemor" })).toBeNull();
+    expect(reportEchoedOwners({ authors: { 0: "Mark" } })).toBeNull();
+    expect(reportEchoedOwners({ authors: [] })).toEqual([]);
+    expect(reportEchoedOwners({ authors: ["Mark Baldemor", "kevzlou7979"] })).toEqual([
+      "Mark Baldemor",
+      "kevzlou7979",
+    ]);
+    // A poisoned echo is sanitized like any other owner list.
+    expect(
+      reportEchoedOwners({ authors: ["Mark Baldemor", "--all", "$(whoami)", 7, null, "mark baldemor"] }),
+    ).toEqual(["Mark Baldemor"]);
+  });
+
+  it("treats the same people in another order or case as unchanged", () => {
+    expect(sameReportOwners([], [])).toBe(true);
+    expect(sameReportOwners(["Mark Baldemor", "kevzlou7979"], ["KEVZLOU7979", "mark baldemor"])).toBe(true);
+    expect(sameReportOwners(["Mark Baldemor"], ["Mark Baldemor", "Dana Cruz"])).toBe(false);
+    expect(sameReportOwners(["Mark Baldemor"], [])).toBe(false);
+  });
+
+  it("labels an empty list as every committer", () => {
+    expect(reportOwnerLabel([])).toBe("All committers");
+    expect(reportOwnerLabel(["Mark Baldemor", "kevzlou7979"])).toBe("Mark Baldemor, kevzlou7979");
+  });
+
+  it("writes the owner under the title of the markdown export", () => {
+    expect(renderReportMarkdown({ ...base, authors: ["Mark Baldemor"] })).toContain(
+      "# Report — June 05 2026\n\nOwner: Mark Baldemor\n\n## June 05 2026",
+    );
+    expect(renderReportMarkdown({ ...base, authors: ["Mark Baldemor", "kevzlou7979"] })).toContain(
+      "\nOwner: Mark Baldemor, kevzlou7979\n",
+    );
+    expect(renderReportMarkdown({ ...base, authors: [] })).toContain("\nOwner: All committers\n");
+    expect(renderReportMarkdown(base)).toContain("\nOwner: All committers\n");
+    // A run stamped by an older caller with the single `author` string.
+    expect(renderReportMarkdown({ ...base, author: "Mark Baldemor" })).toContain(
+      "# Report — June 05 2026\n\nOwner: Mark Baldemor\n\n## June 05 2026",
+    );
+    expect(renderReportMarkdown({ ...base, author: "--all" })).toContain("\nOwner: All committers\n");
+    // The per-day export carries it only when asked to.
+    expect(renderDayMarkdown(base.days[0]!, false)).not.toContain("Owner:");
+    expect(renderDayMarkdown(base.days[0]!, false, "Mark Baldemor")).toContain(
+      "## June 05 2026\nOwner: Mark Baldemor\n\n- ",
+    );
+  });
+
+  it("the summary export opens with the owner only when the run was scoped to someone", () => {
+    // F6: the invoice paste must never gain an "Owner: All committers" line.
+    const scoped = renderReportSummaryMarkdown({ ...base, authors: ["Mark Baldemor", "kevzlou7979"] });
+    expect(scoped.startsWith("Owner: Mark Baldemor, kevzlou7979\n\nJune 05 2026\n")).toBe(true);
+    expect(renderReportSummaryMarkdown({ ...base, author: "Mark Baldemor" }).startsWith("Owner: Mark Baldemor\n\n")).toBe(true);
+    for (const run of [base, { ...base, authors: [] }, { ...base, author: "--all" }]) {
+      const md = renderReportSummaryMarkdown(run);
+      expect(md).not.toContain("Owner:");
+      expect(md.startsWith("June 05 2026\n")).toBe(true);
+    }
+    // Exactly one blank line between the owner and the first day.
+    expect(renderReportSummaryMarkdown({ ...base, authors: ["Mark Baldemor"] })).toBe(
+      "Owner: Mark Baldemor\n\nJune 05 2026\n- Fix Login Redirect\n",
+    );
+  });
+
+  it("the per-day export gets an owner only when the run had one (F15)", () => {
+    expect(reportExportOwner({ ...base, authors: ["Mark Baldemor", "kevzlou7979"] })).toBe(
+      "Mark Baldemor, kevzlou7979",
+    );
+    expect(reportExportOwner({ ...base, author: "Mark Baldemor" })).toBe("Mark Baldemor");
+    expect(reportExportOwner({ ...base, authors: [] })).toBeUndefined();
+    expect(reportExportOwner(base)).toBeUndefined();
+    expect(reportExportOwner(null)).toBeUndefined();
+    // Wired the way ReportTab's per-day export calls it: no owner → no line.
+    expect(renderDayMarkdown(base.days[0]!, false, reportExportOwner(base))).not.toContain("Owner:");
+    expect(
+      renderDayMarkdown(base.days[0]!, false, reportExportOwner({ ...base, authors: ["Mark Baldemor"] })),
+    ).toContain("## June 05 2026\nOwner: Mark Baldemor\n\n- ");
+  });
+
+  it("stamps a parsed run with the owners it was asked for, not the agent's echo", () => {
+    const payload = { type: "report", author: "whatever the agent echoed", days: [{ date: FRI, items: [{ title: "x" }] }] };
+    const ctx = { runId: "r", range: "daily" as const, anchorDate: FRI, generatedAt: 1 };
+    const one = parseReportPayload(payload, { ...ctx, authors: ["Mark Baldemor"] })!;
+    expect(one.author).toBe("Mark Baldemor");
+    expect(one.authors).toEqual(["Mark Baldemor"]);
+    const several = parseReportPayload(payload, { ...ctx, authors: ["Mark Baldemor", "kevzlou7979"] })!;
+    expect(several.author).toBe("Mark Baldemor");
+    expect(several.authors).toEqual(["Mark Baldemor", "kevzlou7979"]);
+    // Asked for everyone: stamped as such, so a later setting flags it stale.
+    const everyone = parseReportPayload(payload, { ...ctx, authors: [] })!;
+    expect(everyone.author).toBeUndefined();
+    expect(everyone.authors).toEqual([]);
+    // A poisoned ask never reaches the run either.
+    expect(parseReportPayload(payload, { ...ctx, authors: ["--all", "Mark Baldemor"] })!.authors).toEqual([
+      "Mark Baldemor",
+    ]);
+    // A caller that didn't ask keeps the agent's author only when usable.
+    expect(parseReportPayload(payload, ctx)!.author).toBe("whatever the agent echoed");
+    expect(parseReportPayload({ ...payload, author: "--all" }, ctx)!.author).toBeUndefined();
+    expect("authors" in parseReportPayload(payload, ctx)!).toBe(false);
   });
 });
