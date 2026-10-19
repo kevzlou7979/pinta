@@ -254,9 +254,84 @@
     if (!ok) return;
     app.deleteTestPlan(id);
   }
-  /** Anchor the Export popover's left edge to the button when a
-   *  right-anchored w-72 (288px) popover would spill off the panel's left. */
-  let exportMenuAlignLeft = $state(false);
+  // ── Popover placement (Export ▾ and the sheets switcher) ──────────
+  // Both menus hang off a `relative` wrapper inside the header toolbar,
+  // which may sit on the title row or wrap under it. The sidepanel's
+  // <main> is `overflow-x-clip` with no horizontal scroll, so a menu
+  // that reaches past its padding box is simply cut off. Placement is
+  // therefore a guard, not a guess: the left edge is computed from the
+  // wanted anchor, clamped to the panel's gutters, and — once the menu
+  // is on screen — corrected from its REAL rect, on open and on resize.
+  const POPOVER_GUTTER = 16;
+  /** The viewport span a popover may occupy: the clipping container's
+   *  padding box (minus its scrollbar), inset by the gutter. */
+  function popoverBounds(from: Element | null): { min: number; max: number } {
+    const clip = from?.closest("main") ?? null;
+    const left = clip ? clip.getBoundingClientRect().left : 0;
+    const width = clip ? clip.clientWidth : document.documentElement.clientWidth;
+    return { min: left + POPOVER_GUTTER, max: left + width - POPOVER_GUTTER };
+  }
+  /** Left edge for a popover, in px from its wrapper's left: `want` (a
+   *  viewport x) clamped so the whole menu stays inside the gutters. */
+  function clampPopoverLeft(wrap: HTMLElement, menu: HTMLElement | null, fallbackWidth: number, want: number): number {
+    const { min, max } = popoverBounds(wrap);
+    const width = Math.min(menu?.getBoundingClientRect().width || fallbackWidth, max - min);
+    const left = Math.max(min, Math.min(want, max - width));
+    // Sub-pixel on purpose: the wrapper's own left is fractional, and a
+    // menu as wide as the span must land on the gutter exactly.
+    return left - wrap.getBoundingClientRect().left;
+  }
+  /** The post-render correction: how far the menu's real rect overshoots
+   *  a gutter (positive = move right, negative = move left), or 0. */
+  function popoverOvershoot(wrap: HTMLElement, menu: HTMLElement): number {
+    const { min, max } = popoverBounds(wrap);
+    const m = menu.getBoundingClientRect();
+    if (m.right > max) return max - m.right;
+    if (m.left < min) return min - m.left;
+    return 0;
+  }
+
+  /** Export popover: a w-72 (288px) panel. Its left edge, in px from
+   *  `exportWrapEl`; starts from the alignment guess (right edges line
+   *  up with the button; left edges when that would spill off the panel's
+   *  left) and is then clamped to the gutters. */
+  let exportMenuLeft = $state(0);
+  let exportWrapEl = $state<HTMLDivElement | null>(null);
+  let exportMenuEl = $state<HTMLDivElement | null>(null);
+  const EXPORT_MENU_MAX_W = 288; // w-72
+
+  function placeExportMenu() {
+    if (!exportWrapEl || !exportBtnEl) return;
+    const btn = exportBtnEl.getBoundingClientRect();
+    const { min } = popoverBounds(exportWrapEl);
+    const width = Math.min(exportMenuEl?.getBoundingClientRect().width || EXPORT_MENU_MAX_W, EXPORT_MENU_MAX_W);
+    const want = btn.right - width < min ? btn.left : btn.right - width;
+    exportMenuLeft = clampPopoverLeft(exportWrapEl, exportMenuEl, EXPORT_MENU_MAX_W, want);
+  }
+  /** Open the Export popover and settle it inside the panel. */
+  async function openExportMenu() {
+    placeExportMenu();
+    exportMenuOpen = true;
+    emailedNote = null;
+    // Prefill the tester-email input (and later the sign-off form)
+    // while the menu animates open.
+    void app.loadTesterInfo();
+    await tick();
+    placeExportMenu();
+    await tick();
+    if (exportWrapEl && exportMenuEl) exportMenuLeft += popoverOvershoot(exportWrapEl, exportMenuEl);
+  }
+
+  // The panel resized with a menu open: re-place it before it is clipped.
+  $effect(() => {
+    if (!exportMenuOpen && !sheetMenuOpen) return;
+    const on = () => {
+      if (exportMenuOpen) void openExportMenu();
+      if (sheetMenuOpen) void openSheetMenu();
+    };
+    window.addEventListener("resize", on);
+    return () => window.removeEventListener("resize", on);
+  });
   // The currently "selected" test row in the catalog. Set when the user
   // clicks a row body or opens its detail view; used to (a) tint the row
   // as a bookmark cursor and (b) scroll-restore back to it when the user
@@ -1843,34 +1918,39 @@
   /** Switcher trigger — Escape inside the popover hands focus back. */
   let sheetMenuBtnEl = $state<HTMLButtonElement | null>(null);
 
-  /** The title row the popover is positioned in. */
+  /** The switcher's segment in the action toolbar — the popover is
+   *  positioned in it. */
   let sheetRowEl = $state<HTMLDivElement | null>(null);
-  /** Popover's left edge, in px from the title row's left. */
+  /** Popover's left edge, in px from that segment's left. */
   let sheetMenuLeft = $state(0);
+  let sheetMenuEl = $state<HTMLDivElement | null>(null);
   const SHEET_MENU_MAX_W = 352; // 22rem
-  const SHEET_MENU_GUTTER = 16;
 
   function closeSheetMenu(refocus = false) {
     sheetMenuOpen = false;
     if (refocus) sheetMenuBtnEl?.focus();
   }
 
-  /** Open the popover right under its button: right edges line up. On a
-   *  narrow panel that would push it off the left side, so it slides
-   *  right just enough to keep the gutter. */
+  /** The popover's left edge lines up with the picker's — it is the
+   *  toolbar's first segment, so the list reads straight down from it.
+   *  Gutter-clamped like the Export menu (see `clampPopoverLeft`): when
+   *  the 22rem panel cannot fit to the picker's right (the toolbar hugs
+   *  the panel's right edge) it slides left only as far as the gutter. */
+  function placeSheetMenu() {
+    if (!sheetRowEl || !sheetMenuBtnEl) return;
+    sheetMenuLeft = clampPopoverLeft(sheetRowEl, sheetMenuEl, SHEET_MENU_MAX_W, sheetMenuBtnEl.getBoundingClientRect().left);
+  }
+  async function openSheetMenu() {
+    placeSheetMenu();
+    sheetMenuOpen = true;
+    await tick();
+    placeSheetMenu();
+    await tick();
+    if (sheetRowEl && sheetMenuEl) sheetMenuLeft += popoverOvershoot(sheetRowEl, sheetMenuEl);
+  }
   function toggleSheetMenu() {
-    if (!sheetMenuOpen) {
-      const row = sheetRowEl?.getBoundingClientRect();
-      const btn = sheetMenuBtnEl?.getBoundingClientRect();
-      if (row && btn) {
-        const width = Math.min(SHEET_MENU_MAX_W, window.innerWidth - 2 * SHEET_MENU_GUTTER);
-        const underButton = btn.right - row.left - width;
-        const leftmost = SHEET_MENU_GUTTER - row.left;
-        const rightmost = window.innerWidth - SHEET_MENU_GUTTER - row.left - width;
-        sheetMenuLeft = Math.round(Math.max(leftmost, Math.min(underButton, rightmost)));
-      }
-    }
-    sheetMenuOpen = !sheetMenuOpen;
+    if (sheetMenuOpen) sheetMenuOpen = false;
+    else void openSheetMenu();
   }
 
   async function switchSheet(docId: string) {
@@ -2610,16 +2690,17 @@
   <!-- Inert for the instant the open sheet is being put away: a mark
        made then would land on a sheet whose saved copy is already taken. -->
   <section class="space-y-4 p-4" inert={app.testPilot.sheetSwapping} aria-busy={app.testPilot.sheetSwapping}>
-    <!-- HEADER — title + author/date + actions on one row. On wide
-         panels (≥ ~480px) buttons sit top-right; on narrow viewports
-         the wrapper flex-wraps and buttons drop below the title block.
+    <!-- HEADER — title + author/date + actions on one row. The title
+         column's basis is small enough (140px) that the 154px toolbar
+         still sits beside it at the sidepanel's 380px minimum; only a
+         narrower panel flex-wraps the toolbar under the title block.
          Title is bold sans, allowed to wrap, never truncated. -->
     <div class="flex items-start justify-between gap-3 flex-wrap">
-      <div class="min-w-0 flex-1 basis-[200px]">
+      <div class="min-w-0 flex-1 basis-[140px]">
         <div class="min-w-0 flex-1 space-y-1">
-        <!-- Title row: the title, then (standalone) the sheet switcher.
-             The menu hangs off this row so it can never leave the panel. -->
-        <div class="relative flex items-start gap-1.5" bind:this={sheetRowEl}>
+        <!-- Title row. The sheet switcher used to sit here beside the
+             title; it is now the first segment of the action toolbar. -->
+        <div class="flex items-start gap-1.5">
         <div class="min-w-0 flex-1">
         <!-- Title (or filename fallback) — click to edit -->
         {#if editingField === "title"}
@@ -2647,71 +2728,6 @@
           </button>
         {/if}
         </div>
-        {#if standalone}
-          {@const others = app.testPilot.savedSheets}
-          <button
-            type="button"
-            class="shrink-0 inline-flex items-center gap-1 h-6 px-1.5 rounded-md border border-ink-200 dark:border-night-line bg-white dark:bg-night-card text-[11px] font-medium text-ink-700 dark:text-night-dim hover:text-brand-pink dark:hover:text-brand-pink-light hover:border-brand-pink/60 dark:hover:border-brand-pink-light/60"
-            onclick={toggleSheetMenu}
-            onkeydown={(e) => {
-              if (e.key !== "Escape" || !sheetMenuOpen) return;
-              e.stopPropagation();
-              closeSheetMenu(true);
-            }}
-            bind:this={sheetMenuBtnEl}
-            data-pinta-sheet-menu
-            aria-haspopup="dialog"
-            aria-expanded={sheetMenuOpen}
-            aria-label="Switch test sheet"
-            title={others.length > 0
-              ? `Switch test sheet — ${others.length} other${others.length === 1 ? "" : "s"} saved in this browser`
-              : "Your test sheets — import another to keep several side by side"}
-          >
-            <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polygon points="12 2 2 7 12 12 22 7 12 2"/><polyline points="2 17 12 22 22 17"/><polyline points="2 12 12 17 22 12"/></svg>
-            <span class="tabular-nums">{others.length + 1}</span>
-            <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="6 9 12 15 18 9"/></svg>
-          </button>
-          {#if sheetMenuOpen}
-            <div
-              class="absolute z-30 top-full mt-1 w-[min(22rem,calc(100vw-2rem))] bg-white dark:bg-night-card border border-ink-200 dark:border-night-line rounded-md shadow-lg py-1"
-              style:left="{sheetMenuLeft}px"
-              role="dialog"
-              aria-label="Your test sheets"
-              tabindex="-1"
-              data-pinta-sheet-menu
-              onkeydown={(e) => {
-                if (e.key !== "Escape") return;
-                e.stopPropagation();
-                closeSheetMenu(true);
-              }}
-            >
-              <div class="px-3 pt-1.5 pb-1 text-[10px] uppercase tracking-wider font-semibold text-ink-500 dark:text-night-mute">Your test sheets</div>
-              <div class="max-h-64 overflow-y-auto">
-                <!-- The sheet on screen -->
-                <div class="flex items-start gap-2 px-3 py-1.5 bg-brand-pink/5" aria-current="true" data-pinta-sheet-current>
-                  <svg class="shrink-0 mt-0.5 text-brand-pink dark:text-brand-pink-light" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="20 6 9 17 4 12"/></svg>
-                  <div class="min-w-0 flex-1">
-                    <div class="text-[12px] font-semibold text-ink-900 dark:text-night-text leading-snug break-words">{meta.title || meta.filename}</div>
-                    <div class="text-[10.5px] text-ink-500 dark:text-night-mute tabular-nums">{t.pass + t.fail} of {t.total} run{t.fail > 0 ? ` · ${t.fail} failed` : ""} · open now</div>
-                  </div>
-                </div>
-                {@render savedSheetRows()}
-              </div>
-              <div class="my-1 border-t border-ink-100 dark:border-night-line"></div>
-              <button
-                type="button"
-                class="w-full flex items-center gap-2 px-3 py-1.5 text-[12px] text-ink-700 dark:text-night-dim hover:bg-ink-50 dark:hover:bg-night-alt hover:text-brand-pink dark:hover:text-brand-pink-light"
-                onclick={importAnotherSheet}
-              >
-                <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>
-                Import another sheet…
-              </button>
-              <p class="px-3 pt-1 pb-1.5 text-[10.5px] text-ink-500 dark:text-night-mute leading-snug">
-                Each sheet keeps its own marks and failure notes in this browser — switch as often as you like.
-              </p>
-            </div>
-          {/if}
-        {/if}
         </div>
 
         <!-- Subline: Author · as of <importedAt>. Author is clickable
@@ -2790,10 +2806,83 @@
            title on wide panels, wraps to next row on narrow viewports
            thanks to flex-wrap on the parent. Labels live in title +
            aria-label since the row is icon-only. -->
-      <div class="inline-flex items-center shrink-0 rounded-md border border-ink-200 dark:border-night-line bg-white dark:bg-night-card divide-x divide-ink-200 dark:divide-night-line">
+      <div class="inline-flex items-center shrink-0 rounded-md border border-ink-200 dark:border-night-line bg-white dark:bg-night-card divide-x divide-ink-200 dark:divide-night-line" data-pinta-test-pilot-toolbar>
+        <!-- Sheet switcher (standalone): the toolbar's first segment. Its
+             own `relative` wrapper is what the popover hangs off, so the
+             button stays a true segment of the group. -->
+        {#if standalone}
+          {@const others = app.testPilot.savedSheets}
+          <div class="relative shrink-0" data-pinta-sheet-menu bind:this={sheetRowEl}>
+          <button
+            type="button"
+            class="inline-flex items-center justify-center gap-0.5 h-8 px-2 rounded-l-md text-[11px] font-medium text-ink-700 dark:text-night-dim hover:text-brand-pink dark:hover:text-brand-pink-light hover:bg-ink-50 dark:hover:bg-night-alt"
+            onclick={toggleSheetMenu}
+            onkeydown={(e) => {
+              if (e.key !== "Escape" || !sheetMenuOpen) return;
+              e.stopPropagation();
+              closeSheetMenu(true);
+            }}
+            bind:this={sheetMenuBtnEl}
+            data-pinta-sheet-menu
+            aria-haspopup="dialog"
+            aria-expanded={sheetMenuOpen}
+            aria-label="Switch test sheet"
+            title={others.length > 0
+              ? `Switch test sheet — ${others.length} other${others.length === 1 ? "" : "s"} saved in this browser`
+              : "Your test sheets — import another to keep several side by side"}
+          >
+            <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polygon points="12 2 2 7 12 12 22 7 12 2"/><polyline points="2 17 12 22 22 17"/><polyline points="2 12 12 17 22 12"/></svg>
+            <span class="tabular-nums">{others.length + 1}</span>
+            <svg width="8" height="8" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="6 9 12 15 18 9"/></svg>
+          </button>
+          {#if sheetMenuOpen}
+            <div
+              class="absolute z-30 top-full mt-1 w-[min(22rem,calc(100vw-2rem))] bg-white dark:bg-night-card border border-ink-200 dark:border-night-line rounded-md shadow-lg py-1"
+              style:left="{sheetMenuLeft}px"
+              bind:this={sheetMenuEl}
+              role="dialog"
+              aria-label="Your test sheets"
+              tabindex="-1"
+              data-pinta-sheet-menu
+              onkeydown={(e) => {
+                if (e.key !== "Escape") return;
+                e.stopPropagation();
+                closeSheetMenu(true);
+              }}
+            >
+              <div class="px-3 pt-1.5 pb-1 text-[10px] uppercase tracking-wider font-semibold text-ink-500 dark:text-night-mute">Your test sheets</div>
+              <div class="max-h-64 overflow-y-auto">
+                <!-- The sheet on screen -->
+                <div class="flex items-start gap-2 px-3 py-1.5 bg-brand-pink/5" aria-current="true" data-pinta-sheet-current>
+                  <svg class="shrink-0 mt-0.5 text-brand-pink dark:text-brand-pink-light" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="20 6 9 17 4 12"/></svg>
+                  <div class="min-w-0 flex-1">
+                    <div class="text-[12px] font-semibold text-ink-900 dark:text-night-text leading-snug break-words">{meta.title || meta.filename}</div>
+                    <div class="text-[10.5px] text-ink-500 dark:text-night-mute tabular-nums">{t.pass + t.fail} of {t.total} run{t.fail > 0 ? ` · ${t.fail} failed` : ""} · open now</div>
+                  </div>
+                </div>
+                {@render savedSheetRows()}
+              </div>
+              <div class="my-1 border-t border-ink-100 dark:border-night-line"></div>
+              <button
+                type="button"
+                class="w-full flex items-center gap-2 px-3 py-1.5 text-[12px] text-ink-700 dark:text-night-dim hover:bg-ink-50 dark:hover:bg-night-alt hover:text-brand-pink dark:hover:text-brand-pink-light"
+                onclick={importAnotherSheet}
+              >
+                <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>
+                Import another sheet…
+              </button>
+              <p class="px-3 pt-1 pb-1.5 text-[10.5px] text-ink-500 dark:text-night-mute leading-snug">
+                Each sheet keeps its own marks and failure notes in this browser — switch as often as you like.
+              </p>
+            </div>
+          {/if}
+          </div>
+        {/if}
+        <!-- Re-import is the first (left-rounded) segment only when the
+             switcher is not there (connected mode). -->
         <button
           type="button"
-          class="inline-flex items-center justify-center w-8 h-8 rounded-l-md text-ink-700 dark:text-night-dim hover:text-brand-pink dark:hover:text-brand-pink-light hover:bg-ink-50 dark:hover:bg-night-alt"
+          class="inline-flex items-center justify-center w-8 h-8 {standalone ? '' : 'rounded-l-md'} text-ink-700 dark:text-night-dim hover:text-brand-pink dark:hover:text-brand-pink-light hover:bg-ink-50 dark:hover:bg-night-alt"
           onclick={onPickFile}
           title="Re-import — replace catalog with a new doc"
           aria-label="Re-import catalog"
@@ -2836,18 +2925,16 @@
           {/if}
         </button>
         {/if}
-        <div class="relative" data-pinta-export-menu>
+        <div class="relative" data-pinta-export-menu bind:this={exportWrapEl}>
           <button
             type="button"
             bind:this={exportBtnEl}
             class="inline-flex items-center justify-center gap-0.5 w-9 h-8 rounded-r-md text-ink-700 dark:text-night-dim hover:text-brand-pink dark:hover:text-brand-pink-light hover:bg-ink-50 dark:hover:bg-night-alt"
-            onclick={(e) => {
-              exportMenuAlignLeft = e.currentTarget.getBoundingClientRect().right < 288 + 8;
-              exportMenuOpen = !exportMenuOpen;
-              emailedNote = null;
-              // Prefill the tester-email input (and later the sign-off
-              // form) while the menu animates open.
-              if (exportMenuOpen) void app.loadTesterInfo();
+            onclick={() => {
+              if (exportMenuOpen) {
+                exportMenuOpen = false;
+                emailedNote = null;
+              } else void openExportMenu();
             }}
             title={stepPrep
               ? `Generating tester-sheet steps (${Math.min(stepPrep.done + 1, stepPrep.total)} of ${stepPrep.total})…`
@@ -2888,7 +2975,9 @@
               </button>
             {/snippet}
             <div
-              class="absolute {exportMenuAlignLeft ? 'left-0' : 'right-0'} top-full mt-1 z-40 w-72 max-w-[calc(100vw-1rem)] max-h-[70vh] overflow-y-auto rounded-md border border-ink-200 dark:border-night-line bg-white dark:bg-night-card shadow-lg"
+              class="absolute top-full mt-1 z-40 w-72 max-w-[calc(100vw-2rem)] max-h-[70vh] overflow-y-auto rounded-md border border-ink-200 dark:border-night-line bg-white dark:bg-night-card shadow-lg"
+              style:left="{exportMenuLeft}px"
+              bind:this={exportMenuEl}
               role="dialog"
               aria-label="Export options"
               tabindex="-1"
@@ -3555,12 +3644,7 @@
           <button
             type="button"
             class="underline underline-offset-2 hover:text-brand-pink dark:hover:text-brand-pink-light"
-            onclick={() => {
-              exportMenuAlignLeft = (exportBtnEl?.getBoundingClientRect().right ?? Infinity) < 288 + 8;
-              exportMenuOpen = true;
-              emailedNote = null;
-              void app.loadTesterInfo();
-            }}
+            onclick={() => void openExportMenu()}
             title="Open the Export popover to follow or cancel the step generation"
           >Show</button>
         </div>

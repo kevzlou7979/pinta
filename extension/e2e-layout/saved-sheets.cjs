@@ -182,7 +182,7 @@ function serve(root) {
     const edges = async () => {
       const b = await switcher.boundingBox();
       const m = await menu.boundingBox();
-      return { btnRight: Math.round(b.x + b.width), btnBottom: Math.round(b.y + b.height), left: Math.round(m.x), right: Math.round(m.x + m.width), top: Math.round(m.y) };
+      return { btnLeft: Math.round(b.x), btnRight: Math.round(b.x + b.width), btnBottom: Math.round(b.y + b.height), left: Math.round(m.x), right: Math.round(m.x + m.width), top: Math.round(m.y) };
     };
     let e = await edges();
     ok(e.left >= 16 && e.right <= 420 - 16 + 1, `420px panel: menu keeps the gutters (${e.left}–${e.right})`);
@@ -194,7 +194,11 @@ function serve(root) {
       await switcher.click();
       await menu.waitFor({ state: "visible", timeout: 3000 }).catch(() => {});
       e = await edges();
-      ok(Math.abs(e.right - e.btnRight) <= 1, `${width}px panel: menu's right edge is under the button's (${e.right} vs ${e.btnRight})`);
+      // 2026-10-19 (toolbar merge, F4): the picker is now the FIRST segment of the
+      // header toolbar, so the popover left-aligns to it, gutter-clamped — the old
+      // "right edge under the button" anchor no longer applies.
+      const expectedLeft = Math.max(16, Math.min(e.btnLeft, width - 16 - (e.right - e.left)));
+      ok(Math.abs(e.left - expectedLeft) <= 2, `${width}px panel: menu left-aligns to the picker, gutter-clamped (${e.left} vs expected ${expectedLeft})`);
       ok(e.left >= 16, `${width}px panel: menu stays inside the panel (left ${e.left})`);
       if (width === 900) await page.screenshot({ path: path.join(SHOTS, "saved-sheets-menu-wide.png") });
       await page.locator("#shell-header").click();
