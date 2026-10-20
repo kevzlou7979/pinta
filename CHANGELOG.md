@@ -8,6 +8,29 @@ For the architectural design behind each item, see
 
 ### Added
 
+- **Support Pinta.** A small "Buy me a coffee" badge next to the version
+  in the side-panel header opens Ko-fi, and a "Support Pinta" link at the
+  bottom of Settings opens the new [support page](docs/support.html). The repo
+  gets a `FUNDING.yml` Sponsor button and the README a coffee link. A tip
+  unlocks nothing.
+- **Motion module.** A new Motion tab: pick an element and the catalog
+  re-ranks to what it can do (Material 3's six transitions, plus count
+  up, stagger, rise in and fade). Opening the tab arms pick; one click
+  on the page plays the best suggestion, and hovering a row previews it
+  there. Replay, reverse, 0.5x / 0.25x speed, scrub, loop and a
+  reduced-motion preview sit under Tune. The tab is pinned to the page
+  you picked on, so other tabs never animate, and count up puts the
+  original text back when it stops. Durations and easings are named
+  tokens, never invented numbers. Applying to code is not built yet
+  (the button is disabled); enable Motion in Settings.
+
+- **Test Pilot: import a Word (.docx) sheet.** The import picker now
+  takes a .docx as well as .md (Google Drive returns an uploaded .md as
+  Word, and testers save Pinta's own Word export). It is converted to
+  the same Markdown in the browser, with the zip library loaded only
+  when you import one. Text Word hides is stripped, and images,
+  comments and tracked deletions are dropped.
+
 - **Test Pilot: failure notes.** A failed test gets an inline "Add
   failure note" under its row (and in its detail view): what went
   wrong, steps to reproduce, and up to 4 screenshots (pick or paste). A

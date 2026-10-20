@@ -304,7 +304,7 @@ The intended user experience, narrated:
 
 **Extension-page CSP** (`manifest.config.ts` `content_security_policy.extension_pages`) tightens the MV3 default so agent-generated variant markup can't load remote resources: `script-src 'self'; object-src 'self'; img-src 'self' data: blob: http://127.0.0.1:* http://localhost:*; media-src 'self' data: blob:; font-src 'self' data:; style-src 'self' 'unsafe-inline'`. `connect-src` / `frame-src` are deliberately unset (companion WS/HTTP, Devices and gallery iframes of arbitrary http(s) dev servers).
 
-**Modes.** The overlay's `Mode` is `idle`, `select`, `draw` (carrying the pen tool), one mode per tool (`image` / `move` / `text` / `delete` / `resize` / `paint` / `scale` / `transform`), plus the one-shot `variant-pick` (Phase 22). Picked from the side-panel tool grid, the floating toolbar, or hotkeys.
+**Modes.** The overlay's `Mode` is `idle`, `select`, `draw` (carrying the pen tool), one mode per tool (`image` / `move` / `text` / `delete` / `resize` / `paint` / `scale` / `transform`), plus the one-shot `variant-pick` (Phase 22) and `motion-pick` (Phase 25, same pick, its own panel handler). Picked from the side-panel tool grid, the floating toolbar, or hotkeys.
 
 **Hotkeys.** Page hotkeys ignore focused inputs / textareas / contenteditable (except `Alt+V`); in a Devices canvas only the annotating frame listens.
 
@@ -441,7 +441,7 @@ GET    /v1/sessions/poll                                   → long-poll for nex
 GET    /v1/sessions/stream                                 → SSE push (event: session\ndata: {...})
 POST   /v1/sessions                                        → ingest a fully-formed session (test path)
 GET    /v1/sessions/:id                                    → full session
-POST   /v1/sessions/:id/status                             → { status, summary?, errorMessage? }
+POST   /v1/sessions/:id/status                             → { status, summary?, errorMessage? } → 200 session; `done` with annotations unresolved adds `warning` + `unresolvedAnnotationIds` (≤20 ids)
 POST   /v1/sessions/:id/claim                              → { claimerId, role? } → 200 winner | 409 already-claimed | 403 { expectedRole } role mismatch
 POST   /v1/sessions/:id/annotations/:annId/status          → { status, errorMessage? }
 DELETE /v1/sessions                                        → wipe history (preserves any active drafting session)
@@ -595,7 +595,7 @@ When invoked:
    d. Present the plan to the user. Wait for confirmation.
    e. Apply edits. POST status updates as you go.
    f. Run any test/lint commands per project conventions.
-5. POST /v1/sessions/:id/status with 'done' and a summary.
+5. POST /v1/sessions/:id/status with 'done' and a summary. If cards were left unresolved, the 200 reply carries a `warning` naming them; finish them and mark each done/error.
 ```
 
 #### 6.3.2 Cursor / Cline / Continue / Zed (MCP)
@@ -1021,7 +1021,16 @@ contract.
   to `done` (or `error` if any failed).
   - HTTP: `POST /v1/sessions/:id/annotations/:annId/status`
   - MCP: `mark_annotation_applying`, `mark_annotation_done`,
-    `mark_annotation_error`
+    `mark_annotation_error`; the `done` tool relays the status reply's
+    `warning` to the agent (`WARNING: …`).
+  - **Skipped annotations.** `skippedAnnotations()` (`shared/src/types.ts`)
+    lists cards a batch left with neither `done` nor `error` once at least
+    one card was resolved. The Submitted tray shows them as "Not applied"
+    with a Resubmit icon (also on failed cards) that copies the card into
+    the draft. The companion accepts an early `done` rather than refusing
+    (a refusal would strand sessions on an older skill) and answers 200
+    with the `warning` + `unresolvedAnnotationIds` (ids validated, ≤20,
+    stored keys of that name never echoed).
   - WS: companion subscribes its store and pushes `session.synced`
     on every state change so the side panel sees agent-driven updates
     in real time without re-fetching (this also fixed an existing bug
@@ -1102,8 +1111,21 @@ later starts a companion can still associate the URL.
 (`pinta-standalone` DB, single object store keyed by URL `origin`).
 Picked over `chrome.storage.local` because the 5 MB cap there dies on
 sessions with screenshots; IDB's quota is a fraction of disk space and
-stores binary blobs efficiently. Different staging URLs (`example.com`
+stores binary blobs efficiently. `DB_VERSION` is 4: v3 added `test_sheets`
+(saved Test Pilot sheets), v4 `test_sheet_index` (title/progress summaries
+backfilled from `test_sheets`, so the switcher lists without loading sheets
+and their screenshots). Different staging URLs (`example.com`
 vs `another.example.com`) get isolated drafts; reload preserves them.
+
+**Saved Test Pilot sheets (standalone).** A tester often holds several
+projects' sheets. Importing another sheet no longer replaces the open one:
+the open sheet is shelved whole (catalog, marks, failure notes, plans,
+scope) in `test_sheets` (keyed by `docId`) and its summary goes to
+`test_sheet_index`; a switcher beside the title swaps in one click, no
+re-import. Re-importing a sheet already held restores it instead of adding
+a copy. Shelf logic and its in-memory test double: `lib/sheet-shelf.ts`;
+IDB access in `local-store.ts`. Sheets live in IDB, not `chrome.storage`,
+so they don't count against its 10 MB limit.
 
 **Replacement actions in the side-panel footer.**
 - **Submit to agent** is hidden (no companion to submit to).
@@ -1183,6 +1205,19 @@ side-panel + disk concern. Types in `shared/src/types.ts`:
 `SessionManifest`, `ImportedSession`, `PintaFile`. Encoder /
 decoder / validator in `extension/src/lib/pinta-file.ts`
 (round-trip-tested in `pinta-file.test.ts`).
+
+**Test Pilot failure notes (`testPilot.failNotes`).** The optional
+`testPilot` block (`PintaFileTestPilot`, additive, same `$pinta: "1"`)
+carries `failNotes?: Record<testId, FailureNote[]>`. A note is
+`{ id, at, description, steps?, images? }`; `images` are
+`{ dataUrl, mediaType, name? }`, PNG/JPEG data URLs only, at most 4 per
+note and 10 notes per test (`FAILURE_NOTE_LIMITS` in
+`extension/src/lib/failure-notes.ts`; the type mirrors
+`shared/src/types.ts` and the two stay in lockstep). Everything read from
+a file goes through `sanitizeFailureNotes` (it can be hand-edited), and
+malformed notes are dropped rather than failing the import. Older bundles
+simply have none. The developer sees the notes read-only on the imported
+run overlay; "File failed tests" sends the note text with the issue.
 
 **Storage.** IDB schema bumped to v2 in `local-store.ts` with a new
 `imported_sessions` object store keyed by a fresh local id (so
@@ -1467,7 +1502,16 @@ companion) import the .md via the empty-state file picker — a local
 JS parser (`parseTestDocMarkdown` in `extension/src/lib/test-pilot-doc.ts`)
 reconstructs the catalog + steps without round-tripping through the
 agent. .docx is hand-rolled OOXML via the bundled `fflate` zip
-helper; no new npm dependency. Round-trip closes when the tester
+helper; no new npm dependency. **Word (.docx) import** runs the other
+way: the empty-state picker also takes a .docx (Google Drive hands an
+uploaded .md back as one; testers save Pinta's own Word export), and
+`extension/src/lib/docx-to-md.ts` turns the document body into the same
+Markdown (`# Title`, `## Section`, pipe tables, numbered steps) so
+`parseTestDocMarkdown` and the agent doc-parse are unchanged. `fflate` is
+lazy-loaded; only the parts it reads are inflated, each size-capped
+(50 MB file, 8 MB per part); hidden text is stripped, and images,
+comments, footnotes, text boxes and tracked deletions are dropped.
+Unreadable files raise `DocxImportError` with a user-safe message. Round-trip closes when the tester
 re-exports the same MD with Result marks filled in; the developer
 re-imports and Pass/Fail status comes back populated.
 
@@ -2214,6 +2258,50 @@ device frame joins the normal annotation batch sent to the agent.
   `chrome-extension://` top page can't reach cross-origin iframe
   `contentWindow`), UA/DPR emulation.
 
+### Phase 25 — Motion module — Shipped on branch (unreleased)
+
+A side-panel **Motion** tab: pick an element, see the transitions it can
+do, and rehearse one on the real page. **Everything up to Apply is
+in-page; no companion, no agent.** Nothing writes to source: stopping
+restores the element exactly as found.
+
+- **Element-first catalog** (`extension/src/lib/motion.ts`): the six
+  Material 3 transitions plus count up, stagger, rise in and fade.
+  `readTarget` + `rankPatterns` re-rank the catalog to what the picked
+  element can do (a number reads as count up, a list as stagger).
+  Durations and easings are named tokens from `DEFAULT_MOTION_SYSTEM`
+  (`resolveTiming`); `buildPlan` emits plain JSON and `buildApplyPayload`
+  carries token names, never invented numbers; a reduced-motion fallback
+  is always required.
+- **On-page rehearsal** (`content/motion-run.ts`, WAAPI, lazy-loaded from
+  `Overlay.svelte` via `import("./motion-run.js")`): turns a plan into live
+  animations and returns a handle (play, reverse, seek, setRate, stop).
+  Count up restores the node's `textContent` and `aria-hidden` on stop;
+  finish is direction-aware. Round-trips are `motion.*` messages guarded
+  by a sequence number.
+- **Interaction ("A then D").** Opening the tab arms pick mode
+  (`motion-pick`, the one-shot pick shared with `variant-pick`). Clicking
+  an element rehearses and auto-plays its best previewable suggestion, so
+  the first preview is one click. Rows are the controls: click keeps and
+  plays, hovering or focusing a row previews it on the page and leaving
+  restores. Reverse, speed (1x / 0.5x / 0.25x), scrub, loop, trigger,
+  tokens, reduced-motion preview and note live in a collapsed **Tune**
+  disclosure; stagger step is three chips (tight, base, loose).
+- **Tab pin.** The tab is pinned on the pick (`motion.tabId`) and every
+  message goes there only, so Motion never animates a tab you didn't pick
+  on. Leaving the pinned tab stops the rehearsal on it and makes the
+  panel inert ("Picked on another tab" + Pick here); returning re-enables;
+  closing it drops the pin. Unpinned, only the active tab may receive the
+  first pick, and a tab switch while armed cancels it.
+- **Apply** is a disabled stub ("coming soon").
+- **Tests.** `motion.test.ts`, `motion-run.repro.test.ts`,
+  `motion-state.repro.test.ts`; e2e `motion.cjs`, real-extension
+  `motion-pick-outline.cjs` and `motion-tab-pin.cjs`.
+- **Not built:** the two-target overlay (source and destination in one
+  view), `op:motion-apply` (hand the plan to the agent), and import.
+
+---
+
 ---
 
 ## 9. Open questions
@@ -2262,7 +2350,7 @@ The tool is working when:
 | Extension framework | Svelte 5 + TypeScript | User's stack; small bundles for content scripts |
 | Extension build | Vite + @crxjs/vite-plugin | Designed for MV3 + HMR for content scripts |
 | Extension styling | Tailwind (no component library) + `@fontsource/poppins` | User's stack; self-hosted font, no CDN |
-| Extension libraries | `prismjs` (code highlighting), `fflate` (zip / .docx) | Small, dependency-free |
+| Extension libraries | `prismjs` (code highlighting), `fflate` (zip / .docx export + import; lazy-loaded for import) | Small, dependency-free |
 | Style isolation | Shadow DOM | Standard pattern for content script UIs |
 | Drawing | Raw Canvas 2D | Simpler than Fabric.js; <100 LOC for v1 |
 | Companion runtime | Node 20+ | Ubiquitous; matches frontend tooling |

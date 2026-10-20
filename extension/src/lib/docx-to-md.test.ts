@@ -328,6 +328,75 @@ describe("tables and hidden text", () => {
     expect(md).toContain("✓ Pass");
   });
 
+  it("text hidden or camouflaged through a style, colour or shading is not passed on", () => {
+    const styles = `<?xml version="1.0"?><w:styles ${W}>` +
+      `<w:style w:type="character" w:styleId="Ghost"><w:rPr><w:vanish/></w:rPr></w:style>` +
+      `<w:style w:type="character" w:styleId="GhostChild"><w:basedOn w:val="Ghost"/></w:style>` +
+      `<w:style w:type="paragraph" w:styleId="HiddenPara"><w:rPr><w:vanish/></w:rPr></w:style>` +
+      `<w:style w:type="character" w:styleId="Paper"><w:rPr><w:color w:val="FFFFFF"/></w:rPr></w:style>` +
+      `</w:styles>`;
+    const md = docxPartsToMarkdown({
+      styles,
+      document: doc(
+        para(run("Visible step.") + run(" STYLE-HIDDEN", `<w:rStyle w:val="GhostChild"/>`)) +
+          para(run("PARA-HIDDEN"), `<w:pStyle w:val="HiddenPara"/>`) +
+          para(run("Keep going.") + run(" WHITE-ON-WHITE", `<w:color w:val="FEFEFE"/>`) + run(" STYLE-WHITE", `<w:rStyle w:val="Paper"/>`)) +
+          para(run(" YELLOW-ON-YELLOW", `<w:color w:val="FFFF00"/><w:highlight w:val="yellow"/>`)) +
+          `<w:tbl>${row("ID", "Test")}<w:tr><w:tc><w:tcPr><w:shd w:fill="1F3864"/></w:tcPr>${para(run("Header on navy", `<w:color w:val="FFFFFF"/>`))}</w:tc><w:tc><w:tcPr/>${para(run("NAVY-ON-WHITE") + run(" CELL-CAMO", `<w:color w:val="FFFFFF"/>`))}</w:tc></w:tr></w:tbl>`,
+      ),
+    });
+    expect(md).toContain("Visible step.");
+    expect(md).toContain("Keep going.");
+    for (const hidden of ["STYLE-HIDDEN", "PARA-HIDDEN", "WHITE-ON-WHITE", "STYLE-WHITE", "YELLOW-ON-YELLOW", "CELL-CAMO"]) {
+      expect(md).not.toContain(hidden);
+    }
+    // White text on a dark cell is readable and stays.
+    expect(md).toContain("Header on navy");
+    expect(md).toContain("NAVY-ON-WHITE");
+  });
+
+  it("a document default or default paragraph style that hides text applies to unstyled runs, and a run can unhide", () => {
+    const styles = `<?xml version="1.0"?><w:styles ${W}>` +
+      `<w:style w:type="paragraph" w:default="1" w:styleId="Normal"><w:rPr><w:vanish/></w:rPr></w:style></w:styles>`;
+    const md = docxPartsToMarkdown({
+      styles,
+      document: doc(para(run("DEFAULT-HIDDEN") + run(" shown", `<w:vanish w:val="0"/>`))),
+    });
+    expect(md).not.toContain("DEFAULT-HIDDEN");
+    expect(md).toContain("shown");
+  });
+
+  it("nested cells, shading patterns and theme colours are judged the way Word paints them", () => {
+    const tc = (shd: string, inner: string) => `<w:tc><w:tcPr>${shd}</w:tcPr>${inner}</w:tc>`;
+    const md = docxPartsToMarkdown({
+      document: doc(
+        `<w:tbl>${row("ID", "Test")}<w:tr>${tc("", para(run("N-1")))}${tc(
+          `<w:shd w:val="clear" w:fill="000000"/>`,
+          `<w:tbl><w:tr>${tc(`<w:shd w:val="clear" w:fill="FFFFFF"/>`, para(run("NESTED-CAMO", `<w:color w:val="FFFFFF"/>`)))}${tc("", para(run("Dark outer", `<w:color w:val="FFFFFF"/>`)))}</w:tr></w:tbl>`,
+        )}</w:tr></w:tbl>` +
+          para(run("SOLID-WHITE", `<w:color w:val="FFFFFF"/><w:shd w:val="solid" w:color="FFFFFF" w:fill="000000"/>`)) +
+          para(run("THEME-PAGE", `<w:color w:val="000000" w:themeColor="background1"/>`)) +
+          para(run("Theme text", `<w:color w:val="FFFFFF" w:themeColor="text1"/>`)) +
+          para(run("WEB-HIDDEN", `<w:vanish w:val="0"/><w:webHidden/>`)) +
+          para(run("On a pattern", `<w:color w:val="FFFFFF"/>`), `<w:shd w:val="pct50" w:color="000000" w:fill="FFFFFF"/>`) +
+          para(run("On auto solid", `<w:color w:val="FFFFFF"/>`), `<w:shd w:val="solid" w:color="auto" w:fill="FFFFFF"/>`),
+      ),
+    });
+    for (const hidden of ["NESTED-CAMO", "SOLID-WHITE", "THEME-PAGE", "WEB-HIDDEN"]) expect(md).not.toContain(hidden);
+    expect(md).toContain("Dark outer");
+    expect(md).toContain("Theme text");
+    expect(md).toContain("On a pattern");
+    expect(md).toContain("On auto solid");
+  });
+
+  it("an explicit paragraph style not based on Normal does not inherit Normal's hiding", () => {
+    const styles = `<?xml version="1.0"?><w:styles ${W}>` +
+      `<w:style w:type="paragraph" w:default="1" w:styleId="Normal"><w:rPr><w:vanish/></w:rPr></w:style>` +
+      `<w:style w:type="paragraph" w:styleId="Plain"/></w:styles>`;
+    const md = docxPartsToMarkdown({ styles, document: doc(para(run("Styled plain"), `<w:pStyle w:val="Plain"/>`)) });
+    expect(md).toContain("Styled plain");
+  });
+
   it("a link target cannot break out of the Markdown link", () => {
     const md = docxPartsToMarkdown({
       rels: `<?xml version="1.0"?><Relationships xmlns="x"><Relationship Id="r1" Target="https://a.test/) [evil](javascript:alert(2)" TargetMode="External"/></Relationships>`,

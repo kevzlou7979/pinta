@@ -388,7 +388,7 @@ const MOTION: ModuleSpec = {
   id: "motion",
   name: "Motion",
   description:
-    "Pick an element, choose a transition or effect, and watch it run on your real page — replay, slow to a quarter speed, scrub it by hand. Material 3's six transition patterns plus count up, stagger, rise in and fade. Apply hands your agent named duration and easing tokens, never invented numbers, and always requires a reduced-motion fallback.",
+    "Pick an element, choose a transition or effect, and watch it run on your real page — replay, slow to a quarter speed, scrub it by hand. Material 3's six transition patterns plus count up, stagger, rise in and fade. Durations and easings are named tokens, never invented numbers, with a reduced-motion fallback always required. Apply-to-code (handing the plan to your agent) is coming soon.",
   mode: "interactive",
   sessionCheckboxLabel: "",
   sessionCheckboxHint: "",

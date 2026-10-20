@@ -216,7 +216,76 @@ type DocxContext = {
   inFailureNotes: boolean;
   /** A styled heading has been emitted (see levelFromFormatting). */
   seenStyledHeading: boolean;
+  /** styleId → run look resolved through basedOn (any style type). */
+  styleLook: Map<string, RunLook>;
+  /** docDefaults alone: the base under an explicit paragraph style. */
+  docDefaultLook: RunLook;
+  /** docDefaults + the default paragraph style: what an unstyled paragraph gets. */
+  defaultLook: RunLook;
+  /** The paragraph being read: its style's look and its shading. */
+  para: { look: RunLook; fill: string | null };
+  /** Fill of the table cell being read. */
+  cellFill: string | null;
 };
+
+/** The run properties that decide whether a reader can see the text. */
+type RunLook = { vanish?: boolean; color?: string | null; sz?: number };
+
+const HIGHLIGHT: Record<string, string> = {
+  black: "000000", blue: "0000FF", cyan: "00FFFF", green: "00FF00", magenta: "FF00FF",
+  red: "FF0000", yellow: "FFFF00", white: "FFFFFF", darkBlue: "000080", darkCyan: "008080",
+  darkGreen: "008000", darkMagenta: "800080", darkRed: "800000", darkYellow: "808000",
+  darkGray: "808080", lightGray: "C0C0C0",
+};
+
+/** `RRGGBB`, or null for "auto" / missing / malformed. */
+function hexColor(v: string | undefined): string | null {
+  return v && /^[0-9a-f]{6}$/i.test(v) ? v.toUpperCase() : null;
+}
+
+/** A background that can't be told (a mixed pattern): skip the colour check. */
+const UNKNOWN_FILL = "?";
+
+/** The colour a `w:shd` paints, UNKNOWN_FILL for a pattern, or null for none. */
+function shadeFill(n: XmlNode | undefined): string | null {
+  const shd = child(n, "w:shd");
+  if (!shd) return null;
+  const val = shd.attrs["w:val"] ?? "clear";
+  // "solid" paints the pattern colour (auto = black); "clear" paints the
+  // fill; "nil" is no shading; a pctN / stripe pattern mixes both.
+  if (val === "solid") return shd.attrs["w:color"] === "auto" ? "000000" : (hexColor(shd.attrs["w:color"]) ?? UNKNOWN_FILL);
+  if (val === "clear") return hexColor(shd.attrs["w:fill"]);
+  return val === "nil" ? null : UNKNOWN_FILL;
+}
+
+function lookOf(rPr: XmlNode | undefined): RunLook {
+  const look: RunLook = {};
+  if (!rPr) return look;
+  const vanish = child(rPr, "w:vanish");
+  const webHidden = child(rPr, "w:webHidden");
+  if (vanish || webHidden) look.vanish = isOn(vanish) || isOn(webHidden);
+  const c = child(rPr, "w:color");
+  if (c) {
+    // Word paints the theme colour over `w:val`. The page colour (bg1) is
+    // white in every stock theme; any other theme colour can't be resolved
+    // here, so it never counts as camouflage.
+    const theme = c.attrs["w:themeColor"];
+    const tinted = c.attrs["w:themeTint"] !== undefined || c.attrs["w:themeShade"] !== undefined;
+    look.color = !theme ? hexColor(c.attrs["w:val"]) : /^(background1|bg1|light1)$/i.test(theme) && !tinted ? "FFFFFF" : null;
+  }
+  const sz = Number(child(rPr, "w:sz")?.attrs["w:val"] || NaN);
+  if (Number.isFinite(sz) && sz > 0) look.sz = sz;
+  return look;
+}
+
+/** Text the same colour as what's behind it reads as blank on the page. */
+function camouflaged(color: string, bg: string): boolean {
+  let max = 0;
+  for (let i = 0; i < 6; i += 2) {
+    max = Math.max(max, Math.abs(parseInt(color.slice(i, i + 2), 16) - parseInt(bg.slice(i, i + 2), 16)));
+  }
+  return max <= 32;
+}
 
 function readStyles(xml: string | undefined, ctx: DocxContext): void {
   // Built-in ids are stable in English-language exports (Google Docs,
@@ -226,6 +295,7 @@ function readStyles(xml: string | undefined, ctx: DocxContext): void {
   ctx.headingByStyle.set("Title", 0);
   if (!xml) return;
   const styles = child(parseXml(xml), "w:styles");
+  readStyleLooks(styles, ctx);
   const basedOn = new Map<string, string>();
   for (const s of styles?.children ?? []) {
     if (s.tag !== "w:style" || s.attrs["w:type"] !== "paragraph") continue;
@@ -256,6 +326,35 @@ function readStyles(xml: string | undefined, ctx: DocxContext): void {
       }
     }
   }
+}
+
+/**
+ * Hidden / camouflaged text can come from a style as well as from the run
+ * itself, so resolve each style's look through its basedOn chain.
+ */
+function readStyleLooks(styles: XmlNode | undefined, ctx: DocxContext): void {
+  const own = new Map<string, { look: RunLook; parent?: string }>();
+  let defaultPara: string | undefined;
+  for (const s of styles?.children ?? []) {
+    if (s.tag !== "w:style") continue;
+    const id = s.attrs["w:styleId"];
+    if (!id) continue;
+    own.set(id, { look: lookOf(child(s, "w:rPr")), parent: child(s, "w:basedOn")?.attrs["w:val"] });
+    if (s.attrs["w:type"] === "paragraph" && /^(1|true|on)$/i.test(s.attrs["w:default"] ?? "")) defaultPara = id;
+  }
+  const resolve = (id: string): RunLook => {
+    const chain: RunLook[] = [];
+    let cur: string | undefined = id;
+    for (let hop = 0; hop < 12 && cur !== undefined && own.has(cur); hop++) {
+      chain.unshift(own.get(cur)!.look);
+      cur = own.get(cur)!.parent;
+    }
+    return Object.assign({}, ...chain);
+  };
+  for (const id of own.keys()) ctx.styleLook.set(id, resolve(id));
+  const docDefault = lookOf(descend(styles, "w:docDefaults", "w:rPrDefault", "w:rPr"));
+  ctx.docDefaultLook = docDefault;
+  ctx.defaultLook = { ...docDefault, ...(defaultPara ? ctx.styleLook.get(defaultPara) : {}) };
 }
 
 function readNumbering(xml: string | undefined, ctx: DocxContext): void {
@@ -314,15 +413,29 @@ const MONO_FONT = /courier|consolas|menlo|monaco|mono|source code/i;
 /** Wingdings glyphs testers type into a Result cell. */
 const WINGDINGS: Record<string, string> = { F0FC: "✓", F0FE: "✓", F0FB: "✗", F0FD: "✗" };
 
-function runSpan(run: XmlNode, href: string | undefined): Span | null {
+function runSpan(run: XmlNode, href: string | undefined, ctx: DocxContext): Span | null {
   const rPr = child(run, "w:rPr");
+  const direct = lookOf(rPr);
+  const charStyle = ctx.styleLook.get(child(rPr, "w:rStyle")?.attrs["w:val"] ?? "") ?? {};
+  // Direct formatting beats the character style, which beats the paragraph
+  // style, which beats the document default.
+  const eff: RunLook = { ...ctx.para.look, ...charStyle, ...direct };
   // Word hides this text from the person reading the document; passing it
   // on would let a sheet carry instructions its reviewer never saw.
-  if (isOn(child(rPr, "w:vanish")) || isOn(child(rPr, "w:webHidden"))) return null;
-  const szRaw = Number(child(rPr, "w:sz")?.attrs["w:val"] || NaN);
-  const sz = Number.isFinite(szRaw) && szRaw > 0 ? szRaw : undefined;
+  if (eff.vanish) return null;
   // 1pt text is unreadable on the page — same treatment as hidden text.
-  if (sz !== undefined && sz <= 2) return null;
+  if (eff.sz !== undefined && eff.sz <= 2) return null;
+  // So is text coloured like whatever sits behind it (white on white).
+  const bg =
+    shadeFill(rPr) ??
+    hexColor(HIGHLIGHT[child(rPr, "w:highlight")?.attrs["w:val"] ?? ""]) ??
+    ctx.para.fill ??
+    ctx.cellFill ??
+    // A page colour (w:background) only shows when settings.xml turns it
+    // on, which this importer doesn't read, so the page counts as white.
+    "FFFFFF";
+  if (eff.color && bg !== UNKNOWN_FILL && camouflaged(eff.color, bg)) return null;
+  const sz = direct.sz;
   let text = "";
   for (const c of run.children) {
     if (c.tag === "w:t") text += c.text;
@@ -351,9 +464,32 @@ const RUN_CONTAINERS = new Set(["w:ins", "w:moveTo", "w:smartTag", "w:sdt", "w:s
 
 function collectSpans(node: XmlNode, ctx: DocxContext, href: string | undefined, out: Span[], depth = 0): void {
   if (depth > MAX_DEPTH) return;
+  if (node.tag === "w:p") {
+    const pPr = child(node, "w:pPr");
+    const saved = ctx.para;
+    ctx.para = {
+      // An explicit style sits on docDefaults (it reaches Normal only via
+      // basedOn); a paragraph with no style gets the default style.
+      look: (() => {
+        const id = child(pPr, "w:pStyle")?.attrs["w:val"];
+        return id && ctx.styleLook.has(id) ? { ...ctx.docDefaultLook, ...ctx.styleLook.get(id) } : ctx.defaultLook;
+      })(),
+      fill: shadeFill(pPr),
+    };
+    try {
+      collectRuns(node, ctx, href, out, depth);
+    } finally {
+      ctx.para = saved;
+    }
+    return;
+  }
+  collectRuns(node, ctx, href, out, depth);
+}
+
+function collectRuns(node: XmlNode, ctx: DocxContext, href: string | undefined, out: Span[], depth: number): void {
   for (const c of node.children) {
     if (c.tag === "w:r") {
-      const s = runSpan(c, href);
+      const s = runSpan(c, href, ctx);
       if (s) out.push(s);
     } else if (c.tag === "w:hyperlink") {
       collectSpans(c, ctx, ctx.links.get(c.attrs["r:id"] ?? "") ?? href, out, depth + 1);
@@ -549,6 +685,16 @@ function paragraphToMd(p: XmlNode, ctx: DocxContext): string {
 
 function cellText(tc: XmlNode, ctx: DocxContext): string {
   const parts: string[] = [];
+  // Each cell, nested ones included, paints its own shading behind its text.
+  const walkCell = (cellNode: XmlNode, depth: number) => {
+    const saved = ctx.cellFill;
+    ctx.cellFill = shadeFill(child(cellNode, "w:tcPr")) ?? saved;
+    try {
+      walk(cellNode, depth);
+    } finally {
+      ctx.cellFill = saved;
+    }
+  };
   const walk = (n: XmlNode, depth: number) => {
     if (depth > MAX_DEPTH) return;
     for (const c of n.children) {
@@ -557,12 +703,14 @@ function cellText(tc: XmlNode, ctx: DocxContext): string {
         collectSpans(c, ctx, undefined, spans);
         const t = oneLine(plainOf(spans)).trim();
         if (t) parts.push(t);
-      } else if (c.tag === "w:tbl" || c.tag === "w:tr" || c.tag === "w:tc" || c.tag === "w:sdt" || c.tag === "w:sdtContent") {
+      } else if (c.tag === "w:tc") {
+        walkCell(c, depth + 1);
+      } else if (c.tag === "w:tbl" || c.tag === "w:tr" || c.tag === "w:sdt" || c.tag === "w:sdtContent") {
         walk(c, depth + 1);
       }
     }
   };
-  walk(tc, 0);
+  walkCell(tc, 0);
   // Cells are plain text on purpose: the sheet parser matches ids and
   // "ID" / "Test" headers literally, and emphasis markers would break that.
   return parts.join(" ").replace(/\\+$/, "").replace(/\|/g, "\\|");
@@ -790,6 +938,11 @@ export function docxPartsToMarkdown(parts: {
     surveyed: 0,
     inFailureNotes: false,
     seenStyledHeading: false,
+    styleLook: new Map(),
+    docDefaultLook: {},
+    defaultLook: {},
+    para: { look: {}, fill: null },
+    cellFill: null,
   };
   readStyles(parts.styles, ctx);
   readNumbering(parts.numbering, ctx);
