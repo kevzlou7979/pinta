@@ -4,12 +4,12 @@ Notable changes shipped on top of the original V1 pipeline. Newest first.
 For the architectural design behind each item, see
 [`spec/SPEC.md`](spec/SPEC.md).
 
-## Unreleased
+## 0.11.0 — 2026-10-21
 
 ### Added
 
-- **Support Pinta.** A small "Buy me a coffee" badge next to the version
-  in the side-panel header opens Ko-fi, and a "Support Pinta" link at the
+- **Support Pinta.** A small "Buy me a coffee" badge beside the Settings
+  gear in the side-panel header opens Ko-fi, and a "Support Pinta" link at the
   bottom of Settings opens the new [support page](docs/support.html). The repo
   gets a `FUNDING.yml` Sponsor button and the README a coffee link. A tip
   unlocks nothing.
@@ -60,12 +60,19 @@ For the architectural design behind each item, see
 
 ### Changed
 
+- **Test Pilot:** the saved-sheets picker joins the Re-import / Clear
+  marks / File issues / Export group as its first segment, so the header
+  is one aligned toolbar that no longer splits across rows on a narrow
+  panel. The Export menu is clamped to the panel.
 - **Test Pilot:** a section that finishes with a failed test no longer
   folds itself away — the failed row stays in view so a note can be
   added. All-pass sections still fold.
 
 ### Fixed
 
+- **Dependencies:** `@modelcontextprotocol/sdk` 1.32.1, which clears a
+  critical `proxy-addr` advisory and the SDK's own OAuth advisory, plus
+  `devalue`, `source-map-js` and `hono` patch releases.
 - **Design Variants: asking for 5 could return 3.** The Variants
   selector is now the only thing that sets the number — a number typed
   in the direction box ("give 3 options") or an earlier run no longer

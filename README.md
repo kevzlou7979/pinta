@@ -45,7 +45,7 @@ Needs **Node 20+** and **Chrome**.
 
    ```bash
    # Claude Code /pinta skill (then restart Claude Code and run /pinta)
-   npx pinta-companion@0.10.0 install-skill
+   npx pinta-companion@0.11.0 install-skill
 
    # or MCP, for Claude Code / Cursor / Cline / Continue / Zed
    claude mcp add pinta -- npx -y -p pinta-companion pinta-mcp
