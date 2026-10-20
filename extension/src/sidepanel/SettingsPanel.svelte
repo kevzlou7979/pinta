@@ -1123,6 +1123,21 @@
     </div>
     {/if}
   </div>
+
+  <!-- Support link — points at the docs page (not straight at a tip
+       service) so funding options can change without an extension release. -->
+  <p class="text-[11px] text-ink-500 dark:text-night-mute text-center pt-2 pb-1">
+    Pinta is free and open source.
+    <a
+      href="https://pinta-companion.vercel.app/support.html"
+      target="_blank"
+      rel="noreferrer noopener"
+      data-pinta-support
+      class="text-brand-pink font-medium hover:underline underline-offset-2"
+    >
+      Support Pinta →
+    </a>
+  </p>
 </section>
 
 <!-- ── Import consent dialog (Phase 19) ──────────────────────────────

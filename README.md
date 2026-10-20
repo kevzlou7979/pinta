@@ -16,6 +16,8 @@
   <a href="https://www.npmjs.com/package/pinta-companion">npm</a>
   &nbsp;·&nbsp;
   <a href="CHANGELOG.md">Changelog</a>
+  &nbsp;·&nbsp;
+  <a href="https://ko-fi.com/markkevinringor">☕ Buy me a coffee</a>
 </p>
 
 <p align="center">

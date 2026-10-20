@@ -207,6 +207,24 @@ async function runVariant(browser, base, variant) {
     await page.waitForTimeout(350);
     await page.screenshot({ path: path.join(SHOTS, `${variant}-${WIDTH}x${h}-tab.png`) });
 
+    // Support link at the foot of Settings: visible, fits the panel, opens
+    // the docs support page in a new tab (never a raw tip-service URL).
+    if (variant === "real") {
+      const link = page.locator("[data-pinta-support]");
+      if ((await link.count()) !== 1) failures.push("support: link missing");
+      else {
+        await link.scrollIntoViewIfNeeded();
+        const s = await link.evaluate((a) => {
+          const r = a.getBoundingClientRect();
+          const m = document.getElementById("shell-main").getBoundingClientRect();
+          return { href: a.getAttribute("href"), target: a.target, rel: a.rel, text: a.textContent.trim(), fits: r.left >= m.left && r.right <= m.right + 0.5, w: r.width };
+        });
+        if (s.href !== "https://pinta-companion.vercel.app/support.html") failures.push(`support: href ${s.href}`);
+        if (s.target !== "_blank" || !/noopener/.test(s.rel)) failures.push(`support: target=${s.target} rel=${s.rel}`);
+        if (!/Support Pinta/.test(s.text) || !(s.w > 0) || !s.fits) failures.push(`support: not visible / clipped (${JSON.stringify(s)})`);
+      }
+    }
+
     if (errors.length) failures.push(`pageerror: ${errors[0]}`);
     rows.push({ variant, size: `${WIDTH}x${h}`, checks, togglesVisited, failures });
     await page.close();

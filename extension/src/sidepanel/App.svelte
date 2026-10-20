@@ -3108,6 +3108,26 @@
          one click from any tab) next to the ⋮ overflow dropdown (history /
          settings / theme + connection status). -->
     <div class="flex items-center gap-1.5 shrink-0">
+      <!-- Tip badge — styled like the gear beside it and muted until hover,
+           so it never competes with the work. Goes straight to Ko-fi; the
+           Settings link carries the fuller support page. Text drops to
+           icon-only on a very narrow panel. -->
+      <a
+        href="https://ko-fi.com/markkevinringor"
+        target="_blank"
+        rel="noreferrer noopener"
+        data-pinta-coffee
+        title="Support Pinta on Ko-fi"
+        aria-label="Buy me a coffee"
+        class="h-7 inline-flex items-center gap-1.5 px-2.5 max-[360px]:px-0 max-[360px]:w-7 max-[360px]:justify-center rounded-full border border-ink-200 bg-white text-[11px] font-medium whitespace-nowrap text-ink-600 hover:text-brand-pink hover:border-ink-400 dark:border-night-line dark:bg-night-alt dark:text-night-dim dark:hover:text-brand-pink-light dark:hover:border-night-line2 transition-colors"
+      >
+        <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+          <path d="M17 8h1a4 4 0 0 1 0 8h-1" />
+          <path d="M3 8h14v9a4 4 0 0 1-4 4H7a4 4 0 0 1-4-4Z" />
+          <path d="M6 2v2M10 2v2M14 2v2" />
+        </svg>
+        <span class="max-[360px]:hidden">Buy me a coffee</span>
+      </a>
       <button
         type="button"
         class={[

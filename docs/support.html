@@ -1,0 +1,209 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Support Pinta</title>
+  <meta name="description" content="Pinta is free and open source. Buy the maintainer a coffee on Ko-fi." />
+  <meta name="theme-color" content="#ffffff" media="(prefers-color-scheme: light)" />
+  <meta name="theme-color" content="#0B0C0E" media="(prefers-color-scheme: dark)" />
+  <link rel="icon" type="image/png" sizes="32x32" href="assets/icons/icon-32.png" />
+  <link rel="icon" type="image/png" sizes="16x16" href="assets/icons/icon-16.png" />
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@600;700&family=Inter:wght@400;500;600&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet" />
+  <style>
+    /* Tokens — mirror index.html's semantic layer, mapped onto this
+       page's legacy variable names. */
+    :root {
+      color-scheme: light;
+      --cream: #FFFFFF;        /* bg */
+      --cream-soft: #F7F7F8;   /* bg-subtle */
+      --paper: #FFFFFF;        /* surface */
+      --line: #E5E6EA;
+      --ink: #17181C;
+      --ink-dim: #565B66;
+      --ink-mute: #6E7480;
+      --pink: #D6205A;         /* accent (text-safe) */
+    }
+    [data-theme="dark"] {
+      color-scheme: dark;
+      --cream: #0B0C0E;
+      --cream-soft: #101114;
+      --paper: #131417;
+      --line: #24262B;
+      --ink: #F2F3F5;
+      --ink-dim: #A6ABB5;
+      --ink-mute: #7C828E;
+      --pink: #FF4D7D;
+    }
+    * { box-sizing: border-box; }
+    html, body { margin: 0; padding: 0; }
+    body {
+      background: var(--cream);
+      color: var(--ink);
+      font-family: "Inter", system-ui, sans-serif;
+      font-size: 15.5px;
+      line-height: 1.7;
+      -webkit-font-smoothing: antialiased;
+    }
+    h1, h2, h3 { font-family: "Space Grotesk", "Inter", system-ui, sans-serif; }
+    :focus-visible { outline: 2px solid var(--pink); outline-offset: 2px; border-radius: 2px; }
+    .wrap {
+      max-width: 720px;
+      margin: 0 auto;
+      padding: 56px 24px 96px;
+    }
+    header {
+      border-bottom: 1px solid var(--line);
+      padding-bottom: 24px;
+      margin-bottom: 40px;
+    }
+    .crumb {
+      font-family: "JetBrains Mono", ui-monospace, monospace;
+      font-size: 12px;
+      letter-spacing: 0.04em;
+      color: var(--ink-mute);
+      margin-bottom: 16px;
+    }
+    .crumb a { color: var(--ink-dim); text-decoration: none; }
+    .crumb a:hover { color: var(--pink); }
+    h1 {
+      font-size: 36px;
+      font-weight: 700;
+      letter-spacing: -0.02em;
+      margin: 0 0 8px;
+    }
+    .sub {
+      font-family: "JetBrains Mono", ui-monospace, monospace;
+      color: var(--ink-dim);
+      font-size: 13px;
+    }
+    h2 {
+      font-size: 22px;
+      font-weight: 600;
+      margin: 48px 0 12px;
+      letter-spacing: -0.01em;
+    }
+    h3 {
+      font-size: 16px;
+      font-weight: 600;
+      margin: 28px 0 8px;
+      color: var(--ink);
+    }
+    p { margin: 0 0 16px; color: var(--ink-dim); }
+    ul { margin: 0 0 16px 0; padding-left: 22px; }
+    li { margin-bottom: 6px; color: var(--ink-dim); }
+    code {
+      font-family: "JetBrains Mono", ui-monospace, monospace;
+      font-size: 0.88em;
+      background: var(--cream-soft);
+      border: 1px solid var(--line);
+      padding: 1px 6px;
+      border-radius: 6px;
+      color: var(--ink);
+    }
+    .callout {
+      background: var(--paper);
+      border: 1px solid var(--line);
+      border-left: 3px solid var(--pink);
+      padding: 16px 20px;
+      border-radius: 6px;
+      margin: 20px 0;
+    }
+    .callout p:last-child { margin-bottom: 0; }
+    strong { color: var(--ink); }
+    a { color: var(--pink); text-decoration: none; }
+    a:hover { text-decoration: underline; }
+    table {
+      width: 100%;
+      border-collapse: collapse;
+      margin: 20px 0;
+      font-size: 14.5px;
+    }
+    th, td {
+      text-align: left;
+      padding: 10px 12px;
+      border: 1px solid var(--line);
+      vertical-align: top;
+      color: var(--ink-dim);
+    }
+    th {
+      background: var(--cream-soft);
+      color: var(--ink-dim);
+      font-family: "JetBrains Mono", ui-monospace, monospace;
+      font-weight: 500;
+      font-size: 11.5px;
+      letter-spacing: 0.1em;
+      text-transform: uppercase;
+    }
+    td strong { color: var(--ink); }
+    footer {
+      border-top: 1px solid var(--line);
+      padding-top: 24px;
+      margin-top: 64px;
+      font-size: 13px;
+      color: var(--ink-mute);
+    }
+    /* Mobile: tighten the gutters and let the wide compliance table scroll
+       inside its own box instead of overflowing the page. */
+    @media (max-width: 720px) {
+      .wrap { padding: 40px 18px 72px; }
+      table { display: block; overflow-x: auto; -webkit-overflow-scrolling: touch; }
+      th, td { min-width: 8.5rem; }
+    }
+    .tips { display: flex; flex-wrap: wrap; gap: 12px; margin: 24px 0 8px; }
+    .tip {
+      display: inline-flex; align-items: center; gap: 8px;
+      padding: 12px 18px; border-radius: 8px; font-weight: 600;
+      background: var(--pink); color: #fff; text-decoration: none;
+    }
+    .tip:hover { text-decoration: none; filter: brightness(1.08); }
+  </style>
+  <script>
+    (function () {
+      var html = document.documentElement;
+      try {
+        var stored = localStorage.getItem('pinta-theme');
+        var prefersLight = window.matchMedia('(prefers-color-scheme: light)').matches;
+        var theme = stored || (prefersLight ? 'light' : 'dark');
+        if (theme === 'dark') html.setAttribute('data-theme', 'dark');
+      } catch (e) {}
+    })();
+  </script>
+</head>
+<body>
+  <div class="wrap">
+    <header>
+      <div class="crumb"><a href="./">← Pinta</a></div>
+      <h1>Support Pinta</h1>
+      <p class="sub">Free, open source, MIT-licensed</p>
+    </header>
+
+    <p>Pinta is built and maintained by one developer, Mark Kevin Baldemor. The extension, the companion and the Claude Code skill are free. If Pinta saves you time, a coffee helps keep new modules and fixes coming.</p>
+
+    <div class="tips">
+      <a class="tip" href="https://ko-fi.com/markkevinringor" target="_blank" rel="noreferrer noopener">Buy me a coffee on Ko-fi</a>
+    </div>
+    <p class="sub">One-off tips through Ko-fi. Pay with PayPal or a card. No account needed.</p>
+
+    <!-- GitHub Sponsors: add once the profile is approved.
+    <div class="tips"><a class="tip" href="https://github.com/sponsors/kevzlou7979" target="_blank" rel="noreferrer noopener">Sponsor on GitHub</a></div>
+    -->
+
+    <h2>Other ways to help</h2>
+    <ul>
+      <li>Star the repo on <a href="https://github.com/kevzlou7979/pinta">GitHub</a>.</li>
+      <li>Report bugs or request features on <a href="https://github.com/kevzlou7979/pinta/issues">GitHub Issues</a>.</li>
+      <li>Leave a review on the Chrome Web Store.</li>
+    </ul>
+
+    <h2>Where the money goes</h2>
+    <p>Tips go to the maintainer. A tip doesn't unlock anything: Pinta works the same whether or not you tip.</p>
+
+    <footer>
+      Pinta is open source under the MIT License. Source: <a href="https://github.com/kevzlou7979/pinta">github.com/kevzlou7979/pinta</a>.
+    </footer>
+  </div>
+</body>
+</html>
